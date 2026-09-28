@@ -1,9 +1,12 @@
-"""t3: read semantics of cdc.fn_cdc_get_all_changes_<ci>.
+"""t3: read semantics of the change table cdc.<ci>_CT, which the reader queries (ADR 0009).
 
 * operation codes and ordering inside one transaction (__$command_id);
+* whether cdc.fn_cdc_get_all_changes_<ci> returns __$command_id (why the reader does not
+  use it);
 * a primary-key update (deferred update -> delete + insert);
-* the error for an empty interval (from > to), which the reader must avoid;
-* --destructive: what a consumer sees after cleanup purged its range.
+* an empty interval (from > to) returns no rows;
+* --destructive: cleanup moves min_lsn, and a purged range reads as empty, which is why
+  the reader re-checks min_lsn after every read.
 
     python -m lab.checks.t3_read_semantics [--destructive]
 """
@@ -16,15 +19,12 @@ from ..common import connect, ct_count, max_lsn, report, rows, scalar, wait_for_
 COLS = "__$start_lsn, __$seqval, __$operation"
 
 
-def _changes(conn, from_lsn, to_lsn, with_cmd):
-    extra = ", __$command_id" if with_cmd else ""
-    order = "__$start_lsn, __$command_id, __$seqval, __$operation" if with_cmd else \
-        "__$start_lsn, __$seqval, __$operation"
-    return rows(conn, f"""
-        SELECT CONVERT(varchar(22), __$start_lsn, 1), __$operation, order_id{extra}
-        FROM cdc.fn_cdc_get_all_changes_dbo_orders(
-             CONVERT(binary(10), ?, 1), CONVERT(binary(10), ?, 1), N'all update old')
-        ORDER BY {order}""", (from_lsn, to_lsn))
+def _changes(conn, from_lsn, to_lsn):
+    return rows(conn, """
+        SELECT CONVERT(varchar(22), __$start_lsn, 1), __$operation, order_id, __$command_id
+        FROM cdc.dbo_orders_CT
+        WHERE __$start_lsn BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)
+        ORDER BY __$start_lsn, __$command_id, __$seqval, __$operation""", (from_lsn, to_lsn))
 
 
 def main(argv=None) -> bool:
@@ -51,14 +51,17 @@ def main(argv=None) -> bool:
     end = max_lsn(conn)
 
     try:
-        changes = _changes(conn, start, end, with_cmd=True)
-        has_cmd = True
+        changes = _changes(conn, start, end)
+        checks.append(("__$command_id in the change table", True, "yes"))
     except Exception as exc:  # noqa: BLE001
-        changes = _changes(conn, start, end, with_cmd=False)
-        has_cmd = False
-        checks.append(("__$command_id returned by the function", False, str(exc)[:200]))
-    if has_cmd:
-        checks.append(("__$command_id returned by the function", True, "yes"))
+        checks.append(("__$command_id in the change table", False, str(exc)[:200]))
+        return report("t3_read_semantics", checks, {})
+    try:
+        rows(conn, "SELECT TOP (1) __$command_id FROM cdc.fn_cdc_get_all_changes_dbo_orders("
+                   "CONVERT(binary(10), ?, 1), CONVERT(binary(10), ?, 1), N'all update old')", (start, end))
+        checks.append(("__$command_id from fn_cdc_get_all_changes", None, "yes"))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(("__$command_id from fn_cdc_get_all_changes", None, str(exc)[:200]))
 
     by_tx = {}
     for lsn, op, oid, *_ in changes:
@@ -70,12 +73,9 @@ def main(argv=None) -> bool:
     pk = txs[-1] if txs else None
     checks.append(("primary-key update appears as", None, f"{pk} (1/2 = delete+insert, 3/4 = update pair)"))
 
-    try:
-        nxt = scalar(conn, "SELECT CONVERT(varchar(22), sys.fn_cdc_increment_lsn(CONVERT(binary(10), ?, 1)), 1)", (end,))
-        _changes(conn, nxt, end, has_cmd)
-        checks.append(("empty interval (from > to) raises", False, "no error: reader could call it"))
-    except Exception as exc:  # noqa: BLE001
-        checks.append(("empty interval (from > to) raises", True, str(exc)[:200]))
+    nxt = scalar(conn, "SELECT CONVERT(varchar(22), sys.fn_cdc_increment_lsn(CONVERT(binary(10), ?, 1)), 1)", (end,))
+    empty = _changes(conn, nxt, end)
+    checks.append(("empty interval (from > to) returns no rows", empty == [], f"{len(empty)} rows"))
 
     if a.destructive:
         old_min = scalar(conn, "SELECT CONVERT(varchar(22), sys.fn_cdc_get_min_lsn('dbo_orders'), 1)")
@@ -84,11 +84,11 @@ def main(argv=None) -> bool:
                    "@low_water_mark = @lw, @threshold = 5000;")
         new_min = scalar(conn, "SELECT CONVERT(varchar(22), sys.fn_cdc_get_min_lsn('dbo_orders'), 1)")
         checks.append(("cleanup moved min_lsn forward", new_min > old_min, f"{old_min} -> {new_min}"))
-        try:
-            _changes(conn, old_min, end, has_cmd)
-            checks.append(("reading a purged range raises", False, "no error: data loss would be silent"))
-        except Exception as exc:  # noqa: BLE001
-            checks.append(("reading a purged range raises", True, str(exc)[:200]))
+        below = scalar(conn, "SELECT CONVERT(varchar(22), sys.fn_cdc_decrement_lsn(CONVERT(binary(10), ?, 1)), 1)",
+                       (new_min,))
+        left = _changes(conn, old_min, below)
+        checks.append(("purged range reads as empty (so the reader re-checks min_lsn)", left == [],
+                       f"{len(left)} rows left below the new min_lsn"))
 
     return report("t3_read_semantics", checks, {"changes": changes})
 
