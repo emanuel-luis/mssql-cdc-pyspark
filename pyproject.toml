@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mssql-cdc-pyspark"
+version = "0.1.0"
+description = "Platform-agnostic PySpark streaming source for SQL Server CDC, with a partition-finalization (completeness) signal"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Emanuel Luis" }]
+keywords = ["spark", "pyspark", "sql-server", "cdc", "delta-lake", "datasource-v2", "arrow"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Database",
+]
+dependencies = ["pyarrow>=14"]
+
+[project.optional-dependencies]
+# PySpark itself is not a hard dependency: managed platforms (Databricks, EMR,
+# Fabric...) ship their own. Install the "spark" extra for local runs.
+spark = ["pyspark>=4.2", "delta-spark>=4.4"]
+mssql = ["mssql-python>=1.5"]
+arrow-odbc = ["arrow-odbc>=10"]
+
+[dependency-groups]
+# Tests and lab/ (not packaged). `uv sync` installs this group by default.
+dev = ["pytest>=8", "pyspark>=4.2", "delta-spark>=4.4", "faker>=30", "mssql-python>=1.5"]
+
+[project.urls]
+Repository = "https://github.com/emanuel-luis/mssql-cdc-pyspark"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "delta: needs Delta Lake jars (Maven access on first run)",
+  "sqlserver: needs a live SQL Server with CDC (see docker-compose.yml)",
+]
