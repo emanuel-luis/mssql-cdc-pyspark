@@ -1,0 +1,296 @@
+"""Access to SQL Server CDC metadata and change tables.
+
+``CdcClient`` is the interface the Spark data source depends on. ``SqlCdcClient``
+implements it with plain T-SQL on top of a small ``Backend`` that knows how to run a
+query and return Apache Arrow record batches. Two backends ship:
+
+* ``mssql-python`` (default): Microsoft's official driver. ``pip`` only; it bundles
+  the ODBC driver and fetches natively into Arrow via ``cursor.arrow_batch()``.
+* ``arrow-odbc``: needs unixODBC and msodbcsql18 on every worker.
+
+All LSNs cross the driver boundary as hex strings and are converted server-side
+with ``CONVERT(binary(10), ?, 1)``, so both backends bind parameters the same way.
+"""
+
+from __future__ import annotations
+
+import re
+from abc import ABC, abstractmethod
+from typing import Iterator, Sequence
+
+import pyarrow as pa
+
+from . import lsn as _lsn
+
+_IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
+_TZ_RE = re.compile(r"^[A-Za-z0-9 ._+\-/()]+$")
+
+
+class DataLossError(RuntimeError):
+    """Raised when requested change data was already purged by CDC cleanup."""
+
+
+def _check_ident(name: str, what: str) -> str:
+    if not _IDENT_RE.match(name):
+        raise ValueError(f"Invalid {what}: {name!r}")
+    return name
+
+
+def _check_column(name: str) -> str:
+    if "]" in name or not name:
+        raise ValueError(f"Invalid column name: {name!r}")
+    return name
+
+
+# --------------------------------------------------------------------------- #
+# Interface
+# --------------------------------------------------------------------------- #
+class CdcClient(ABC):
+    """What the data source needs from SQL Server. All LSNs are hex strings."""
+
+    @abstractmethod
+    def max_lsn(self) -> str: ...
+
+    @abstractmethod
+    def min_lsn(self, capture_instance: str) -> str: ...
+
+    @abstractmethod
+    def increment_lsn(self, lsn: str) -> str: ...
+
+    @abstractmethod
+    def decrement_lsn(self, lsn: str) -> str: ...
+
+    @abstractmethod
+    def lsn_to_time(self, lsn: str) -> str | None:
+        """Commit time of an LSN as ISO-8601 UTC string (millisecond precision)."""
+
+    @abstractmethod
+    def nth_commit_after(self, lsn: str, n: int) -> str | None:
+        """The n-th commit LSN strictly after ``lsn`` in cdc.lsn_time_mapping."""
+
+    @abstractmethod
+    def split_points(self, from_lsn: str, to_lsn: str, n: int) -> list[str]:
+        """Up to ``n`` commit-aligned upper bounds that split [from, to]."""
+
+    @abstractmethod
+    def iter_changes(
+        self,
+        capture_instance: str,
+        from_lsn: str,
+        to_lsn: str,
+        columns: Sequence[str],
+        include_command_id: bool,
+        batch_size: int,
+    ) -> Iterator[pa.RecordBatch]:
+        """Changes in the closed interval [from_lsn, to_lsn], in commit order."""
+
+    def close(self) -> None:  # pragma: no cover - default no-op
+        pass
+
+
+# --------------------------------------------------------------------------- #
+# Backends: "run this SQL, give me Arrow"
+# --------------------------------------------------------------------------- #
+class Backend(ABC):
+    @abstractmethod
+    def batches(self, sql: str, params: Sequence[str], batch_size: int) -> Iterator[pa.RecordBatch]: ...
+
+    def scalar(self, sql: str, params: Sequence[str] = ()):
+        for batch in self.batches(sql, params, 1):
+            if batch.num_rows:
+                return batch.column(0)[0].as_py()
+        return None
+
+    def close(self) -> None:
+        pass
+
+
+class MssqlPythonBackend(Backend):
+    """Microsoft ``mssql-python`` driver with native Arrow fetch (>= 1.5.0)."""
+
+    def __init__(self, connection_string: str, timeout: int = 30):
+        import mssql_python  # imported lazily: this runs on driver and executors
+
+        self._conn = mssql_python.connect(connection_string, autocommit=True, timeout=timeout)
+
+    def batches(self, sql, params, batch_size):
+        cur = self._conn.cursor()
+        try:
+            cur.execute(sql, tuple(params))
+            while True:
+                batch = cur.arrow_batch(batch_size)
+                if batch.num_rows == 0:
+                    break
+                yield batch
+        finally:
+            cur.close()
+
+    def scalar(self, sql, params=()):
+        cur = self._conn.cursor()
+        try:
+            cur.execute(sql, tuple(params))
+            row = cur.fetchone()
+            return None if row is None else row[0]
+        finally:
+            cur.close()
+
+    def close(self):
+        self._conn.close()
+
+
+class ArrowOdbcBackend(Backend):
+    """``arrow-odbc``. Requires unixODBC + Microsoft ODBC Driver 18 on the worker."""
+
+    def __init__(self, connection_string: str, max_bytes_per_batch: int = 64 * 1024 * 1024):
+        import arrow_odbc
+
+        self._conn = arrow_odbc.connect(connection_string)
+        self._max_bytes = max_bytes_per_batch
+
+    def batches(self, sql, params, batch_size):
+        reader = self._conn.read_arrow_batches(
+            sql,
+            batch_size=batch_size,
+            parameters=list(params),
+            max_bytes_per_batch=self._max_bytes,
+            fetch_concurrently=False,
+        )
+        for batch in reader:
+            if batch.num_rows:
+                yield batch
+
+
+# --------------------------------------------------------------------------- #
+# T-SQL implementation
+# --------------------------------------------------------------------------- #
+class SqlCdcClient(CdcClient):
+    def __init__(self, backend: Backend, source_timezone: str = "UTC"):
+        if not _TZ_RE.match(source_timezone):
+            raise ValueError(f"Invalid sourceTimeZone: {source_timezone!r}")
+        self._b = backend
+        self._tz = source_timezone
+
+    # -- helpers --------------------------------------------------------------
+    def _utc(self, expr: str) -> str:
+        """``tran_end_time`` is a timezone-less datetime in the server's clock."""
+        if self._tz.upper() == "UTC":
+            return f"CAST({expr} AS datetime2(3))"
+        return f"CAST(({expr} AT TIME ZONE N'{self._tz}') AT TIME ZONE 'UTC' AS datetime2(3))"
+
+    def _hex(self, value) -> str | None:
+        return None if value is None else _lsn.normalize(value)
+
+    # -- metadata -------------------------------------------------------------
+    def max_lsn(self):
+        return self._hex(self._b.scalar("SELECT CONVERT(varchar(22), sys.fn_cdc_get_max_lsn(), 1)"))
+
+    def min_lsn(self, capture_instance):
+        value = self._hex(
+            self._b.scalar(
+                "SELECT CONVERT(varchar(22), sys.fn_cdc_get_min_lsn(?), 1)",
+                (_check_ident(capture_instance, "capture instance"),),
+            )
+        )
+        if value in (None, _lsn.ZERO_LSN):
+            raise ValueError(
+                f"Capture instance {capture_instance!r} not found, or the login lacks "
+                "permission to read it (sys.fn_cdc_get_min_lsn returned 0x00...)."
+            )
+        return value
+
+    def increment_lsn(self, lsn):
+        return self._hex(
+            self._b.scalar(
+                "SELECT CONVERT(varchar(22), sys.fn_cdc_increment_lsn(CONVERT(binary(10), ?, 1)), 1)",
+                (lsn,),
+            )
+        )
+
+    def decrement_lsn(self, lsn):
+        return self._hex(
+            self._b.scalar(
+                "SELECT CONVERT(varchar(22), sys.fn_cdc_decrement_lsn(CONVERT(binary(10), ?, 1)), 1)",
+                (lsn,),
+            )
+        )
+
+    def lsn_to_time(self, lsn):
+        value = self._b.scalar(
+            "SELECT CONVERT(varchar(23), "
+            + self._utc("sys.fn_cdc_map_lsn_to_time(CONVERT(binary(10), ?, 1))")
+            + ", 126)",
+            (lsn,),
+        )
+        return value or None
+
+    def nth_commit_after(self, lsn, n):
+        n = int(n)
+        if n <= 0:
+            raise ValueError("n must be positive")
+        return self._hex(
+            self._b.scalar(
+                "SELECT CONVERT(varchar(22), MAX(start_lsn), 1) FROM ("
+                f"SELECT TOP ({n}) start_lsn FROM cdc.lsn_time_mapping "
+                "WHERE start_lsn > CONVERT(binary(10), ?, 1) ORDER BY start_lsn) t",
+                (lsn,),
+            )
+        )
+
+    def split_points(self, from_lsn, to_lsn, n):
+        n = int(n)
+        sql = (
+            "SELECT CONVERT(varchar(22), MAX(start_lsn), 1) AS b FROM ("
+            f"SELECT start_lsn, NTILE({n}) OVER (ORDER BY start_lsn) AS g "
+            "FROM cdc.lsn_time_mapping "
+            "WHERE start_lsn >= CONVERT(binary(10), ?, 1) AND start_lsn <= CONVERT(binary(10), ?, 1)"
+            ") x GROUP BY g ORDER BY b"
+        )
+        points = []
+        for batch in self._b.batches(sql, (from_lsn, to_lsn), 1000):
+            points.extend(self._hex(v) for v in batch.column(0).to_pylist())
+        return points
+
+    # -- data -----------------------------------------------------------------
+    def iter_changes(self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size):
+        ci = _check_ident(capture_instance, "capture instance")
+        cols = ", ".join(f"c.[{_check_column(c)}]" for c in columns)
+        cmd_select = "c.[__$command_id] AS _command_id, " if include_command_id else ""
+        cmd_order = "c.[__$command_id], " if include_command_id else ""
+        sql = (
+            "SELECT "
+            "CONVERT(varchar(22), c.[__$start_lsn], 1) AS _start_lsn, "
+            "CONVERT(varchar(22), c.[__$seqval], 1) AS _seqval, "
+            "c.[__$operation] AS _operation, "
+            f"{cmd_select}"
+            f"{self._utc('m.tran_end_time')} AS _commit_ts"
+            f"{', ' + cols if cols else ''} "
+            f"FROM cdc.[fn_cdc_get_all_changes_{ci}]("
+            "CONVERT(binary(10), ?, 1), CONVERT(binary(10), ?, 1), N'all update old') c "
+            "JOIN cdc.lsn_time_mapping m ON m.start_lsn = c.[__$start_lsn] "
+            f"ORDER BY c.[__$start_lsn], {cmd_order}c.[__$seqval], c.[__$operation]"
+        )
+        yield from self._b.batches(sql, (from_lsn, to_lsn), batch_size)
+
+    def close(self):
+        self._b.close()
+
+
+# --------------------------------------------------------------------------- #
+# Factory (called on the driver and inside every executor task)
+# --------------------------------------------------------------------------- #
+def make_client(options) -> CdcClient:
+    opts = {k.lower(): v for k, v in dict(options).items()}
+    backend = opts.get("backend", "mssql-python").lower()
+    tz = opts.get("sourcetimezone", "UTC")
+    if backend == "fake":
+        from .fake import FakeCdcClient
+
+        return FakeCdcClient(opts["fakepath"])
+    conn = opts.get("connectionstring")
+    if not conn:
+        raise ValueError("Option 'connectionString' is required")
+    if backend == "mssql-python":
+        return SqlCdcClient(MssqlPythonBackend(conn, int(opts.get("connecttimeout", "30"))), tz)
+    if backend == "arrow-odbc":
+        return SqlCdcClient(ArrowOdbcBackend(conn), tz)
+    raise ValueError(f"Unknown backend {backend!r} (use mssql-python, arrow-odbc or fake)")
