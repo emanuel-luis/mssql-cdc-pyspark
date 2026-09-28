@@ -86,13 +86,16 @@ def advance(spark, control_table: str, table_name: str, end_offset: dict | None,
     cand = candidate(end_offset, granularity)
     ensure_control_table(spark, control_table)
     if cand is not None:
+        # No parameter markers: on a Delta-enabled session (delta-spark 4.4, Spark 4.2)
+        # they stay unbound (UNBOUND_SQL_PARAMETER). The source row is a DataFrame.
+        src = spark.createDataFrame(
+            [(table_name, cand, end_offset["lsn"], datetime.fromisoformat(end_offset["commit_ts"]))],
+            "table_name STRING, cand TIMESTAMP_NTZ, end_lsn STRING, end_ts TIMESTAMP_NTZ",
+        )
         spark.sql(
             f"""
             MERGE INTO {table_ref(control_table)} t
-            USING (SELECT :table_name AS table_name,
-                          CAST(:cand AS TIMESTAMP_NTZ) AS cand,
-                          :end_lsn AS end_lsn,
-                          CAST(:end_ts AS TIMESTAMP_NTZ) AS end_ts) s
+            USING {{src}} s
             ON t.table_name = s.table_name
             WHEN MATCHED AND s.cand > t.finalized_until THEN UPDATE SET
                  finalized_until = s.cand, end_lsn = s.end_lsn,
@@ -101,21 +104,14 @@ def advance(spark, control_table: str, table_name: str, end_offset: dict | None,
                  (table_name, finalized_until, end_lsn, end_commit_ts, updated_at)
                  VALUES (s.table_name, s.cand, s.end_lsn, s.end_ts, current_timestamp())
             """,
-            args={
-                "table_name": table_name,
-                "cand": cand.isoformat(sep=" "),
-                "end_lsn": end_offset["lsn"],
-                "end_ts": end_offset["commit_ts"].replace("T", " "),
-            },
+            src=src,
         )
     return finalized_until(spark, control_table, table_name)
 
 
 def finalized_until(spark, control_table: str, table_name: str) -> datetime | None:
-    rows = spark.sql(
-        f"SELECT finalized_until FROM {table_ref(control_table)} WHERE table_name = :t",
-        args={"t": table_name},
-    ).collect()
+    df = spark.sql(f"SELECT table_name, finalized_until FROM {table_ref(control_table)}")
+    rows = df.where(df.table_name == table_name).select("finalized_until").collect()  # see advance()
     return rows[0][0] if rows else None
 
 
