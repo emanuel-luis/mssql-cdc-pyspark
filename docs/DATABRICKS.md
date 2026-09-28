@@ -8,7 +8,10 @@ Nothing in `mssql_cdc` imports Databricks APIs; the same package runs on any Spa
    ships Spark 4.1.0 with that API backported: `t5_engine` passes there (dedicated,
    single node). Run `lab/checks/t5_engine.py` in a notebook to confirm on another
    runtime before anything else. `t5` needs a single-node cluster, because its
-   file-backed fake needs a local path shared by driver and executors.
+   file-backed fake needs a local path shared by driver and executors. Leave `--path`
+   at its default (a fresh temp dir): a path without a scheme is local to Python but
+   resolves to DBFS for the Spark checkpoint, so a fixed one survives the cluster and
+   the next run fails with "does not support recovering from checkpoint location".
 2. **Access mode.** Use dedicated. Python streaming data sources on standard access
    mode are untested.
 3. **Install.** In a job, a `requirements` task library pointing to a
