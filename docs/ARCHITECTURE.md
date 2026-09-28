@@ -94,9 +94,9 @@ _commit_ts`, then the captured columns. The ordering key for applying changes is
 `(_start_lsn, _command_id, _seqval, _operation)`.
 
 Captured columns come from the `columns` option (DDL) or, when it is omitted, from CDC
-metadata at `load()` time on the driver: `cdc.change_tables` joined to
-`cdc.captured_columns` and `sys.columns`, in `column_ordinal` order
-(`SqlCdcClient.captured_columns`). Default type mapping:
+metadata at `load()` time on the driver: `sys.sp_cdc_get_captured_columns`, sorted by
+`column_ordinal` (`SqlCdcClient.captured_columns`). It needs only the permissions of the
+CDC query functions. Default type mapping:
 
 | SQL Server | Spark |
 |---|---|

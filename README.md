@@ -96,7 +96,7 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 | Option | Default | Meaning |
 |---|---|---|
 | `captureInstance` | required | e.g. `dbo_orders` |
-| `columns` | inferred | DDL of the captured columns to read. Inferred from CDC metadata (`cdc.captured_columns`) when omitted; required for `backend=fake` |
+| `columns` | inferred | DDL of the captured columns to read. Inferred with `sys.sp_cdc_get_captured_columns` when omitted; required for `backend=fake` |
 | `connectionString` | required | `mssql-python` / ODBC 18 connection string |
 | `backend` | `mssql-python` | `mssql-python`, `arrow-odbc`, or `fake` (tests) |
 | `startingLsn` | `earliest` | `earliest`, `latest`, or an LSN (`0x...`), treated as already processed |

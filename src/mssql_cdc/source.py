@@ -20,7 +20,7 @@ Usage::
             .load())  # columns inferred from CDC metadata; "columns" (DDL) overrides
 
 When ``columns`` is omitted, the captured columns and their types come from
-``cdc.captured_columns`` at ``load()`` time, on the driver.
+``sys.sp_cdc_get_captured_columns`` at ``load()`` time, on the driver.
 """
 
 from __future__ import annotations

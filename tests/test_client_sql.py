@@ -114,37 +114,43 @@ class Rows(Recorder):
         return iter([pa.RecordBatch.from_pylist(self.rows)] if self.rows else [])
 
 
-def _col(name, type_name, precision=0, scale=0):
-    return {"column_name": name, "type_name": type_name, "precision": precision, "scale": scale}
+def _col(ordinal, name, data_type, precision=None, scale=None):
+    """One row of sys.sp_cdc_get_captured_columns (the columns the client reads)."""
+    return {"column_ordinal": ordinal, "column_name": name, "data_type": data_type,
+            "numeric_precision": precision, "numeric_scale": scale}
 
 
 def test_captured_columns_inferred_from_cdc_metadata():
-    rec = Rows([_col("order_id", "int", 10), _col("amount", "decimal", 18, 2),
-                _col("status", "varchar"), _col("created at", "datetime2", 23, 3),
-                _col("flag", "bit"), _col("qty", "tinyint", 3)])
+    rec = Rows([_col(2, "amount", "decimal", 18, 2), _col(1, "order_id", "int", 10, 0),
+                _col(3, "status", "varchar"), _col(4, "created at", "datetime2"),
+                _col(5, "flag", "bit"), _col(6, "qty", "tinyint", 3, 0)])
     ddl = SqlCdcClient(rec).captured_columns("dbo_orders")
     assert ddl == ("`order_id` INT, `amount` DECIMAL(18,2), `status` STRING, "
-                   "`created at` TIMESTAMP_NTZ, `flag` BOOLEAN, `qty` SMALLINT")
-    sql, params = rec.calls[-1]
-    assert "JOIN cdc.captured_columns cc ON cc.object_id = ct.object_id" in sql
-    assert "WHERE ct.capture_instance = ?" in sql and sql.endswith("ORDER BY cc.column_ordinal")
-    assert params == ("dbo_orders",)
+                   "`created at` TIMESTAMP_NTZ, `flag` BOOLEAN, `qty` SMALLINT")  # ordinal order
+    assert rec.calls[-1] == ("EXEC sys.sp_cdc_get_captured_columns @capture_instance = ?", ("dbo_orders",))
 
 
 def test_captured_columns_errors_point_to_columns_option():
     with pytest.raises(ValueError, match="geography.*'columns'"):
-        SqlCdcClient(Rows([_col("shape", "geography")])).captured_columns("dbo_orders")
+        SqlCdcClient(Rows([_col(1, "shape", "geography")])).captured_columns("dbo_orders")
     with pytest.raises(ValueError, match="not found"):
         SqlCdcClient(Rows([])).captured_columns("dbo_orders")
     with pytest.raises(ValueError):
         SqlCdcClient(Rows([])).captured_columns("dbo_orders; DROP TABLE x")
+
+    class Denied(Recorder):
+        def batches(self, sql, params, batch_size):
+            raise RuntimeError("Object doesn't exist or access is denied.")  # Error 22981
+
+    with pytest.raises(ValueError, match="gating role"):
+        SqlCdcClient(Denied()).captured_columns("dbo_orders")
 
 
 def test_schema_infers_columns_when_option_missing(monkeypatch):
     import mssql_cdc.client as client_mod
     from mssql_cdc.source import MssqlCdcDataSource
 
-    client = SqlCdcClient(Rows([_col("order_id", "int", 10)]))
+    client = SqlCdcClient(Rows([_col(1, "order_id", "int", 10, 0)]))
     closed = []
     client.close = lambda: closed.append(True)
     monkeypatch.setattr(client_mod, "make_client", lambda options: client)

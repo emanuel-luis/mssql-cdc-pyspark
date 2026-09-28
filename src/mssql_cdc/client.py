@@ -326,29 +326,26 @@ class SqlCdcClient(CdcClient):
         return points
 
     def captured_columns(self, capture_instance):
+        # The documented API, not cdc.captured_columns: it needs only what the query
+        # functions need (SELECT on the source columns, gating role if any).
         ci = _check_ident(capture_instance, "capture instance")
-        sql = (
-            "SELECT cc.column_name, "
-            # alias types resolve to their base type; CLR types (geography...) to their own name
-            "COALESCE(TYPE_NAME(c.system_type_id), TYPE_NAME(c.user_type_id)) AS type_name, "
-            "c.precision, c.scale "
-            "FROM cdc.change_tables ct "
-            "JOIN cdc.captured_columns cc ON cc.object_id = ct.object_id "
-            "JOIN sys.columns c ON c.object_id = ct.object_id AND c.name = cc.column_name "
-            "WHERE ct.capture_instance = ? "
-            "ORDER BY cc.column_ordinal"
+        not_found = (
+            f"Capture instance {ci!r} not found, or the login lacks SELECT on its source "
+            "columns (or membership in its gating role). Pass 'columns' explicitly."
         )
-        rows = [r for batch in self._b.batches(sql, (ci,), 1000) for r in batch.to_pylist()]
+        try:
+            rows = [r for batch in self._b.batches(
+                "EXEC sys.sp_cdc_get_captured_columns @capture_instance = ?", (ci,), 1000)
+                for r in batch.to_pylist()]
+        except Exception as exc:  # noqa: BLE001 - Error 22981, driver-specific type
+            raise ValueError(not_found) from exc
         if not rows:
-            raise ValueError(
-                f"Capture instance {ci!r} not found, or the login cannot read its CDC "
-                "metadata (cdc.change_tables, cdc.captured_columns). Pass 'columns' explicitly."
-            )
+            raise ValueError(not_found)
         ddl = []
-        for r in rows:
+        for r in sorted(rows, key=lambda r: r["column_ordinal"]):
             name = _check_column(r["column_name"])
             try:
-                typ = _spark_type(r["type_name"], r["precision"], r["scale"])
+                typ = _spark_type(r["data_type"], r["numeric_precision"], r["numeric_scale"])
             except ValueError as e:
                 raise ValueError(f"{ci}.{name}: {e}. Pass 'columns' explicitly.") from None
             ddl.append(f"`{name.replace('`', '``')}` {typ}")
