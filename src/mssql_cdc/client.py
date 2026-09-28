@@ -10,6 +10,7 @@ query and return Apache Arrow record batches. Two backends ship:
 
 All LSNs cross the driver boundary as hex strings and are converted server-side
 with ``CONVERT(binary(10), ?, 1)``, so both backends bind parameters the same way.
+Changes are read from the change table ``cdc.<capture_instance>_CT`` (ADR 0009).
 """
 
 from __future__ import annotations
@@ -355,6 +356,9 @@ class SqlCdcClient(CdcClient):
 
     # -- data -----------------------------------------------------------------
     def iter_changes(self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size):
+        # The change table itself, not cdc.fn_cdc_get_all_changes_<ci>: the function does
+        # not return __$command_id (ADR 0009). Unlike the function, the table does not
+        # reject a range that cleanup purged; the reader re-checks min_lsn after reading.
         ci = _check_ident(capture_instance, "capture instance")
         cols = ", ".join(f"c.[{_check_column(c)}]" for c in columns)
         cmd_select = "c.[__$command_id] AS _command_id, " if include_command_id else ""
@@ -367,9 +371,9 @@ class SqlCdcClient(CdcClient):
             f"{cmd_select}"
             f"{self._utc('m.tran_end_time')} AS _commit_ts"
             f"{', ' + cols if cols else ''} "
-            f"FROM cdc.[fn_cdc_get_all_changes_{ci}]("
-            "CONVERT(binary(10), ?, 1), CONVERT(binary(10), ?, 1), N'all update old') c "
+            f"FROM cdc.[{ci}_CT] c "
             "JOIN cdc.lsn_time_mapping m ON m.start_lsn = c.[__$start_lsn] "
+            "WHERE c.[__$start_lsn] BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1) "
             f"ORDER BY c.[__$start_lsn], {cmd_order}c.[__$seqval], c.[__$operation]"
         )
         yield from self._b.batches(sql, (from_lsn, to_lsn), batch_size)

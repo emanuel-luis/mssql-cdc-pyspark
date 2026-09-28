@@ -10,5 +10,6 @@
 | [0006](0006-file-backed-fake-for-engine-tests.md) | A file-backed CDC fake to test the real Spark engine | accepted |
 | [0007](0007-infer-columns-from-cdc-metadata.md) | Infer captured columns from CDC metadata | accepted |
 | [0008](0008-detect-source-time-zone.md) | Detect the server time zone by name | accepted |
+| [0009](0009-read-change-tables-directly.md) | Read the change table directly, re-check retention after the read | accepted |
 
 New ADRs: copy the format, next number, one decision per file.

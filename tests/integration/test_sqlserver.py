@@ -51,7 +51,7 @@ def test_commit_times_are_utc_on_a_non_utc_server(spark, sqlserver):
     utc_now = sqlserver.run("SELECT SYSUTCDATETIME()")[0][0]
     sqlserver.wait_for_changes(ci, 1)
 
-    df, q = _read(spark, sqlserver, ci, includeCommandId="false")
+    df, q = _read(spark, sqlserver, ci)
     commit_ts = df.first()["_commit_ts"]  # TIMESTAMP_NTZ: collect() does no zone shift
     assert abs(commit_ts - utc_now) < timedelta(minutes=1)
     offset_ts = datetime.fromisoformat(end_offset_from_progress(q.lastProgress)["commit_ts"])
@@ -97,7 +97,7 @@ def test_inferred_columns_round_trip_every_mapped_type(spark, sqlserver):
           '6F9619FF-8B86-D011-B42D-00C04FC964FF', 0x01020304, 0x0A0B, 0x0C, N'alias')""")
     sqlserver.wait_for_changes(ci, 1)
 
-    df, _ = _read(spark, sqlserver, ci, includeCommandId="false")  # no "columns" option
+    df, _ = _read(spark, sqlserver, ci)  # no "columns" option
     assert [(n, t) for n, t in df.dtypes if not n.startswith("_")] == EXPECTED_TYPES
 
     row = df.first().asDict()
@@ -124,7 +124,7 @@ def test_inferred_columns_round_trip_every_mapped_type(spark, sqlserver):
 def test_unsupported_type_fails_at_load_with_a_pointer_to_columns(spark, sqlserver):
     ci = sqlserver.cdc_table("geo_probe", "id INT NOT NULL PRIMARY KEY, g geography")
     with pytest.raises(Exception, match="geography.*'columns'"):
-        _read(spark, sqlserver, ci, includeCommandId="false")
+        _read(spark, sqlserver, ci)
 
 
 def test_stream_resumes_from_checkpoint_with_transactions_in_order(spark, sqlserver, workdir):
@@ -134,25 +134,32 @@ def test_stream_resumes_from_checkpoint_with_transactions_in_order(spark, sqlser
                   "DELETE FROM dbo.orders WHERE order_id = 1; COMMIT")
     sqlserver.wait_for_changes(ci, 4)  # insert, update before/after, delete
 
-    first, _ = _read(spark, sqlserver, ci, checkpoint=workdir, includeCommandId="false")
-    rows = first.orderBy("_start_lsn", "_seqval", "_operation").collect()
+    first, _ = _read(spark, sqlserver, ci, checkpoint=workdir)
+    rows = first.orderBy("_start_lsn", "_command_id", "_seqval", "_operation").collect()
     assert [r["_operation"] for r in rows] == [2, 3, 4, 1]
+    ids = [r["_command_id"] for r in rows]
+    assert None not in ids and ids == sorted(ids)  # __$command_id orders the statements
     assert len({r["_start_lsn"] for r in rows}) == 1  # one commit
 
     sqlserver.run("INSERT INTO dbo.orders VALUES (2, 'new')")
     sqlserver.wait_for_changes(ci, 5)
-    after, _ = _read(spark, sqlserver, ci, checkpoint=workdir, includeCommandId="false")
+    after, _ = _read(spark, sqlserver, ci, checkpoint=workdir)
     after_rows = after.collect()  # same sink: first-run rows must not repeat
     new = [r for r in after_rows if r not in rows]
     assert len(after_rows) == 5 and [(r["order_id"], r["_operation"]) for r in new] == [(2, 2)]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "fn_cdc_get_all_changes_* does not return __$command_id on SQL Server 2022 (lab t3), "
-    "so the default includeCommandId=true fails; flip when the read path gets it elsewhere"))
-def test_default_options_read_command_id(spark, sqlserver):
-    ci = sqlserver.cdc_table("cmd_probe", "id INT NOT NULL PRIMARY KEY")
-    sqlserver.run("INSERT INTO dbo.cmd_probe VALUES (1)")
+def test_purged_range_stops_the_stream(spark, sqlserver, workdir):
+    ci = sqlserver.cdc_table("purge_probe", "id INT NOT NULL PRIMARY KEY")
+    sqlserver.run("INSERT INTO dbo.purge_probe VALUES (1)")
     sqlserver.wait_for_changes(ci, 1)
-    df, _ = _read(spark, sqlserver, ci)
-    assert df.first()["_command_id"] is not None
+    _read(spark, sqlserver, ci, checkpoint=workdir)  # checkpoint now at the first commit
+    sqlserver.run("INSERT INTO dbo.purge_probe VALUES (2)")
+    sqlserver.run("INSERT INTO dbo.purge_probe VALUES (3)")
+    sqlserver.wait_for_changes(ci, 3)
+    # the cleanup job's work, done now: rows below the new low watermark are deleted
+    sqlserver.run("DECLARE @lw binary(10) = sys.fn_cdc_get_max_lsn(); "
+                  "EXEC sys.sp_cdc_cleanup_change_table @capture_instance = ?, "
+                  "@low_water_mark = @lw, @threshold = 5000", (ci,))
+    with pytest.raises(Exception, match="re-snapshot is required"):
+        _read(spark, sqlserver, ci, checkpoint=workdir)

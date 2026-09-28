@@ -10,6 +10,7 @@ Primary sources behind the design.
 * `cdc.lsn_time_mapping`: https://learn.microsoft.com/en-us/sql/relational-databases/system-tables/cdc-lsn-time-mapping-transact-sql
 * `sys.fn_cdc_get_max_lsn`: https://learn.microsoft.com/en-us/sql/relational-databases/system-functions/sys-fn-cdc-get-max-lsn-transact-sql
 * `sys.fn_cdc_get_min_lsn`: https://learn.microsoft.com/en-us/sql/relational-databases/system-functions/sys-fn-cdc-get-min-lsn-transact-sql
+* `sys.sp_cdc_cleanup_change_table` (moves `start_lsn`, then deletes): https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sys-sp-cdc-cleanup-change-table-transact-sql
 * Administer and monitor (cleanup, latency): https://learn.microsoft.com/en-us/sql/relational-databases/track-changes/administer-and-monitor-change-data-capture-sql-server
 * Known issues: https://learn.microsoft.com/en-us/sql/relational-databases/track-changes/known-issues-and-errors-change-data-capture
 * Azure SQL Database CDC: https://learn.microsoft.com/en-us/azure/azure-sql/database/change-data-capture-overview

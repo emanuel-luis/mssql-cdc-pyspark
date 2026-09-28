@@ -1,7 +1,7 @@
 """PySpark Python Data Source (DataSource V2) for SQL Server Change Data Capture.
 
 Streaming offsets are commit LSNs. Each micro-batch reads the closed interval
-``[fn_cdc_increment_lsn(start), end]`` from ``cdc.fn_cdc_get_all_changes_<ci>``.
+``[fn_cdc_increment_lsn(start), end]`` from the change table ``cdc.<ci>_CT``.
 ``end`` never exceeds ``sys.fn_cdc_get_max_lsn()``, the last LSN the capture
 process has processed, so every batch is a prefix of the source commit history.
 
@@ -154,17 +154,8 @@ class _BaseReader(DataSourceStreamReader):
         if end["lsn"] <= start["lsn"]:
             return []
         from_lsn = self.client.increment_lsn(start["lsn"])
-        min_lsn = self.client.min_lsn(self.capture_instance)
-        if from_lsn < min_lsn:
-            if self.fail_on_data_loss:
-                from .client import DataLossError
-
-                raise DataLossError(
-                    f"{self.capture_instance}: change data from {from_lsn} was purged by CDC "
-                    f"cleanup (current min_lsn is {min_lsn}). A re-snapshot is required. "
-                    "Set failOnDataLoss=false to skip ahead (loses changes)."
-                )
-            from_lsn = min_lsn
+        # failOnDataLoss=false: skip ahead to what cleanup left
+        from_lsn = max(from_lsn, self._guard_retention(self.client, from_lsn))
         to_lsn = end["lsn"]
         if self.num_partitions <= 1:
             return [LsnRange(self.capture_instance, from_lsn, to_lsn)]
@@ -178,6 +169,19 @@ class _BaseReader(DataSourceStreamReader):
             ranges.append(LsnRange(self.capture_instance, lo, hi))
             lo = self.client.increment_lsn(hi)
         return ranges
+
+    def _guard_retention(self, client, from_lsn: str) -> str:
+        """Invariant 4: fail when CDC cleanup purged change data at or after ``from_lsn``."""
+        min_lsn = client.min_lsn(self.capture_instance)
+        if from_lsn < min_lsn and self.fail_on_data_loss:
+            from .client import DataLossError
+
+            raise DataLossError(
+                f"{self.capture_instance}: change data from {from_lsn} was purged by CDC "
+                f"cleanup (current min_lsn is {min_lsn}). A re-snapshot is required. "
+                "Set failOnDataLoss=false to skip ahead (loses changes)."
+            )
+        return min_lsn
 
     # -- data (runs on executors) ---------------------------------------------
     def read(self, partition: LsnRange) -> Iterator:
@@ -204,6 +208,9 @@ class _BaseReader(DataSourceStreamReader):
                 )
                 table = table.select(self.field_names).cast(target)
                 yield from table.to_batches()
+            # Cleanup may have run since partitions() checked. It moves min_lsn before it
+            # deletes rows, so min_lsn past from_lsn now means rows may be missing.
+            self._guard_retention(client, partition.from_lsn)
         finally:
             client.close()
             self._client = None

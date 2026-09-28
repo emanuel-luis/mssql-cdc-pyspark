@@ -5,7 +5,8 @@ It reproduces the parts of CDC the data source relies on:
 * a database-wide commit timeline (``cdc.lsn_time_mapping``), including
   "dummy" entries written while the database is idle;
 * per-capture-instance change rows ordered by commit LSN;
-* a per-instance low watermark (``sys.fn_cdc_get_min_lsn``) that cleanup moves.
+* a per-instance low watermark (``sys.fn_cdc_get_min_lsn``) that cleanup moves
+  before it deletes the change rows below it.
 
 State lives in plain files so that the Spark driver and every executor process
 see the same data (Python workers are separate processes, even locally).
@@ -96,9 +97,6 @@ class FakeCdcClient(CdcClient):
         return points
 
     def iter_changes(self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size):
-        if from_lsn < self.min_lsn(capture_instance):
-            # SQL Server raises Msg 313 here; mirror it with an error
-            raise RuntimeError("Msg 313: from_lsn is outside the validity interval")
         times = {r["start_lsn"]: r["tran_end_time"] for r in self._mapping()}
         rows = [
             r
@@ -178,10 +176,15 @@ class FakeCdcDatabase:
         return start
 
     def cleanup(self, capture_instance: str, low_water_mark: str) -> None:
-        """Move the low watermark forward, like the CDC cleanup job."""
+        """Like sys.sp_cdc_cleanup_change_table: move the low watermark, then delete the
+        change rows below it."""
         p = os.path.join(self.path, _MIN)
         with open(p, encoding="utf-8") as fh:
             mins = json.load(fh)
         mins[capture_instance] = low_water_mark
         with open(p, "w", encoding="utf-8") as fh:
             json.dump(mins, fh)
+        path = os.path.join(self.path, "changes", f"{capture_instance}.jsonl")
+        kept = [r for r in _read_jsonl(path) if r["start_lsn"] >= low_water_mark]
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.writelines(json.dumps(r) + "\n" for r in kept)

@@ -13,7 +13,7 @@ from decimal import Decimal
 
 import pytest
 
-from mssql_cdc import HAS_ADMISSION_CONTROL
+from mssql_cdc import HAS_ADMISSION_CONTROL, DataLossError, MssqlCdcDataSource
 from mssql_cdc.fake import FakeCdcDatabase
 from mssql_cdc.finalization import candidate, end_offset_from_progress
 
@@ -102,6 +102,24 @@ def test_retention_guard_fails_loudly(spark, workdir):
     db.cleanup(CI, last)  # cleanup purged the commit the stream still needs
     with pytest.raises(Exception, match="re-snapshot is required"):
         _run(spark, workdir)
+
+
+def test_cleanup_between_planning_and_read_fails_the_task(spark, workdir):
+    from pyspark.sql.streaming.datasource import ReadAllAvailable
+
+    from mssql_cdc.source import MssqlCdcStreamReader
+
+    db = _db(workdir, n_tx=3)
+    opts = {"backend": "fake", "fakePath": os.path.join(workdir, "src"), "captureInstance": CI,
+            "columns": COLUMNS}
+    schema = spark.createDataFrame([], MssqlCdcDataSource(opts).schema()).schema
+    reader = MssqlCdcStreamReader(opts, schema)
+    start = reader.initialOffset()
+    [planned] = reader.partitions(start, reader.latestOffset(start, ReadAllAvailable()))
+    # cleanup runs after planning: it purges the planned range before the task reads it
+    db.cleanup(CI, db.commit(CI, [(2, _order(900))], at=T0 + timedelta(hours=1)))
+    with pytest.raises(DataLossError, match="re-snapshot is required"):
+        list(reader.read(planned))
 
 
 def test_metadata_columns_and_types(spark, workdir):

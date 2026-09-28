@@ -59,9 +59,11 @@ you a low watermark on commit time. `lab/checks/t1` and `t4` test exactly this.
 
 * **Retention**: CDC cleanup deletes by time, even when consumers are behind. If
   the next `from_lsn` is below `sys.fn_cdc_get_min_lsn(ci)`, the source raises
-  (`failOnDataLoss=true`) and a re-snapshot is needed.
-* **Empty ranges**: the reader never calls `fn_cdc_get_all_changes` with
-  `from > to` (SQL Server raises Msg 313).
+  (`failOnDataLoss=true`) and a re-snapshot is needed. The reader reads the change
+  table directly (ADR 0009), which returns a purged range as empty rather than failing,
+  so every task checks `min_lsn` again after its read: cleanup moves the watermark
+  before it deletes, so a purge during the read cannot go unnoticed.
+* **Empty ranges**: `partitions()` plans nothing when `end <= start`.
 * **Idempotency**: Delta `txnAppId`/`txnVersion` keyed by batch id, so a replayed
   micro-batch is skipped.
 

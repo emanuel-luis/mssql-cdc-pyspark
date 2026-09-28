@@ -61,8 +61,9 @@ sequenceDiagram
   R->>S: fn_cdc_increment_lsn(start), fn_cdc_get_min_lsn(ci)
   R-->>E: [LsnRange(from, to)]  or DataLossError
   E->>X: read(LsnRange)
-  X->>S: fn_cdc_get_all_changes_ci(from, to, 'all update old') JOIN lsn_time_mapping
+  X->>S: cdc.ci_CT WHERE start_lsn BETWEEN from AND to, JOIN lsn_time_mapping
   S-->>X: Arrow record batches
+  X->>S: fn_cdc_get_min_lsn(ci)  (cleanup during the read? then DataLossError)
   X-->>E: batches cast to the Spark schema
   E->>D: foreachBatch(df, batch_id)
   D->>D: append (txnAppId, txnVersion=batch_id, userMetadata=facts)

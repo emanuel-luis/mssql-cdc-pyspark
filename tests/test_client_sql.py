@@ -26,7 +26,8 @@ def test_changes_query_shape():
     client = SqlCdcClient(rec)
     list(client.iter_changes("dbo_orders", "0x01", "0x02", ["order_id", "status"], True, 100))
     sql, params = rec.calls[-1]
-    assert "cdc.[fn_cdc_get_all_changes_dbo_orders](CONVERT(binary(10), ?, 1), CONVERT(binary(10), ?, 1), N'all update old')" in sql
+    assert "FROM cdc.[dbo_orders_CT] c " in sql and "fn_cdc_get_all_changes" not in sql
+    assert "WHERE c.[__$start_lsn] BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)" in sql
     assert "JOIN cdc.lsn_time_mapping m ON m.start_lsn = c.[__$start_lsn]" in sql
     assert sql.rstrip().endswith("ORDER BY c.[__$start_lsn], c.[__$command_id], c.[__$seqval], c.[__$operation]")
     assert "c.[order_id], c.[status]" in sql
