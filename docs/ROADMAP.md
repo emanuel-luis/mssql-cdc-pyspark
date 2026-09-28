@@ -6,7 +6,8 @@
       code and fake fixed where real CDC differed (ADRs 0008–0010).
 - [x] Delta tests passing locally (`tests/test_delta_sink.py`).
 - [x] Publish to GitHub; CI `unit`, `integration` and `lab` jobs green.
-- [ ] Databricks classic (DBR 18 LTS, dedicated): t5, t6 `--schema`, t7 `--schema`.
+- [x] Databricks classic (DBR 18.2, dedicated): t5, t6 `--schema`.
+- [ ] Databricks classic: t7 `--schema` (needs a lab SQL Server reachable from the cluster).
 - [x] Fill the results table in `LAB.md` with links to result files.
 
 ## v0.2: production concerns

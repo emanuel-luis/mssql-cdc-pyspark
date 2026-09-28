@@ -94,4 +94,6 @@ Evidence files are in the `lab-results` artifact of the CI run linked in each ro
 | t5 | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS | [`t5_engine-20260928T220829Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |
 | t6 | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS | [`t6_delta_semantics-20260928T220927Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |
 | t7 | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS | [`t7_end_to_end-20260928T221114Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |
+| t5 | DBR 18.2 (Spark 4.1.0), dedicated single node, Azure | PASS | one-off job run; result kept in the workspace copy of `lab/results` |
+| t6 `--schema` | DBR 18.2 (Spark 4.1.0), dedicated single node, Unity Catalog managed tables | PASS | same run |
 | t7 `--idle-minutes 6 --destructive` | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS: idle offset advanced, guard stopped the stream | [`t7_end_to_end-20260928T223005Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |

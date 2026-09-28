@@ -18,7 +18,7 @@ v0.1, experimental.
 | Delta sink + finalization (`tests/test_delta_sink.py`) | ✅ passes locally; SQL parameter markers are unusable on Delta sessions, so `finalization` avoids them |
 | SQL Server behaviour (`lab/checks/t1`–`t4`, `t7`) | ✅ t2–t7 pass in CI (t3 also locally with `--destructive`). The idle part of t7 needs more than 5 idle minutes (CI uses 6) |
 | `arrow-odbc` backend | ❌ untested |
-| Databricks | ❌ untested (`docs/DATABRICKS.md`) |
+| Databricks | ✅ t5, t6 pass on DBR 18.2 (Spark 4.1.0 with the admission-control backport), dedicated; ❌ t7 not run (needs a lab SQL Server reachable from the cluster) |
 
 The first session's task is to run `LAB.md` end to end and fix what breaks.
 `docs/ROADMAP.md` lists everything after that.

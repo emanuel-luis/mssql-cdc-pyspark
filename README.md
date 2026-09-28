@@ -5,7 +5,7 @@ built on Spark's Python DataSource V2 API, plus a **completeness signal**
 (`finalized_until`) that tells downstream jobs when a period of data is safe to read.
 
 * 100% PySpark: no JVM connector, no platform-specific APIs. Runs on local Spark,
-  Databricks classic, and any Spark 4.2+ runtime.
+  Databricks classic (DBR 18.2+), and any Spark 4.2+ runtime.
 * Offsets are SQL Server commit LSNs, checkpointed by Spark. Supports
   `Trigger.AvailableNow` and per-batch limits (`maxCommitsPerBatch`).
 * Arrow end to end: the default driver (`mssql-python`) fetches straight into Arrow
