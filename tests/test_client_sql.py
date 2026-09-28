@@ -7,9 +7,10 @@ from mssql_cdc.client import Backend, SqlCdcClient, make_client
 
 
 class Recorder(Backend):
-    def __init__(self, scalar_value="0x0000002A000001000001"):
+    def __init__(self, scalar_value="0x0000002A000001000001", tz="UTC"):
         self.calls = []
         self.value = scalar_value
+        self.tz = tz
 
     def batches(self, sql, params, batch_size):
         self.calls.append((sql, tuple(params)))
@@ -17,7 +18,7 @@ class Recorder(Backend):
 
     def scalar(self, sql, params=()):
         self.calls.append((sql, tuple(params)))
-        return self.value
+        return self.tz if "CURRENT_TIMEZONE_ID" in sql else self.value
 
 
 def test_changes_query_shape():
@@ -45,8 +46,31 @@ def test_timezone_conversion():
     list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
     assert "AT TIME ZONE N'E. South America Standard Time') AT TIME ZONE 'UTC'" in rec.calls[-1][0]
     utc = Recorder()
-    list(SqlCdcClient(utc).iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+    list(SqlCdcClient(utc, source_timezone="UTC").iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
     assert "AT TIME ZONE" not in utc.calls[-1][0]
+    assert not any("CURRENT_TIMEZONE_ID" in sql for sql, _ in utc.calls)
+
+
+def test_timezone_auto_is_detected_once_per_client():
+    rec = Recorder(tz="E. South America Standard Time")
+    client = SqlCdcClient(rec)
+    client.lsn_to_time("0x01")
+    list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+    assert [sql for sql, _ in rec.calls].count("SELECT CURRENT_TIMEZONE_ID()") == 1
+    assert "AT TIME ZONE N'E. South America Standard Time') AT TIME ZONE 'UTC'" in rec.calls[-1][0]
+
+
+def test_timezone_auto_fails_loudly():
+    class OldServer(Recorder):
+        def scalar(self, sql, params=()):
+            if "CURRENT_TIMEZONE_ID" in sql:
+                raise RuntimeError("'CURRENT_TIMEZONE_ID' is not a recognized built-in function name.")
+            return super().scalar(sql, params)
+
+    with pytest.raises(ValueError, match="Set sourceTimeZone"):
+        SqlCdcClient(OldServer()).lsn_to_time("0x01")
+    with pytest.raises(ValueError, match="Invalid sourceTimeZone"):  # detected values are inlined too
+        SqlCdcClient(Recorder(tz="UTC'; DROP TABLE x --")).lsn_to_time("0x01")
 
 
 def test_injection_is_rejected():

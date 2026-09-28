@@ -27,7 +27,7 @@ def load_env() -> None:
 
 load_env()
 DATABASE = os.environ.get("MSSQL_DATABASE", "cdc_lab")
-SOURCE_TZ = os.environ.get("MSSQL_SOURCE_TZ", "UTC")
+SOURCE_TZ = os.environ.get("MSSQL_SOURCE_TZ", "auto")
 
 
 def connection_string(database: str | None = None) -> str:

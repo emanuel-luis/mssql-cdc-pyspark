@@ -28,7 +28,6 @@ jobs:
       MSSQL_PORT: "1433"
       MSSQL_USER: sa
       MSSQL_DATABASE: cdc_lab
-      MSSQL_SOURCE_TZ: UTC
     services:
       mssql:
         image: mcr.microsoft.com/mssql/server:2022-latest

@@ -102,7 +102,7 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 | `startingLsn` | `earliest` | `earliest`, `latest`, or an LSN (`0x...`), treated as already processed |
 | `maxCommitsPerBatch` | unlimited | commits (from `cdc.lsn_time_mapping`) per micro-batch |
 | `numPartitions` | `1` | split each batch into commit-aligned LSN ranges |
-| `sourceTimeZone` | `UTC` | Windows time zone of the server clock, used to convert commit times to UTC |
+| `sourceTimeZone` | `auto` | Windows time zone name of the server clock (e.g. `E. South America Standard Time`), used to convert commit times to UTC. `auto` reads `CURRENT_TIMEZONE_ID()` (SQL Server 2022+, Azure SQL); older versions must set it |
 | `failOnDataLoss` | `true` | raise when CDC cleanup purged the next range |
 | `includeCommandId` | `true` | read `__$command_id` (ordering within a transaction) |
 | `arrowBatchSize` | `10000` | rows per Arrow batch fetched from the driver |

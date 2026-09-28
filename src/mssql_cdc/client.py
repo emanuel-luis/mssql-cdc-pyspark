@@ -212,19 +212,44 @@ class ArrowOdbcBackend(Backend):
 # --------------------------------------------------------------------------- #
 # T-SQL implementation
 # --------------------------------------------------------------------------- #
+def _check_tz(name) -> str:
+    if not isinstance(name, str) or not _TZ_RE.match(name):
+        raise ValueError(f"Invalid sourceTimeZone: {name!r}")
+    return name
+
+
 class SqlCdcClient(CdcClient):
-    def __init__(self, backend: Backend, source_timezone: str = "UTC"):
-        if not _TZ_RE.match(source_timezone):
-            raise ValueError(f"Invalid sourceTimeZone: {source_timezone!r}")
+    def __init__(self, backend: Backend, source_timezone: str = "auto"):
         self._b = backend
-        self._tz = source_timezone
+        self._tz = None if source_timezone.lower() == "auto" else _check_tz(source_timezone)
 
     # -- helpers --------------------------------------------------------------
+    @property
+    def timezone(self) -> str:
+        """Windows time zone of the server clock; with ``auto``, detected once per client.
+
+        A zone name, not the current UTC offset: ``AT TIME ZONE`` then applies the
+        daylight-saving rules in force at each commit, so historical LSNs convert right.
+        """
+        # ponytail: one query per client (driver and every task); ship the detected zone
+        # to executors in the options if it ever shows up in profiles.
+        if self._tz is None:
+            try:
+                detected = self._b.scalar("SELECT CURRENT_TIMEZONE_ID()")
+            except Exception as exc:  # noqa: BLE001 - driver-specific error types
+                raise ValueError(
+                    "sourceTimeZone=auto needs CURRENT_TIMEZONE_ID() (SQL Server 2022+, Azure "
+                    "SQL). Set sourceTimeZone to the server's Windows time zone name, e.g. "
+                    "'UTC' or 'E. South America Standard Time'."
+                ) from exc
+            self._tz = _check_tz(detected)
+        return self._tz
+
     def _utc(self, expr: str) -> str:
         """``tran_end_time`` is a timezone-less datetime in the server's clock."""
-        if self._tz.upper() == "UTC":
+        if self.timezone.upper() == "UTC":
             return f"CAST({expr} AS datetime2(3))"
-        return f"CAST(({expr} AT TIME ZONE N'{self._tz}') AT TIME ZONE 'UTC' AS datetime2(3))"
+        return f"CAST(({expr} AT TIME ZONE N'{self.timezone}') AT TIME ZONE 'UTC' AS datetime2(3))"
 
     def _hex(self, value) -> str | None:
         return None if value is None else _lsn.normalize(value)
@@ -359,7 +384,7 @@ class SqlCdcClient(CdcClient):
 def make_client(options) -> CdcClient:
     opts = {k.lower(): v for k, v in dict(options).items()}
     backend = opts.get("backend", "mssql-python").lower()
-    tz = opts.get("sourcetimezone", "UTC")
+    tz = opts.get("sourcetimezone", "auto")
     if backend == "fake":
         from .fake import FakeCdcClient
 

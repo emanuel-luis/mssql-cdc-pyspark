@@ -30,7 +30,6 @@ query = (
     spark.readStream.format("mssql_cdc")
     .option("connectionString", conn)
     .option("captureInstance", "dbo_orders")
-    .option("sourceTimeZone", "UTC")
     .option("maxCommitsPerBatch", "500")
     .load()
     .writeStream.foreachBatch(delta_sink(f"{SCHEMA}.bronze_orders", "orders-bronze-v1",

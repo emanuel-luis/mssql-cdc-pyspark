@@ -20,7 +20,7 @@ def main(argv=None) -> bool:
          (cid, f"tz{cid}@example.com"))
     local_now, utc_now, offset_now = rows(conn, "SELECT SYSDATETIME(), SYSUTCDATETIME(), SYSDATETIMEOFFSET()")[0]
     try:
-        server_tz = scalar(conn, "SELECT CURRENT_TIMEZONE()")
+        server_tz = scalar(conn, "SELECT CURRENT_TIMEZONE_ID() + N' / ' + CURRENT_TIMEZONE()")
     except Exception as exc:  # noqa: BLE001 - older versions
         server_tz = f"n/a ({exc.__class__.__name__})"
     wait_for_rows(conn, "dbo_customers", before + 1)
@@ -42,7 +42,8 @@ def main(argv=None) -> bool:
     ]
     return report("t2_timezone", checks, {
         "local_now": local_now, "utc_now": utc_now, "tran_end_time": tran_end,
-        "hint": "set sourceTimeZone to the Windows zone name when tran_end_time follows a non-UTC local clock",
+        "hint": "sourceTimeZone=auto uses CURRENT_TIMEZONE_ID(); on SQL Server 2019 or older, set it "
+                "to the Windows zone name when tran_end_time follows a non-UTC local clock",
     })
 
 
