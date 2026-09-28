@@ -30,8 +30,11 @@ def main(argv=None) -> bool:
         return f"{a.schema}.{name}" if a.schema else f"delta.`{base}/{name}`"
 
     def create(name, ddl):
-        verb = "CREATE OR REPLACE TABLE" if a.schema else "CREATE TABLE"
-        spark.sql(f"{verb} {ref(name)} ({ddl}) USING delta")
+        # Drop, not CREATE OR REPLACE: a replaced table keeps its Delta log, so a rerun would
+        # see the last run's txnAppId/txnVersion (appends skipped) and history (false passes).
+        if a.schema:
+            spark.sql(f"DROP TABLE IF EXISTS {ref(name)}")
+        spark.sql(f"CREATE TABLE {ref(name)} ({ddl}) USING delta")
 
     def history(name, n=5):
         return spark.sql(f"DESCRIBE HISTORY {ref(name)} LIMIT {n}").select(
