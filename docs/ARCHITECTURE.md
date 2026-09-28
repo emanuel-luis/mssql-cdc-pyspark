@@ -121,7 +121,7 @@ backend has no type metadata and always needs `columns`.
 | Table | Grain | Written by | Notes |
 |---|---|---|---|
 | bronze (e.g. `bronze_orders`) | one row per change | `delta_sink` | append-only; `_batch_id` added; commit `userMetadata` holds the batch facts |
-| facts (optional) | one row per non-empty batch | `delta_sink` | durable copy of the facts (Delta checkpoints drop `commitInfo`) |
+| facts (optional) | one row per non-empty batch | `delta_sink` | durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write) and `written_at` |
 | `table_finalization` | one row per target table | `finalization.advance` | `finalized_until`, `end_lsn`, `end_commit_ts`, `updated_at` |
 
 ## Extension points

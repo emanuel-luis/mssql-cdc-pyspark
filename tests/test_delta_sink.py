@@ -43,7 +43,9 @@ def test_sink_facts_and_monotonic_finalization(delta_spark, workdir):
     hist = spark.sql(f"DESCRIBE HISTORY delta.`{target}`").collect()
     metas = [json.loads(h["userMetadata"]) for h in hist if h["userMetadata"]]
     assert sum(m["rows"] for m in metas) == 5 and len(metas) == 3  # 2 + 2 + 1 commits
-    assert spark.read.format("delta").load(facts).count() == 3
+    fact_rows = spark.read.format("delta").load(facts).collect()
+    assert len(fact_rows) == 3
+    assert all(r["started_at"] <= r["written_at"] and r["duration_ms"] >= 0 for r in fact_rows)
 
     end = finalization.end_offset_from_progress(q.lastProgress)
     fu = finalization.advance(spark, control, "bronze_orders", end)
@@ -54,6 +56,18 @@ def test_sink_facts_and_monotonic_finalization(delta_spark, workdir):
     assert finalization.advance(spark, control, "bronze_orders", older) == fu
     assert finalization.is_final(spark, control, "bronze_orders", datetime(2026, 9, 28, 15))
     assert not finalization.is_final(spark, control, "bronze_orders", datetime(2026, 9, 28, 16))
+
+
+def test_facts_table_from_before_the_timing_columns_gains_them(delta_spark, workdir):
+    spark = delta_spark
+    facts = os.path.join(workdir, "facts")
+    spark.createDataFrame([("old", 0, 1)], "app_id string, batch_id bigint, rows bigint") \
+        .write.format("delta").save(facts)
+    df = spark.createDataFrame([(1, 2, "0x" + "0" * 20, None)],
+                               "order_id int, _operation int, _start_lsn string, _commit_ts timestamp_ntz")
+    delta_sink(os.path.join(workdir, "bronze"), "evolve-test", facts)(df, 0)
+    rows = {r["app_id"]: r for r in spark.read.format("delta").load(facts).collect()}
+    assert rows["old"]["duration_ms"] is None and rows["evolve-test"]["duration_ms"] >= 0
 
 
 def test_replayed_batch_is_ignored(delta_spark, workdir):

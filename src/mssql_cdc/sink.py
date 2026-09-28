@@ -5,11 +5,16 @@
 * Facts about each batch go into the Delta commit (``userMetadata``) and,
   optionally, into a facts table. The table matters: ``commitInfo`` is not kept in
   checkpoints and disappears with log cleanup (``delta.logRetentionDuration``).
+* The facts table also times each batch: ``started_at`` and ``duration_ms`` cover the
+  read from SQL Server, the facts aggregation and the target write. Offset planning and
+  the checkpoint commit run outside ``foreachBatch`` and are not included.
 """
 
 from __future__ import annotations
 
 import json
+import time
+from datetime import datetime, timezone
 
 from pyspark.sql import DataFrame, functions as F
 
@@ -17,7 +22,8 @@ from .finalization import table_ref
 
 FACTS_SCHEMA = (
     "app_id STRING, batch_id BIGINT, rows BIGINT, min_lsn STRING, max_lsn STRING, "
-    "min_commit_ts STRING, max_commit_ts STRING, deletes BIGINT, inserts BIGINT, updates BIGINT"
+    "min_commit_ts STRING, max_commit_ts STRING, deletes BIGINT, inserts BIGINT, updates BIGINT, "
+    "started_at TIMESTAMP, duration_ms BIGINT"
 )
 _FACT_FIELDS = [f.split()[0] for f in FACTS_SCHEMA.split(", ")]
 
@@ -41,7 +47,8 @@ def batch_facts(df: DataFrame) -> dict:
     return facts
 
 
-def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str | None = None):
+def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str | None = None,
+           merge_schema: bool = False):
     writer = (
         df.write.format("delta")
         .mode("append")
@@ -50,6 +57,8 @@ def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str 
     )
     if metadata is not None:
         writer = writer.option("userMetadata", metadata)
+    if merge_schema:
+        writer = writer.option("mergeSchema", "true")
     if table_ref(target) != target:
         writer.save(target)
     else:
@@ -65,6 +74,7 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None):
     """
 
     def write_batch(df: DataFrame, batch_id: int) -> None:
+        started_at, t0 = datetime.now(timezone.utc), time.monotonic()
         df = df.persist()
         try:
             facts = batch_facts(df)
@@ -74,11 +84,13 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None):
             _write(df.withColumn("_batch_id", F.lit(batch_id)), target, app_id, batch_id,
                    json.dumps(facts, separators=(",", ":")))
             if facts_table:
+                facts.update(started_at=started_at, duration_ms=round((time.monotonic() - t0) * 1000))
                 spark = df.sparkSession
                 facts_df = spark.createDataFrame(
                     [tuple(facts[k] for k in _FACT_FIELDS)], FACTS_SCHEMA).withColumn(
                     "target", F.lit(target)).withColumn("written_at", F.current_timestamp())
-                _write(facts_df, facts_table, f"{app_id}#facts", batch_id)
+                # mergeSchema: facts tables created before started_at/duration_ms gain them
+                _write(facts_df, facts_table, f"{app_id}#facts", batch_id, merge_schema=True)
         finally:
             df.unpersist()
 
