@@ -174,7 +174,7 @@ class _BaseReader(DataSourceStreamReader):
         import pyarrow as pa
         from pyspark.sql.pandas.types import to_arrow_schema
 
-        target = to_arrow_schema(self.schema)
+        target = to_arrow_schema(self.schema, timezone="UTC")  # TIMESTAMP columns are UTC instants
         client = self.client
         try:
             for batch in client.iter_changes(

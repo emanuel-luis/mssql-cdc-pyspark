@@ -144,3 +144,11 @@ def test_starting_latest_skips_history(spark, workdir):
     db.commit(CI, [(2, _order(555))], at=T0 + timedelta(hours=1))
     _, out = _run(spark, workdir, startingLsn="latest")
     assert [r["order_id"] for r in _read(spark, out).collect()] == [555]
+
+
+def test_timestamp_column_is_a_utc_instant(spark, workdir):
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    db.commit(CI, [(2, {"order_id": 1, "paid_at": "2026-09-28T13:50:00-03:00"})], at=T0)
+    _, out = _run(spark, workdir, columns="order_id INT, paid_at TIMESTAMP")
+    # rendered in the session time zone (UTC); collect() would use the local zone
+    assert _read(spark, out).selectExpr("CAST(paid_at AS STRING)").first()[0] == "2026-09-28 16:50:00"
