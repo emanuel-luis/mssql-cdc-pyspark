@@ -25,6 +25,7 @@ When ``columns`` is omitted, the captured columns and their types come from
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -75,6 +76,8 @@ class LsnRange(InputPartition):
 class MssqlCdcDataSource(DataSource):
     """``spark.readStream.format("mssql_cdc")``."""
 
+    default_num_partitions: int | None = None  # set by register() from the session's cores
+
     @classmethod
     def name(cls) -> str:
         return "mssql_cdc"
@@ -100,18 +103,22 @@ class MssqlCdcDataSource(DataSource):
 
     def streamReader(self, schema):
         cls = MssqlCdcStreamReader if HAS_ADMISSION_CONTROL else MssqlCdcLegacyStreamReader
-        return cls(dict(self.options), schema)
+        return cls(dict(self.options), schema, self.default_num_partitions)
 
 
 class _BaseReader(DataSourceStreamReader):
-    def __init__(self, options: dict, schema):
+    def __init__(self, options: dict, schema, default_num_partitions: int | None = None):
         self.options = options
         self.capture_instance = _opt(options, "captureInstance")
         if not self.capture_instance:
             raise ValueError("Option 'captureInstance' is required (e.g. 'dbo_orders')")
         self.include_command_id = _truthy(_opt(options, "includeCommandId", "true"))
         self.fail_on_data_loss = _truthy(_opt(options, "failOnDataLoss", "true"))
-        self.num_partitions = int(_opt(options, "numPartitions", "1"))
+        num_partitions = str(_opt(options, "numPartitions", "auto")).strip().lower()
+        # auto: the session's cores (register()), else this driver node's CPUs. Each
+        # partition opens its own connection to SQL Server.
+        self.num_partitions = (max(1, default_num_partitions or os.cpu_count() or 1)
+                               if num_partitions == "auto" else int(num_partitions))
         self.batch_size = int(_opt(options, "arrowBatchSize", "10000"))
         meta_names = {n for n, _ in METADATA_COLUMNS}
         self.field_names = list(schema.fieldNames())
@@ -223,8 +230,8 @@ class _BaseReader(DataSourceStreamReader):
 class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
     """Spark 4.2+: admission control (maxCommitsPerBatch) and Trigger.AvailableNow."""
 
-    def __init__(self, options, schema):
-        super().__init__(options, schema)
+    def __init__(self, options, schema, default_num_partitions=None):
+        super().__init__(options, schema, default_num_partitions)
         self._target = None
         max_commits = _opt(options, "maxCommitsPerBatch")
         self._max_commits = int(max_commits) if max_commits else None

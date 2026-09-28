@@ -1,6 +1,21 @@
-"""SparkSession helper: reuse the platform session, or build a local one."""
+"""SparkSession helpers: reuse the platform session or build a local one; count cores."""
 
 from __future__ import annotations
+
+import os
+
+
+def available_cores(spark=None) -> int:
+    """Cores the session's compute runs tasks on (``defaultParallelism``), else the local
+    CPU count; 0 when neither is known. Spark Connect sessions have no ``sparkContext``."""
+    if spark is not None:
+        try:
+            cores = int(spark.sparkContext.defaultParallelism)
+            if cores > 0:
+                return cores
+        except Exception:  # noqa: BLE001 - counting cores must never break a read
+            pass
+    return os.cpu_count() or 0
 
 
 def get_spark(app_name: str = "mssql-cdc", master: str = "local[*]", delta: bool = True):

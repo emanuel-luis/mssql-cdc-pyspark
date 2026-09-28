@@ -16,5 +16,15 @@ __version__ = "0.1.0"
 
 
 def register(spark) -> None:
-    """Register ``format("mssql_cdc")`` on a SparkSession."""
-    spark.dataSource.register(MssqlCdcDataSource)
+    """Register ``format("mssql_cdc")`` on a SparkSession.
+
+    ``numPartitions`` defaults to the cores of this session's compute. The data source
+    plans in a Python worker that has no session, so the count is taken here and rides
+    along as an attribute of a registered subclass (Spark pickles it by value).
+    """
+    from .spark import available_cores
+
+    cores = available_cores(spark)
+    source = type(MssqlCdcDataSource.__name__, (MssqlCdcDataSource,),
+                  {"default_num_partitions": cores or None})
+    spark.dataSource.register(source)

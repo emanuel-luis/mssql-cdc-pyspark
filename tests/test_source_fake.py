@@ -111,7 +111,7 @@ def test_cleanup_between_planning_and_read_fails_the_task(spark, workdir):
 
     db = _db(workdir, n_tx=3)
     opts = {"backend": "fake", "fakePath": os.path.join(workdir, "src"), "captureInstance": CI,
-            "columns": COLUMNS}
+            "columns": COLUMNS, "numPartitions": "1"}
     schema = spark.createDataFrame([], MssqlCdcDataSource(opts).schema()).schema
     reader = MssqlCdcStreamReader(opts, schema)
     start = reader.initialOffset()
@@ -170,3 +170,56 @@ def test_timestamp_column_is_a_utc_instant(spark, workdir):
     _, out = _run(spark, workdir, columns="order_id INT, paid_at TIMESTAMP")
     # rendered in the session time zone (UTC); collect() would use the local zone
     assert _read(spark, out).selectExpr("CAST(paid_at AS STRING)").first()[0] == "2026-09-28 16:50:00"
+
+
+def test_register_carries_the_session_cores_to_the_workers():
+    from pyspark import cloudpickle
+
+    import mssql_cdc
+
+    class StubSpark:
+        class sparkContext:  # noqa: N801
+            defaultParallelism = 7
+
+        class dataSource:  # noqa: N801
+            registered = []
+
+            @classmethod
+            def register(cls, source):
+                cls.registered.append(source)
+
+    mssql_cdc.register(StubSpark)
+    source = StubSpark.dataSource.registered[-1]
+    assert issubclass(source, MssqlCdcDataSource) and source.name() == "mssql_cdc"
+    # the data source plans in a Python worker: the value must survive the pickling
+    assert cloudpickle.loads(cloudpickle.dumps(source)).default_num_partitions == 7
+
+
+def test_num_partitions_precedence():
+    from pyspark.sql.types import IntegerType, StructField, StructType
+
+    from mssql_cdc.source import MssqlCdcStreamReader
+
+    schema = StructType([StructField("order_id", IntegerType())])
+    opts = {"backend": "fake", "fakePath": "unused", "captureInstance": CI}
+    assert MssqlCdcStreamReader({**opts, "numPartitions": "5"}, schema, 3).num_partitions == 5
+    assert MssqlCdcStreamReader({**opts, "numPartitions": "auto"}, schema, 3).num_partitions == 3
+    assert MssqlCdcStreamReader(opts, schema, 3).num_partitions == 3
+    assert MssqlCdcStreamReader(opts, schema, None).num_partitions == max(1, os.cpu_count() or 1)
+
+
+def test_num_partitions_defaults_to_the_session_cores(spark, workdir):
+    from pyspark.sql import functions as F
+
+    _db(workdir, n_tx=10, rows_per_tx=1)
+    name = "q_" + uuid.uuid4().hex[:8]
+    q = (
+        spark.readStream.format("mssql_cdc")
+        .options(backend="fake", fakePath=os.path.join(workdir, "src"), captureInstance=CI, columns=COLUMNS)
+        .load()
+        .withColumn("pid", F.spark_partition_id())  # one Spark partition per planned LSN range
+        .writeStream.format("memory").queryName(name).trigger(availableNow=True).start()
+    )
+    q.awaitTermination()
+    pids = {r[0] for r in spark.sql(f"SELECT DISTINCT pid FROM {name}").collect()}
+    assert len(pids) == spark.sparkContext.defaultParallelism  # conftest: local[2], via register()

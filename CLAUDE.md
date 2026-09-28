@@ -60,7 +60,8 @@ src/mssql_cdc/
   lsn.py           LSN <-> canonical hex string.
   sink.py          delta_sink(): idempotent append (txnAppId/txnVersion) + per-batch facts.
   finalization.py  finalized_until: candidate(), advance() (monotonic MERGE), is_final().
-  spark.py         get_spark(): reuse the platform session or build a local one with Delta.
+  spark.py         get_spark(): reuse the platform session or build a local one with Delta;
+                   available_cores(): what register() uses for numPartitions=auto (ADR 0011).
 lab/
   workload.py      Faker OLTP workload (setup/seed/stream/bulk/long-tx).
   common.py        .env loading, connections, helpers, PASS/FAIL reporting to lab/results/.
