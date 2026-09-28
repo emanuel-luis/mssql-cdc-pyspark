@@ -27,7 +27,14 @@ arrow-odbc = ["arrow-odbc>=10"]
 
 [dependency-groups]
 # Tests and lab/ (not packaged). `uv sync` installs this group by default.
-dev = ["pytest>=8", "pyspark>=4.2", "delta-spark>=4.4", "faker>=30", "mssql-python>=1.5"]
+dev = [
+    "pytest>=8",
+    "pyspark>=4.2",
+    "delta-spark>=4.4",
+    "faker>=30",
+    "mssql-python>=1.5",
+    "testcontainers>=4.15",
+]
 
 [project.urls]
 Repository = "https://github.com/emanuel-luis/mssql-cdc-pyspark"
@@ -37,7 +44,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not sqlserver'"  # integration tests: pytest -m sqlserver (needs Docker)
 markers = [
   "delta: needs Delta Lake jars (Maven access on first run)",
-  "sqlserver: needs a live SQL Server with CDC (see docker-compose.yml)",
+  "sqlserver: integration tests against SQL Server 2022 in Docker (testcontainers)",
 ]

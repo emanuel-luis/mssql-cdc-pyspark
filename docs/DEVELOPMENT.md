@@ -119,12 +119,19 @@ break the file renames Spark relies on.
 uv run pytest -q                            # everything; Delta tests skip if jars can't resolve
 MSSQL_CDC_TEST_DELTA=0 uv run pytest -q     # don't even try Delta
 uv run pytest -q -k idle                    # one topic
+uv run pytest -q -m sqlserver               # integration: SQL Server 2022 in Docker
 ```
 
 * `tests/test_source_fake.py` is the main safety net: real Spark streaming,
   simulated SQL Server.
 * `tests/test_client_sql.py` pins generated T-SQL.
 * `tests/test_delta_sink.py` needs Delta.
+* `tests/integration` starts a throwaway SQL Server 2022 with CDC and SQL Server Agent
+  through [testcontainers](https://testcontainers-python.readthedocs.io/), with the
+  server clock in `America/Sao_Paulo`, and runs the source against it. It needs a
+  running Docker daemon (Docker Engine, or Docker Desktop on Windows) and skips without
+  one; the first run pulls the SQL Server image. The default `pytest` run leaves
+  these tests out.
 
 ## Lab
 
@@ -135,6 +142,7 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
 `.github/workflows/ci.yml`:
 
 * `unit`: pytest with Delta on Ubuntu, Java 17, Python 3.11.
+* `integration`: `pytest -m sqlserver` (testcontainers on the runner's Docker).
 * `lab`: a SQL Server 2022 service container with Agent, then workload and checks
   t2–t7; t1 and the destructive t7 are `continue-on-error`. Results are uploaded as the
   `lab-results` artifact.
