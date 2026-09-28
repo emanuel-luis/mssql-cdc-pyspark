@@ -17,8 +17,10 @@ Usage::
     df = (spark.readStream.format("mssql_cdc")
             .option("connectionString", "Server=...;Database=...;UID=...;PWD=...;Encrypt=yes")
             .option("captureInstance", "dbo_orders")
-            .option("columns", "order_id INT, status STRING, amount DECIMAL(18,2)")
-            .load())
+            .load())  # columns inferred from CDC metadata; "columns" (DDL) overrides
+
+When ``columns`` is omitted, the captured columns and their types come from
+``cdc.captured_columns`` at ``load()`` time, on the driver.
 """
 
 from __future__ import annotations
@@ -78,15 +80,23 @@ class MssqlCdcDataSource(DataSource):
         return "mssql_cdc"
 
     def schema(self) -> str:
-        columns = _opt(self.options, "columns")
-        if not columns:
-            raise ValueError(
-                "Option 'columns' is required: a DDL list of the captured source "
-                "columns, e.g. 'order_id INT, status STRING, amount DECIMAL(18,2)'."
-            )
+        columns = _opt(self.options, "columns") or self._captured_columns()
         include_cmd = _truthy(_opt(self.options, "includeCommandId", "true"))
         meta = [f"{n} {t}" for n, t in METADATA_COLUMNS if include_cmd or n != "_command_id"]
         return ", ".join(meta) + ", " + columns
+
+    def _captured_columns(self) -> str:
+        """Without ``columns``, read the captured columns from CDC metadata (driver side)."""
+        from .client import make_client
+
+        ci = _opt(self.options, "captureInstance")
+        if not ci:
+            raise ValueError("Option 'captureInstance' is required (e.g. 'dbo_orders')")
+        client = make_client(self.options)
+        try:
+            return client.captured_columns(ci)
+        finally:
+            client.close()
 
     def streamReader(self, schema):
         cls = MssqlCdcStreamReader if HAS_ADMISSION_CONTROL else MssqlCdcLegacyStreamReader

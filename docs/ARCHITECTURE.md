@@ -89,8 +89,31 @@ sequenceDiagram
 ## Output schema
 
 Metadata columns `_capture_instance, _start_lsn, _seqval, _operation, _command_id,
-_commit_ts`, then the captured columns from the `columns` option. The ordering key for
-applying changes is `(_start_lsn, _command_id, _seqval, _operation)`.
+_commit_ts`, then the captured columns. The ordering key for applying changes is
+`(_start_lsn, _command_id, _seqval, _operation)`.
+
+Captured columns come from the `columns` option (DDL) or, when it is omitted, from CDC
+metadata at `load()` time on the driver: `cdc.change_tables` joined to
+`cdc.captured_columns` and `sys.columns`, in `column_ordinal` order
+(`SqlCdcClient.captured_columns`). Default type mapping:
+
+| SQL Server | Spark |
+|---|---|
+| `bit` | `BOOLEAN` |
+| `tinyint`, `smallint` | `SMALLINT` |
+| `int` / `bigint` | `INT` / `BIGINT` |
+| `real` / `float` | `FLOAT` / `DOUBLE` |
+| `decimal(p,s)`, `numeric(p,s)` | `DECIMAL(p,s)` |
+| `money` / `smallmoney` | `DECIMAL(19,4)` / `DECIMAL(10,4)` |
+| `date` | `DATE` |
+| `datetime`, `datetime2`, `smalldatetime` | `TIMESTAMP_NTZ` |
+| `datetimeoffset` | `TIMESTAMP` |
+| `char`, `varchar`, `nchar`, `nvarchar`, `text`, `ntext`, `xml`, `uniqueidentifier`, `time` | `STRING` |
+| `binary`, `varbinary`, `image`, `rowversion` | `BINARY` |
+
+Alias types map through their base type. Anything else (`sql_variant`, `geography`,
+`geometry`, `hierarchyid`) fails at `load()` with a message to pass `columns`. The fake
+backend has no type metadata and always needs `columns`.
 
 ## Tables written by the sink and finalization
 

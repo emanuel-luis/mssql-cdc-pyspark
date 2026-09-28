@@ -42,6 +42,48 @@ def _check_column(name: str) -> str:
     return name
 
 
+# Default Spark type per SQL Server type, for schemas inferred from CDC metadata.
+# The `columns` option overrides them.
+_SPARK_TYPES = {
+    "bit": "BOOLEAN",
+    "tinyint": "SMALLINT",  # 0..255 does not fit Spark's signed TINYINT
+    "smallint": "SMALLINT",
+    "int": "INT",
+    "bigint": "BIGINT",
+    "real": "FLOAT",
+    "float": "DOUBLE",
+    "money": "DECIMAL(19,4)",
+    "smallmoney": "DECIMAL(10,4)",
+    "date": "DATE",
+    "datetime": "TIMESTAMP_NTZ",
+    "datetime2": "TIMESTAMP_NTZ",
+    "smalldatetime": "TIMESTAMP_NTZ",
+    "datetimeoffset": "TIMESTAMP",
+    "time": "STRING",
+    "char": "STRING",
+    "varchar": "STRING",
+    "nchar": "STRING",
+    "nvarchar": "STRING",
+    "text": "STRING",
+    "ntext": "STRING",
+    "xml": "STRING",
+    "uniqueidentifier": "STRING",
+    "binary": "BINARY",
+    "varbinary": "BINARY",
+    "image": "BINARY",
+    "timestamp": "BINARY",  # rowversion
+}
+
+
+def _spark_type(sql_type: str, precision: int, scale: int) -> str:
+    t = (sql_type or "").lower()
+    if t in ("decimal", "numeric"):
+        return f"DECIMAL({int(precision)},{int(scale)})"
+    if t not in _SPARK_TYPES:
+        raise ValueError(f"no default Spark type for SQL Server type {sql_type!r}")
+    return _SPARK_TYPES[t]
+
+
 # --------------------------------------------------------------------------- #
 # Interface
 # --------------------------------------------------------------------------- #
@@ -83,6 +125,13 @@ class CdcClient(ABC):
         batch_size: int,
     ) -> Iterator[pa.RecordBatch]:
         """Changes in the closed interval [from_lsn, to_lsn], in commit order."""
+
+    def captured_columns(self, capture_instance: str) -> str:
+        """Spark DDL of the captured columns, in capture order."""
+        raise ValueError(
+            "Option 'columns' is required for this backend: a DDL list of the captured "
+            "source columns, e.g. 'order_id INT, status STRING, amount DECIMAL(18,2)'."
+        )
 
     def close(self) -> None:  # pragma: no cover - default no-op
         pass
@@ -249,6 +298,35 @@ class SqlCdcClient(CdcClient):
         for batch in self._b.batches(sql, (from_lsn, to_lsn), 1000):
             points.extend(self._hex(v) for v in batch.column(0).to_pylist())
         return points
+
+    def captured_columns(self, capture_instance):
+        ci = _check_ident(capture_instance, "capture instance")
+        sql = (
+            "SELECT cc.column_name, "
+            # alias types resolve to their base type; CLR types (geography...) to their own name
+            "COALESCE(TYPE_NAME(c.system_type_id), TYPE_NAME(c.user_type_id)) AS type_name, "
+            "c.precision, c.scale "
+            "FROM cdc.change_tables ct "
+            "JOIN cdc.captured_columns cc ON cc.object_id = ct.object_id "
+            "JOIN sys.columns c ON c.object_id = ct.object_id AND c.name = cc.column_name "
+            "WHERE ct.capture_instance = ? "
+            "ORDER BY cc.column_ordinal"
+        )
+        rows = [r for batch in self._b.batches(sql, (ci,), 1000) for r in batch.to_pylist()]
+        if not rows:
+            raise ValueError(
+                f"Capture instance {ci!r} not found, or the login cannot read its CDC "
+                "metadata (cdc.change_tables, cdc.captured_columns). Pass 'columns' explicitly."
+            )
+        ddl = []
+        for r in rows:
+            name = _check_column(r["column_name"])
+            try:
+                typ = _spark_type(r["type_name"], r["precision"], r["scale"])
+            except ValueError as e:
+                raise ValueError(f"{ci}.{name}: {e}. Pass 'columns' explicitly.") from None
+            ddl.append(f"`{name.replace('`', '``')}` {typ}")
+        return ", ".join(ddl)
 
     # -- data -----------------------------------------------------------------
     def iter_changes(self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size):

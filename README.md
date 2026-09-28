@@ -77,7 +77,6 @@ query = (
     spark.readStream.format("mssql_cdc")
     .option("connectionString", "Server=host,1433;Database=db;UID=u;PWD=p;Encrypt=yes")
     .option("captureInstance", "dbo_orders")
-    .option("columns", "order_id INT, status STRING, amount DECIMAL(18,2)")
     .option("maxCommitsPerBatch", "500")
     .load()
     .writeStream.foreachBatch(delta_sink("bronze.orders", app_id="orders-v1",
@@ -97,7 +96,7 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 | Option | Default | Meaning |
 |---|---|---|
 | `captureInstance` | required | e.g. `dbo_orders` |
-| `columns` | required | DDL of the captured columns to read |
+| `columns` | inferred | DDL of the captured columns to read. Inferred from CDC metadata (`cdc.captured_columns`) when omitted; required for `backend=fake` |
 | `connectionString` | required | `mssql-python` / ODBC 18 connection string |
 | `backend` | `mssql-python` | `mssql-python`, `arrow-odbc`, or `fake` (tests) |
 | `startingLsn` | `earliest` | `earliest`, `latest`, or an LSN (`0x...`), treated as already processed |
@@ -110,7 +109,7 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 
 ### Output schema
 
-Captured columns, plus:
+Captured columns (inferred, or as given in `columns`), plus:
 
 | Column | Type | Source |
 |---|---|---|

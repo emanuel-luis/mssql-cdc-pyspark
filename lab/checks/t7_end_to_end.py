@@ -33,8 +33,9 @@ from mssql_cdc.spark import get_spark
 from ..common import SOURCE_TZ, connect, connection_string, ct_count, max_lsn, report
 from ..workload import Workload
 
-COLUMNS = ("order_id INT, customer_id INT, status STRING, amount DECIMAL(18,2), "
-           "created_at TIMESTAMP_NTZ, updated_at TIMESTAMP_NTZ")
+# dbo.orders as sql/00_setup.sql creates it; the reader must infer exactly this
+EXPECTED_COLUMNS = ("order_id INT, customer_id INT, status STRING, amount DECIMAL(18,2), "
+                    "created_at TIMESTAMP_NTZ, updated_at TIMESTAMP_NTZ")
 
 
 def _wait_stable(conn, ci, polls=3, every=2.0, timeout=180):
@@ -82,13 +83,16 @@ def main(argv=None) -> bool:
     if a.backend == "arrow-odbc":
         conn_str = "Driver={ODBC Driver 18 for SQL Server};" + conn_str
 
+    def source():  # no "columns": inferred from CDC metadata
+        return (spark.readStream.format("mssql_cdc")
+                .option("backend", a.backend).option("connectionString", conn_str)
+                .option("captureInstance", "dbo_orders")
+                .option("sourceTimeZone", SOURCE_TZ)
+                .option("maxCommitsPerBatch", str(a.max_commits))
+                .option("numPartitions", str(a.num_partitions)).load())
+
     def run():
-        q = (spark.readStream.format("mssql_cdc")
-             .option("backend", a.backend).option("connectionString", conn_str)
-             .option("captureInstance", "dbo_orders").option("columns", COLUMNS)
-             .option("sourceTimeZone", SOURCE_TZ)
-             .option("maxCommitsPerBatch", str(a.max_commits))
-             .option("numPartitions", str(a.num_partitions)).load()
+        q = (source()
              .writeStream.foreachBatch(delta_sink(target, app_id, facts))
              .option("checkpointLocation", ckpt).trigger(availableNow=True).start())
         q.awaitTermination()
@@ -99,6 +103,9 @@ def main(argv=None) -> bool:
         return spark.sql(f"SELECT count(*) FROM {finalization.table_ref(target)}").first()[0]
 
     checks, timings = [], []
+    inferred = [(f.name, f.dataType.simpleString()) for f in source().schema if not f.name.startswith("_")]
+    expected = [(f.name, f.dataType.simpleString()) for f in spark.createDataFrame([], EXPECTED_COLUMNS).schema]
+    checks.append(("columns inferred from CDC metadata", inferred == expected, str(inferred)))
     t_start = time.time()
     q, prog = run()
     elapsed = time.time() - t_start

@@ -30,8 +30,6 @@ query = (
     spark.readStream.format("mssql_cdc")
     .option("connectionString", conn)
     .option("captureInstance", "dbo_orders")
-    .option("columns", "order_id INT, customer_id INT, status STRING, amount DECIMAL(18,2), "
-                       "created_at TIMESTAMP_NTZ, updated_at TIMESTAMP_NTZ")
     .option("sourceTimeZone", "UTC")
     .option("maxCommitsPerBatch", "500")
     .load()

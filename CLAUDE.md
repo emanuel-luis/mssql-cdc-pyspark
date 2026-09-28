@@ -116,6 +116,9 @@ notes/             Local only, gitignored: research notes in Portuguese (context
 * Does `mssql-python` accept the `CONVERT(binary(10), ?, 1)` arguments inside the TVF
   call, and what Arrow types does it return for them? (t3, t7)
 * Does `fn_cdc_get_all_changes_*` return `__$command_id` on SQL Server 2022? (t3)
+* Inferred schemas: which Arrow types `mssql-python` returns for `time`,
+  `uniqueidentifier` and `datetimeoffset`, and whether they cast to the default
+  Spark types (`client._SPARK_TYPES`). t7 covers the `dbo.orders` types only.
 * Frequency of idle dummy entries in `cdc.lsn_time_mapping` (t1), and whether
   `tran_end_time` follows the server's local clock (t2).
 * Delta: `userMetadata` via session conf on MERGE; MERGE idempotency via session txn

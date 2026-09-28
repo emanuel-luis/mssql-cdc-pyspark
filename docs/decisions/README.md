@@ -8,5 +8,6 @@
 | [0004](0004-verdict-in-control-table.md) | `finalized_until` in a control table, never in table properties | accepted |
 | [0005](0005-ordering-over-atomicity.md) | Data first, verdict after, monotonic | accepted |
 | [0006](0006-file-backed-fake-for-engine-tests.md) | A file-backed CDC fake to test the real Spark engine | accepted |
+| [0007](0007-infer-columns-from-cdc-metadata.md) | Infer captured columns from CDC metadata | accepted |
 
 New ADRs: copy the format, next number, one decision per file.
