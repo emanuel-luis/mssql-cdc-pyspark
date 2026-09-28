@@ -74,19 +74,24 @@ Windows zone name.
 
 * **`t1` or `t4` fails:** stop. The completeness signal depends on both; the
   design must change before anything else.
-* **`t3` shows no `__$command_id`:** run with `includeCommandId=false`, and order by
+* **`t3` shows no `__$command_id` in the change table** (2012–2016 without the
+  cumulative update): run with `includeCommandId=false`, and order by
   `(_start_lsn, _seqval, _operation)`.
 * **`t6` MERGE idempotency fails:** the sink is unaffected (append + txn options).
   Downstream MERGEs must be idempotent by key instead.
 
 ## 4. Results
 
+Evidence files are in the `lab-results` artifact of the CI run linked in each row
+(GitHub keeps artifacts for 90 days; rerun the workflow to regenerate them).
+
 | Check | Platform / version | Result | Evidence (`lab/results/...`) |
 |---|---|---|---|
-| t1 | | | |
-| t2 | | | |
-| t3 | | | |
-| t4 | | | |
-| t5 | | | |
-| t6 | | | |
-| t7 | | | |
+| t1 | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS; idle entries every 305 s, `max_lsn` up to 300 s stale | [`t1_idle_heartbeat-20260928T222216Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |
+| t2 | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS | [`t2_timezone-20260928T220645Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |
+| t3 | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS (`--destructive` also passed in a local run) | [`t3_read_semantics-20260928T220651Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |
+| t4 | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS | [`t4_watermark_concurrency-20260928T220811Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |
+| t5 | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS | [`t5_engine-20260928T220829Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |
+| t6 | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS | [`t6_delta_semantics-20260928T220927Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |
+| t7 | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS | [`t7_end_to_end-20260928T221114Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |
+| t7 `--idle-minutes 6 --destructive` | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS: idle offset advanced, guard stopped the stream | [`t7_end_to_end-20260928T223005Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |

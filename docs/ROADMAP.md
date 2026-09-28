@@ -2,12 +2,12 @@
 
 ## v0.1: validate what exists
 
-- [ ] Run `LAB.md` locally (Docker SQL Server 2022): t1–t7 green; fix code and the fake
-      where real CDC differs.
-- [ ] Delta tests passing locally (`tests/test_delta_sink.py`).
-- [ ] Publish to GitHub; CI `unit` and `lab` jobs green.
+- [x] Run `LAB.md` against SQL Server 2022: t1–t7 green (in CI; t1 and t3 also locally),
+      code and fake fixed where real CDC differed (ADRs 0008–0010).
+- [x] Delta tests passing locally (`tests/test_delta_sink.py`).
+- [x] Publish to GitHub; CI `unit`, `integration` and `lab` jobs green.
 - [ ] Databricks classic (DBR 18 LTS, dedicated): t5, t6 `--schema`, t7 `--schema`.
-- [ ] Fill the results table in `LAB.md` with links to result files.
+- [x] Fill the results table in `LAB.md` with links to result files.
 
 ## v0.2: production concerns
 
