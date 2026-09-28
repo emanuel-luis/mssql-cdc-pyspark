@@ -1,6 +1,7 @@
 # 0010: Idle lag of ~5 minutes; an optional Agent heartbeat for less
 
-**Status:** accepted (2026-09)
+**Status:** accepted  
+**Date:** 2026-09-28T19:03:23-03:00
 
 ## Context
 `finalized_until` follows the commit time of the batch's end LSN, and the end LSN is at

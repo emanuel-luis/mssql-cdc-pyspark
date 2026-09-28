@@ -1,6 +1,7 @@
 # 0003: `mssql-python` as default driver, `arrow-odbc` as fallback
 
-**Status:** accepted (2026-09). Survey in `docs/CONNECTORS.md`.
+**Status:** accepted. Survey in `docs/CONNECTORS.md`.  
+**Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)
 
 ## Context
 `read()` yields Arrow record batches from executors. The driver should fetch natively into

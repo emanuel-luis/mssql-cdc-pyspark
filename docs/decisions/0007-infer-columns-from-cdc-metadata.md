@@ -1,7 +1,9 @@
 # 0007: Infer captured columns from CDC metadata
 
-**Status:** accepted (2026-09); amended the same month to use
-`sys.sp_cdc_get_captured_columns` (see Consequences).
+**Status:** accepted  
+**Date:** 2026-09-28T17:03:21-03:00  
+**Amended:** 2026-09-28T18:11:50-03:00, metadata from `sys.sp_cdc_get_captured_columns`
+(see Consequences)
 
 ## Context
 The source required a `columns` option: a hand-written DDL of the captured columns. It

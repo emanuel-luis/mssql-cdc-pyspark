@@ -1,7 +1,9 @@
 # 0008: Detect the server time zone by name
 
-**Status:** accepted (2026-09); amended the same month with a fallback for SQL Server
-2016–2019 (see Amendment).
+**Status:** accepted  
+**Date:** 2026-09-28T17:05:54-03:00  
+**Amended:** 2026-09-28T20:19:40-03:00, current-offset fallback for SQL Server 2016–2019
+(see Amendment)
 
 ## Context
 `cdc.lsn_time_mapping.tran_end_time` is a timezone-less `datetime` in the server clock.

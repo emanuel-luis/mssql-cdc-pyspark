@@ -1,7 +1,9 @@
 # 0009: Read the change table directly
 
-**Status:** accepted (2026-09). Supersedes the read path described in invariants 2–4 of
-`CLAUDE.md` before this change.
+**Status:** accepted. Supersedes the read path described in invariants 2–4 of
+`CLAUDE.md` before this change.  
+**Date:** 2026-09-28T17:39:20-03:00  
+**Amended:** 2026-09-28T18:11:50-03:00, the one extra grant and the gating-role trade-off
 
 ## Context
 The reader queried `cdc.fn_cdc_get_all_changes_<ci>(from, to, N'all update old')` and,

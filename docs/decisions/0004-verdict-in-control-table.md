@@ -1,6 +1,7 @@
 # 0004: `finalized_until` in a control table, never in table properties
 
-**Status:** accepted (2026-09)
+**Status:** accepted  
+**Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)
 
 ## Context
 Pinterest stores its finalization watermark as an Iceberg table property. On Delta, and

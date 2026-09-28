@@ -1,6 +1,7 @@
 # 0006: A file-backed CDC fake to test the real Spark engine
 
-**Status:** accepted (2026-09)
+**Status:** accepted  
+**Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)
 
 ## Context
 Most bugs in a streaming source live in the interaction with the engine: offsets,

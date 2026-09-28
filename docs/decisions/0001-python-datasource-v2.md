@@ -1,6 +1,7 @@
 # 0001: Python DataSource V2 instead of a JVM connector
 
-**Status:** accepted (2026-09)
+**Status:** accepted  
+**Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)
 
 ## Context
 The project must be platform-agnostic and "100% PySpark": installable with pip on local

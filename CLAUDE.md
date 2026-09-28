@@ -144,4 +144,5 @@ about every 5 minutes (t1); `sql/heartbeat.sql` brings `max_lsn`'s lag to ~10 s
 * PySpark is an optional extra (`[spark]`): platforms ship their own. Do not add hard
   dependencies to `[project].dependencies` beyond `pyarrow`.
 * Keep the README options table and output schema in sync with `source.py`.
-* Record design changes as a new ADR in `docs/decisions/`.
+* Record design changes as a new ADR in `docs/decisions/`, with `**Date:**` (ISO-8601 with
+  the UTC offset) and an `**Amended:**` line per later change (see `docs/decisions/README.md`).

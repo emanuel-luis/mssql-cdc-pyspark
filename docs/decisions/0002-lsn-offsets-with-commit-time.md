@@ -1,6 +1,7 @@
 # 0002: Offsets are hex LSNs carrying the commit time
 
-**Status:** accepted (2026-09)
+**Status:** accepted  
+**Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)
 
 ## Context
 Offsets must be JSON dicts of primitives. SQL Server LSNs are 10-byte binaries. A

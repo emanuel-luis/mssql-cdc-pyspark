@@ -1,6 +1,7 @@
 # 0005: Data first, verdict after, monotonic
 
-**Status:** accepted (2026-09)
+**Status:** accepted  
+**Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)
 
 ## Context
 Committing data and the verdict atomically would need multi-table transactions (DBR 18+,
