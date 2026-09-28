@@ -51,6 +51,14 @@ class SqlServer:
         finally:
             cur.close()
 
+    def login(self, name: str, *grants: str) -> str:
+        """A login whose database user has only ``grants``; returns its connection string."""
+        self.run(f"CREATE LOGIN [{name}] WITH PASSWORD = '{PASSWORD}', CHECK_POLICY = OFF")
+        self.run(f"CREATE USER [{name}] FOR LOGIN [{name}]")
+        for grant in grants:
+            self.run(grant)
+        return self.connection_string.replace("UID=sa;", f"UID={name};")
+
     def cdc_table(self, name: str, columns_ddl: str) -> str:
         """Create ``dbo.<name>`` with CDC on; returns the capture instance."""
         self.run(f"CREATE TABLE dbo.[{name}] ({columns_ddl})")

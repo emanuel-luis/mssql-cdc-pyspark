@@ -149,6 +149,20 @@ def test_stream_resumes_from_checkpoint_with_transactions_in_order(spark, sqlser
     assert len(after_rows) == 5 and [(r["order_id"], r["_operation"]) for r in new] == [(2, 2)]
 
 
+def test_least_privilege_login_needs_one_grant_on_the_change_table(spark, sqlserver):
+    ci = sqlserver.cdc_table("priv_probe", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10)")
+    sqlserver.run("INSERT INTO dbo.priv_probe VALUES (1, 'a')")
+    sqlserver.wait_for_changes(ci, 1)
+    # what the CDC query functions need: enough to plan and to infer the schema...
+    conn = sqlserver.login("cdc_reader", "GRANT SELECT ON dbo.priv_probe TO cdc_reader")
+    with pytest.raises(Exception, match=r"GRANT SELECT ON cdc\.\[dbo_priv_probe_CT\]"):
+        _read(spark, sqlserver, ci, connectionString=conn)
+    # ...plus SELECT on this one change table to read it
+    sqlserver.run("GRANT SELECT ON cdc.dbo_priv_probe_CT TO cdc_reader")
+    df, _ = _read(spark, sqlserver, ci, connectionString=conn)
+    assert [(r["id"], r["v"]) for r in df.collect()] == [(1, "a")]
+
+
 def test_purged_range_stops_the_stream(spark, sqlserver, workdir):
     ci = sqlserver.cdc_table("purge_probe", "id INT NOT NULL PRIMARY KEY")
     sqlserver.run("INSERT INTO dbo.purge_probe VALUES (1)")

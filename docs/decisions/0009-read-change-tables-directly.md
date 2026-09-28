@@ -44,8 +44,16 @@ moved low watermark by the time the read finishes.
   `tests/integration` check the columns, and that cleanup moves `min_lsn` and deletes
   the rows below it; the move-before-delete order is taken from the documentation (see
   `docs/REFERENCES.md`) and cannot be observed from a test.
-* The login needs `SELECT` on `cdc.<ci>_CT`. The reader already reads
-  `cdc.lsn_time_mapping`, `cdc.change_tables` and `cdc.captured_columns`.
+* **One extra grant.** The query functions reach the change table through ownership
+  chaining, so a login with `SELECT` on the source columns (plus the gating role) can
+  call them without any right on `cdc.<ci>_CT`. Reading the table directly needs
+  `GRANT SELECT ON cdc.[<ci>_CT] TO <user>`, per capture instance; nothing else in the
+  `cdc` schema (`cdc.lsn_time_mapping` and the `sys.fn_cdc_*` functions are readable
+  without it). A denied read raises `PermissionError` naming that grant. Checked with a
+  least-privilege login against SQL Server 2022 (`tests/integration`).
+* That grant sidesteps the gating role: the function checks the role, the table does
+  not. The data exposed is the same, but whoever relied on the role now controls access
+  with the grant.
 * One more `fn_cdc_get_min_lsn` query per task.
 * `FakeCdcDatabase.cleanup` now also deletes the rows below the watermark, like the real
   procedure, and `FakeCdcClient.iter_changes` no longer emulates Msg 313.

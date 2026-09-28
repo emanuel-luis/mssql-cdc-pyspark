@@ -373,7 +373,16 @@ class SqlCdcClient(CdcClient):
             "WHERE c.[__$start_lsn] BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1) "
             f"ORDER BY c.[__$start_lsn], {cmd_order}c.[__$seqval], c.[__$operation]"
         )
-        yield from self._b.batches(sql, (from_lsn, to_lsn), batch_size)
+        try:
+            yield from self._b.batches(sql, (from_lsn, to_lsn), batch_size)
+        except Exception as exc:
+            if "denied" in str(exc) and f"{ci}_CT" in str(exc):
+                raise PermissionError(
+                    f"The login cannot read the change table cdc.[{ci}_CT]. Beyond what the CDC "
+                    f"query functions need, the reader needs: GRANT SELECT ON cdc.[{ci}_CT] "
+                    "TO <user> (ADR 0009)."
+                ) from exc
+            raise
 
     def close(self):
         self._b.close()

@@ -146,6 +146,16 @@ def test_captured_columns_errors_point_to_columns_option():
         SqlCdcClient(Denied()).captured_columns("dbo_orders")
 
 
+def test_change_table_permission_error_names_the_grant():
+    class Denied(Recorder):
+        def batches(self, sql, params, batch_size):
+            raise RuntimeError("[SQL Server]The SELECT permission was denied on the object "
+                               "'dbo_orders_CT', database 'db', schema 'cdc'.")
+
+    with pytest.raises(PermissionError, match=r"GRANT SELECT ON cdc\.\[dbo_orders_CT\]"):
+        list(SqlCdcClient(Denied()).iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+
+
 def test_schema_infers_columns_when_option_missing(monkeypatch):
     import mssql_cdc.client as client_mod
     from mssql_cdc.source import MssqlCdcDataSource

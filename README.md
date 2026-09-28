@@ -122,6 +122,19 @@ Captured columns (inferred, or as given in `columns`), plus:
 
 Order changes with `(_start_lsn, _command_id, _seqval, _operation)`.
 
+### Permissions
+
+A `db_owner` needs nothing else. A least-privilege login needs what the CDC query
+functions need, plus one grant per capture instance, because the reader reads the change
+table directly (see [ADR 0009](docs/decisions/0009-read-change-tables-directly.md)):
+
+```sql
+GRANT SELECT ON dbo.orders TO cdc_reader;           -- the captured source columns
+GRANT SELECT ON cdc.[dbo_orders_CT] TO cdc_reader;  -- the change table
+-- and, if the capture instance has a gating role:
+ALTER ROLE <gating_role> ADD MEMBER cdc_reader;
+```
+
 ### Completeness semantics
 
 `finalized_until = truncate(end.commit_ts, "hour")`, advanced only after the batch
