@@ -223,34 +223,41 @@ class SqlCdcClient(CdcClient):
     def __init__(self, backend: Backend, source_timezone: str = "auto"):
         self._b = backend
         self._tz = None if source_timezone.lower() == "auto" else _check_tz(source_timezone)
+        self._offset_min: int | None = None  # set instead of _tz by the pre-2022 fallback
 
     # -- helpers --------------------------------------------------------------
     @property
     def timezone(self) -> str:
-        """Windows time zone of the server clock; with ``auto``, detected once per client.
+        """Time zone of the server clock; with ``auto``, detected once per client.
 
-        A zone name, not the current UTC offset: ``AT TIME ZONE`` then applies the
-        daylight-saving rules in force at each commit, so historical LSNs convert right.
+        SQL Server 2022+ and Azure SQL name it (``CURRENT_TIMEZONE_ID()``), and ``AT TIME
+        ZONE`` applies the daylight-saving rules in force at each commit. Older versions
+        have no such function; then the server's current UTC offset
+        (``SYSDATETIMEOFFSET()``) is applied to every commit, returned as ``UTC-03:00``.
+        That is exact for zones without daylight saving; elsewhere, name the zone.
         """
         # ponytail: one query per client (driver and every task); ship the detected zone
         # to executors in the options if it ever shows up in profiles.
-        if self._tz is None:
+        if self._tz is None and self._offset_min is None:
             try:
-                detected = self._b.scalar("SELECT CURRENT_TIMEZONE_ID()")
-            except Exception as exc:  # noqa: BLE001 - driver-specific error types
-                raise ValueError(
-                    "sourceTimeZone=auto needs CURRENT_TIMEZONE_ID() (SQL Server 2022+, Azure "
-                    "SQL). Set sourceTimeZone to the server's Windows time zone name, e.g. "
-                    "'UTC' or 'E. South America Standard Time'."
-                ) from exc
-            self._tz = _check_tz(detected)
-        return self._tz
+                self._tz = _check_tz(self._b.scalar("SELECT CURRENT_TIMEZONE_ID()"))
+            except ValueError:
+                raise
+            except Exception:  # noqa: BLE001 - no such function before 2022; driver-specific type
+                self._offset_min = int(self._b.scalar("SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())"))
+        if self._tz is not None:
+            return self._tz
+        sign, minutes = ("+" if self._offset_min >= 0 else "-"), abs(self._offset_min)
+        return f"UTC{sign}{minutes // 60:02d}:{minutes % 60:02d}"
 
     def _utc(self, expr: str) -> str:
         """``tran_end_time`` is a timezone-less datetime in the server's clock."""
-        if self.timezone.upper() == "UTC":
+        zone = self.timezone
+        if self._offset_min is not None:
+            return f"CAST(DATEADD(minute, {-self._offset_min}, {expr}) AS datetime2(3))"
+        if zone.upper() == "UTC":
             return f"CAST({expr} AS datetime2(3))"
-        return f"CAST(({expr} AT TIME ZONE N'{self.timezone}') AT TIME ZONE 'UTC' AS datetime2(3))"
+        return f"CAST(({expr} AT TIME ZONE N'{zone}') AT TIME ZONE 'UTC' AS datetime2(3))"
 
     def _hex(self, value) -> str | None:
         return None if value is None else _lsn.normalize(value)

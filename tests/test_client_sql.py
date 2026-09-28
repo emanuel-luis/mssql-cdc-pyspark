@@ -61,15 +61,27 @@ def test_timezone_auto_is_detected_once_per_client():
     assert "AT TIME ZONE N'E. South America Standard Time') AT TIME ZONE 'UTC'" in rec.calls[-1][0]
 
 
-def test_timezone_auto_fails_loudly():
-    class OldServer(Recorder):
+def test_timezone_auto_falls_back_to_the_current_offset_before_2022():
+    class OldServer(Recorder):  # SQL Server 2016-2019
         def scalar(self, sql, params=()):
             if "CURRENT_TIMEZONE_ID" in sql:
+                self.calls.append((sql, tuple(params)))
                 raise RuntimeError("'CURRENT_TIMEZONE_ID' is not a recognized built-in function name.")
+            if "TZOFFSET" in sql:
+                self.calls.append((sql, tuple(params)))
+                return -180
             return super().scalar(sql, params)
 
-    with pytest.raises(ValueError, match="Set sourceTimeZone"):
-        SqlCdcClient(OldServer()).lsn_to_time("0x01")
+    rec = OldServer()
+    client = SqlCdcClient(rec)
+    client.lsn_to_time("0x01")
+    list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+    assert client.timezone == "UTC-03:00"
+    assert "CAST(DATEADD(minute, 180, m.tran_end_time) AS datetime2(3))" in rec.calls[-1][0]
+    assert [sql for sql, _ in rec.calls].count("SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())") == 1
+
+
+def test_timezone_detected_names_are_validated():
     with pytest.raises(ValueError, match="Invalid sourceTimeZone"):  # detected values are inlined too
         SqlCdcClient(Recorder(tz="UTC'; DROP TABLE x --")).lsn_to_time("0x01")
 

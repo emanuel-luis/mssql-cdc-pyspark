@@ -202,3 +202,23 @@ def test_heartbeat_script_keeps_an_idle_stream_current(spark, sqlserver, workdir
         assert utc_now - datetime.fromisoformat(second["commit_ts"]) < timedelta(seconds=30)
     finally:
         sqlserver.run("EXEC msdb.dbo.sp_delete_job @job_name = ?", (job,))
+
+
+def test_pre_2022_offset_fallback_matches_the_named_zone(sqlserver):
+    from mssql_cdc.client import MssqlPythonBackend, SqlCdcClient
+
+    class Pre2022(MssqlPythonBackend):  # SQL Server 2016-2019 have no CURRENT_TIMEZONE_ID()
+        def scalar(self, sql, params=()):
+            if "CURRENT_TIMEZONE_ID" in sql:
+                raise RuntimeError("'CURRENT_TIMEZONE_ID' is not a recognized built-in function name.")
+            return super().scalar(sql, params)
+
+    named = make_client({"connectionString": sqlserver.connection_string})
+    fallback = SqlCdcClient(Pre2022(sqlserver.connection_string))
+    try:
+        lsn = named.max_lsn()
+        assert fallback.timezone == "UTC-03:00"  # America/Sao_Paulo has no daylight saving now
+        assert fallback.lsn_to_time(lsn) == named.lsn_to_time(lsn)
+    finally:
+        named.close()
+        fallback.close()

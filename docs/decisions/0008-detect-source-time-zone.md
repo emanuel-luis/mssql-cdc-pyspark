@@ -1,6 +1,7 @@
 # 0008: Detect the server time zone by name
 
-**Status:** accepted (2026-09)
+**Status:** accepted (2026-09); amended the same month with a fallback for SQL Server
+2016–2019 (see Amendment).
 
 ## Context
 `cdc.lsn_time_mapping.tran_end_time` is a timezone-less `datetime` in the server clock.
@@ -22,6 +23,20 @@ an explicit one before it is inlined.
 
 ## Consequences
 * Correct commit times on non-UTC servers with no configuration, on 2022+.
-* SQL Server 2016–2019 must set `sourceTimeZone`; there is no silent fallback to a fixed
-  offset.
 * One extra scalar query per client (driver, and each task on executors).
+
+## Amendment: fallback to the current offset before 2022
+The first source this ran against in production is SQL Server 2016 SP3, where `auto` just
+failed. A common convention for such servers, and the one this team already uses, is to
+read the server's current UTC offset once per run from `SYSDATETIMEOFFSET()` and apply it
+to every commit time. `auto` now does the same when `CURRENT_TIMEZONE_ID()` does not
+exist: it reads `DATEPART(TZOFFSET, SYSDATETIMEOFFSET())` and converts with
+`DATEADD(minute, -offset, tran_end_time)`; `timezone` reports it as `UTC-03:00`.
+
+* Exact for zones without daylight saving (Brazil since 2019, UTC servers).
+* In a zone with daylight saving, commits from the other half of the year come out an
+  hour off, and a run that spans a transition applies one offset to both sides. Such
+  servers should set `sourceTimeZone` to the zone name, which `AT TIME ZONE` resolves per
+  commit (available since SQL Server 2016).
+* `tests/integration` forces the fallback against a real server (clock in
+  `America/Sao_Paulo`) and checks it converts exactly like the zone name.

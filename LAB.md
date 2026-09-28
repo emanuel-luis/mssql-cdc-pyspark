@@ -67,8 +67,9 @@ python -m lab.checks.t7_end_to_end --destructive
 
 For timezone behaviour, recreate the container with `MSSQL_TZ=America/Sao_Paulo` in
 `.env`, then rerun `t2` and `t7`. `sourceTimeZone=auto` (the default) picks the zone up
-from `CURRENT_TIMEZONE_ID()`; on SQL Server 2019 or older, set `MSSQL_SOURCE_TZ` to the
-Windows zone name.
+from `CURRENT_TIMEZONE_ID()`; on SQL Server 2019 or older it applies the server's current
+UTC offset, so set `MSSQL_SOURCE_TZ` to the Windows zone name when the zone has daylight
+saving.
 
 ## 3. If a check fails
 
