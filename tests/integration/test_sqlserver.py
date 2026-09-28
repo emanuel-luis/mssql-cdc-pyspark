@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
+import time
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -177,3 +180,25 @@ def test_purged_range_stops_the_stream(spark, sqlserver, workdir):
                   "@low_water_mark = @lw, @threshold = 5000", (ci,))
     with pytest.raises(Exception, match="re-snapshot is required"):
         _read(spark, sqlserver, ci, checkpoint=workdir)
+
+
+def test_heartbeat_script_keeps_an_idle_stream_current(spark, sqlserver, workdir):
+    ci = sqlserver.cdc_table("quiet", "id INT NOT NULL PRIMARY KEY")
+    sqlserver.run("INSERT INTO dbo.quiet VALUES (1)")
+    sqlserver.wait_for_changes(ci, 1)
+    script = Path(__file__).resolve().parents[2] / "sql" / "heartbeat.sql"
+    for batch in re.split(r"^\s*GO\s*$", script.read_text(), flags=re.MULTILINE):
+        if batch.strip():
+            sqlserver.run(batch)
+    job = "cdc_heartbeat_" + sqlserver.run("SELECT DB_NAME()")[0][0]
+    try:
+        _, q1 = _read(spark, sqlserver, ci, checkpoint=workdir)
+        time.sleep(25)  # dbo.quiet gets no writes; only the Agent job does
+        _, q2 = _read(spark, sqlserver, ci, checkpoint=workdir)
+        first, second = end_offset_from_progress(q1.lastProgress), end_offset_from_progress(q2.lastProgress)
+        utc_now = sqlserver.run("SELECT SYSUTCDATETIME()")[0][0]
+        assert second["lsn"] > first["lsn"]
+        # idle, SQL Server alone moves max_lsn about every 5 minutes (lab t1)
+        assert utc_now - datetime.fromisoformat(second["commit_ts"]) < timedelta(seconds=30)
+    finally:
+        sqlserver.run("EXEC msdb.dbo.sp_delete_job @job_name = ?", (job,))

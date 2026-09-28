@@ -28,7 +28,8 @@ event times it observed.
 SQL Server CDC can do better, because the source already knows. The capture
 process writes changes in commit order, one consistent transaction per scan
 cycle, `sys.fn_cdc_get_max_lsn()` is the last LSN it processed, and during
-inactivity it writes "dummy" entries so that LSN keeps advancing. This project
+inactivity it writes "dummy" entries (about every 5 minutes on SQL Server 2022) so
+that LSN keeps advancing. This project
 carries that frontier through the pipeline. Details in [docs/DESIGN.md](docs/DESIGN.md).
 
 ```mermaid
@@ -142,6 +143,11 @@ is committed and never moved backwards. **Every period strictly before
 `finalized_until` is complete** in the target: no source commit at or before that
 time can still arrive. Use `finalization.is_final(spark, control, table, period_end)`
 in consumers, or query the control table directly.
+
+On a quiet database the verdict trails real time by up to ~5 minutes, the interval of
+SQL Server's idle entries. [`sql/heartbeat.sql`](sql/heartbeat.sql) (a one-row
+CDC-tracked table updated every 10 seconds by an Agent job) brings that down to about
+10 seconds; see [ADR 0010](docs/decisions/0010-heartbeat-for-quiet-databases.md).
 
 ## Drivers
 

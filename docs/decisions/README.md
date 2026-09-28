@@ -11,5 +11,6 @@
 | [0007](0007-infer-columns-from-cdc-metadata.md) | Infer captured columns from CDC metadata | accepted |
 | [0008](0008-detect-source-time-zone.md) | Detect the server time zone by name | accepted |
 | [0009](0009-read-change-tables-directly.md) | Read the change table directly, re-check retention after the read | accepted |
+| [0010](0010-heartbeat-for-quiet-databases.md) | Idle lag of ~5 minutes; an optional Agent heartbeat for less | accepted |
 
 New ADRs: copy the format, next number, one decision per file.

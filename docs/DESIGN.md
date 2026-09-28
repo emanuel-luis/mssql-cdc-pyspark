@@ -32,6 +32,14 @@ committed at or before the commit time of `max_lsn` is already in the change
 tables, and `max_lsn` keeps advancing while the database is idle. The source hands
 you a low watermark on commit time. `lab/checks/t1` and `t4` test exactly this.
 
+How often the idle entries come is not documented. On SQL Server 2022 (CU27) t1
+measures one about every 5 minutes; writes to tables without CDC and `CHECKPOINT` do
+not add any. So on a quiet database `finalized_until` lags by up to ~5 minutes, which is
+fine for hourly periods. For a tighter bound, `sql/heartbeat.sql` updates a one-row
+CDC-tracked table every 10 seconds from a SQL Server Agent job; every update is a
+captured commit, so `max_lsn` moves at that pace (ADR 0010). The reader itself never
+writes to the source.
+
 ## Offsets
 
 `{"lsn": "0x<20 hex>", "commit_ts": "<UTC ISO-8601>"}`
