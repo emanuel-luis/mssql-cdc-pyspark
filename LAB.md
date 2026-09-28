@@ -39,12 +39,12 @@ all four operation codes.
 
 ## 2. Checks
 
-Run them in this order. `t1` needs the database idle, so don't run anything else
+Run them in this order. `t1` needs the database idle (no `sql/heartbeat.sql` job either), so don't run anything else
 at the same time.
 
 | Check | Hypothesis | Needs | Supports |
 |---|---|---|---|
-| `t1_idle_heartbeat` | `max_lsn` keeps advancing while the DB is idle (dummy entries in `cdc.lsn_time_mapping`) | SQL Server | the core claim; idle tables do not stall finalization |
+| `t1_idle_heartbeat` | `max_lsn` keeps advancing while the DB is idle (dummy entries in `cdc.lsn_time_mapping`), and how often | SQL Server | the core claim; how far finalization lags on a quiet database |
 | `t2_timezone` | which clock `tran_end_time` follows; no commit-time regressions | SQL Server (run with `MSSQL_TZ=UTC` and with a non-UTC zone) | the `sourceTimeZone` option; finalization periods |
 | `t3_read_semantics` | op codes and `__$command_id` ordering; PK update shape; `from > to` errors; `--destructive`: purged range errors | SQL Server | reader design; retention guard |
 | `t4_watermark_concurrency` | no rows ever appear below an already observed `max_lsn`; LSN order is commit order | SQL Server | `max_lsn` as a safe low watermark |
@@ -56,10 +56,10 @@ at the same time.
 python -m lab.checks.t2_timezone
 python -m lab.checks.t3_read_semantics
 python -m lab.checks.t4_watermark_concurrency --long-seconds 120
-python -m lab.checks.t1_idle_heartbeat --minutes 10 --interval 30
+python -m lab.checks.t1_idle_heartbeat --minutes 11 --interval 10
 python -m lab.checks.t5_engine
 python -m lab.checks.t6_delta_semantics
-python -m lab.checks.t7_end_to_end --idle-minutes 5
+python -m lab.checks.t7_end_to_end --idle-minutes 6    # idle entries come about every 5 min
 # destructive, last:
 python -m lab.checks.t3_read_semantics --destructive
 python -m lab.checks.t7_end_to_end --destructive

@@ -1,12 +1,15 @@
-"""t1: does max_lsn keep advancing while the database is idle?
+"""t1: does max_lsn keep advancing while the database is idle, and how often?
 
 The thesis of the whole design: CDC writes "dummy" rows to cdc.lsn_time_mapping
 during inactivity, so sys.fn_cdc_get_max_lsn() keeps moving and a completeness
-signal derived from it does not stall on quiet tables.
+signal derived from it does not stall on quiet tables. How often is undocumented;
+this check measures it (the interval between advances, and how stale the commit time
+of max_lsn gets). Run for at least two intervals to see one.
 
-Nothing else may write to the lab database while this runs.
+Nothing else may write to the lab database while this runs (a running
+sql/heartbeat.sql job counts as a write).
 
-    python -m lab.checks.t1_idle_heartbeat --minutes 10 --interval 30
+    python -m lab.checks.t1_idle_heartbeat --minutes 11 --interval 10
 """
 
 import argparse
@@ -18,8 +21,8 @@ from ..common import connect, ct_count, max_lsn, report, rows, scalar, wait_for_
 
 def main(argv=None) -> bool:
     p = argparse.ArgumentParser()
-    p.add_argument("--minutes", type=float, default=10)
-    p.add_argument("--interval", type=float, default=30)
+    p.add_argument("--minutes", type=float, default=11)
+    p.add_argument("--interval", type=float, default=10)
     a = p.parse_args(argv)
     conn = connect()
 
@@ -33,14 +36,16 @@ def main(argv=None) -> bool:
 
     polls = []
     for _ in range(int(a.minutes * 60 / a.interval)):
-        polls.append((
-            scalar(conn, "SELECT SYSDATETIME()"),
-            max_lsn(conn),
-            scalar(conn, "SELECT sys.fn_cdc_map_lsn_to_time(sys.fn_cdc_get_max_lsn())"),
-        ))
+        polls.append(tuple(rows(conn, """
+            SELECT SYSDATETIME(), CONVERT(varchar(22), sys.fn_cdc_get_max_lsn(), 1),
+                   sys.fn_cdc_map_lsn_to_time(sys.fn_cdc_get_max_lsn()),
+                   DATEDIFF(ms, sys.fn_cdc_map_lsn_to_time(sys.fn_cdc_get_max_lsn()), SYSDATETIME()) / 1000.0""")[0]))
         time.sleep(a.interval)
 
     advances = [polls[i] for i in range(1, len(polls)) if polls[i][1] != polls[i - 1][1]]
+    gaps = [round((advances[i][2] - advances[i - 1][2]).total_seconds())
+            for i in range(1, len(advances))]
+    lags = [float(p[3]) for p in polls]
     dummies = rows(conn, """
         SELECT CONVERT(varchar(22), m.start_lsn, 1), m.tran_end_time, CONVERT(varchar(22), m.tran_id, 1)
         FROM cdc.lsn_time_mapping m
@@ -48,15 +53,12 @@ def main(argv=None) -> bool:
           AND NOT EXISTS (SELECT 1 FROM cdc.dbo_orders_CT c WHERE c.__$start_lsn = m.start_lsn)
           AND NOT EXISTS (SELECT 1 FROM cdc.dbo_customers_CT c WHERE c.__$start_lsn = m.start_lsn)
         ORDER BY m.start_lsn""", (first,))
-    times = [d[1] for d in dummies]
-    gaps = [(times[i] - times[i - 1]).total_seconds() for i in range(1, len(times))]
-    avg_gap = round(sum(gaps) / len(gaps), 1) if gaps else None
-
     checks = [
         ("max_lsn advanced while idle", len(advances) > 0,
          f"{len(advances)} advances in {len(polls)} polls"),
         ("lsn_time_mapping entries with no change rows", len(dummies) > 0, f"{len(dummies)} entries"),
-        ("average interval between dummy entries (s)", None, str(avg_gap)),
+        ("seconds between idle advances", None, str(gaps)),
+        ("max staleness of max_lsn's commit time (s)", None, f"{max(lags):.1f} (p50 {sorted(lags)[len(lags) // 2]:.1f})"),
         ("tran_id values of dummy entries", None, str(sorted({d[2] for d in dummies}))),
     ]
     return report("t1_idle_heartbeat", checks, {

@@ -30,6 +30,6 @@ lab-sql:        ## SQL Server behaviour checks (t1 takes ~10 min, run it alone)
 lab-spark:      ## Spark / Delta / end-to-end checks
 	uv run python -m lab.checks.t5_engine
 	uv run python -m lab.checks.t6_delta_semantics
-	uv run python -m lab.checks.t7_end_to_end --idle-minutes 5
+	uv run python -m lab.checks.t7_end_to_end --idle-minutes 6
 
 lab: setup seed lab-sql lab-spark

@@ -30,7 +30,7 @@ switch ($Target) {
   "lab-spark" {
     Run "uv run python -m lab.checks.t5_engine"
     Run "uv run python -m lab.checks.t6_delta_semantics"
-    Run "uv run python -m lab.checks.t7_end_to_end --idle-minutes 5"
+    Run "uv run python -m lab.checks.t7_end_to_end --idle-minutes 6"
   }
   "lab"       { foreach ($t in "setup", "seed", "lab-sql", "lab-spark") { & $PSCommandPath $t } }
   default     { throw "unknown target: $Target" }
