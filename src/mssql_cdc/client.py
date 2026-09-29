@@ -311,8 +311,10 @@ class SqlCdcClient(CdcClient):
         )
         if value in (None, _lsn.ZERO_LSN):
             raise ValueError(
-                f"Capture instance {capture_instance!r} not found, or the login lacks "
-                "permission to read it (sys.fn_cdc_get_min_lsn returned 0x00...)."
+                f"Capture instance {capture_instance!r} not found, the login lacks "
+                "permission to read it, or capture has not processed its creation yet "
+                "(sys.fn_cdc_get_min_lsn returned 0x00...). Right after "
+                "sys.sp_cdc_enable_table, retry once the capture job has run."
             )
         return value
 
