@@ -87,6 +87,29 @@ def test_tables_are_created_typed_and_commented(delta_spark, workdir):
     cols, description = _comments(spark, target)
     assert description and cols["_start_lsn"][1] and cols["_operation"][1]
     assert cols["order_id"][1] is None  # captured columns keep the source's names and types only
+    for path in (control, facts, target):  # born current: stamped with their kind's migrations
+        props = spark.sql(f"DESCRIBE DETAIL delta.`{path}`").first()["properties"]
+        assert props["mssql_cdc.schema_version"] == "0"
+
+
+def test_migrations_bring_an_older_table_up_once(delta_spark, workdir, monkeypatch):
+    from mssql_cdc import migrations, tables
+    from mssql_cdc.migrations import facts as facts_migrations
+
+    spark = delta_spark
+    old = os.path.join(workdir, "facts_old")
+    tables.create_if_not_exists(spark, old, [("app_id", "STRING", None)])  # unstamped: version 0
+    monkeypatch.setattr(facts_migrations, "MIGRATIONS", [migrations.Migration(
+        "add x", lambda s, t: migrations.add_columns(s, t, [("x", "BIGINT", "added by a migration")]))])
+
+    assert migrations.migrate(spark, old, "facts") == 1
+    field = spark.read.format("delta").load(old).schema["x"]
+    assert field.dataType.simpleString() == "bigint" and field.metadata["comment"] == "added by a migration"
+    history = spark.sql(f"DESCRIBE HISTORY delta.`{old}`").count()
+    assert migrations.migrate(spark, old, "facts") == 1  # already current: nothing runs
+    assert spark.sql(f"DESCRIBE HISTORY delta.`{old}`").count() == history
+    props = spark.sql(f"DESCRIBE DETAIL delta.`{old}`").first()["properties"]
+    assert props["mssql_cdc.schema_version"] == "1"
 
 
 def test_replayed_batch_is_ignored(delta_spark, workdir):

@@ -126,7 +126,10 @@ backend has no type metadata and always needs `columns`.
 
 All three are created on first use with `DeltaTable.createIfNotExists`: explicit types, and a
 comment on the table and on every control, facts and bronze metadata column
-(`DESCRIBE TABLE` shows them). Existing tables are not altered ([ADR 0012](decisions/0012-delta-tables-through-the-deltatable-api.md)).
+(`DESCRIBE TABLE` shows them), and stamped with the table property
+`mssql_cdc.schema_version`. Existing tables get the schema migrations of their kind that
+they have not had yet ([ADR 0012](decisions/0012-delta-tables-through-the-deltatable-api.md),
+[ADR 0013](decisions/0013-schema-migrations-per-table-kind.md)).
 
 ## Extension points
 

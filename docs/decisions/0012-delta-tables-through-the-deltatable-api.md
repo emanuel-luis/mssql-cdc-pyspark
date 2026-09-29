@@ -2,7 +2,8 @@
 
 **Status:** accepted  
 **Date:** 2026-09-28T21:09:56-03:00  
-**Amended:** 2026-09-28T21:15:37-03:00, every time column is `TIMESTAMP_NTZ` in UTC
+**Amended:** 2026-09-28T21:15:37-03:00, every time column is `TIMESTAMP_NTZ` in UTC  
+**Amended:** 2026-09-28T21:26:25-03:00, existing tables are migrated (ADR 0013)
 
 ## Context
 The control table was created with a `CREATE TABLE IF NOT EXISTS` string and advanced
@@ -26,8 +27,8 @@ batch held and no column said what it meant.
   moments the library records (`started_at`, `written_at`, `updated_at`, taken from the
   Python clock in UTC). Mixing `TIMESTAMP` and `TIMESTAMP_NTZ` makes a difference such as
   `written_at - max_commit_ts` depend on the Spark session's time zone.
-* No migrations: tables are created in this shape. An existing table is left as it is
-  (`createIfNotExists` is a no-op), and one with an older facts schema must be recreated.
+* Tables are created in this shape; `createIfNotExists` leaves an existing one as it is.
+  Changes to existing tables go through schema migrations (ADR 0013).
 
 ## Consequences
 * No SQL strings for Delta DDL or MERGE in the core, so no parameter markers to work

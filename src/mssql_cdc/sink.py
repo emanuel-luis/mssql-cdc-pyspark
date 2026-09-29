@@ -9,7 +9,8 @@
   read from SQL Server, the facts aggregation and the target write. Offset planning and
   the checkpoint commit run outside ``foreachBatch`` and are not included.
 * Both tables are created on the first batch with the ``DeltaTable`` builder, with a
-  comment on every metadata/facts column. Existing tables are left as they are.
+  comment on every metadata/facts column; existing ones get pending schema migrations
+  (``mssql_cdc.migrations``).
 """
 
 from __future__ import annotations
@@ -20,7 +21,8 @@ from datetime import datetime, timezone
 
 from pyspark.sql import DataFrame, functions as F
 
-from .tables import create_if_not_exists, is_path
+from . import migrations
+from .tables import is_path
 
 BRONZE_COMMENT = (
     "Append-only change rows from SQL Server CDC, written by mssql-cdc-pyspark's delta_sink. "
@@ -132,9 +134,9 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None):
     """
     created: set[str] = set()  # once per query run, not once per batch
 
-    def ensure(spark, table: str, columns, comment: str) -> None:
+    def ensure(spark, table: str, kind: str, columns, comment: str) -> None:
         if table not in created:
-            create_if_not_exists(spark, table, columns, comment)
+            migrations.ensure(spark, table, kind, columns, comment)
             created.add(table)
 
     def write_batch(df: DataFrame, batch_id: int) -> None:
@@ -147,13 +149,13 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None):
             facts.update({"batch_id": batch_id, "app_id": app_id})
             spark = df.sparkSession
             out = df.withColumn("_batch_id", F.lit(batch_id))
-            ensure(spark, target, [(f.name, f.dataType, BRONZE_COLUMN_COMMENTS.get(f.name))
-                                   for f in out.schema], BRONZE_COMMENT)
+            ensure(spark, target, "bronze", [(f.name, f.dataType, BRONZE_COLUMN_COMMENTS.get(f.name))
+                                             for f in out.schema], BRONZE_COMMENT)
             _write(out, target, app_id, batch_id, _json(facts))
             if facts_table:
                 facts.update(started_at=started_at, duration_ms=round((time.monotonic() - t0) * 1000),
                              target=target, written_at=_utc_now())
-                ensure(spark, facts_table, FACTS_COLUMNS, FACTS_COMMENT)
+                ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
                 facts_df = spark.createDataFrame([tuple(facts[k] for k in _FACT_FIELDS)], FACTS_SCHEMA)
                 _write(facts_df, facts_table, f"{app_id}#facts", batch_id)
         finally:

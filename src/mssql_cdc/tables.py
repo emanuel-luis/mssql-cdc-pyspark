@@ -23,10 +23,12 @@ def delta_table(spark, name_or_path: str):
     return DeltaTable.forName(spark, name_or_path)
 
 
-def create_if_not_exists(spark, name_or_path: str, columns: Iterable[tuple], comment: str | None = None):
+def create_if_not_exists(spark, name_or_path: str, columns: Iterable[tuple], comment: str | None = None,
+                         properties: dict | None = None):
     """``columns``: ``(name, type, comment)``; ``type`` is a DDL string or a Spark DataType.
 
-    A no-op when the table exists: its schema and comments are left as they are.
+    A no-op when the table exists: its schema, comments and properties are left as they
+    are (``mssql_cdc.migrations`` changes existing tables).
     """
     from delta.tables import DeltaTable
 
@@ -34,6 +36,8 @@ def create_if_not_exists(spark, name_or_path: str, columns: Iterable[tuple], com
     builder = builder.location(name_or_path) if is_path(name_or_path) else builder.tableName(name_or_path)
     if comment:
         builder = builder.comment(comment)
+    for key, value in (properties or {}).items():
+        builder = builder.property(key, value)
     for name, data_type, column_comment in columns:
         builder = builder.addColumn(name, data_type, comment=column_comment)
     builder.execute()

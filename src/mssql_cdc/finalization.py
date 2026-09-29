@@ -25,7 +25,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from .tables import create_if_not_exists, delta_table, table_ref  # noqa: F401 - table_ref re-exported
+from . import migrations
+from .tables import delta_table, table_ref  # noqa: F401 - table_ref re-exported
 
 _GRANULARITIES = ("minute", "hour", "day")
 
@@ -83,7 +84,7 @@ CONTROL_COLUMNS = [
 
 
 def ensure_control_table(spark, control_table: str) -> None:
-    create_if_not_exists(spark, control_table, CONTROL_COLUMNS, CONTROL_COMMENT)
+    migrations.ensure(spark, control_table, "control", CONTROL_COLUMNS, CONTROL_COMMENT)
 
 
 def advance(spark, control_table: str, table_name: str, end_offset: dict | None,
