@@ -10,7 +10,8 @@
   the checkpoint commit run outside ``foreachBatch`` and are not included.
 * Optional network metrics: with ``metrics_path`` (the directory of the source option
   ``metricsPath``) the sink folds each partition's round trip, read time, MB and
-  ``ASYNC_NETWORK_IO`` into the batch facts. The sink never connects to SQL Server itself.
+  ``ASYNC_NETWORK_IO`` into the batch facts, with the retention watermark and headroom
+  (ADR 0017). The sink never connects to SQL Server itself.
   Metrics never fail a batch. ``mssql_cdc.stream()`` wires both ends from one set of
   options.
 * Both tables are created on the first batch with the ``DeltaTable`` builder, with a
@@ -30,7 +31,7 @@ from datetime import datetime, timezone
 from pyspark.sql import DataFrame, functions as F
 
 from . import migrations
-from .migrations.facts import NETWORK_COLUMNS
+from .migrations.facts import NETWORK_COLUMNS, RETENTION_COLUMNS
 from .tables import is_path
 
 BRONZE_COMMENT = (
@@ -97,6 +98,7 @@ FACTS_COLUMNS = [
         "Server, these facts and the append. Offset planning and the checkpoint commit are "
         "not included.")),
     *NETWORK_COLUMNS,
+    *RETENTION_COLUMNS,
     ("target", "STRING", "Table name or path the batch was written to."),
     ("written_at", "TIMESTAMP_NTZ", "When this facts row was written, after the target commit, UTC."),
 ]
@@ -147,12 +149,20 @@ def _fold_metrics(path: str, lo: str, hi: str) -> tuple[dict, list[str]]:
         return {}, []
     waits = [m.get("network_wait_ms") for m in picked]
     rtts = [m["rtt_ms"] for m in picked if m.get("rtt_ms") is not None]
+    marks = [m["retention_watermark_ts"] for m in picked if m.get("retention_watermark_ts")]
     return {
+        "retention_watermark_ts": datetime.fromisoformat(max(marks)) if marks else None,
         "source_rtt_ms": round(statistics.median(rtts), 1) if rtts else None,
         "read_seconds": round(sum(m["seconds"] for m in picked), 3),
         "read_mb": round(sum(m["bytes"] for m in picked) / 1e6, 6),
         "network_wait_ms": None if None in waits else sum(waits),
     }, files
+
+
+def _headroom(watermark: datetime | None, max_commit_ts: datetime | None) -> dict:
+    hours = (None if watermark is None or max_commit_ts is None
+             else round((max_commit_ts - watermark).total_seconds() / 3600, 2))
+    return {"retention_watermark_ts": watermark, "retention_headroom_hours": hours}
 
 
 def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str | None = None):
@@ -207,6 +217,7 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None,
                              source_rtt_ms=folded.get("source_rtt_ms"),
                              read_seconds=folded.get("read_seconds"), read_mb=folded.get("read_mb"),
                              network_wait_ms=folded.get("network_wait_ms"),
+                             **_headroom(folded.get("retention_watermark_ts"), facts["max_commit_ts"]),
                              target=target, written_at=_utc_now())
                 ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
                 facts_df = spark.createDataFrame([tuple(facts[k] for k in _FACT_FIELDS)], FACTS_SCHEMA)

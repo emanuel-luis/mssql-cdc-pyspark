@@ -268,6 +268,7 @@ def test_stream_facade_records_network_metrics_from_a_real_server(delta_spark, s
     [row] = delta_spark.read.format("delta").load(facts).collect()
     assert row["source_rtt_ms"] > 0 and row["read_mb"] > 0
     assert row["network_wait_ms"] is not None  # own session's ASYNC_NETWORK_IO, no extra grant
+    assert row["retention_watermark_ts"] <= row["max_commit_ts"] and row["retention_headroom_hours"] >= 0
 
 
 def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(delta_spark, sqlserver, workdir):

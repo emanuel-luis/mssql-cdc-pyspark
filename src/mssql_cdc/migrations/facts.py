@@ -34,7 +34,26 @@ NETWORK_COLUMNS = [
         "does not expose sys.dm_exec_session_wait_stats.")),
 ]
 
+# Migration 2 (2026-09-29): retention headroom (ADR 0017).
+RETENTION_COLUMNS = [
+    ("retention_watermark_ts", "TIMESTAMP_NTZ", (
+        "How far CDC cleanup had deleted when the batch was read: the commit time (UTC) of "
+        "sys.fn_cdc_get_min_lsn for the capture instance, the latest seen by the batch's "
+        "partitions after reading. Changes committed before it are gone from the source. NULL "
+        "unless the source option metricsPath and delta_sink(metrics_path=...) are set.")),
+    ("retention_headroom_hours", "DOUBLE", (
+        "Hours between retention_watermark_ts and max_commit_ts: how far the stream is ahead of "
+        "what cleanup has deleted. A current stream sits near the retention period (3 days by "
+        "default); it shrinks as the stream falls behind, and at 0 the next changes to read are "
+        "being purged. Cleanup moves the watermark in steps (the default job runs daily), so "
+        "alert with more margin than that interval, and also when facts stop arriving: a "
+        "stopped stream keeps its last value while the real headroom keeps shrinking. NULL "
+        "under the same condition as retention_watermark_ts.")),
+]
+
 MIGRATIONS: list[Migration] = [
     Migration("network and read metrics",
               lambda spark, table: add_columns(spark, table, NETWORK_COLUMNS)),
+    Migration("retention headroom",
+              lambda spark, table: add_columns(spark, table, RETENTION_COLUMNS)),
 ]

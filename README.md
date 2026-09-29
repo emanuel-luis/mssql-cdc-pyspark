@@ -89,7 +89,9 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 through `delta_sink`. With a facts table and a checkpoint that is a local or FUSE path
 (such as a Volume), per-partition network and read metrics land in the facts on their own
 (`<checkpoint>/_mssql_cdc_metrics`); with a URI checkpoint (`dbfs:/`, `abfss://`), add the
-`metricsPath` option.
+`metricsPath` option. The same files carry the retention headroom: `retention_headroom_hours`
+in the facts is how far the stream is ahead of what CDC cleanup has deleted; alert when it
+falls, or when facts stop arriving ([ADR 0017](docs/decisions/0017-retention-headroom-in-facts.md)).
 
 `bootstrap=True` loads the whole table, not only what CDC retention still holds: the first
 run appends a snapshot of the source table to the target (operation 0, stamped with the

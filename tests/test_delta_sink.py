@@ -94,25 +94,28 @@ def test_tables_are_created_typed_and_commented(delta_spark, workdir):
         assert props["mssql_cdc.schema_version"] == str(migrations.current_version(kind))
 
 
-def test_facts_table_at_version_0_gains_the_network_columns(delta_spark, workdir):
+def test_facts_table_at_version_0_gains_the_network_and_retention_columns(delta_spark, workdir):
     from mssql_cdc import migrations, tables
-    from mssql_cdc.migrations.facts import NETWORK_COLUMNS
+    from mssql_cdc.migrations.facts import NETWORK_COLUMNS, RETENTION_COLUMNS
     from mssql_cdc.sink import FACTS_COLUMNS
 
     spark = delta_spark
     old = os.path.join(workdir, "facts_v0")
-    v0 = [c for c in FACTS_COLUMNS if c not in NETWORK_COLUMNS]  # the facts shape before migration 1
+    added = NETWORK_COLUMNS + RETENTION_COLUMNS
+    v0 = [c for c in FACTS_COLUMNS if c not in added]  # the facts shape before migration 1
     tables.create_if_not_exists(spark, old, v0, properties={migrations.SCHEMA_VERSION_PROPERTY: "0"})
-    assert migrations.migrate(spark, old, "facts") == 1
+    assert migrations.migrate(spark, old, "facts") == 2
     fields = {f.name: f for f in spark.read.format("delta").load(old).schema}
-    assert all(name in fields and fields[name].metadata.get("comment") for name, _, _ in NETWORK_COLUMNS)
+    assert all(name in fields and fields[name].metadata.get("comment") for name, _, _ in added)
 
 
 def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
     spark = delta_spark
     db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    kept_from = db.idle(at=T0 - timedelta(hours=70))
     for i in range(4):
         db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+    db.cleanup(CI, kept_from)  # cleanup has deleted up to 70 h before the first commit
     target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
     metrics = os.path.join(workdir, "metrics")
     source = {"backend": "fake", "fakePath": os.path.join(workdir, "src"), "captureInstance": CI,
@@ -124,6 +127,8 @@ def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
     [row] = spark.read.format("delta").load(facts).collect()
     assert row["read_seconds"] > 0 and row["read_mb"] > 0
     assert row["network_wait_ms"] is None and row["source_rtt_ms"] is None  # the fake has no server
+    assert row["retention_watermark_ts"] == T0 - timedelta(hours=70)
+    assert row["retention_headroom_hours"] == 70.05  # the batch's last commit is T0 + 3 min
     assert not [f for f in os.listdir(metrics) if f.endswith(".json")]  # folded and removed
 
 

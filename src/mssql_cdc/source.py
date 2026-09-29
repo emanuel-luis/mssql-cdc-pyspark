@@ -260,14 +260,20 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 yield from table.to_batches()
             # Cleanup may have run since partitions() checked. It moves min_lsn before it
             # deletes rows, so min_lsn past from_lsn now means rows may be missing.
-            self._guard_retention(client, partition.from_lsn)
+            min_lsn = self._guard_retention(client, partition.from_lsn)
             if self.metrics_path:
                 wait_after = client.network_wait_ms()
+                try:
+                    watermark = client.lsn_to_time(min_lsn)
+                except Exception:  # noqa: BLE001 - a metric must never fail a read
+                    watermark = None
                 _write_metrics(self.metrics_path, partition, {
                     "rows": rows, "bytes": nbytes, "seconds": time.perf_counter() - started,
                     "rtt_ms": rtt[0] if rtt else None,
                     "network_wait_ms": (None if wait_before is None or wait_after is None
                                         else wait_after - wait_before),
+                    # what cleanup has deleted up to, as a commit time (ADR 0017)
+                    "retention_watermark_ts": watermark,
                 })
         finally:
             client.close()

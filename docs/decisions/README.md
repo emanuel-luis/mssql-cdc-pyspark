@@ -18,6 +18,7 @@
 | [0014](0014-network-and-read-metrics-in-facts.md) | Network and read metrics in the ingestion facts | accepted | 2026-09-29T10:12:04-03:00 | 2026-09-29T10:48:30-03:00 |
 | [0015](0015-split-batches-by-change-rows.md) | Split batches by the change table's rows | accepted | 2026-09-29T10:31:46-03:00 |  |
 | [0016](0016-bootstrap-snapshot-at-a-recorded-lsn.md) | Bootstrap with a snapshot stamped with an LSN recorded before the read | accepted | 2026-09-29T12:38:28-03:00 |  |
+| [0017](0017-retention-headroom-in-facts.md) | Retention headroom in the ingestion facts | accepted | 2026-09-29T14:58:53-03:00 |  |
 
 New ADRs: copy the format, next number, one decision per file. Put the time the
 decision is recorded in `**Date:**` (ISO-8601 with the UTC offset, e.g.
