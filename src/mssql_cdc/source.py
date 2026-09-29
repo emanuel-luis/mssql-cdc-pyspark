@@ -26,6 +26,7 @@ When ``columns`` is omitted, the captured columns and their types come from
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -64,6 +65,21 @@ def _opt(options, key: str, default=None):
 
 def _truthy(value) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "y")
+
+
+def _write_metrics(path: str, partition: "LsnRange", metrics: dict) -> None:
+    """One JSON per partition; a task retry overwrites its file. Best effort: a metric
+    must never fail a read."""
+    import json
+
+    try:
+        os.makedirs(path, exist_ok=True)
+        name = os.path.join(path, f"{partition.from_lsn}-{partition.to_lsn}.json")
+        with open(name + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump({"from_lsn": partition.from_lsn, "to_lsn": partition.to_lsn, **metrics}, fh)
+        os.replace(name + ".tmp", name)
+    except OSError:
+        pass
 
 
 @dataclass
@@ -120,6 +136,9 @@ class _BaseReader(DataSourceStreamReader):
         self.num_partitions = (max(1, default_num_partitions or os.cpu_count() or 1)
                                if num_partitions == "auto" else int(num_partitions))
         self.batch_size = int(_opt(options, "arrowBatchSize", "10000"))
+        # optional: a directory (local or FUSE, e.g. /Volumes/...) where each partition read
+        # leaves its metrics for delta_sink(metrics_path=...) to fold into the batch facts
+        self.metrics_path = _opt(options, "metricsPath")
         meta_names = {n for n, _ in METADATA_COLUMNS}
         self.field_names = list(schema.fieldNames())
         self.source_columns = [f for f in self.field_names if f not in meta_names]
@@ -197,6 +216,8 @@ class _BaseReader(DataSourceStreamReader):
 
         target = to_arrow_schema(self.schema, timezone="UTC")  # TIMESTAMP columns are UTC instants
         client = self.client
+        started, rows, nbytes = time.perf_counter(), 0, 0
+        wait_before = client.network_wait_ms() if self.metrics_path else None
         try:
             for batch in client.iter_changes(
                 partition.capture_instance,
@@ -214,10 +235,18 @@ class _BaseReader(DataSourceStreamReader):
                     pa.array([partition.capture_instance] * table.num_rows, pa.string()),
                 )
                 table = table.select(self.field_names).cast(target)
+                rows, nbytes = rows + table.num_rows, nbytes + table.nbytes
                 yield from table.to_batches()
             # Cleanup may have run since partitions() checked. It moves min_lsn before it
             # deletes rows, so min_lsn past from_lsn now means rows may be missing.
             self._guard_retention(client, partition.from_lsn)
+            if self.metrics_path:
+                wait_after = client.network_wait_ms()
+                _write_metrics(self.metrics_path, partition, {
+                    "rows": rows, "bytes": nbytes, "seconds": time.perf_counter() - started,
+                    "network_wait_ms": (None if wait_before is None or wait_after is None
+                                        else wait_after - wait_before),
+                })
         finally:
             client.close()
             self._client = None

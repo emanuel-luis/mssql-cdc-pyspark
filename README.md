@@ -107,6 +107,7 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 | `failOnDataLoss` | `true` | raise when CDC cleanup purged the next range |
 | `includeCommandId` | `true` | read `__$command_id` (ordering within a transaction) |
 | `arrowBatchSize` | `10000` | rows per Arrow batch fetched from the driver |
+| `metricsPath` | none | directory (local, or FUSE such as a Volume) where each partition leaves its read time, MB and network wait for `delta_sink(metrics_path=...)` to fold into the facts |
 
 ### Output schema
 

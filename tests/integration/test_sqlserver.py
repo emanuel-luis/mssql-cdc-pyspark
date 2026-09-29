@@ -222,3 +222,13 @@ def test_pre_2022_offset_fallback_matches_the_named_zone(sqlserver):
     finally:
         named.close()
         fallback.close()
+
+
+def test_round_trip_and_network_wait_on_a_real_server(sqlserver):
+    client = make_client({"connectionString": sqlserver.connection_string})
+    try:
+        times = client.ping(3)
+        assert len(times) == 3 and min(times) > 0
+        assert isinstance(client.network_wait_ms(), int)  # own session: no VIEW SERVER STATE needed
+    finally:
+        client.close()

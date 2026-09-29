@@ -205,3 +205,19 @@ def test_fake_backend_still_requires_columns(tmp_path):
     ds = MssqlCdcDataSource({"backend": "fake", "fakePath": str(tmp_path), "captureInstance": "dbo_orders"})
     with pytest.raises(ValueError, match="'columns' is required"):
         ds.schema()
+
+
+def test_ping_and_network_wait():
+    rec = Recorder(scalar_value=1234)
+    client = SqlCdcClient(rec, source_timezone="UTC")
+    assert len(client.ping(3)) == 3 and all(t >= 0 for t in client.ping(2))
+    assert client.network_wait_ms() == 1234
+    assert "sys.dm_exec_session_wait_stats WHERE session_id = @@SPID AND wait_type = 'ASYNC_NETWORK_IO'" in rec.calls[-1][0]
+
+    class NoView(Recorder):
+        def scalar(self, sql, params=()):
+            if "dm_exec_session_wait_stats" in sql:
+                raise RuntimeError("VIEW SERVER STATE permission was denied")
+            return super().scalar(sql, params)
+
+    assert SqlCdcClient(NoView(), source_timezone="UTC").network_wait_ms() is None  # never raises

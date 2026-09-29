@@ -87,9 +87,45 @@ def test_tables_are_created_typed_and_commented(delta_spark, workdir):
     cols, description = _comments(spark, target)
     assert description and cols["_start_lsn"][1] and cols["_operation"][1]
     assert cols["order_id"][1] is None  # captured columns keep the source's names and types only
-    for path in (control, facts, target):  # born current: stamped with their kind's migrations
+    from mssql_cdc import migrations
+
+    for path, kind in ((control, "control"), (facts, "facts"), (target, "bronze")):  # born current
         props = spark.sql(f"DESCRIBE DETAIL delta.`{path}`").first()["properties"]
-        assert props["mssql_cdc.schema_version"] == "0"
+        assert props["mssql_cdc.schema_version"] == str(migrations.current_version(kind))
+
+
+def test_facts_table_at_version_0_gains_the_network_columns(delta_spark, workdir):
+    from mssql_cdc import migrations, tables
+    from mssql_cdc.migrations.facts import NETWORK_COLUMNS
+    from mssql_cdc.sink import FACTS_COLUMNS
+
+    spark = delta_spark
+    old = os.path.join(workdir, "facts_v0")
+    v0 = [c for c in FACTS_COLUMNS if c not in NETWORK_COLUMNS]  # the facts shape before migration 1
+    tables.create_if_not_exists(spark, old, v0, properties={migrations.SCHEMA_VERSION_PROPERTY: "0"})
+    assert migrations.migrate(spark, old, "facts") == 1
+    fields = {f.name: f for f in spark.read.format("delta").load(old).schema}
+    assert all(name in fields and fields[name].metadata.get("comment") for name, _, _ in NETWORK_COLUMNS)
+
+
+def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
+    spark = delta_spark
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    for i in range(4):
+        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+    target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
+    metrics = os.path.join(workdir, "metrics")
+    source = {"backend": "fake", "fakePath": os.path.join(workdir, "src"), "captureInstance": CI,
+              "columns": COLUMNS, "numPartitions": "2", "metricsPath": metrics}
+    q = (spark.readStream.format("mssql_cdc").options(**source).load()
+         .writeStream.foreachBatch(delta_sink(target, "metrics-v1", facts, source_options=source,
+                                              metrics_path=metrics))
+         .option("checkpointLocation", os.path.join(workdir, "ckpt")).trigger(availableNow=True).start())
+    q.awaitTermination()
+    [row] = spark.read.format("delta").load(facts).collect()
+    assert row["read_seconds"] > 0 and row["read_mb"] > 0
+    assert row["network_wait_ms"] is None and row["source_rtt_ms"] is None  # the fake has no server
+    assert not [f for f in os.listdir(metrics) if f.endswith(".json")]  # folded and removed
 
 
 def test_migrations_bring_an_older_table_up_once(delta_spark, workdir, monkeypatch):

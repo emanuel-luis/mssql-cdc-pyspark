@@ -8,6 +8,10 @@
 * The facts table also times each batch: ``started_at`` and ``duration_ms`` cover the
   read from SQL Server, the facts aggregation and the target write. Offset planning and
   the checkpoint commit run outside ``foreachBatch`` and are not included.
+* Optional network metrics: ``source_options`` (the stream's options) lets the sink time
+  round trips to SQL Server per batch (``source_rtt_ms``); ``metrics_path`` (the same
+  directory as the source option ``metricsPath``) folds each partition's read time, MB and
+  ``ASYNC_NETWORK_IO`` into the batch facts. Metrics never fail a batch.
 * Both tables are created on the first batch with the ``DeltaTable`` builder, with a
   comment on every metadata/facts column; existing ones get pending schema migrations
   (``mssql_cdc.migrations``).
@@ -15,13 +19,17 @@
 
 from __future__ import annotations
 
+import glob
 import json
+import os
+import statistics
 import time
 from datetime import datetime, timezone
 
 from pyspark.sql import DataFrame, functions as F
 
 from . import migrations
+from .migrations.facts import NETWORK_COLUMNS
 from .tables import is_path
 
 BRONZE_COMMENT = (
@@ -76,6 +84,7 @@ FACTS_COLUMNS = [
         "Milliseconds from started_at to the end of the target write: the read from SQL "
         "Server, these facts and the append. Offset planning and the checkpoint commit are "
         "not included.")),
+    *NETWORK_COLUMNS,
     ("target", "STRING", "Table name or path the batch was written to."),
     ("written_at", "TIMESTAMP_NTZ", "When this facts row was written, after the target commit, UTC."),
 ]
@@ -110,6 +119,28 @@ def _json(facts: dict) -> str:
                       default=lambda v: v.isoformat(timespec="milliseconds"))
 
 
+def _fold_metrics(path: str, lo: str, hi: str) -> tuple[dict, list[str]]:
+    """Sum the metrics files of the partitions overlapping the batch's LSNs [lo, hi]."""
+    picked, files = [], []
+    for name in glob.glob(os.path.join(path, "*.json")):
+        try:
+            with open(name, encoding="utf-8") as fh:
+                m = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if m["to_lsn"] >= lo and m["from_lsn"] <= hi:
+            picked.append(m)
+            files.append(name)
+    if not picked:
+        return {}, []
+    waits = [m.get("network_wait_ms") for m in picked]
+    return {
+        "read_seconds": round(sum(m["seconds"] for m in picked), 3),
+        "read_mb": round(sum(m["bytes"] for m in picked) / 1e6, 6),
+        "network_wait_ms": None if None in waits else sum(waits),
+    }, files
+
+
 def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str | None = None):
     writer = (
         df.write.format("delta")
@@ -125,14 +156,37 @@ def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str 
         writer.saveAsTable(target)
 
 
-def delta_sink(target: str, app_id: str, facts_table: str | None = None):
+def delta_sink(target: str, app_id: str, facts_table: str | None = None,
+               source_options: dict | None = None, metrics_path: str | None = None):
     """Return a ``foreachBatch`` function.
 
     ``app_id`` must be stable for the lifetime of a checkpoint. If the checkpoint is
     deleted, use a new ``app_id``; batch ids restart at 0 and would otherwise be
     ignored as duplicates.
+
+    ``source_options`` and ``metrics_path`` only feed the facts table (see the module doc).
     """
     created: set[str] = set()  # once per query run, not once per batch
+    probe: dict = {"client": None}  # one connection for the query run, not one per batch
+
+    def rtt_ms() -> float | None:
+        if not source_options:
+            return None
+        try:
+            if probe["client"] is None:
+                from .client import make_client
+
+                probe["client"] = make_client(source_options)
+            times = probe["client"].ping(3)
+            return round(statistics.median(times), 1) if times else None
+        except Exception:  # noqa: BLE001 - reconnect next batch; a metric never fails one
+            client, probe["client"] = probe["client"], None
+            try:
+                if client is not None:
+                    client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return None
 
     def ensure(spark, table: str, kind: str, columns, comment: str) -> None:
         if table not in created:
@@ -153,11 +207,21 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None):
                                              for f in out.schema], BRONZE_COMMENT)
             _write(out, target, app_id, batch_id, _json(facts))
             if facts_table:
-                facts.update(started_at=started_at, duration_ms=round((time.monotonic() - t0) * 1000),
+                duration_ms = round((time.monotonic() - t0) * 1000)
+                folded, files = (_fold_metrics(metrics_path, facts["min_lsn"], facts["max_lsn"])
+                                 if metrics_path else ({}, []))
+                facts.update(started_at=started_at, duration_ms=duration_ms, source_rtt_ms=rtt_ms(),
+                             read_seconds=folded.get("read_seconds"), read_mb=folded.get("read_mb"),
+                             network_wait_ms=folded.get("network_wait_ms"),
                              target=target, written_at=_utc_now())
                 ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
                 facts_df = spark.createDataFrame([tuple(facts[k] for k in _FACT_FIELDS)], FACTS_SCHEMA)
                 _write(facts_df, facts_table, f"{app_id}#facts", batch_id)
+                for name in files:  # folded into this batch's facts; a replay rewrites them
+                    try:
+                        os.remove(name)
+                    except OSError:
+                        pass
         finally:
             df.unpersist()
 

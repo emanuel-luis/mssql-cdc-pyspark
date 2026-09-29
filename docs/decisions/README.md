@@ -15,6 +15,7 @@
 | [0011](0011-num-partitions-from-cores.md) | `numPartitions` defaults to the compute's cores | accepted | 2026-09-28T20:55:34-03:00 |  |
 | [0012](0012-delta-tables-through-the-deltatable-api.md) | Delta tables through the `DeltaTable` API, created typed and commented | accepted | 2026-09-28T21:09:56-03:00 | 2026-09-28T21:15:37-03:00, 2026-09-28T21:26:25-03:00 |
 | [0013](0013-schema-migrations-per-table-kind.md) | Schema migrations per table kind | accepted | 2026-09-28T21:26:25-03:00 |  |
+| [0014](0014-network-and-read-metrics-in-facts.md) | Network and read metrics in the ingestion facts | accepted | 2026-09-29T10:12:04-03:00 |  |
 
 New ADRs: copy the format, next number, one decision per file. Put the time the
 decision is recorded in `**Date:**` (ISO-8601 with the UTC offset, e.g.

@@ -121,7 +121,7 @@ backend has no type metadata and always needs `columns`.
 | Table | Grain | Written by | Notes |
 |---|---|---|---|
 | bronze (e.g. `bronze_orders`) | one row per change | `delta_sink` | append-only; `_batch_id` added; commit `userMetadata` holds the batch facts |
-| facts (optional) | one row per non-empty batch | `delta_sink` | durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write) and `written_at` |
+| facts (optional) | one row per non-empty batch | `delta_sink` | durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write), `written_at`, and optional network and read metrics (`source_rtt_ms`, `read_seconds`, `read_mb`, `network_wait_ms`; [ADR 0014](decisions/0014-network-and-read-metrics-in-facts.md)) |
 | `table_finalization` | one row per target table | `finalization.advance` | `finalized_until`, `end_lsn`, `end_commit_ts`, `updated_at` |
 
 All three are created on first use with `DeltaTable.createIfNotExists`: explicit types, and a

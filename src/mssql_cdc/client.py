@@ -134,6 +134,15 @@ class CdcClient(ABC):
             "source columns, e.g. 'order_id INT, status STRING, amount DECIMAL(18,2)'."
         )
 
+    def ping(self, samples: int = 3) -> list[float]:
+        """Round-trip times in milliseconds of ``samples`` trivial queries; [] when not a server."""
+        return []
+
+    def network_wait_ms(self) -> int | None:
+        """Milliseconds this connection's server session has waited on the client so far
+        (``ASYNC_NETWORK_IO``); None when unknown."""
+        return None
+
     def close(self) -> None:  # pragma: no cover - default no-op
         pass
 
@@ -357,6 +366,27 @@ class SqlCdcClient(CdcClient):
         for batch in self._b.batches(sql, (from_lsn, to_lsn), 1000):
             points.extend(self._hex(v) for v in batch.column(0).to_pylist())
         return points
+
+    def ping(self, samples=3):
+        import time
+
+        times = []
+        for _ in range(samples):
+            t0 = time.perf_counter()
+            self._b.scalar("SELECT 1")
+            times.append((time.perf_counter() - t0) * 1000)
+        return times
+
+    def network_wait_ms(self):
+        # sys.dm_exec_session_wait_stats (2016+): a session sees its own row without
+        # VIEW SERVER STATE. No row yet means no wait so far.
+        try:
+            value = self._b.scalar(
+                "SELECT wait_time_ms FROM sys.dm_exec_session_wait_stats "
+                "WHERE session_id = @@SPID AND wait_type = 'ASYNC_NETWORK_IO'")
+        except Exception:  # noqa: BLE001 - a metric must never fail a read
+            return None
+        return int(value or 0)
 
     def captured_columns(self, capture_instance):
         # The documented API, not cdc.captured_columns: it needs only what the query
