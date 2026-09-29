@@ -223,3 +223,24 @@ def test_num_partitions_defaults_to_the_session_cores(spark, workdir):
     q.awaitTermination()
     pids = {r[0] for r in spark.sql(f"SELECT DISTINCT pid FROM {name}").collect()}
     assert len(pids) == spark.sparkContext.defaultParallelism  # conftest: local[2], via register()
+
+
+def test_partitions_hold_the_same_rows_even_when_commits_differ_in_size(workdir):
+    from pyspark.sql.streaming.datasource import ReadAllAvailable
+    from pyspark.sql.types import IntegerType, StructField, StructType
+
+    from mssql_cdc.source import MssqlCdcStreamReader
+
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    for i in range(8):  # eight one-row commits, then one commit with eight rows
+        db.commit(CI, [(2, {"order_id": i})], at=T0 + timedelta(minutes=i))
+    db.commit(CI, [(2, {"order_id": 100 + r}) for r in range(8)], at=T0 + timedelta(minutes=9))
+    opts = {"backend": "fake", "fakePath": os.path.join(workdir, "src"), "captureInstance": CI,
+            "numPartitions": "2"}
+    reader = MssqlCdcStreamReader(opts, StructType([StructField("order_id", IntegerType())]))
+    start = reader.initialOffset()
+    ranges = reader.partitions(start, reader.latestOffset(start, ReadAllAvailable()))
+    client = reader.client
+    sizes = [sum(b.num_rows for b in client.iter_changes(CI, r.from_lsn, r.to_lsn, [], False, 100))
+             for r in ranges]
+    assert sizes == [8, 8]  # by commits it would be 5 commits / 5 rows and 4 commits / 11 rows

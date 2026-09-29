@@ -221,3 +221,12 @@ def test_ping_and_network_wait():
             return super().scalar(sql, params)
 
     assert SqlCdcClient(NoView(), source_timezone="UTC").network_wait_ms() is None  # never raises
+
+
+def test_split_points_tile_the_change_rows_of_the_capture_instance():
+    rec = Rows([{"b": "0x0000002a000001000001"}, {"b": "0x0000002a000001000002"}])
+    points = SqlCdcClient(rec, source_timezone="UTC").split_points("dbo_orders", "0x01", "0x02", 4)
+    assert points == ["0x0000002A000001000001", "0x0000002A000001000002"]
+    sql, params = rec.calls[-1]
+    assert "NTILE(4) OVER (ORDER BY __$start_lsn)" in sql and "FROM cdc.[dbo_orders_CT]" in sql
+    assert "lsn_time_mapping" not in sql and params == ("0x01", "0x02")

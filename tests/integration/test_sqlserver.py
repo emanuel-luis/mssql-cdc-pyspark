@@ -232,3 +232,24 @@ def test_round_trip_and_network_wait_on_a_real_server(sqlserver):
         assert isinstance(client.network_wait_ms(), int)  # own session: no VIEW SERVER STATE needed
     finally:
         client.close()
+
+
+def test_split_points_balance_rows_across_uneven_commits(sqlserver):
+    ci = sqlserver.cdc_table("skewed", "id INT NOT NULL PRIMARY KEY")
+    for i in range(8):
+        sqlserver.run("INSERT INTO dbo.skewed VALUES (?)", (i,))
+    sqlserver.run("INSERT INTO dbo.skewed SELECT 100 + n FROM (VALUES (0),(1),(2),(3),(4),(5),(6),(7)) v(n)")
+    sqlserver.wait_for_changes(ci, 16)
+    client = make_client({"connectionString": sqlserver.connection_string})
+    try:
+        lo, hi = client.min_lsn(ci), client.max_lsn()
+        bounds = client.split_points(ci, lo, hi, 2)
+        ranges, prev = [], lo
+        for b in bounds:
+            ranges.append((prev, b))
+            prev = client.increment_lsn(b)
+        sizes = [sqlserver.run(f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE __$start_lsn BETWEEN "
+                               "CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)", r)[0][0] for r in ranges]
+        assert sizes == [8, 8]
+    finally:
+        client.close()

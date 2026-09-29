@@ -112,8 +112,9 @@ class CdcClient(ABC):
         """The n-th commit LSN strictly after ``lsn`` in cdc.lsn_time_mapping."""
 
     @abstractmethod
-    def split_points(self, from_lsn: str, to_lsn: str, n: int) -> list[str]:
-        """Up to ``n`` commit-aligned upper bounds that split [from, to]."""
+    def split_points(self, capture_instance: str, from_lsn: str, to_lsn: str, n: int) -> list[str]:
+        """Up to ``n`` commit-aligned upper bounds that split [from, to] into ranges holding
+        about the same number of change rows of ``capture_instance``."""
 
     @abstractmethod
     def iter_changes(
@@ -353,13 +354,18 @@ class SqlCdcClient(CdcClient):
             )
         )
 
-    def split_points(self, from_lsn, to_lsn, n):
+    def split_points(self, capture_instance, from_lsn, to_lsn, n):
+        # Tiles of the change table's own rows, not of cdc.lsn_time_mapping's commits: those
+        # are database-wide, and on a real table they left the largest range with ~2x the
+        # mean rows (ADR 0015). Each bound is the last commit LSN of its tile, so a commit
+        # whose rows straddle two tiles stays whole in the first range.
+        ci = _check_ident(capture_instance, "capture instance")
         n = int(n)
         sql = (
-            "SELECT CONVERT(varchar(22), MAX(start_lsn), 1) AS b FROM ("
-            f"SELECT start_lsn, NTILE({n}) OVER (ORDER BY start_lsn) AS g "
-            "FROM cdc.lsn_time_mapping "
-            "WHERE start_lsn >= CONVERT(binary(10), ?, 1) AND start_lsn <= CONVERT(binary(10), ?, 1)"
+            "SELECT CONVERT(varchar(22), MAX(__$start_lsn), 1) AS b FROM ("
+            f"SELECT __$start_lsn, NTILE({n}) OVER (ORDER BY __$start_lsn) AS g "
+            f"FROM cdc.[{ci}_CT] "
+            "WHERE __$start_lsn BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)"
             ") x GROUP BY g ORDER BY b"
         )
         points = []

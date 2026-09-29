@@ -84,8 +84,10 @@ class FakeCdcClient(CdcClient):
         after = [r["start_lsn"] for r in self._mapping() if r["start_lsn"] > lsn]
         return after[: int(n)][-1] if after else None
 
-    def split_points(self, from_lsn, to_lsn, n):
-        lsns = [r["start_lsn"] for r in self._mapping() if from_lsn <= r["start_lsn"] <= to_lsn]
+    def split_points(self, capture_instance, from_lsn, to_lsn, n):
+        # like SqlCdcClient: tiles of the capture instance's change rows, bound = last LSN
+        lsns = sorted(r["start_lsn"] for r in self._changes(capture_instance)
+                      if from_lsn <= r["start_lsn"] <= to_lsn)
         if not lsns:
             return []
         n = max(1, min(int(n), len(lsns)))

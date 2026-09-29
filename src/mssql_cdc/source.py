@@ -185,7 +185,8 @@ class _BaseReader(DataSourceStreamReader):
         to_lsn = end["lsn"]
         if self.num_partitions <= 1:
             return [LsnRange(self.capture_instance, from_lsn, to_lsn)]
-        bounds = [b for b in self.client.split_points(from_lsn, to_lsn, self.num_partitions) if b]
+        bounds = [b for b in self.client.split_points(self.capture_instance, from_lsn, to_lsn,
+                                                      self.num_partitions) if b]
         if not bounds or bounds[-1] != to_lsn:
             bounds.append(to_lsn)
         ranges, lo = [], from_lsn
