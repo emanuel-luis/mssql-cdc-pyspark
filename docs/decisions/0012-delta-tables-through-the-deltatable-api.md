@@ -1,7 +1,8 @@
 # 0012: Delta tables through the `DeltaTable` API, created typed and commented
 
 **Status:** accepted  
-**Date:** 2026-09-28T21:09:56-03:00
+**Date:** 2026-09-28T21:09:56-03:00  
+**Amended:** 2026-09-28T21:15:37-03:00, every time column is `TIMESTAMP_NTZ` in UTC
 
 ## Context
 The control table was created with a `CREATE TABLE IF NOT EXISTS` string and advanced
@@ -17,11 +18,14 @@ batch held and no column said what it meant.
   DataFrame writer, which is what carries `txnAppId`/`txnVersion`.
 * Every table is created with explicit types and a comment on the table and on each
   column that explains what it holds and how to use it:
-  * control table: all columns (`finalized_until` is `TIMESTAMP_NTZ`, UTC);
-  * facts table: all columns; commit times are `TIMESTAMP_NTZ` (UTC), timings `TIMESTAMP`
-    and `BIGINT`;
+  * control table: all columns;
+  * facts table: all columns;
   * bronze: the metadata columns (`_start_lsn`, `_operation`, ...); captured columns keep
     the source's names and types.
+* Every time column is `TIMESTAMP_NTZ` in UTC: commit times, `finalized_until`, and the
+  moments the library records (`started_at`, `written_at`, `updated_at`, taken from the
+  Python clock in UTC). Mixing `TIMESTAMP` and `TIMESTAMP_NTZ` makes a difference such as
+  `written_at - max_commit_ts` depend on the Spark session's time zone.
 * No migrations: tables are created in this shape. An existing table is left as it is
   (`createIfNotExists` is a no-op), and one with an older facts schema must be recreated.
 

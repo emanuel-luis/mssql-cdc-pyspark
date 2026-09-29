@@ -77,9 +77,12 @@ def test_tables_are_created_typed_and_commented(delta_spark, workdir):
     cols, description = _comments(spark, control)
     assert description and "finalized_until" in description
     assert cols["finalized_until"][0] == "timestamp_ntz" and "only moves forward" in cols["finalized_until"][1]
+    assert cols["updated_at"][0] == cols["end_commit_ts"][0] == "timestamp_ntz"
     assert all(comment for _, comment in cols.values())
     cols, description = _comments(spark, facts)
     assert description and cols["min_commit_ts"][0] == "timestamp_ntz"
+    # every time is TIMESTAMP_NTZ in UTC, so differences never depend on the session time zone
+    assert {cols[c][0] for c in ("started_at", "written_at", "max_commit_ts")} == {"timestamp_ntz"}
     assert all(comment for _, comment in cols.values())
     cols, description = _comments(spark, target)
     assert description and cols["_start_lsn"][1] and cols["_operation"][1]

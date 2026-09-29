@@ -69,16 +69,22 @@ FACTS_COLUMNS = [
     ("updates", "BIGINT", (
         "Updated rows, counted once: operation 4 (the row after). Each has an operation 3 "
         "row (the row before) that is not counted here.")),
-    ("started_at", "TIMESTAMP", "When the sink started processing the batch."),
+    ("started_at", "TIMESTAMP_NTZ", "When the sink started processing the batch, UTC."),
     ("duration_ms", "BIGINT", (
         "Milliseconds from started_at to the end of the target write: the read from SQL "
         "Server, these facts and the append. Offset planning and the checkpoint commit are "
         "not included.")),
     ("target", "STRING", "Table name or path the batch was written to."),
-    ("written_at", "TIMESTAMP", "When this facts row was written, after the target commit."),
+    ("written_at", "TIMESTAMP_NTZ", "When this facts row was written, after the target commit, UTC."),
 ]
-_FACT_FIELDS = [name for name, _, _ in FACTS_COLUMNS[:-2]]  # target and written_at are added last
-FACTS_SCHEMA = ", ".join(f"{name} {data_type}" for name, data_type, _ in FACTS_COLUMNS[:-2])
+_FACT_FIELDS = [name for name, _, _ in FACTS_COLUMNS]
+FACTS_SCHEMA = ", ".join(f"{name} {data_type}" for name, data_type, _ in FACTS_COLUMNS)
+
+
+def _utc_now() -> datetime:
+    """Every time in these tables is TIMESTAMP_NTZ in UTC: comparing them (written_at minus
+    max_commit_ts) never depends on the Spark session's time zone."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def batch_facts(df: DataFrame) -> dict:
@@ -132,7 +138,7 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None):
             created.add(table)
 
     def write_batch(df: DataFrame, batch_id: int) -> None:
-        started_at, t0 = datetime.now(timezone.utc), time.monotonic()
+        started_at, t0 = _utc_now(), time.monotonic()
         df = df.persist()
         try:
             facts = batch_facts(df)
@@ -145,11 +151,10 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None):
                                    for f in out.schema], BRONZE_COMMENT)
             _write(out, target, app_id, batch_id, _json(facts))
             if facts_table:
-                facts.update(started_at=started_at, duration_ms=round((time.monotonic() - t0) * 1000))
+                facts.update(started_at=started_at, duration_ms=round((time.monotonic() - t0) * 1000),
+                             target=target, written_at=_utc_now())
                 ensure(spark, facts_table, FACTS_COLUMNS, FACTS_COMMENT)
-                facts_df = spark.createDataFrame(
-                    [tuple(facts[k] for k in _FACT_FIELDS)], FACTS_SCHEMA).withColumn(
-                    "target", F.lit(target)).withColumn("written_at", F.current_timestamp())
+                facts_df = spark.createDataFrame([tuple(facts[k] for k in _FACT_FIELDS)], FACTS_SCHEMA)
                 _write(facts_df, facts_table, f"{app_id}#facts", batch_id)
         finally:
             df.unpersist()

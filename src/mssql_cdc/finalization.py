@@ -23,7 +23,7 @@ lags (consumers wait a little longer); it can never run ahead of the data.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .tables import create_if_not_exists, delta_table, table_ref  # noqa: F401 - table_ref re-exported
 
@@ -78,7 +78,7 @@ CONTROL_COLUMNS = [
     ("end_commit_ts", "TIMESTAMP_NTZ", "Commit time of end_lsn, UTC. finalized_until is this instant "
      "truncated to the period (an hour by default), because transactions sharing this exact "
      "commit time may still be arriving."),
-    ("updated_at", "TIMESTAMP", "When the verdict last moved (the Spark session's clock)."),
+    ("updated_at", "TIMESTAMP_NTZ", "When the verdict last moved, UTC."),
 ]
 
 
@@ -96,11 +96,12 @@ def advance(spark, control_table: str, table_name: str, end_offset: dict | None,
     ensure_control_table(spark, control_table)
     if cand is not None:
         src = spark.createDataFrame(
-            [(table_name, cand, end_offset["lsn"], datetime.fromisoformat(end_offset["commit_ts"]))],
-            "table_name STRING, cand TIMESTAMP_NTZ, end_lsn STRING, end_ts TIMESTAMP_NTZ",
+            [(table_name, cand, end_offset["lsn"], datetime.fromisoformat(end_offset["commit_ts"]),
+              datetime.now(timezone.utc).replace(tzinfo=None))],
+            "table_name STRING, cand TIMESTAMP_NTZ, end_lsn STRING, end_ts TIMESTAMP_NTZ, now TIMESTAMP_NTZ",
         )
         changes = {"finalized_until": "s.cand", "end_lsn": "s.end_lsn",
-                   "end_commit_ts": "s.end_ts", "updated_at": "current_timestamp()"}
+                   "end_commit_ts": "s.end_ts", "updated_at": "s.now"}
         (
             delta_table(spark, control_table).alias("t")
             .merge(src.alias("s"), "t.table_name = s.table_name")
