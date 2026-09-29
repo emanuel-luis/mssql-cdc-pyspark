@@ -1,7 +1,7 @@
 # 0014: Network and read metrics in the ingestion facts
 
 **Status:** accepted  
-**Date:** 2026-09-29T10:12:04-03:00
+**Date:** 2026-09-29T10:12:04-03:00  
 **Amended:** 2026-09-29T10:48:30-03:00, the round trip moved to the partitions; `stream()` declares the options once
 
 ## Context
@@ -32,8 +32,8 @@ the bronze schema should not.
 ## Consequences
 * A slow batch can be read as network (`network_wait_ms` close to `read_seconds * 1000`,
   high `source_rtt_ms`) or server (low wait, long read) from the facts alone.
-* `source_rtt_ms` is the driver's round trip at write time, a proxy for the executors'
-  (same network); it costs 3 round trips per batch.
+* `source_rtt_ms` costs one round trip per partition read (see the Amendment; it was
+  first a driver-side ping by the sink).
 * `metricsPath` must be a directory every node can write and the driver can read: a local
   path on a single node, or a FUSE path such as a Unity Catalog Volume.
 * `read_seconds` sums partitions (task-seconds) and includes Spark taking the rows.
