@@ -3,7 +3,8 @@
 **Status:** accepted  
 **Date:** 2026-09-28T17:05:54-03:00  
 **Amended:** 2026-09-28T20:19:40-03:00, current-offset fallback for SQL Server 2016–2019
-(see Amendment)
+(see Amendment)  
+**Amended:** 2026-09-28T21:44:31-03:00, a named zone is converted per range, not per row (see Amendment 2)
 
 ## Context
 `cdc.lsn_time_mapping.tran_end_time` is a timezone-less `datetime` in the server clock.
@@ -42,3 +43,13 @@ exist: it reads `DATEPART(TZOFFSET, SYSDATETIMEOFFSET())` and converts with
   commit (available since SQL Server 2016).
 * `tests/integration` forces the fallback against a real server (clock in
   `America/Sao_Paulo`) and checks it converts exactly like the zone name.
+
+## Amendment 2: convert per range, not per row
+`AT TIME ZONE` is expensive: converting every change row with it cut one connection's
+read from ~28k to ~10.5k rows/s (lab t8, 91 columns). For a named zone the reader now asks
+once per partition for the zone's UTC offset at the first and last commit of the range.
+When both ends have the same offset and are less than 7 days apart, no daylight-saving
+change happened in between (no zone changes twice within a week), so a plain `DATEADD`
+with that offset is exact for every row; otherwise it converts row by row as before.
+Reads with a named zone now run at the speed of UTC ones (~27k rows/s in t8), and the
+integration tests (server clock in `America/Sao_Paulo`) still get UTC commit times.

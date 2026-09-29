@@ -24,6 +24,6 @@ Design choices that make the two backends interchangeable:
 * Every batch is cast to the Spark schema before it is yielded
   (`large_string` -> `string`, etc.).
 
-Known caveats: mssql-python falls back to row-by-row fetch when a result contains
-`(max)` columns; arrow-odbc maps `datetime2(7)` to nanoseconds, which overflows
+Known caveats: `(max)` columns slow mssql-python's Arrow fetch by about a quarter (lab t8),
+not by the order of magnitude a row-by-row fallback would; arrow-odbc maps `datetime2(7)` to nanoseconds, which overflows
 after year 2262 (sentinel dates like 9999-12-31).

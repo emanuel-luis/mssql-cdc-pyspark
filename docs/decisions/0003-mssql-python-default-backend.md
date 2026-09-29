@@ -1,7 +1,8 @@
 # 0003: `mssql-python` as default driver, `arrow-odbc` as fallback
 
 **Status:** accepted. Survey in `docs/CONNECTORS.md`.  
-**Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)
+**Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)  
+**Amended:** 2026-09-28T21:44:31-03:00, the `(max)` caveat measured (lab t8)
 
 ## Context
 `read()` yields Arrow record batches from executors. The driver should fetch natively into
@@ -17,5 +18,8 @@ ADBC (closed binary, separate installer) and turbodbc (no binary type support).
 ## Consequences
 * LSNs travel as hex strings in both directions (`CONVERT(..., 1)`), so neither backend
   binds or decodes binary values.
-* `mssql-python` falls back to row-by-row fetch when a result has `(max)` columns.
+* `mssql-python` was said to fall back to row-by-row fetch when a result has `(max)`
+  columns. Measured with lab t8 (one connection, 91 columns, 200k rows): two `(max)`
+  columns cost about a quarter of the throughput (26k vs 34k rows/s), and the Arrow fetch
+  stays 2–3x faster than `fetchall()` either way. A cost, not a cliff.
 * On Linux, `mssql-python` needs `libltdl7`, `libkrb5-3` and `libgssapi-krb5-2`.

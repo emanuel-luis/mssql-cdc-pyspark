@@ -50,6 +50,7 @@ at the same time.
 | `t4_watermark_concurrency` | no rows ever appear below an already observed `max_lsn`; LSN order is commit order | SQL Server | `max_lsn` as a safe low watermark |
 | `t5_engine` | the runtime supports Python streaming sources with admission control and `AvailableNow` | Spark only | platform requirements |
 | `t6_delta_semantics` | `userMetadata` on MERGE; idempotent append and MERGE | Spark + Delta | sink idempotency; facts |
+| `t8_fetch_throughput` | rows/s of one connection over a wide change table: with/without `(max)` columns, Arrow batch size, named time zone, `fetchall()` baseline | SQL Server | read performance; informational |
 | `t7_end_to_end` | bronze == change table up to the end LSN; restart and incremental runs; `--idle-minutes`: finalization advances without rows; `--destructive`: guard stops the stream | everything | the full pipeline, with per-batch timings |
 
 ```bash

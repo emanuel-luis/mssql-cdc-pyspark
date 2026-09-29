@@ -7,10 +7,11 @@ from mssql_cdc.client import Backend, SqlCdcClient, make_client
 
 
 class Recorder(Backend):
-    def __init__(self, scalar_value="0x0000002A000001000001", tz="UTC"):
+    def __init__(self, scalar_value="0x0000002A000001000001", tz="UTC", range_offset=None):
         self.calls = []
         self.value = scalar_value
         self.tz = tz
+        self.range_offset = range_offset  # what the per-range offset query answers
 
     def batches(self, sql, params, batch_size):
         self.calls.append((sql, tuple(params)))
@@ -18,7 +19,11 @@ class Recorder(Backend):
 
     def scalar(self, sql, params=()):
         self.calls.append((sql, tuple(params)))
-        return self.tz if "CURRENT_TIMEZONE_ID" in sql else self.value
+        if "CURRENT_TIMEZONE_ID" in sql:
+            return self.tz
+        if "FROM cdc.lsn_time_mapping" in sql and "TZOFFSET" in sql:
+            return self.range_offset
+        return self.value
 
 
 def test_changes_query_shape():
@@ -50,6 +55,18 @@ def test_timezone_conversion():
     list(SqlCdcClient(utc, source_timezone="UTC").iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
     assert "AT TIME ZONE" not in utc.calls[-1][0]
     assert not any("CURRENT_TIMEZONE_ID" in sql for sql, _ in utc.calls)
+
+
+def test_named_zone_converts_a_range_with_one_offset_by_dateadd():
+    rec = Recorder(range_offset=-180)  # both ends of the range at UTC-3, under 7 days apart
+    client = SqlCdcClient(rec, source_timezone="E. South America Standard Time")
+    list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+    offset_sql, offset_params = rec.calls[-2]
+    assert "DATEDIFF(day, MIN(tran_end_time), MAX(tran_end_time)) < 7" in offset_sql
+    assert offset_params == ("0x01", "0x02")
+    changes_sql = rec.calls[-1][0]
+    assert "CAST(DATEADD(minute, 180, m.tran_end_time) AS datetime2(3)) AS _commit_ts" in changes_sql
+    assert "AT TIME ZONE" not in changes_sql  # no per-row conversion
 
 
 def test_timezone_auto_is_detected_once_per_client():

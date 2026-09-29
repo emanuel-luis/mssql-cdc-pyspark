@@ -250,14 +250,40 @@ class SqlCdcClient(CdcClient):
         sign, minutes = ("+" if self._offset_min >= 0 else "-"), abs(self._offset_min)
         return f"UTC{sign}{minutes // 60:02d}:{minutes % 60:02d}"
 
-    def _utc(self, expr: str) -> str:
-        """``tran_end_time`` is a timezone-less datetime in the server's clock."""
+    def _utc(self, expr: str, offset_min: int | None = None) -> str:
+        """``tran_end_time`` is a timezone-less datetime in the server's clock.
+
+        ``offset_min``: a UTC offset known to hold for every value of ``expr``; a plain
+        ``DATEADD`` then replaces ``AT TIME ZONE``, which costs ~2.7x the read (lab t8).
+        """
         zone = self.timezone
-        if self._offset_min is not None:
-            return f"CAST(DATEADD(minute, {-self._offset_min}, {expr}) AS datetime2(3))"
+        offset_min = self._offset_min if offset_min is None else offset_min
+        if offset_min is not None:
+            return f"CAST(DATEADD(minute, {-int(offset_min)}, {expr}) AS datetime2(3))"
         if zone.upper() == "UTC":
             return f"CAST({expr} AS datetime2(3))"
         return f"CAST(({expr} AT TIME ZONE N'{zone}') AT TIME ZONE 'UTC' AS datetime2(3))"
+
+    def _range_offset(self, from_lsn: str, to_lsn: str) -> int | None:
+        """The named zone's UTC offset over a range of commits, when it is one offset.
+
+        Equal offsets at both ends of a range shorter than 7 days mean no daylight-saving
+        change in between (no zone changes twice within a week). None otherwise, or when
+        the range has no commits: the caller then converts row by row.
+        """
+        zone = self.timezone
+        if self._offset_min is not None or zone.upper() == "UTC":
+            return None
+        value = self._b.scalar(
+            "SELECT CASE WHEN DATEDIFF(day, MIN(tran_end_time), MAX(tran_end_time)) < 7 "
+            f"AND DATEPART(TZOFFSET, MIN(tran_end_time) AT TIME ZONE N'{zone}') "
+            f"= DATEPART(TZOFFSET, MAX(tran_end_time) AT TIME ZONE N'{zone}') "
+            f"THEN DATEPART(TZOFFSET, MIN(tran_end_time) AT TIME ZONE N'{zone}') END "
+            "FROM cdc.lsn_time_mapping "
+            "WHERE start_lsn BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)",
+            (from_lsn, to_lsn),
+        )
+        return None if value is None else int(value)
 
     def _hex(self, value) -> str | None:
         return None if value is None else _lsn.normalize(value)
@@ -373,7 +399,7 @@ class SqlCdcClient(CdcClient):
             "CONVERT(varchar(22), c.[__$seqval], 1) AS _seqval, "
             "c.[__$operation] AS _operation, "
             f"{cmd_select}"
-            f"{self._utc('m.tran_end_time')} AS _commit_ts"
+            f"{self._utc('m.tran_end_time', self._range_offset(from_lsn, to_lsn))} AS _commit_ts"
             f"{', ' + cols if cols else ''} "
             f"FROM cdc.[{ci}_CT] c "
             "JOIN cdc.lsn_time_mapping m ON m.start_lsn = c.[__$start_lsn] "
