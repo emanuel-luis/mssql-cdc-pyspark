@@ -13,6 +13,7 @@
 | [0009](0009-read-change-tables-directly.md) | Read the change table directly, re-check retention after the read | accepted | 2026-09-28T17:39:20-03:00 | 2026-09-28T18:11:50-03:00 |
 | [0010](0010-heartbeat-for-quiet-databases.md) | Idle lag of ~5 minutes; an optional Agent heartbeat for less | accepted | 2026-09-28T19:03:23-03:00 |  |
 | [0011](0011-num-partitions-from-cores.md) | `numPartitions` defaults to the compute's cores | accepted | 2026-09-28T20:55:34-03:00 |  |
+| [0012](0012-delta-tables-through-the-deltatable-api.md) | Delta tables through the `DeltaTable` API, created typed and commented | accepted | 2026-09-28T21:09:56-03:00 |  |
 
 New ADRs: copy the format, next number, one decision per file. Put the time the
 decision is recorded in `**Date:**` (ISO-8601 with the UTC offset, e.g.

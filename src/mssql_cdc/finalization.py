@@ -25,6 +25,8 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
+from .tables import create_if_not_exists, delta_table, table_ref  # noqa: F401 - table_ref re-exported
+
 _GRANULARITIES = ("minute", "hour", "day")
 
 
@@ -61,20 +63,27 @@ def end_offset_from_progress(progress, source_index: int = 0) -> dict | None:
     return end
 
 
-def table_ref(name_or_path: str) -> str:
-    """A table name, or ``delta.`path``` when given a filesystem/object-store path."""
-    if "/" in name_or_path or ":" in name_or_path:
-        return f"delta.`{name_or_path}`"
-    return name_or_path
+CONTROL_COMMENT = (
+    "Completeness verdict per CDC-fed table, kept by mssql-cdc-pyspark: one row per table. "
+    "Gate downstream work on finalized_until, e.g. with finalization.is_final()."
+)
+CONTROL_COLUMNS = [
+    ("table_name", "STRING", "The table this verdict is about: the name passed to "
+     "finalization.advance(), usually the target table. One row per table."),
+    ("finalized_until", "TIMESTAMP_NTZ", "The verdict, UTC. Every period that ends at or before "
+     "this instant is complete in the table: no source commit at or before it can still arrive. "
+     "It only moves forward. A consumer of the period [start, end) waits for finalized_until >= end."),
+    ("end_lsn", "STRING", "Source commit LSN (0x + 20 hex) of the batch end that last moved the "
+     "verdict: how far the source had been read and committed to the table."),
+    ("end_commit_ts", "TIMESTAMP_NTZ", "Commit time of end_lsn, UTC. finalized_until is this instant "
+     "truncated to the period (an hour by default), because transactions sharing this exact "
+     "commit time may still be arriving."),
+    ("updated_at", "TIMESTAMP", "When the verdict last moved (the Spark session's clock)."),
+]
 
 
 def ensure_control_table(spark, control_table: str) -> None:
-    ref = table_ref(control_table)
-    spark.sql(
-        f"CREATE TABLE IF NOT EXISTS {ref} ("
-        "table_name STRING, finalized_until TIMESTAMP_NTZ, end_lsn STRING, "
-        "end_commit_ts TIMESTAMP_NTZ, updated_at TIMESTAMP) USING delta"
-    )
+    create_if_not_exists(spark, control_table, CONTROL_COLUMNS, CONTROL_COMMENT)
 
 
 def advance(spark, control_table: str, table_name: str, end_offset: dict | None,
@@ -86,32 +95,25 @@ def advance(spark, control_table: str, table_name: str, end_offset: dict | None,
     cand = candidate(end_offset, granularity)
     ensure_control_table(spark, control_table)
     if cand is not None:
-        # No parameter markers: on a Delta-enabled session (delta-spark 4.4, Spark 4.2)
-        # they stay unbound (UNBOUND_SQL_PARAMETER). The source row is a DataFrame.
         src = spark.createDataFrame(
             [(table_name, cand, end_offset["lsn"], datetime.fromisoformat(end_offset["commit_ts"]))],
             "table_name STRING, cand TIMESTAMP_NTZ, end_lsn STRING, end_ts TIMESTAMP_NTZ",
         )
-        spark.sql(
-            f"""
-            MERGE INTO {table_ref(control_table)} t
-            USING {{src}} s
-            ON t.table_name = s.table_name
-            WHEN MATCHED AND s.cand > t.finalized_until THEN UPDATE SET
-                 finalized_until = s.cand, end_lsn = s.end_lsn,
-                 end_commit_ts = s.end_ts, updated_at = current_timestamp()
-            WHEN NOT MATCHED THEN INSERT
-                 (table_name, finalized_until, end_lsn, end_commit_ts, updated_at)
-                 VALUES (s.table_name, s.cand, s.end_lsn, s.end_ts, current_timestamp())
-            """,
-            src=src,
+        changes = {"finalized_until": "s.cand", "end_lsn": "s.end_lsn",
+                   "end_commit_ts": "s.end_ts", "updated_at": "current_timestamp()"}
+        (
+            delta_table(spark, control_table).alias("t")
+            .merge(src.alias("s"), "t.table_name = s.table_name")
+            .whenMatchedUpdate(condition="s.cand > t.finalized_until", set=changes)  # never backwards
+            .whenNotMatchedInsert(values={"table_name": "s.table_name", **changes})
+            .execute()
         )
     return finalized_until(spark, control_table, table_name)
 
 
 def finalized_until(spark, control_table: str, table_name: str) -> datetime | None:
-    df = spark.sql(f"SELECT table_name, finalized_until FROM {table_ref(control_table)}")
-    rows = df.where(df.table_name == table_name).select("finalized_until").collect()  # see advance()
+    df = delta_table(spark, control_table).toDF()
+    rows = df.where(df.table_name == table_name).select("finalized_until").collect()
     return rows[0][0] if rows else None
 
 

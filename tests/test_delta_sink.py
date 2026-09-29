@@ -58,16 +58,32 @@ def test_sink_facts_and_monotonic_finalization(delta_spark, workdir):
     assert not finalization.is_final(spark, control, "bronze_orders", datetime(2026, 9, 28, 16))
 
 
-def test_facts_table_from_before_the_timing_columns_gains_them(delta_spark, workdir):
+def _comments(spark, path):
+    """Column comments and the table description of a Delta table at ``path``."""
+    fields = {f.name: (f.dataType.simpleString(), f.metadata.get("comment"))
+              for f in spark.read.format("delta").load(path).schema}
+    return fields, spark.sql(f"DESCRIBE DETAIL delta.`{path}`").first()["description"]
+
+
+def test_tables_are_created_typed_and_commented(delta_spark, workdir):
     spark = delta_spark
-    facts = os.path.join(workdir, "facts")
-    spark.createDataFrame([("old", 0, 1)], "app_id string, batch_id bigint, rows bigint") \
-        .write.format("delta").save(facts)
-    df = spark.createDataFrame([(1, 2, "0x" + "0" * 20, None)],
-                               "order_id int, _operation int, _start_lsn string, _commit_ts timestamp_ntz")
-    delta_sink(os.path.join(workdir, "bronze"), "evolve-test", facts)(df, 0)
-    rows = {r["app_id"]: r for r in spark.read.format("delta").load(facts).collect()}
-    assert rows["old"]["duration_ms"] is None and rows["evolve-test"]["duration_ms"] >= 0
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    db.commit(CI, [(2, {"order_id": 1, "status": "new"})], at=T0)
+    target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
+    control = os.path.join(workdir, "control")
+    q = _stream(spark, workdir, target, "typed-v1", facts)
+    finalization.advance(spark, control, "bronze_orders", finalization.end_offset_from_progress(q.lastProgress))
+
+    cols, description = _comments(spark, control)
+    assert description and "finalized_until" in description
+    assert cols["finalized_until"][0] == "timestamp_ntz" and "only moves forward" in cols["finalized_until"][1]
+    assert all(comment for _, comment in cols.values())
+    cols, description = _comments(spark, facts)
+    assert description and cols["min_commit_ts"][0] == "timestamp_ntz"
+    assert all(comment for _, comment in cols.values())
+    cols, description = _comments(spark, target)
+    assert description and cols["_start_lsn"][1] and cols["_operation"][1]
+    assert cols["order_id"][1] is None  # captured columns keep the source's names and types only
 
 
 def test_replayed_batch_is_ignored(delta_spark, workdir):

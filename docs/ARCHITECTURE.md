@@ -124,6 +124,10 @@ backend has no type metadata and always needs `columns`.
 | facts (optional) | one row per non-empty batch | `delta_sink` | durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write) and `written_at` |
 | `table_finalization` | one row per target table | `finalization.advance` | `finalized_until`, `end_lsn`, `end_commit_ts`, `updated_at` |
 
+All three are created on first use with `DeltaTable.createIfNotExists`: explicit types, and a
+comment on the table and on every control, facts and bronze metadata column
+(`DESCRIBE TABLE` shows them). Existing tables are not altered ([ADR 0012](decisions/0012-delta-tables-through-the-deltatable-api.md)).
+
 ## Extension points
 
 * **New backend**: subclass `client.Backend` (`batches`, optionally `scalar`) and add
