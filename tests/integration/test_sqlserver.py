@@ -268,3 +268,52 @@ def test_stream_facade_records_network_metrics_from_a_real_server(delta_spark, s
     [row] = delta_spark.read.format("delta").load(facts).collect()
     assert row["source_rtt_ms"] > 0 and row["read_mb"] > 0
     assert row["network_wait_ms"] is not None  # own session's ASYNC_NETWORK_IO, no extra grant
+
+
+def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(delta_spark, sqlserver, workdir):
+    from pyspark.sql import Window, functions as F
+
+    from mssql_cdc import stream
+
+    # rows written before CDC was enabled exist only in the table: only a snapshot has them
+    sqlserver.run("CREATE TABLE dbo.boot (id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL)")
+    sqlserver.run("INSERT INTO dbo.boot SELECT n, 'old' FROM (VALUES (1),(2),(3),(4),(5),(6)) t(n)")
+    sqlserver.run("EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'boot', "
+                  "@role_name = NULL, @supports_net_changes = 0")
+    ci = "dbo_boot"
+    # No wait for capture: on a quiet database max_lsn stays below the new instance's first
+    # LSN (and fn_cdc_get_min_lsn returns NULL) for up to ~5 minutes; the snapshot does not need it.
+    conn = sqlserver.login("boot_reader", "GRANT SELECT ON dbo.boot TO boot_reader",
+                           "GRANT SELECT ON cdc.dbo_boot_CT TO boot_reader")
+    options = {"connectionString": conn, "captureInstance": ci, "numPartitions": "3"}
+    client = make_client(options)
+    try:  # the documented API names the table and its key for a least-privilege login
+        source = client.source_table(ci)
+        assert source[:3] == ("dbo", "boot", ["id"]) and source.start_lsn.startswith("0x")
+    finally:
+        client.close()
+    target, ckpt = os.path.join(workdir, "bronze"), os.path.join(workdir, "ckpt")
+
+    def run():
+        q = stream(delta_spark, options).to_delta(target, "boot-v1", ckpt,
+                                                  trigger={"availableNow": True}, bootstrap=True)
+        q.awaitTermination()
+        return delta_spark.read.format("delta").load(target)
+
+    first = run()
+    assert sorted((r["id"], r["v"], r["_operation"]) for r in first.collect()) == [
+        (i, "old", 0) for i in range(1, 7)]
+    sqlserver.run("UPDATE dbo.boot SET v = 'new' WHERE id = 2")
+    sqlserver.run("DELETE FROM dbo.boot WHERE id = 3")
+    sqlserver.run("INSERT INTO dbo.boot VALUES (7, 'new')")
+    sqlserver.wait_for_changes(ci, 4)
+    second = run()
+    assert second.where("_operation = 0").count() == 6 and second.count() == 10
+
+    last = Window.partitionBy("id").orderBy(
+        F.col("_start_lsn").desc(), F.col("_command_id").desc_nulls_last(),
+        F.col("_seqval").desc_nulls_last(), F.col("_operation").desc())
+    latest = (second.where("_operation != 3").withColumn("n", F.row_number().over(last))
+              .where("n = 1 AND _operation != 1").collect())
+    assert sorted((r["id"], r["v"]) for r in latest) == sorted(
+        (r[0], r[1]) for r in sqlserver.run("SELECT id, v FROM dbo.boot"))

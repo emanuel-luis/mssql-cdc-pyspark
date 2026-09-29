@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass
 from typing import Iterator
 
-from pyspark.sql.datasource import DataSource, DataSourceStreamReader, InputPartition
+from pyspark.sql.datasource import DataSource, DataSourceReader, DataSourceStreamReader, InputPartition
 
 try:  # Spark 4.2+ (and runtimes that backported SPARK-55304)
     from pyspark.sql.streaming.datasource import (
@@ -55,7 +55,8 @@ METADATA_COLUMNS = [
     ("_command_id", "INT"),
     ("_commit_ts", "TIMESTAMP_NTZ"),
 ]
-OPERATIONS = {1: "delete", 2: "insert", 3: "update_before", 4: "update_after"}
+# 1-4 are SQL Server's __$operation codes; 0 marks a snapshot row (ADR 0016)
+OPERATIONS = {0: "snapshot", 1: "delete", 2: "insert", 3: "update_before", 4: "update_after"}
 
 
 def _opt(options, key: str, default=None):
@@ -122,7 +123,22 @@ class MssqlCdcDataSource(DataSource):
         return cls(dict(self.options), schema, self.default_num_partitions)
 
 
-class _BaseReader(DataSourceStreamReader):
+class MssqlCdcSnapshotDataSource(MssqlCdcDataSource):
+    """``spark.read.format("mssql_cdc_snapshot")``: the tracked table's current rows in the
+    stream's schema, as operation 0 at one LSN (ADR 0016). ``CdcStream.snapshot`` writes
+    them to Delta and returns the offset the stream starts from."""
+
+    @classmethod
+    def name(cls) -> str:
+        return "mssql_cdc_snapshot"
+
+    def reader(self, schema):
+        return MssqlCdcSnapshotReader(dict(self.options), schema, self.default_num_partitions)
+
+
+class _Common:
+    """What the stream and snapshot readers share: options, the schema, a lazy client."""
+
     def __init__(self, options: dict, schema, default_num_partitions: int | None = None):
         self.options = options
         self.capture_instance = _opt(options, "captureInstance")
@@ -159,6 +175,8 @@ class _BaseReader(DataSourceStreamReader):
             self._client = make_client(self.options)
         return self._client
 
+
+class _BaseReader(_Common, DataSourceStreamReader):
     # -- offsets --------------------------------------------------------------
     def _offset(self, lsn: str) -> dict:
         return {"lsn": lsn, "commit_ts": self.client.lsn_to_time(lsn) or ""}
@@ -297,3 +315,90 @@ class MssqlCdcLegacyStreamReader(_BaseReader):  # pragma: no cover - Spark < 4.2
 
     def latestOffset(self) -> dict:
         return self._offset(self.client.max_lsn())
+
+
+# --------------------------------------------------------------------------- #
+# Snapshot of the tracked table (ADR 0016)
+# --------------------------------------------------------------------------- #
+def snapshot_lsn(client, source) -> str:
+    """The LSN a snapshot is stamped with, recorded *before* the table is read.
+
+    Every commit up to ``max_lsn`` is already in the table when the read starts; a commit the
+    read also sees comes later and has a larger LSN, so the stream from here replays it and
+    the downstream MERGE absorbs the overlap. A capture instance that capture has not reached
+    yet (``max_lsn`` below its first LSN: a quiet database, just after the enable) starts
+    the stream at its first LSN instead; ``fn_cdc_get_min_lsn`` is NULL until then, the
+    instance's ``start_lsn`` in ``source`` (a ``SourceTable``) is not.
+    """
+    max_lsn = client.max_lsn()
+    if source.start_lsn is None:
+        return max_lsn  # no low endpoint yet; the stream's retention guard still checks it
+    return max(max_lsn, client.decrement_lsn(source.start_lsn))
+
+
+@dataclass
+class KeyRange(InputPartition):
+    capture_instance: str
+    lsn: str  # the snapshot's LSN and commit time, stamped on every row
+    commit_ts: str | None
+    schema: str
+    table: str
+    key: str | None  # None: the whole table in one partition
+    lo: int | None  # inclusive; None: open, plus the rows with a NULL key
+    hi: int | None  # exclusive; None: open
+
+
+class MssqlCdcSnapshotReader(_Common, DataSourceReader):
+    def partitions(self):
+        client = self.client
+        from .lsn import normalize
+
+        source = client.source_table(self.capture_instance)
+        given = _opt(self.options, "snapshotLsn")
+        lsn = normalize(given) if given else snapshot_lsn(client, source)
+        commit_ts = client.lsn_to_time(lsn)
+        schema, table, keys = source.schema, source.table, source.keys
+        # ponytail: uniform ranges over MIN..MAX of an integer leading key column (two seeks);
+        # sparse or skewed keys give uneven partitions. Tile with NTILE if that shows up.
+        key = keys[0] if keys and keys[0] in self.source_columns else None
+        lo, hi = client.key_range(schema, table, key) if key and self.num_partitions > 1 else (None, None)
+        whole = [KeyRange(self.capture_instance, lsn, commit_ts, schema, table, None, None, None)]
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (lo, hi)) or hi == lo:
+            return whole
+        n = min(self.num_partitions, hi - lo + 1)
+        cuts = [lo + (hi - lo + 1) * i // n for i in range(1, n)]
+        bounds = [None, *cuts, None]
+        return [KeyRange(self.capture_instance, lsn, commit_ts, schema, table, key, a, b)
+                for a, b in zip(bounds, bounds[1:])]
+
+    def read(self, partition: KeyRange) -> Iterator:
+        from datetime import datetime
+
+        import pyarrow as pa
+        from pyspark.sql.pandas.types import to_arrow_schema
+
+        target = to_arrow_schema(self.schema, timezone="UTC")
+        commit_ts = datetime.fromisoformat(partition.commit_ts) if partition.commit_ts else None
+        meta = {  # constant per snapshot; _seqval and _command_id have no meaning here
+            "_capture_instance": (partition.capture_instance, pa.string()),
+            "_start_lsn": (partition.lsn, pa.string()),
+            "_seqval": (None, pa.string()),
+            "_operation": (0, pa.int32()),
+            "_command_id": (None, pa.int32()),
+            "_commit_ts": (commit_ts, pa.timestamp("us")),
+        }
+        client = self.client
+        try:
+            for batch in client.iter_table(partition.schema, partition.table, self.source_columns,
+                                           partition.key, partition.lo, partition.hi, self.batch_size):
+                if batch.num_rows == 0:
+                    continue
+                table = pa.Table.from_batches([batch])
+                for name in self.field_names:
+                    if name in meta:
+                        value, typ = meta[name]
+                        table = table.append_column(name, pa.array([value] * table.num_rows, typ))
+                yield from table.select(self.field_names).cast(target).to_batches()
+        finally:
+            client.close()
+            self._client = None

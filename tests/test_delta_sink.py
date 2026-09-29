@@ -174,3 +174,46 @@ def test_replayed_batch_is_ignored(delta_spark, workdir):
     write(df, 7)
     write(df, 7)  # same batch id replayed after a failure
     assert spark.read.format("delta").load(target).count() == 1
+
+
+def test_bootstrap_snapshots_once_and_the_stream_continues_from_it(delta_spark, workdir):
+    from pyspark.sql import Window, functions as F
+
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: "order_id"})
+    for i in range(6):
+        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+    db.commit(CI, [(1, {"order_id": 4, "status": "new"})], at=T0 + timedelta(minutes=7))
+    db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=8)))  # retention lost all of that history
+    target, ckpt = os.path.join(workdir, "bronze"), os.path.join(workdir, "ckpt")
+    options = {"backend": "fake", "fakePath": src, "captureInstance": CI, "columns": COLUMNS,
+               "numPartitions": "2"}
+
+    def run():
+        q = stream(spark, options).to_delta(target, "boot-v1", ckpt, trigger={"availableNow": True},
+                                            bootstrap=True)
+        q.awaitTermination()
+        return spark.read.format("delta").load(target)
+
+    first = run()
+    assert first.where("_operation = 0").count() == 5 and first.count() == 5  # 0..5 minus 4
+    db.commit(CI, [(3, {"order_id": 1, "status": "new"}), (4, {"order_id": 1, "status": "paid"})],
+              at=T0 + timedelta(minutes=9))
+    db.commit(CI, [(2, {"order_id": 9, "status": "new"})], at=T0 + timedelta(minutes=10))
+    second = run()  # a rerun: the same snapshot, then only the new changes
+    assert second.where("_operation = 0").count() == 5 and second.count() == 8
+
+    # the latest image per key, as a MERGE downstream would apply it, is the source table now
+    last = Window.partitionBy("order_id").orderBy(
+        F.col("_start_lsn").desc(), F.col("_command_id").desc_nulls_last(),
+        F.col("_seqval").desc_nulls_last(), F.col("_operation").desc())
+    latest = (second.where("_operation != 3").withColumn("n", F.row_number().over(last))
+              .where("n = 1 AND _operation != 1").select("order_id", "status").collect())
+    assert sorted((r["order_id"], r["status"]) for r in latest) == [
+        (0, "new"), (1, "paid"), (2, "new"), (3, "new"), (5, "new"), (9, "new")]
+
+    with pytest.raises(ValueError, match="one or the other"):
+        stream(spark, {**options, "startingLsn": "latest"}).to_delta(target, "x", ckpt, bootstrap=True)

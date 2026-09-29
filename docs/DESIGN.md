@@ -77,9 +77,10 @@ writes to the source.
 
 ## What this is not
 
-* Not a snapshot tool: the initial load is out of scope for v0.1 (record
-  `max_lsn`, snapshot, then start the stream at that LSN; an idempotent MERGE
-  downstream absorbs the overlap).
+* Not a bulk-copy tool: the initial load (`bootstrap=True`, ADR 0016) records `max_lsn`,
+  reads the table through the same driver, then starts the stream at that LSN; an
+  idempotent MERGE downstream absorbs the overlap. It is as fast as the link to the
+  source, like the stream.
 * Not business-time completeness: a late *business* event (a back-dated
   `order_date`) is a modelling problem, not an ingestion one.
 

@@ -78,7 +78,7 @@ options = {
 }
 query = stream(spark, options).to_delta(
     "bronze.orders", app_id="orders-v1", checkpoint="/Volumes/cat/sch/vol/ckpt/orders",
-    facts_table="ops.ingestion_facts", trigger={"availableNow": True})
+    facts_table="ops.ingestion_facts", trigger={"availableNow": True}, bootstrap=True)
 query.awaitTermination()
 
 end = finalization.end_offset_from_progress(query.lastProgress)
@@ -89,7 +89,18 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 through `delta_sink`. With a facts table and a checkpoint that is a local or FUSE path
 (such as a Volume), per-partition network and read metrics land in the facts on their own
 (`<checkpoint>/_mssql_cdc_metrics`); with a URI checkpoint (`dbfs:/`, `abfss://`), add the
-`metricsPath` option. The same pipeline by hand, for another sink or more control:
+`metricsPath` option.
+
+`bootstrap=True` loads the whole table, not only what CDC retention still holds: the first
+run appends a snapshot of the source table to the target (operation 0, stamped with the
+`max_lsn` recorded before the read) and starts the checkpoint from that LSN. Later runs find
+the snapshot and read nothing again. A MERGE downstream that keeps the latest image per key
+absorbs the overlap between snapshot and stream
+([ADR 0016](docs/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)).
+`stream(spark, options).snapshot(target)` does the snapshot alone and returns the offset;
+`spark.read.format("mssql_cdc_snapshot")` reads it for another sink.
+
+The same pipeline by hand, for another sink or more control:
 
 ```python
 from mssql_cdc import register, finalization
@@ -123,13 +134,14 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 | `columns` | inferred | DDL of the captured columns to read. Inferred with `sys.sp_cdc_get_captured_columns` when omitted; required for `backend=fake` |
 | `connectionString` | required | `mssql-python` / ODBC 18 connection string |
 | `backend` | `mssql-python` | `mssql-python`, `arrow-odbc`, or `fake` (tests) |
-| `startingLsn` | `earliest` | `earliest`, `latest`, or an LSN (`0x...`), treated as already processed |
+| `startingLsn` | `earliest` | `earliest`, `latest`, or an LSN (`0x...`), treated as already processed. `to_delta(bootstrap=True)` sets it to the snapshot's LSN |
 | `maxCommitsPerBatch` | unlimited | commits (from `cdc.lsn_time_mapping`) per micro-batch |
-| `numPartitions` | `auto` | split each batch into commit-aligned LSN ranges, one connection each. `auto`: the cores of the session that called `register()` (`defaultParallelism`), else the driver's CPU count; set a number to cap the load on the source |
+| `numPartitions` | `auto` | split each batch into commit-aligned LSN ranges (a snapshot: into ranges of an integer key), one connection each. `auto`: the cores of the session that called `register()` (`defaultParallelism`), else the driver's CPU count; set a number to cap the load on the source |
 | `sourceTimeZone` | `auto` | Windows time zone name of the server clock (e.g. `E. South America Standard Time`), used to convert commit times to UTC. `auto` reads `CURRENT_TIMEZONE_ID()` (SQL Server 2022+, Azure SQL); on older versions it applies the server's current UTC offset (`SYSDATETIMEOFFSET()`), exact for zones without daylight saving; elsewhere, set the zone name |
 | `failOnDataLoss` | `true` | raise when CDC cleanup purged the next range |
 | `includeCommandId` | `true` | read `__$command_id` (ordering within a transaction) |
 | `arrowBatchSize` | `10000` | rows per Arrow batch fetched from the driver |
+| `snapshotLsn` | `max_lsn` before the read | `mssql_cdc_snapshot` only: the LSN stamped on the snapshot rows |
 | `metricsPath` | none (`stream()`: `<checkpoint>/_mssql_cdc_metrics` for local/FUSE checkpoints) | directory (local, or FUSE such as a Volume) where each partition leaves its round trip, read time, MB and network wait for `delta_sink(metrics_path=...)` to fold into the facts |
 
 ### Output schema
@@ -141,11 +153,12 @@ Captured columns (inferred, or as given in `columns`), plus:
 | `_capture_instance` | string | option |
 | `_start_lsn` | string | `__$start_lsn`, commit LSN as `0x` + 20 hex |
 | `_seqval` | string | `__$seqval` |
-| `_operation` | int | 1 delete, 2 insert, 3 update (before), 4 update (after) |
+| `_operation` | int | 1 delete, 2 insert, 3 update (before), 4 update (after); 0 snapshot row |
 | `_command_id` | int | `__$command_id` |
 | `_commit_ts` | timestamp_ntz | `cdc.lsn_time_mapping.tran_end_time`, in UTC |
 
-Order changes with `(_start_lsn, _command_id, _seqval, _operation)`.
+Order changes with `(_start_lsn, _command_id, _seqval, _operation)`. Snapshot rows have
+`_seqval` and `_command_id` NULL and share one `_start_lsn`, below every change read after them.
 
 ### Permissions
 

@@ -36,25 +36,36 @@ from .tables import is_path
 BRONZE_COMMENT = (
     "Append-only change rows from SQL Server CDC, written by mssql-cdc-pyspark's delta_sink. "
     "One row per change: an update is two rows (operation 3, the row before; 4, the row after). "
-    "Order changes by (_start_lsn, _command_id, _seqval, _operation)."
+    "Order changes by (_start_lsn, _command_id, _seqval, _operation). Rows with operation 0 "
+    "are a snapshot of the source table, all at one _start_lsn that precedes the changes read "
+    "after it."
 )
 BRONZE_COLUMN_COMMENTS = {
     "_capture_instance": "CDC capture instance the change came from, e.g. dbo_orders.",
     "_start_lsn": (
         "Commit LSN of the source transaction (__$start_lsn) as 0x + 20 uppercase hex. "
-        "All changes of one transaction share it; string order is commit order."),
+        "All changes of one transaction share it; string order is commit order. On snapshot "
+        "rows, the LSN recorded before the table was read: the row is at least that recent."),
     "_seqval": (
         "Position of the change in the transaction log (__$seqval), 0x + 20 hex. "
-        "Tie-breaker only: order by _command_id first."),
+        "Tie-breaker only: order by _command_id first. NULL on snapshot rows."),
     "_operation": (
         "What happened to the row: 1 = delete, 2 = insert, 3 = update (row before), "
-        "4 = update (row after)."),
-    "_command_id": "Order of the statement within its transaction (__$command_id).",
-    "_commit_ts": "Commit time of the source transaction, UTC (from cdc.lsn_time_mapping).",
+        "4 = update (row after), 0 = snapshot (the row as read from the source table)."),
+    "_command_id": (
+        "Order of the statement within its transaction (__$command_id). NULL on snapshot rows."),
+    "_commit_ts": (
+        "Commit time of the source transaction, UTC (from cdc.lsn_time_mapping); on snapshot "
+        "rows, the commit time of their _start_lsn."),
     "_batch_id": (
         "Micro-batch that wrote the row; with the sink's app_id, the key of its row in the "
-        "ingestion facts table."),
+        "ingestion facts table. NULL on snapshot rows."),
 }
+
+
+def bronze_columns(df: DataFrame) -> list[tuple]:
+    """The bronze table's creation columns: ``df``'s fields with their comments."""
+    return [(f.name, f.dataType, BRONZE_COLUMN_COMMENTS.get(f.name)) for f in df.schema]
 
 FACTS_COMMENT = (
     "One row per non-empty micro-batch written by mssql-cdc-pyspark's delta_sink: what was "
@@ -185,9 +196,8 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None,
                 return
             facts.update({"batch_id": batch_id, "app_id": app_id})
             spark = df.sparkSession
-            out = df.withColumn("_batch_id", F.lit(batch_id))
-            ensure(spark, target, "bronze", [(f.name, f.dataType, BRONZE_COLUMN_COMMENTS.get(f.name))
-                                             for f in out.schema], BRONZE_COMMENT)
+            out = df.withColumn("_batch_id", F.lit(batch_id).cast("int"))
+            ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
             _write(out, target, app_id, batch_id, _json(facts))
             if facts_table:
                 duration_ms = round((time.monotonic() - t0) * 1000)

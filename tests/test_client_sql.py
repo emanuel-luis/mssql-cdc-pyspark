@@ -232,3 +232,41 @@ def test_split_points_tile_the_change_rows_of_the_capture_instance():
     sql, params = rec.calls[-1]
     assert "NTILE(4) OVER (ORDER BY __$start_lsn)" in sql and "FROM cdc.[dbo_orders_CT]" in sql
     assert "lsn_time_mapping" not in sql and params == ("0x01", "0x02")
+
+
+def test_snapshot_queries():
+    class Help(Recorder):
+        def batches(self, sql, params, batch_size):
+            self.calls.append((sql, tuple(params)))
+            if "sp_cdc_help_change_data_capture" in sql:
+                return iter([pa.RecordBatch.from_pylist([
+                    {"capture_instance": "dbo_other", "source_schema": "dbo", "source_table": "other",
+                     "index_column_list": None, "start_lsn": None},
+                    {"capture_instance": "dbo_orders", "source_schema": "sales", "source_table": "orders",
+                     "index_column_list": "[order_id], [line]", "start_lsn": "0x0000002a000001000001"}])])
+            return iter(())
+
+    rec = Help()
+    client = SqlCdcClient(rec)
+    assert client.source_table("dbo_orders") == (
+        "sales", "orders", ["order_id", "line"], "0x0000002A000001000001")
+    assert rec.calls[-1] == ("EXEC sys.sp_cdc_help_change_data_capture", ())
+    with pytest.raises(ValueError, match="not found"):
+        client.source_table("dbo_missing")
+
+    assert client.key_range("sales", "orders", "order_id") == (None, None)  # empty table
+    assert rec.calls[-1][0] == ("SELECT (SELECT MIN([order_id]) FROM [sales].[orders]) AS lo, "
+                                "(SELECT MAX([order_id]) FROM [sales].[orders]) AS hi")
+
+    def where(lo, hi, key="order_id"):
+        list(client.iter_table("sales", "orders", ["order_id", "status"], key, lo, hi, 100))
+        return rec.calls[-1][0].removeprefix("SELECT [order_id], [status] FROM [sales].[orders]")
+
+    assert where(None, None) == "" and where(1, 2, key=None) == ""
+    assert where(None, 10) == " WHERE ([order_id] < 10 OR [order_id] IS NULL)"
+    assert where(10, 20) == " WHERE [order_id] >= 10 AND [order_id] < 20"
+    assert where(20, None) == " WHERE [order_id] >= 20"
+    with pytest.raises(ValueError):
+        where("1; DROP TABLE x", None)
+    with pytest.raises(ValueError):
+        where(None, None, key="a]; DROP TABLE x --")

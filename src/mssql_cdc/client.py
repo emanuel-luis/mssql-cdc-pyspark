@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from typing import Iterator, Sequence
+from typing import Iterator, NamedTuple, Sequence
 
 import pyarrow as pa
 
@@ -29,6 +29,15 @@ _TZ_RE = re.compile(r"^[A-Za-z0-9 ._+\-/()]+$")
 
 class DataLossError(RuntimeError):
     """Raised when requested change data was already purged by CDC cleanup."""
+
+
+class SourceTable(NamedTuple):
+    """The table a capture instance tracks (``sys.sp_cdc_help_change_data_capture``)."""
+
+    schema: str
+    table: str
+    keys: list[str]  # columns of the unique index CDC identifies rows by; [] without one
+    start_lsn: str | None  # the instance's low endpoint; known before capture reaches it
 
 
 def _check_ident(name: str, what: str) -> str:
@@ -127,6 +136,29 @@ class CdcClient(ABC):
         batch_size: int,
     ) -> Iterator[pa.RecordBatch]:
         """Changes in the closed interval [from_lsn, to_lsn], in commit order."""
+
+    # -- snapshot of the tracked table (ADR 0016) ------------------------------
+    @abstractmethod
+    def source_table(self, capture_instance: str) -> SourceTable:
+        """The table ``capture_instance`` tracks, its key and the instance's first LSN."""
+
+    @abstractmethod
+    def key_range(self, schema: str, table: str, key: str) -> tuple:
+        """(MIN, MAX) of ``key`` in the table; (None, None) when it is empty."""
+
+    @abstractmethod
+    def iter_table(
+        self,
+        schema: str,
+        table: str,
+        columns: Sequence[str],
+        key: str | None,
+        lo: int | None,
+        hi: int | None,
+        batch_size: int,
+    ) -> Iterator[pa.RecordBatch]:
+        """Current rows of the table (``columns`` only) with ``lo <= key < hi``. A None bound
+        is open; the range open below (``lo`` None) also holds the rows whose key is NULL."""
 
     def captured_columns(self, capture_instance: str) -> str:
         """Spark DDL of the captured columns, in capture order."""
@@ -445,6 +477,48 @@ class SqlCdcClient(CdcClient):
             f"ORDER BY c.[__$start_lsn], {cmd_order}c.[__$seqval], c.[__$operation]"
         )
         yield from self._change_table_batches(ci, sql, (from_lsn, to_lsn), batch_size)
+
+    # -- snapshot (ADR 0016) ----------------------------------------------------
+    def source_table(self, capture_instance):
+        # The documented API, not cdc.change_tables (invariant 11). Called without
+        # arguments it lists the capture instances whose captured columns the login can
+        # SELECT, which the query functions already require.
+        ci = _check_ident(capture_instance, "capture instance")
+        rows = [r for batch in self._b.batches("EXEC sys.sp_cdc_help_change_data_capture", (), 1000)
+                for r in batch.to_pylist() if r["capture_instance"] == ci]
+        if not rows:
+            raise ValueError(
+                f"Capture instance {ci!r} not found, or the login lacks SELECT on its source "
+                "columns (or membership in its gating role).")
+        r = rows[0]
+        keys = re.findall(r"\[([^\]]+)\]", r["index_column_list"] or "")  # "[a], [b]"
+        return SourceTable(_check_column(r["source_schema"]), _check_column(r["source_table"]),
+                           [_check_column(k) for k in keys], self._hex(r["start_lsn"]))
+
+    def key_range(self, schema, table, key):
+        t, k = f"[{_check_column(schema)}].[{_check_column(table)}]", f"[{_check_column(key)}]"
+        # two scalar subqueries: each is one seek on an index led by the key
+        for batch in self._b.batches(
+                f"SELECT (SELECT MIN({k}) FROM {t}) AS lo, (SELECT MAX({k}) FROM {t}) AS hi", (), 1):
+            if batch.num_rows:
+                row = batch.to_pylist()[0]
+                return row["lo"], row["hi"]
+        return None, None
+
+    def iter_table(self, schema, table, columns, key, lo, hi, batch_size):
+        # READ COMMITTED, never NOLOCK: a dirty read can keep a row that a rollback then
+        # removes, and no change row would ever correct it downstream.
+        cols = ", ".join(f"[{_check_column(c)}]" for c in columns)
+        where = []
+        if key is not None:
+            k = f"[{_check_column(key)}]"
+            if lo is not None:
+                where.append(f"{k} >= {int(lo)}")
+            if hi is not None:
+                where.append(f"({k} < {int(hi)} OR {k} IS NULL)" if lo is None else f"{k} < {int(hi)}")
+        sql = (f"SELECT {cols} FROM [{_check_column(schema)}].[{_check_column(table)}]"
+               + (" WHERE " + " AND ".join(where) if where else ""))
+        yield from self._b.batches(sql, (), batch_size)
 
     def _change_table_batches(self, ci: str, sql: str, params, batch_size: int):
         """Batches of a query on cdc.[<ci>_CT]; a denied read names the grant it needs."""

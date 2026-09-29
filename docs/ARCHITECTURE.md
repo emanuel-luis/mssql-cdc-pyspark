@@ -7,6 +7,7 @@ flowchart TB
   subgraph src/mssql_cdc
     DS[source.MssqlCdcDataSource<br/>schema, streamReader]
     RD[source.MssqlCdcStreamReader<br/>offsets, partitions, read]
+    SN[source.MssqlCdcSnapshotReader<br/>key ranges, read]
     CL[client.CdcClient]
     SQL[client.SqlCdcClient<br/>T-SQL]
     BE1[MssqlPythonBackend<br/>cursor.arrow_batch]
@@ -16,14 +17,17 @@ flowchart TB
     FN[finalization<br/>advance / is_final]
   end
   DS --> RD --> CL
+  DS --> SN --> CL
   CL --> SQL --> BE1 & BE2
   CL --> FK
   RD -. micro-batches .-> SK
+  SN -. bootstrap .-> SK
   SK -. after commit .-> FN
 ```
 
 * **Source**: Spark Python DataSource V2 (`pyspark.sql.datasource`). One stream per
-  capture instance.
+  capture instance. `mssql_cdc_snapshot` is its batch sibling: the tracked table's current
+  rows in the same schema, stamped with one LSN, for the initial load (ADR 0016).
 * **Client**: the only code that knows T-SQL. The reader depends on the `CdcClient`
   interface, so the fake can replace SQL Server in tests.
 * **Backends**: turn a query into Arrow record batches. Interchangeable because every
@@ -39,6 +43,7 @@ flowchart TB
 | `DataSource.schema()` | driver-side Python worker | returns a DDL string; no JVM access |
 | `initialOffset`, `latestOffset`, `getDefaultReadLimit`, `prepareForTriggerAvailableNow`, `reportLatestOffset`, `partitions`, `commit` | one long-lived driver-side Python worker per query | may keep state (`_target`, cached client) |
 | `read(partition)` | executor Python workers, one call per partition | stateless; opens its own connection; the reader is pickled without `_client` |
+| snapshot `partitions()` | driver-side Python worker, once per read | records the snapshot LSN unless `snapshotLsn` is set; each `KeyRange` carries the LSN, commit time, table and key bounds, so `read` needs no planning state |
 
 ## One micro-batch
 
@@ -91,7 +96,8 @@ sequenceDiagram
 
 Metadata columns `_capture_instance, _start_lsn, _seqval, _operation, _command_id,
 _commit_ts`, then the captured columns. The ordering key for applying changes is
-`(_start_lsn, _command_id, _seqval, _operation)`.
+`(_start_lsn, _command_id, _seqval, _operation)`. Snapshot rows have `_operation = 0`, the
+snapshot's LSN as `_start_lsn` and NULL `_seqval` and `_command_id`.
 
 Captured columns come from the `columns` option (DDL) or, when it is omitted, from CDC
 metadata at `load()` time on the driver: `sys.sp_cdc_get_captured_columns`, sorted by

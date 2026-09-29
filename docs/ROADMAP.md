@@ -12,12 +12,15 @@
 
 ## v0.2: production concerns
 
-- [ ] **Initial snapshot / bootstrap**: record `max_lsn`, snapshot the table
-      (`spark.read` over JDBC or the same backend), start the stream at that LSN.
+- [x] **Initial snapshot / bootstrap**: record `max_lsn`, snapshot the table through the
+      same backend, start the stream at that LSN (ADR 0016).
+- [ ] Snapshot partitions for composite or non-integer keys, and NTILE tiles for sparse
+      ones (today: uniform ranges of an integer leading key, else one partition).
 - [ ] **Schema changes**: detect `cdc.ddl_history`; support switching to a second
       capture instance without losing changes.
 - [ ] **Silver helper**: apply changes to a target with MERGE, latest image per key by
-      `(_start_lsn, _command_id, _seqval, _operation)`, deletes honoured; propagate
+      `(_start_lsn, _command_id, _seqval, _operation)`, deletes honoured, operation 0
+      (snapshot) as an upsert, rebuild from the newest snapshot after a re-snapshot; propagate
       `finalized_until`.
 - [ ] **Continuous mode finalization**: `StreamingQueryListener` that advances the
       verdict on progress (check it does not block the listener bus).

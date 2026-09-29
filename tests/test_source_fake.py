@@ -189,10 +189,12 @@ def test_register_carries_the_session_cores_to_the_workers():
                 cls.registered.append(source)
 
     mssql_cdc.register(StubSpark)
-    source = StubSpark.dataSource.registered[-1]
-    assert issubclass(source, MssqlCdcDataSource) and source.name() == "mssql_cdc"
-    # the data source plans in a Python worker: the value must survive the pickling
-    assert cloudpickle.loads(cloudpickle.dumps(source)).default_num_partitions == 7
+    sources = StubSpark.dataSource.registered
+    assert [s.name() for s in sources] == ["mssql_cdc", "mssql_cdc_snapshot"]
+    for source in sources:
+        assert issubclass(source, MssqlCdcDataSource)
+        # the data source plans in a Python worker: the value must survive the pickling
+        assert cloudpickle.loads(cloudpickle.dumps(source)).default_num_partitions == 7
 
 
 def test_num_partitions_precedence():
@@ -244,3 +246,32 @@ def test_partitions_hold_the_same_rows_even_when_commits_differ_in_size(workdir)
     sizes = [sum(b.num_rows for b in client.iter_changes(CI, r.from_lsn, r.to_lsn, [], False, 100))
              for r in ranges]
     assert sizes == [8, 8]  # by commits it would be 5 commits / 5 rows and 4 commits / 11 rows
+
+
+def test_snapshot_reads_the_current_rows_in_key_ranges(spark, workdir):
+    from pyspark.sql.types import IntegerType, StringType, StructField, StructType
+
+    from mssql_cdc.fake import FakeCdcClient
+    from mssql_cdc.source import MssqlCdcSnapshotReader
+
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: "order_id"})
+    for i in range(10):
+        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+    db.commit(CI, [(3, {"order_id": 3, "status": "new"}), (4, {"order_id": 3, "status": "paid"})])
+    db.commit(CI, [(1, {"order_id": 5, "status": "new"})])
+    db.commit(CI, [(2, {"order_id": None, "status": "no key"})])  # a unique index allows one NULL
+    at = db.idle(at=T0 + timedelta(hours=1))
+    opts = {"backend": "fake", "fakePath": src, "captureInstance": CI,
+            "columns": "order_id INT, status STRING", "numPartitions": "4"}
+
+    schema = StructType([StructField("order_id", IntegerType()), StructField("status", StringType())])
+    ranges = MssqlCdcSnapshotReader(opts, schema).partitions()
+    assert [(r.lo, r.hi) for r in ranges] == [(None, 2), (2, 5), (5, 7), (7, None)]  # keys 0..9
+
+    rows = spark.read.format("mssql_cdc_snapshot").options(**opts).load().collect()
+    assert sorted(((r["order_id"], r["status"]) for r in rows), key=str) == sorted(
+        [(i, "paid" if i == 3 else "new") for i in range(10) if i != 5] + [(None, "no key")], key=str)
+    assert {(r["_operation"], r["_start_lsn"], r["_seqval"], r["_command_id"]) for r in rows} == {
+        (0, at, None, None)}
+    assert {r["_commit_ts"] for r in rows} == {datetime.fromisoformat(FakeCdcClient(src).lsn_to_time(at))}

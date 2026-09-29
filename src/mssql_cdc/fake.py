@@ -6,7 +6,9 @@ It reproduces the parts of CDC the data source relies on:
   "dummy" entries written while the database is idle;
 * per-capture-instance change rows ordered by commit LSN;
 * a per-instance low watermark (``sys.fn_cdc_get_min_lsn``) that cleanup moves
-  before it deletes the change rows below it.
+  before it deletes the change rows below it;
+* for instances given a key column, the source table's current rows, which a snapshot
+  reads and cleanup does not touch.
 
 State lives in plain files so that the Spark driver and every executor process
 see the same data (Python workers are separate processes, even locally).
@@ -22,10 +24,11 @@ from typing import Iterable, Iterator, Sequence
 import pyarrow as pa
 
 from . import lsn as _lsn
-from .client import CdcClient
+from .client import CdcClient, SourceTable
 
 _MAPPING = "lsn_time_mapping.jsonl"
 _MIN = "min_lsn.json"
+_KEYS = "keys.json"
 
 
 def _read_jsonl(path: str) -> list[dict]:
@@ -98,6 +101,41 @@ class FakeCdcClient(CdcClient):
             points.append(lsns[idx - 1])
         return points
 
+    def _keys(self) -> dict:
+        p = os.path.join(self.path, _KEYS)
+        if not os.path.exists(p):
+            return {}
+        with open(p, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def source_table(self, capture_instance):
+        start = self.min_lsn(capture_instance)  # not found -> ValueError, like the real one
+        key = self._keys().get(capture_instance)
+        return SourceTable("dbo", capture_instance, [key] if key else [], start)
+
+    def _table(self, table: str) -> list[dict]:
+        p = os.path.join(self.path, "tables", f"{table}.json")
+        if not os.path.exists(p):
+            return []
+        with open(p, encoding="utf-8") as fh:
+            return list(json.load(fh).values())
+
+    def key_range(self, schema, table, key):
+        keys = [r[key] for r in self._table(table) if r.get(key) is not None]
+        return (min(keys), max(keys)) if keys else (None, None)
+
+    def iter_table(self, schema, table, columns, key, lo, hi, batch_size):
+        def inside(row):
+            k = row.get(key) if key else None
+            if k is None:
+                return lo is None
+            return (lo is None or k >= lo) and (hi is None or k < hi)
+
+        rows = [r for r in self._table(table) if inside(r)]
+        for i in range(0, len(rows), batch_size):
+            chunk = rows[i : i + batch_size]
+            yield pa.RecordBatch.from_pydict({c: [r.get(c) for r in chunk] for c in columns})
+
     def iter_changes(self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size):
         times = {r["start_lsn"]: r["tran_end_time"] for r in self._mapping()}
         rows = [
@@ -126,9 +164,17 @@ class FakeCdcClient(CdcClient):
 class FakeCdcDatabase:
     """Writer side of the fake: simulates transactions, idle time and cleanup."""
 
-    def __init__(self, path: str, capture_instances: Iterable[str], start_lsn: int = 0x2A_0000_0100_0001):
+    def __init__(self, path: str, capture_instances: Iterable[str], start_lsn: int = 0x2A_0000_0100_0001,
+                 keys: dict[str, str] | None = None):
+        """``keys``: capture instance -> key column. Instances with a key also keep the source
+        table's current rows (what a snapshot reads), updated by every commit."""
         self.path = path
         os.makedirs(os.path.join(path, "changes"), exist_ok=True)
+        os.makedirs(os.path.join(path, "tables"), exist_ok=True)
+        if keys:
+            with open(os.path.join(path, _KEYS), "w", encoding="utf-8") as fh:
+                json.dump(keys, fh)
+        self._keys = FakeCdcClient(path)._keys()
         self._next = start_lsn
         existing = _read_jsonl(os.path.join(path, _MAPPING))
         if existing:
@@ -169,6 +215,20 @@ class FakeCdcDatabase:
                 },
             )
         self._append(_MAPPING, {"start_lsn": start, "tran_end_time": self._ts(at)})
+        key = self._keys.get(capture_instance)
+        if key:  # the source table: after-images replace, deletes remove, before-images do nothing
+            p = os.path.join(self.path, "tables", f"{capture_instance}.json")
+            table = {}
+            if os.path.exists(p):
+                with open(p, encoding="utf-8") as fh:
+                    table = json.load(fh)
+            for op, row in changes:
+                if op in (2, 4):
+                    table[str(row[key])] = row
+                elif op == 1:
+                    table.pop(str(row[key]), None)
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump(table, fh)
         return start
 
     def idle(self, at: datetime | None = None) -> str:
