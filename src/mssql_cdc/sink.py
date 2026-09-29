@@ -14,6 +14,9 @@
   (ADR 0017). The sink never connects to SQL Server itself.
   Metrics never fail a batch. ``mssql_cdc.stream()`` wires both ends from one set of
   options.
+* Snapshots are facts too: ``write_event()`` records the bootstrap and every re-snapshot
+  after data loss as one row with ``event`` set and no ``batch_id`` (ADR 0018), idempotent
+  the same way.
 * Both tables are created on the first batch with the ``DeltaTable`` builder, with a
   comment on every metadata/facts column; existing ones get pending schema migrations
   (``mssql_cdc.migrations``).
@@ -31,7 +34,7 @@ from datetime import datetime, timezone
 from pyspark.sql import DataFrame, functions as F
 
 from . import migrations
-from .migrations.facts import NETWORK_COLUMNS, RETENTION_COLUMNS
+from .migrations.facts import EVENT_COLUMNS, NETWORK_COLUMNS, RETENTION_COLUMNS
 from .tables import is_path
 
 BRONZE_COMMENT = (
@@ -71,7 +74,9 @@ def bronze_columns(df: DataFrame) -> list[tuple]:
 FACTS_COMMENT = (
     "One row per non-empty micro-batch written by mssql-cdc-pyspark's delta_sink: what was "
     "written (counts, LSN and commit-time ranges) and how long it took. The same facts are in "
-    "each target commit's userMetadata, which Delta log cleanup eventually drops."
+    "each target commit's userMetadata, which Delta log cleanup eventually drops. Each "
+    "snapshot stream().to_delta takes (bootstrap or re-snapshot) adds one row, with event set "
+    "(see its comment)."
 )
 FACTS_COLUMNS = [
     ("app_id", "STRING", (
@@ -99,6 +104,7 @@ FACTS_COLUMNS = [
         "not included.")),
     *NETWORK_COLUMNS,
     *RETENTION_COLUMNS,
+    *EVENT_COLUMNS,
     ("target", "STRING", "Table name or path the batch was written to."),
     ("written_at", "TIMESTAMP_NTZ", "When this facts row was written, after the target commit, UTC."),
 ]
@@ -220,7 +226,8 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None,
                              **_headroom(folded.get("retention_watermark_ts"), facts["max_commit_ts"]),
                              target=target, written_at=_utc_now())
                 ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
-                facts_df = spark.createDataFrame([tuple(facts[k] for k in _FACT_FIELDS)], FACTS_SCHEMA)
+                facts_df = spark.createDataFrame([tuple(facts.get(k) for k in _FACT_FIELDS)],
+                                                 FACTS_SCHEMA)  # event columns stay NULL
                 _write(facts_df, facts_table, f"{app_id}#facts", batch_id)
                 for name in files:  # folded into this batch's facts; a replay rewrites them
                     try:
@@ -231,3 +238,26 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None,
             df.unpersist()
 
     return write_batch
+
+
+def write_event(spark, facts_table: str, event: str, *, app_id: str, txn_app_id: str, version: int,
+                target: str, lsn: str, commit_ts: str, rows: int | None = None,
+                started_at: datetime | None = None, duration_ms: int | None = None,
+                lost_from_ts: datetime | None = None, lost_to_ts: datetime | None = None,
+                retention_watermark_ts: datetime | None = None) -> None:
+    """Record a snapshot (``event`` 'bootstrap' or 'resnapshot') as one facts row.
+
+    The row has no ``batch_id``; ``lsn`` and ``commit_ts`` are the snapshot's offset.
+    Idempotent like the batch rows: a rerun with the same ``txn_app_id`` and ``version``
+    is skipped by Delta.
+    """
+    ts = datetime.fromisoformat(commit_ts) if commit_ts else None
+    facts = {"app_id": app_id, "batch_id": None, "rows": rows, "min_lsn": lsn, "max_lsn": lsn,
+             "min_commit_ts": ts, "max_commit_ts": ts, "deletes": 0, "inserts": 0, "updates": 0,
+             "started_at": started_at, "duration_ms": duration_ms,
+             **_headroom(retention_watermark_ts, ts),
+             "event": event, "lost_from_ts": lost_from_ts, "lost_to_ts": lost_to_ts,
+             "target": target, "written_at": _utc_now()}
+    migrations.ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
+    df = spark.createDataFrame([tuple(facts.get(k) for k in _FACT_FIELDS)], FACTS_SCHEMA)
+    _write(df, facts_table, txn_app_id, version)

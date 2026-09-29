@@ -14,6 +14,8 @@
 
 - [x] **Initial snapshot / bootstrap**: record `max_lsn`, snapshot the table through the
       same backend, start the stream at that LSN (ADR 0016).
+- [x] **Automatic re-snapshot after data loss**: `to_delta(on_data_loss="resnapshot")`,
+      checkpoint generations, loss events in the facts, at most one per interval (ADR 0018).
 - [ ] Snapshot partitions for composite or non-integer keys, and NTILE tiles for sparse
       ones (today: uniform ranges of an integer leading key, else one partition).
 - [ ] **Schema changes**: detect `cdc.ddl_history`; support switching to a second

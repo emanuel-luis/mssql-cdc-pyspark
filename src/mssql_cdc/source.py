@@ -334,9 +334,12 @@ def snapshot_lsn(client, source) -> str:
     the downstream MERGE absorbs the overlap. A capture instance that capture has not reached
     yet (``max_lsn`` below its first LSN: a quiet database, just after the enable) starts
     the stream at its first LSN instead; ``fn_cdc_get_min_lsn`` is NULL until then, the
-    instance's ``start_lsn`` in ``source`` (a ``SourceTable``) is not.
+    instance's ``start_lsn`` in ``source`` (a ``SourceTable``) is not. ``max_lsn`` itself is
+    NULL on a database capture has not written to yet.
     """
-    max_lsn = client.max_lsn()
+    from .lsn import ZERO_LSN
+
+    max_lsn = client.max_lsn() or ZERO_LSN
     if source.start_lsn is None:
         return max_lsn  # no low endpoint yet; the stream's retention guard still checks it
     return max(max_lsn, client.decrement_lsn(source.start_lsn))

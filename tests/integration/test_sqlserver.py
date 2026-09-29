@@ -271,9 +271,8 @@ def test_stream_facade_records_network_metrics_from_a_real_server(delta_spark, s
     assert row["retention_watermark_ts"] <= row["max_commit_ts"] and row["retention_headroom_hours"] >= 0
 
 
-def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(delta_spark, sqlserver, workdir):
-    from pyspark.sql import Window, functions as F
-
+def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(
+        delta_spark, sqlserver, workdir, latest):
     from mssql_cdc import stream
 
     # rows written before CDC was enabled exist only in the table: only a snapshot has them
@@ -283,7 +282,8 @@ def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(de
                   "@role_name = NULL, @supports_net_changes = 0")
     ci = "dbo_boot"
     # No wait for capture: on a quiet database max_lsn stays below the new instance's first
-    # LSN (and fn_cdc_get_min_lsn returns NULL) for up to ~5 minutes; the snapshot does not need it.
+    # LSN (and fn_cdc_get_min_lsn returns NULL) for up to ~5 minutes, and on a database capture
+    # has never written to max_lsn is NULL too (run this test alone); the snapshot needs neither.
     conn = sqlserver.login("boot_reader", "GRANT SELECT ON dbo.boot TO boot_reader",
                            "GRANT SELECT ON cdc.dbo_boot_CT TO boot_reader")
     options = {"connectionString": conn, "captureInstance": ci, "numPartitions": "3"}
@@ -310,11 +310,40 @@ def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(de
     sqlserver.wait_for_changes(ci, 4)
     second = run()
     assert second.where("_operation = 0").count() == 6 and second.count() == 10
+    assert latest(second, "id", "v") == sorted((r[0], r[1]) for r in sqlserver.run("SELECT id, v FROM dbo.boot"))
 
-    last = Window.partitionBy("id").orderBy(
-        F.col("_start_lsn").desc(), F.col("_command_id").desc_nulls_last(),
-        F.col("_seqval").desc_nulls_last(), F.col("_operation").desc())
-    latest = (second.where("_operation != 3").withColumn("n", F.row_number().over(last))
-              .where("n = 1 AND _operation != 1").collect())
-    assert sorted((r["id"], r["v"]) for r in latest) == sorted(
-        (r[0], r[1]) for r in sqlserver.run("SELECT id, v FROM dbo.boot"))
+
+def test_resnapshot_recovers_a_stream_whose_changes_were_purged(delta_spark, sqlserver, workdir, latest):
+    from mssql_cdc import stream
+
+    ci = sqlserver.cdc_table("resnap", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL")
+    sqlserver.run("INSERT INTO dbo.resnap SELECT n, 'old' FROM (VALUES (1),(2),(3)) t(n)")
+    sqlserver.wait_for_changes(ci, 3)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    options = {"connectionString": sqlserver.connection_string, "captureInstance": ci}
+
+    def run():
+        q = stream(delta_spark, options).to_delta(target, "resnap-v1", ckpt, facts,
+                                                  trigger={"availableNow": True}, bootstrap=True,
+                                                  on_data_loss="resnapshot")
+        q.awaitTermination()
+        return delta_spark.read.format("delta").load(target)
+
+    run()  # the bootstrap snapshot
+    sqlserver.run("INSERT INTO dbo.resnap VALUES (4, 'new')")
+    sqlserver.wait_for_changes(ci, 4)
+    run()  # the checkpoint is now at that commit
+    sqlserver.run("UPDATE dbo.resnap SET v = 'new' WHERE id = 1")
+    sqlserver.run("DELETE FROM dbo.resnap WHERE id = 2")
+    sqlserver.wait_for_changes(ci, 7)
+    sqlserver.run("DECLARE @lw binary(10) = sys.fn_cdc_get_max_lsn(); "
+                  "EXEC sys.sp_cdc_cleanup_change_table @capture_instance = ?, "
+                  "@low_water_mark = @lw, @threshold = 5000", (ci,))
+
+    bronze = run()  # detects the purge, re-snapshots, starts generation 1
+    assert bronze.where("_operation = 0").select("_start_lsn").distinct().count() == 2
+    # id 2's delete was purged unread: only a rebuild from the newest snapshot drops it
+    assert latest(bronze, "id", "v") == sorted((r[0], r[1]) for r in sqlserver.run("SELECT id, v FROM dbo.resnap"))
+    [event] = delta_spark.read.format("delta").load(facts).where("event = 'resnapshot'").collect()
+    assert event["app_id"] == "resnap-v1.g1" and event["rows"] == 3
+    assert event["lost_from_ts"] <= event["lost_to_ts"]

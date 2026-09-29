@@ -61,3 +61,27 @@ def workdir():
     path = tempfile.mkdtemp(prefix="mssql-cdc-")
     yield path
     shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def latest():
+    """``latest(df, key, value, facts=None)``: sorted (key, value) of the latest image per key
+    in a bronze DataFrame, as a MERGE downstream applies it, rebuilt from the newest snapshot
+    on: a re-snapshot leaves no delete row for the gap (ADR 0016). With ``facts``, a newer
+    snapshot event counts too: an empty table's snapshot has no rows (ADR 0018)."""
+    from pyspark.sql import Window, functions as F
+
+    def rebuild(df, key, value, facts=None):
+        points = [df.where("_operation = 0").agg(F.max("_start_lsn")).first()[0]]
+        if facts is not None:
+            points.append(facts.where("event IS NOT NULL").agg(F.max("max_lsn")).first()[0])
+        since = max(p for p in points if p)
+        last = Window.partitionBy(key).orderBy(
+            F.col("_start_lsn").desc(), F.col("_command_id").desc_nulls_last(),
+            F.col("_seqval").desc_nulls_last(), F.col("_operation").desc())
+        rows = (df.where((F.col("_start_lsn") >= since) & (F.col("_operation") != 3))
+                .withColumn("n", F.row_number().over(last)).where("n = 1 AND _operation != 1")
+                .collect())
+        return sorted((r[key], r[value]) for r in rows)
+
+    return rebuild

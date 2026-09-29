@@ -82,7 +82,8 @@ def test_tables_are_created_typed_and_commented(delta_spark, workdir):
     cols, description = _comments(spark, facts)
     assert description and cols["min_commit_ts"][0] == "timestamp_ntz"
     # every time is TIMESTAMP_NTZ in UTC, so differences never depend on the session time zone
-    assert {cols[c][0] for c in ("started_at", "written_at", "max_commit_ts")} == {"timestamp_ntz"}
+    assert {cols[c][0] for c in ("started_at", "written_at", "max_commit_ts", "lost_from_ts",
+                                 "lost_to_ts")} == {"timestamp_ntz"}
     assert all(comment for _, comment in cols.values())
     cols, description = _comments(spark, target)
     assert description and cols["_start_lsn"][1] and cols["_operation"][1]
@@ -94,17 +95,17 @@ def test_tables_are_created_typed_and_commented(delta_spark, workdir):
         assert props["mssql_cdc.schema_version"] == str(migrations.current_version(kind))
 
 
-def test_facts_table_at_version_0_gains_the_network_and_retention_columns(delta_spark, workdir):
+def test_facts_table_at_version_0_gains_the_network_retention_and_event_columns(delta_spark, workdir):
     from mssql_cdc import migrations, tables
-    from mssql_cdc.migrations.facts import NETWORK_COLUMNS, RETENTION_COLUMNS
+    from mssql_cdc.migrations.facts import EVENT_COLUMNS, NETWORK_COLUMNS, RETENTION_COLUMNS
     from mssql_cdc.sink import FACTS_COLUMNS
 
     spark = delta_spark
     old = os.path.join(workdir, "facts_v0")
-    added = NETWORK_COLUMNS + RETENTION_COLUMNS
+    added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS
     v0 = [c for c in FACTS_COLUMNS if c not in added]  # the facts shape before migration 1
     tables.create_if_not_exists(spark, old, v0, properties={migrations.SCHEMA_VERSION_PROPERTY: "0"})
-    assert migrations.migrate(spark, old, "facts") == 2
+    assert migrations.migrate(spark, old, "facts") == 3
     fields = {f.name: f for f in spark.read.format("delta").load(old).schema}
     assert all(name in fields and fields[name].metadata.get("comment") for name, _, _ in added)
 
@@ -181,9 +182,16 @@ def test_replayed_batch_is_ignored(delta_spark, workdir):
     assert spark.read.format("delta").load(target).count() == 1
 
 
-def test_bootstrap_snapshots_once_and_the_stream_continues_from_it(delta_spark, workdir):
-    from pyspark.sql import Window, functions as F
+def _snapshots(df) -> int:
+    return df.where("_operation = 0").select("_start_lsn").distinct().count()
 
+
+def _generation(ckpt) -> dict:
+    with open(os.path.join(ckpt, "_mssql_cdc_generation.json"), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def test_bootstrap_snapshots_once_and_the_stream_continues_from_it(delta_spark, workdir, latest):
     from mssql_cdc import stream
 
     spark = delta_spark
@@ -212,13 +220,223 @@ def test_bootstrap_snapshots_once_and_the_stream_continues_from_it(delta_spark, 
     assert second.where("_operation = 0").count() == 5 and second.count() == 8
 
     # the latest image per key, as a MERGE downstream would apply it, is the source table now
-    last = Window.partitionBy("order_id").orderBy(
-        F.col("_start_lsn").desc(), F.col("_command_id").desc_nulls_last(),
-        F.col("_seqval").desc_nulls_last(), F.col("_operation").desc())
-    latest = (second.where("_operation != 3").withColumn("n", F.row_number().over(last))
-              .where("n = 1 AND _operation != 1").select("order_id", "status").collect())
-    assert sorted((r["order_id"], r["status"]) for r in latest) == [
+    assert latest(second, "order_id", "status") == [
         (0, "new"), (1, "paid"), (2, "new"), (3, "new"), (5, "new"), (9, "new")]
 
     with pytest.raises(ValueError, match="one or the other"):
         stream(spark, {**options, "startingLsn": "latest"}).to_delta(target, "x", ckpt, bootstrap=True)
+
+
+def _orders(workdir, n=3):
+    """A keyed fake with orders 0..n-1 inserted, and the stream options for it."""
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: "order_id"})
+    for i in range(n):
+        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+    return db, {"backend": "fake", "fakePath": src, "captureInstance": CI, "columns": COLUMNS}
+
+
+def test_data_loss_resnapshots_into_a_new_generation_once_per_interval(delta_spark, workdir, latest):
+    from mssql_cdc import DataLossError, stream
+
+    spark = delta_spark
+    db, options = _orders(workdir)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+
+    def run(**kw):  # the same job every time
+        kw = {"bootstrap": True, "on_data_loss": "resnapshot", **kw}
+        q = stream(spark, options).to_delta(target, "loss-v1", ckpt, facts, trigger={"availableNow": True},
+                                            **kw)
+        q.awaitTermination()
+        return spark.read.format("delta").load(target)
+
+    def events():
+        return (spark.read.format("delta").load(facts).where("event IS NOT NULL")
+                .orderBy("written_at").collect())
+
+    run()
+    [boot] = events()
+    assert (boot["event"], boot["app_id"], boot["batch_id"], boot["rows"]) == ("bootstrap", "loss-v1", None, 3)
+    assert boot["min_lsn"] == boot["max_lsn"] and boot["lost_from_ts"] is None
+    db.commit(CI, [(2, {"order_id": 3, "status": "new"})], at=T0 + timedelta(minutes=3))
+    run()  # the checkpoint's last processed commit is now T0 + 3 min
+    db.commit(CI, [(3, {"order_id": 1, "status": "new"}), (4, {"order_id": 1, "status": "paid"})],
+              at=T0 + timedelta(minutes=4))
+    db.commit(CI, [(1, {"order_id": 2, "status": "new"})], at=T0 + timedelta(minutes=5))
+    db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=7)))  # purged before the stream read them
+
+    bronze = run()
+    assert _generation(ckpt)["generation"] == 1 and _snapshots(bronze) == 2
+    _, resnap = events()
+    assert (resnap["event"], resnap["app_id"], resnap["batch_id"], resnap["rows"]) == (
+        "resnapshot", "loss-v1.g1", None, 3)
+    # the gap: from the last processed commit to the retention watermark at detection
+    assert (resnap["lost_from_ts"], resnap["lost_to_ts"]) == (T0 + timedelta(minutes=3),
+                                                             T0 + timedelta(minutes=7))
+    assert resnap["retention_watermark_ts"] == resnap["lost_to_ts"]
+    # a crash just before the state file: the rerun reuses the snapshot and the event row
+    os.remove(os.path.join(ckpt, "_mssql_cdc_generation.json"))
+    bronze = run()
+    assert _generation(ckpt)["generation"] == 1 and _snapshots(bronze) == 2 and len(events()) == 2
+
+    db.commit(CI, [(3, {"order_id": 0, "status": "new"}), (4, {"order_id": 0, "status": "paid"})],
+              at=T0 + timedelta(minutes=8))
+    db.commit(CI, [(1, {"order_id": 3, "status": "new"})], at=T0 + timedelta(minutes=9))
+    # no new loss: generation 1 carries on, no snapshot, no event; the state is read whatever
+    # on_data_loss says
+    bronze = run(on_data_loss="fail")
+    assert _snapshots(bronze) == 2 and len(events()) == 2
+    gen1 = os.path.join(ckpt, "_generations", "1")
+    assert os.listdir(os.path.join(gen1, "commits")) and os.path.isdir(os.path.join(gen1, "_mssql_cdc_metrics"))
+    batches = spark.read.format("delta").load(facts).where("batch_id IS NOT NULL").collect()
+    assert {(r["app_id"], r["event"]) for r in batches} == {("loss-v1", None), ("loss-v1.g1", None)}
+    # key 2, deleted during the gap, has no delete row: rebuilt from the newest snapshot it is gone
+    assert latest(bronze, "order_id", "status") == [(0, "paid"), (1, "paid")]  # the fake's table now
+
+    db.commit(CI, [(2, {"order_id": 7, "status": "new"})], at=T0 + timedelta(minutes=10))
+    db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=11)))
+    with pytest.raises(DataLossError, match="resnapshot_interval_days"):
+        run()  # a second loss within the interval needs a person, not another snapshot
+    assert _snapshots(spark.read.format("delta").load(target)) == 2
+    assert _generation(ckpt)["generation"] == 1
+
+    bronze = run(resnapshot_interval_days=0)  # the person decided: generation 2
+    assert _generation(ckpt)["generation"] == 2 and _snapshots(bronze) == 3
+    assert [(e["event"], e["app_id"]) for e in events()][2:] == [("resnapshot", "loss-v1.g2")]
+    assert latest(bronze, "order_id", "status") == [(0, "paid"), (1, "paid"), (7, "new")]
+
+
+def test_resnapshot_reuses_a_snapshot_taken_before_a_crash(delta_spark, workdir):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _orders(workdir)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+
+    def run():
+        q = stream(spark, options).to_delta(target, "crash-v1", ckpt, facts, trigger={"availableNow": True},
+                                            on_data_loss="resnapshot")
+        q.awaitTermination()
+        return spark.read.format("delta").load(target)
+
+    run()  # from earliest, no bootstrap
+    db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=3))
+    db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=4)))
+    taken = stream(spark, options).snapshot(target, resnapshot=True)  # then the job died
+    bronze = run()
+    assert bronze.where("_operation = 0").count() == 2  # that snapshot (orders 1, 2), no other
+    state = _generation(ckpt)
+    assert (state["generation"], state["snapshot_lsn"]) == (1, taken["lsn"])
+    [event] = spark.read.format("delta").load(facts).where("event = 'resnapshot'").collect()
+    assert event["app_id"] == "crash-v1.g1"
+    assert event["rows"] is None and event["duration_ms"] is None  # reused: nothing was read
+
+
+def test_a_resnapshot_purged_before_it_ends_counts_as_an_attempt(delta_spark, workdir, monkeypatch, latest):
+    from mssql_cdc import DataLossError, stream
+    from mssql_cdc.pipeline import CdcStream
+
+    spark = delta_spark
+    db, options = _orders(workdir)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+
+    def run(**kw):
+        q = stream(spark, options).to_delta(target, "slow-v1", ckpt, facts, trigger={"availableNow": True},
+                                            on_data_loss="resnapshot", **kw)
+        q.awaitTermination()
+        return spark.read.format("delta").load(target)
+
+    run()
+    db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=3))
+    db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=4)))
+    take = CdcStream._take_snapshot
+
+    def slow(self, target, ci):  # cleanup passes the snapshot's LSN while the table is read
+        taken = take(self, target, ci)
+        db.commit(CI, [(2, {"order_id": 5, "status": "new"})], at=T0 + timedelta(minutes=5))
+        db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=6)))
+        return taken
+
+    monkeypatch.setattr(CdcStream, "_take_snapshot", slow)
+    with pytest.raises(DataLossError, match="took longer"):
+        run()
+    monkeypatch.undo()
+    with pytest.raises(DataLossError, match="or a failed one"):
+        run()  # no second full read within the interval
+    assert _snapshots(spark.read.format("delta").load(target)) == 1
+    bronze = run(resnapshot_interval_days=0)  # the purged snapshot is not reused: a new one
+    assert _snapshots(bronze) == 2 and _generation(ckpt)["generation"] == 1
+    [event] = spark.read.format("delta").load(facts).where("event = 'resnapshot'").collect()
+    assert (event["app_id"], event["rows"]) == ("slow-v1.g1", 3)
+    assert latest(bronze, "order_id", "status") == [(1, "new"), (2, "new"), (5, "new")]
+
+
+def test_resnapshot_of_an_emptied_table_is_marked_by_its_event(delta_spark, workdir, monkeypatch, latest):
+    from mssql_cdc import stream
+    from mssql_cdc.fake import FakeCdcClient
+
+    spark = delta_spark
+    db, options = _orders(workdir)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+
+    def run():
+        q = stream(spark, options).to_delta(target, "empty-v1", ckpt, facts, trigger={"availableNow": True},
+                                            bootstrap=True, on_data_loss="resnapshot")
+        q.awaitTermination()
+        return spark.read.format("delta").load(target)
+
+    run()  # the bootstrap; nothing after it, so no batch is committed
+
+    def unset(self, ci):
+        raise ValueError("fn_cdc_get_min_lsn returned 0x00")  # capture has not run yet
+
+    monkeypatch.setattr(FakeCdcClient, "min_lsn", unset)
+    run()  # nothing to read, nothing to check: like the driver guard, min_lsn is not asked
+    monkeypatch.undo()
+    db.commit(CI, [(1, {"order_id": i, "status": "new"}) for i in range(3)], at=T0 + timedelta(minutes=5))
+    db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=6)))  # every row deleted, then purged
+    bronze = run()
+    assert _generation(ckpt)["generation"] == 1 and _snapshots(bronze) == 1  # no rows to write
+    fdf = spark.read.format("delta").load(facts)
+    [event] = fdf.where("event = 'resnapshot'").collect()
+    assert event["rows"] == 0 and event["max_lsn"] > bronze.agg({"_start_lsn": "max"}).first()[0]
+    assert latest(bronze, "order_id", "status", facts=fdf) == []  # the event is the rebuild point
+
+
+def test_resnapshot_recovers_a_stream_started_at_a_purged_lsn(delta_spark, workdir):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _orders(workdir)
+    given = db.idle(at=T0 + timedelta(minutes=3))
+    db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=4))
+    db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=5)))
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    q = stream(spark, {**options, "startingLsn": given}).to_delta(
+        target, "given-v1", ckpt, facts, trigger={"availableNow": True}, on_data_loss="resnapshot")
+    q.awaitTermination()  # recovered on the first run, before batch 0 could fail
+    assert _generation(ckpt)["generation"] == 1
+    assert spark.read.format("delta").load(target).where("_operation = 0").count() == 2
+
+
+def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
+    from mssql_cdc import stream
+    from mssql_cdc.pipeline import _last_offset
+
+    _, options = _orders(workdir, n=1)
+    cdc, target, ckpt = stream(spark, options), os.path.join(workdir, "bronze"), os.path.join(workdir, "ckpt")
+    with pytest.raises(ValueError, match="on_data_loss"):
+        cdc.to_delta(target, "x", ckpt, on_data_loss="skip")
+    # the generation state is a file, and the checkpoint is read from Python
+    for uri in ("abfss://c@a.dfs.core.windows.net/x", "/dbfs/ckpt/orders"):
+        with pytest.raises(ValueError, match="same directory"):
+            cdc.to_delta(target, "x", uri, "facts", on_data_loss="resnapshot")
+    with pytest.raises(ValueError, match="facts_table"):
+        cdc.to_delta(target, "x", ckpt, on_data_loss="resnapshot")
+    assert not spark.streams.active
+    for name in ("offsets", "commits"):
+        os.makedirs(os.path.join(ckpt, name))
+        with open(os.path.join(ckpt, name, "0"), "w", encoding="utf-8") as fh:
+            fh.write('v2\n{}\n{"lsn": "0x00000000000000000001"}\n')
+    with pytest.raises(ValueError, match="offset log version 'v2'"):
+        _last_offset(ckpt)

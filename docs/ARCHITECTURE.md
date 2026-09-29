@@ -92,6 +92,29 @@ sequenceDiagram
   deterministic for a range as long as CDC cleanup has not purged it; if it has, the
   guard fails the query.
 
+### Generations (`to_delta`)
+
+`to_delta` reads `<checkpoint>/_mssql_cdc_generation.json` on every call to find the live
+generation. Without the file it is generation 0: the checkpoint and `app_id` as given.
+
+```
+<checkpoint>/
+  offsets/ commits/ metadata ...   generation 0 (Spark's files)
+  _mssql_cdc_metrics/              generation 0 metrics (default metricsPath)
+  _mssql_cdc_generation.json       {"generation": n, "snapshot_lsn", "commit_ts", "at"},
+                                   plus "recovering" and "failed_at" while a recovery is open
+  _generations/<n>/                generation n: Spark checkpoint and metrics, app_id <app_id>.g<n>
+```
+
+With `on_data_loss="resnapshot"`, before starting the query it takes the last processed
+offset from the live checkpoint (line 3 of `offsets/<n>` for the highest committed `n`,
+Spark's offset log format `v1`) and, when `max_lsn` is past it, applies the driver guard's
+test. When the next range is purged it records that offset as `recovering`, snapshots the
+target, records a `'resnapshot'` facts row, writes the state file for `n + 1` (atomically;
+the commit point) and starts generation `n + 1` from the snapshot's LSN. At most one
+automatic re-snapshot, or failed one, per `resnapshot_interval_days`
+([ADR 0018](decisions/0018-automatic-resnapshot-after-data-loss.md)).
+
 ## Output schema
 
 Metadata columns `_capture_instance, _start_lsn, _seqval, _operation, _command_id,
@@ -127,7 +150,7 @@ backend has no type metadata and always needs `columns`.
 | Table | Grain | Written by | Notes |
 |---|---|---|---|
 | bronze (e.g. `bronze_orders`) | one row per change | `delta_sink` | append-only; `_batch_id` added; commit `userMetadata` holds the batch facts |
-| facts (optional) | one row per non-empty batch | `delta_sink` | durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write), `written_at`, and optional network and read metrics (`source_rtt_ms`, `read_seconds`, `read_mb`, `network_wait_ms`; [ADR 0014](decisions/0014-network-and-read-metrics-in-facts.md)) and retention headroom (`retention_watermark_ts`, `retention_headroom_hours`; [ADR 0017](decisions/0017-retention-headroom-in-facts.md)) |
+| facts (optional) | one row per non-empty batch, and one per snapshot `to_delta` takes (bootstrap or re-snapshot) | `delta_sink`, `write_event` | snapshot rows have `event` `'bootstrap'` or `'resnapshot'` (NULL for batches), no `batch_id`, and on a re-snapshot the purged gap in `lost_from_ts`/`lost_to_ts` ([ADR 0018](decisions/0018-automatic-resnapshot-after-data-loss.md)); durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write), `written_at`, and optional network and read metrics (`source_rtt_ms`, `read_seconds`, `read_mb`, `network_wait_ms`; [ADR 0014](decisions/0014-network-and-read-metrics-in-facts.md)) and retention headroom (`retention_watermark_ts`, `retention_headroom_hours`; [ADR 0017](decisions/0017-retention-headroom-in-facts.md)) |
 | `table_finalization` | one row per target table | `finalization.advance` | `finalized_until`, `end_lsn`, `end_commit_ts`, `updated_at` |
 
 All three are created on first use with `DeltaTable.createIfNotExists`: explicit types, and a

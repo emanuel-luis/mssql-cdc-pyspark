@@ -71,6 +71,10 @@ writes to the source.
   table directly (ADR 0009), which returns a purged range as empty rather than failing,
   so every task checks `min_lsn` again after its read: cleanup moves the watermark
   before it deletes, so a purge during the read cannot go unnoticed.
+* **Recovery**: `to_delta(on_data_loss="resnapshot")` runs the same test before the query
+  starts (when there is a range to read) and, when it fails, re-snapshots into a new checkpoint generation instead of
+  failing every run until someone steps in. The purged history stays lost, and is recorded
+  as a facts row; a second loss within `resnapshot_interval_days` still raises (ADR 0018).
 * **Empty ranges**: `partitions()` plans nothing when `end <= start`.
 * **Idempotency**: Delta `txnAppId`/`txnVersion` keyed by batch id, so a replayed
   micro-batch is skipped.

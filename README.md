@@ -10,7 +10,8 @@ built on Spark's Python DataSource V2 API, plus a **completeness signal**
   `Trigger.AvailableNow` and per-batch limits (`maxCommitsPerBatch`).
 * Arrow end to end: the default driver (`mssql-python`) fetches straight into Arrow
   record batches inside the executors.
-* Fails loudly when CDC cleanup purged changes the stream still needed.
+* Fails loudly when CDC cleanup purged changes the stream still needed, or re-snapshots on
+  its own and records the gap (`on_data_loss="resnapshot"`).
 
 > Status: **v0.1, experimental.** Streaming-engine behaviour (offsets, checkpoints,
 > `AvailableNow`, admission control, retention guard) is covered by unit tests
@@ -88,7 +89,8 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 `stream()` declares the options once: it registers the source, reads with them and writes
 through `delta_sink`. With a facts table and a checkpoint that is a local or FUSE path
 (such as a Volume), per-partition network and read metrics land in the facts on their own
-(`<checkpoint>/_mssql_cdc_metrics`); with a URI checkpoint (`dbfs:/`, `abfss://`), add the
+(`<checkpoint>/_mssql_cdc_metrics`, under the live generation's checkpoint after a
+re-snapshot, see below); with a URI checkpoint (`dbfs:/`, `abfss://`), add the
 `metricsPath` option. The same files carry the retention headroom: `retention_headroom_hours`
 in the facts is how far the stream is ahead of what CDC cleanup has deleted; alert when it
 falls, or when facts stop arriving ([ADR 0017](docs/decisions/0017-retention-headroom-in-facts.md)).
@@ -98,7 +100,9 @@ run appends a snapshot of the source table to the target (operation 0, stamped w
 `max_lsn` recorded before the read) and starts the checkpoint from that LSN. Later runs find
 the snapshot and read nothing again. A MERGE downstream that keeps the latest image per key
 absorbs the overlap between snapshot and stream
-([ADR 0016](docs/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)).
+([ADR 0016](docs/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)). With a facts
+table, the snapshot also gets a facts row with `event = 'bootstrap'` (micro-batch rows have
+`event` NULL).
 `stream(spark, options).snapshot(target)` does the snapshot alone and returns the offset;
 `spark.read.format("mssql_cdc_snapshot")` reads it for another sink.
 
@@ -128,6 +132,34 @@ end = finalization.end_offset_from_progress(query.lastProgress)
 finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 ```
 
+### Recovering from data loss
+
+CDC cleanup deletes changes by age, read or not. A stream stopped or behind for longer than
+the retention (3 days by default) finds its next changes gone and stops with `DataLossError`.
+With `on_data_loss="resnapshot"`, `to_delta` checks the checkpoint before it starts and, when
+the next changes are purged, takes a new snapshot and continues from it in a new generation:
+Spark checkpoint `<checkpoint>/_generations/<n>` and `app_id` `<app_id>.g<n>`, all under the
+checkpoint you passed.
+
+```python
+query = stream(spark, options).to_delta(
+    "bronze.orders", app_id="orders-v1", checkpoint="/Volumes/cat/sch/vol/ckpt/orders",
+    facts_table="ops.ingestion_facts", trigger={"availableNow": True}, bootstrap=True,
+    on_data_loss="resnapshot", resnapshot_interval_days=7)
+```
+
+The changes between the last offset read and the retention watermark are lost for good. The
+facts get a row with `event = 'resnapshot'` and the gap in `lost_from_ts` and `lost_to_ts`;
+downstream should then rebuild from the newest snapshot: the highest `_start_lsn` of the
+target's `_operation = 0` rows or of the facts' event rows (`max_lsn`), whichever is higher,
+because a snapshot of an empty table writes no rows. A purge during a run still fails that
+query, and the next run recovers. A second loss within `resnapshot_interval_days` (keep it
+above the retention) raises `DataLossError` instead: the stream cannot keep up, and a person
+has to decide; so does a re-snapshot whose own LSN was purged before the read ended. Needs a
+facts table and a checkpoint path that Python and Spark resolve to the same directory (local,
+or a Volume; not a URI or `/dbfs/`); run one job per stream
+([ADR 0018](docs/decisions/0018-automatic-resnapshot-after-data-loss.md)).
+
 ### Options
 
 | Option | Default | Meaning |
@@ -136,7 +168,7 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 | `columns` | inferred | DDL of the captured columns to read. Inferred with `sys.sp_cdc_get_captured_columns` when omitted; required for `backend=fake` |
 | `connectionString` | required | `mssql-python` / ODBC 18 connection string |
 | `backend` | `mssql-python` | `mssql-python`, `arrow-odbc`, or `fake` (tests) |
-| `startingLsn` | `earliest` | `earliest`, `latest`, or an LSN (`0x...`), treated as already processed. `to_delta(bootstrap=True)` sets it to the snapshot's LSN |
+| `startingLsn` | `earliest` | `earliest`, `latest`, or an LSN (`0x...`), treated as already processed. `to_delta(bootstrap=True)` sets it to the snapshot's LSN; after a re-snapshot (generation `n > 0`) `to_delta` ignores it and starts at that snapshot |
 | `maxCommitsPerBatch` | unlimited | commits (from `cdc.lsn_time_mapping`) per micro-batch |
 | `numPartitions` | `auto` | split each batch into commit-aligned LSN ranges (a snapshot: into ranges of an integer key), one connection each. `auto`: the cores of the session that called `register()` (`defaultParallelism`), else the driver's CPU count; set a number to cap the load on the source |
 | `sourceTimeZone` | `auto` | Windows time zone name of the server clock (e.g. `E. South America Standard Time`), used to convert commit times to UTC. `auto` reads `CURRENT_TIMEZONE_ID()` (SQL Server 2022+, Azure SQL); on older versions it applies the server's current UTC offset (`SYSDATETIMEOFFSET()`), exact for zones without daylight saving; elsewhere, set the zone name |
@@ -144,7 +176,7 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 | `includeCommandId` | `true` | read `__$command_id` (ordering within a transaction) |
 | `arrowBatchSize` | `10000` | rows per Arrow batch fetched from the driver |
 | `snapshotLsn` | `max_lsn` before the read | `mssql_cdc_snapshot` only: the LSN stamped on the snapshot rows |
-| `metricsPath` | none (`stream()`: `<checkpoint>/_mssql_cdc_metrics` for local/FUSE checkpoints) | directory (local, or FUSE such as a Volume) where each partition leaves its round trip, read time, MB and network wait for `delta_sink(metrics_path=...)` to fold into the facts |
+| `metricsPath` | none (`stream()`: `_mssql_cdc_metrics` under the live generation's checkpoint for local/FUSE checkpoints, see [Generations](docs/ARCHITECTURE.md#generations-to_delta)) | directory (local, or FUSE such as a Volume) where each partition leaves its round trip, read time, MB and network wait for `delta_sink(metrics_path=...)` to fold into the facts |
 
 ### Output schema
 

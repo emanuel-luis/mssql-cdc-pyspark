@@ -51,9 +51,31 @@ RETENTION_COLUMNS = [
         "under the same condition as retention_watermark_ts.")),
 ]
 
+# Migration 3 (2026-09-29): snapshot events, the bootstrap and re-snapshots after data
+# loss (ADR 0018).
+EVENT_COLUMNS = [
+    ("event", "STRING", (
+        "What the row records: NULL for a micro-batch; 'bootstrap' for the initial snapshot of "
+        "the target; 'resnapshot' for a snapshot taken because CDC cleanup purged changes "
+        "before the stream read them. Event rows have no batch_id; min_lsn = max_lsn is the "
+        "LSN the snapshot is stamped with, and the only trace of a snapshot of an empty table "
+        "(rows = 0), which writes no target rows.")),
+    ("lost_from_ts", "TIMESTAMP_NTZ", (
+        "On 'resnapshot' rows, the UTC commit time of the last offset the stream had processed. "
+        "Changes committed after it and before lost_to_ts were purged unread: the target has "
+        "the rows as of the snapshot, but those changes are missing from its change history. "
+        "NULL on other rows.")),
+    ("lost_to_ts", "TIMESTAMP_NTZ", (
+        "On 'resnapshot' rows, the UTC commit time of the CDC retention watermark "
+        "(sys.fn_cdc_get_min_lsn) when the loss was detected: where the gap in the change "
+        "history ends. NULL on other rows.")),
+]
+
 MIGRATIONS: list[Migration] = [
     Migration("network and read metrics",
               lambda spark, table: add_columns(spark, table, NETWORK_COLUMNS)),
     Migration("retention headroom",
               lambda spark, table: add_columns(spark, table, RETENTION_COLUMNS)),
+    Migration("snapshot events",
+              lambda spark, table: add_columns(spark, table, EVENT_COLUMNS)),
 ]
