@@ -183,6 +183,8 @@ def test_change_table_permission_error_names_the_grant():
 
     with pytest.raises(PermissionError, match=r"GRANT SELECT ON cdc\.\[dbo_orders_CT\]"):
         list(SqlCdcClient(Denied()).iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+    with pytest.raises(PermissionError, match=r"GRANT SELECT ON cdc\.\[dbo_orders_CT\]"):
+        SqlCdcClient(Denied(), source_timezone="UTC").split_points("dbo_orders", "0x01", "0x02", 4)
 
 
 def test_schema_infers_columns_when_option_missing(monkeypatch):

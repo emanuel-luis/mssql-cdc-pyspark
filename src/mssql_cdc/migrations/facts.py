@@ -11,12 +11,14 @@ Append only; see ``mssql_cdc.migrations``. For example::
 from .base import Migration, add_columns
 
 # Migration 1 (2026-09-29): network and read metrics. Frozen here as shipped; the sink's
-# creation columns reuse it so new tables are born with the same definitions.
+# creation columns reuse it so new tables are born with the same definitions. (Revised the
+# same day, before any release: source_rtt_ms moved from a sink ping to the partitions.)
 NETWORK_COLUMNS = [
     ("source_rtt_ms", "DOUBLE", (
-        "Median round trip in milliseconds of 3 trivial queries from the Spark driver to SQL "
-        "Server, taken while writing this batch: the network latency at that moment. NULL "
-        "unless delta_sink(source_options=...) is set.")),
+        "Network latency to SQL Server during the batch: the median, over its partitions, of "
+        "one round trip (SELECT 1) each made on its own connection just before reading, in "
+        "milliseconds. NULL unless the source option metricsPath and "
+        "delta_sink(metrics_path=...) are set.")),
     ("read_seconds", "DOUBLE", (
         "Seconds the batch's partitions spent reading from SQL Server, summed over partitions "
         "(task-seconds: with parallel partitions it can exceed wall time), including Spark "

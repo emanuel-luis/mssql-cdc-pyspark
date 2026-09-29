@@ -369,7 +369,7 @@ class SqlCdcClient(CdcClient):
             ") x GROUP BY g ORDER BY b"
         )
         points = []
-        for batch in self._b.batches(sql, (from_lsn, to_lsn), 1000):
+        for batch in self._change_table_batches(ci, sql, (from_lsn, to_lsn), 1000):
             points.extend(self._hex(v) for v in batch.column(0).to_pylist())
         return points
 
@@ -442,8 +442,12 @@ class SqlCdcClient(CdcClient):
             "WHERE c.[__$start_lsn] BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1) "
             f"ORDER BY c.[__$start_lsn], {cmd_order}c.[__$seqval], c.[__$operation]"
         )
+        yield from self._change_table_batches(ci, sql, (from_lsn, to_lsn), batch_size)
+
+    def _change_table_batches(self, ci: str, sql: str, params, batch_size: int):
+        """Batches of a query on cdc.[<ci>_CT]; a denied read names the grant it needs."""
         try:
-            yield from self._b.batches(sql, (from_lsn, to_lsn), batch_size)
+            yield from self._b.batches(sql, params, batch_size)
         except Exception as exc:
             if "denied" in str(exc) and f"{ci}_CT" in str(exc):
                 raise PermissionError(

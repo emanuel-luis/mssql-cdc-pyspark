@@ -253,3 +253,18 @@ def test_split_points_balance_rows_across_uneven_commits(sqlserver):
         assert sizes == [8, 8]
     finally:
         client.close()
+
+
+def test_stream_facade_records_network_metrics_from_a_real_server(delta_spark, sqlserver, workdir):
+    from mssql_cdc import stream
+
+    ci = sqlserver.cdc_table("net_probe", "id INT NOT NULL PRIMARY KEY")
+    sqlserver.run("INSERT INTO dbo.net_probe VALUES (1)")
+    sqlserver.wait_for_changes(ci, 1)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    q = stream(delta_spark, {"connectionString": sqlserver.connection_string, "captureInstance": ci}) \
+        .to_delta(target, "net-v1", ckpt, facts, trigger={"availableNow": True})
+    q.awaitTermination()
+    [row] = delta_spark.read.format("delta").load(facts).collect()
+    assert row["source_rtt_ms"] > 0 and row["read_mb"] > 0
+    assert row["network_wait_ms"] is not None  # own session's ASYNC_NETWORK_IO, no extra grant

@@ -69,6 +69,29 @@ uv run python examples/local_pipeline.py  # resumes from the checkpoint
 ## Usage
 
 ```python
+from mssql_cdc import finalization, stream
+
+options = {
+    "connectionString": "Server=host,1433;Database=db;UID=u;PWD=p;Encrypt=yes",
+    "captureInstance": "dbo_orders",
+    "maxCommitsPerBatch": "500",
+}
+query = stream(spark, options).to_delta(
+    "bronze.orders", app_id="orders-v1", checkpoint="/Volumes/cat/sch/vol/ckpt/orders",
+    facts_table="ops.ingestion_facts", trigger={"availableNow": True})
+query.awaitTermination()
+
+end = finalization.end_offset_from_progress(query.lastProgress)
+finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
+```
+
+`stream()` declares the options once: it registers the source, reads with them and writes
+through `delta_sink`. With a facts table and a checkpoint that is a local or FUSE path
+(such as a Volume), per-partition network and read metrics land in the facts on their own
+(`<checkpoint>/_mssql_cdc_metrics`); with a URI checkpoint (`dbfs:/`, `abfss://`), add the
+`metricsPath` option. The same pipeline by hand, for another sink or more control:
+
+```python
 from mssql_cdc import register, finalization
 from mssql_cdc.sink import delta_sink
 
@@ -107,7 +130,7 @@ finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 | `failOnDataLoss` | `true` | raise when CDC cleanup purged the next range |
 | `includeCommandId` | `true` | read `__$command_id` (ordering within a transaction) |
 | `arrowBatchSize` | `10000` | rows per Arrow batch fetched from the driver |
-| `metricsPath` | none | directory (local, or FUSE such as a Volume) where each partition leaves its read time, MB and network wait for `delta_sink(metrics_path=...)` to fold into the facts |
+| `metricsPath` | none (`stream()`: `<checkpoint>/_mssql_cdc_metrics` for local/FUSE checkpoints) | directory (local, or FUSE such as a Volume) where each partition leaves its round trip, read time, MB and network wait for `delta_sink(metrics_path=...)` to fold into the facts |
 
 ### Output schema
 

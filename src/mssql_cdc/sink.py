@@ -8,10 +8,11 @@
 * The facts table also times each batch: ``started_at`` and ``duration_ms`` cover the
   read from SQL Server, the facts aggregation and the target write. Offset planning and
   the checkpoint commit run outside ``foreachBatch`` and are not included.
-* Optional network metrics: ``source_options`` (the stream's options) lets the sink time
-  round trips to SQL Server per batch (``source_rtt_ms``); ``metrics_path`` (the same
-  directory as the source option ``metricsPath``) folds each partition's read time, MB and
-  ``ASYNC_NETWORK_IO`` into the batch facts. Metrics never fail a batch.
+* Optional network metrics: with ``metrics_path`` (the directory of the source option
+  ``metricsPath``) the sink folds each partition's round trip, read time, MB and
+  ``ASYNC_NETWORK_IO`` into the batch facts. The sink never connects to SQL Server itself.
+  Metrics never fail a batch. ``mssql_cdc.stream()`` wires both ends from one set of
+  options.
 * Both tables are created on the first batch with the ``DeltaTable`` builder, with a
   comment on every metadata/facts column; existing ones get pending schema migrations
   (``mssql_cdc.migrations``).
@@ -134,7 +135,9 @@ def _fold_metrics(path: str, lo: str, hi: str) -> tuple[dict, list[str]]:
     if not picked:
         return {}, []
     waits = [m.get("network_wait_ms") for m in picked]
+    rtts = [m["rtt_ms"] for m in picked if m.get("rtt_ms") is not None]
     return {
+        "source_rtt_ms": round(statistics.median(rtts), 1) if rtts else None,
         "read_seconds": round(sum(m["seconds"] for m in picked), 3),
         "read_mb": round(sum(m["bytes"] for m in picked) / 1e6, 6),
         "network_wait_ms": None if None in waits else sum(waits),
@@ -157,36 +160,16 @@ def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str 
 
 
 def delta_sink(target: str, app_id: str, facts_table: str | None = None,
-               source_options: dict | None = None, metrics_path: str | None = None):
+               metrics_path: str | None = None):
     """Return a ``foreachBatch`` function.
 
     ``app_id`` must be stable for the lifetime of a checkpoint. If the checkpoint is
     deleted, use a new ``app_id``; batch ids restart at 0 and would otherwise be
     ignored as duplicates.
 
-    ``source_options`` and ``metrics_path`` only feed the facts table (see the module doc).
+    ``metrics_path`` only feeds the facts table (see the module doc).
     """
     created: set[str] = set()  # once per query run, not once per batch
-    probe: dict = {"client": None}  # one connection for the query run, not one per batch
-
-    def rtt_ms() -> float | None:
-        if not source_options:
-            return None
-        try:
-            if probe["client"] is None:
-                from .client import make_client
-
-                probe["client"] = make_client(source_options)
-            times = probe["client"].ping(3)
-            return round(statistics.median(times), 1) if times else None
-        except Exception:  # noqa: BLE001 - reconnect next batch; a metric never fails one
-            client, probe["client"] = probe["client"], None
-            try:
-                if client is not None:
-                    client.close()
-            except Exception:  # noqa: BLE001
-                pass
-            return None
 
     def ensure(spark, table: str, kind: str, columns, comment: str) -> None:
         if table not in created:
@@ -210,7 +193,8 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None,
                 duration_ms = round((time.monotonic() - t0) * 1000)
                 folded, files = (_fold_metrics(metrics_path, facts["min_lsn"], facts["max_lsn"])
                                  if metrics_path else ({}, []))
-                facts.update(started_at=started_at, duration_ms=duration_ms, source_rtt_ms=rtt_ms(),
+                facts.update(started_at=started_at, duration_ms=duration_ms,
+                             source_rtt_ms=folded.get("source_rtt_ms"),
                              read_seconds=folded.get("read_seconds"), read_mb=folded.get("read_mb"),
                              network_wait_ms=folded.get("network_wait_ms"),
                              target=target, written_at=_utc_now())

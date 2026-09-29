@@ -59,6 +59,7 @@ src/mssql_cdc/
   fake.py          File-backed CDC simulator (FakeCdcClient reader, FakeCdcDatabase writer).
   lsn.py           LSN <-> canonical hex string.
   sink.py          delta_sink(): idempotent append (txnAppId/txnVersion) + per-batch facts.
+  pipeline.py      stream(spark, options).to_delta(...): source + sink from one set of options.
   finalization.py  finalized_until: candidate(), advance() (monotonic MERGE), is_final().
   tables.py        DeltaTable API: open by name/path, create typed with column comments (ADR 0012).
   migrations/      schema migrations per table kind: control.py, facts.py, bronze.py (ADR 0013).

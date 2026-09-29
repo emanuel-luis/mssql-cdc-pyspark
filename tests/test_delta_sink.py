@@ -118,14 +118,31 @@ def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
     source = {"backend": "fake", "fakePath": os.path.join(workdir, "src"), "captureInstance": CI,
               "columns": COLUMNS, "numPartitions": "2", "metricsPath": metrics}
     q = (spark.readStream.format("mssql_cdc").options(**source).load()
-         .writeStream.foreachBatch(delta_sink(target, "metrics-v1", facts, source_options=source,
-                                              metrics_path=metrics))
+         .writeStream.foreachBatch(delta_sink(target, "metrics-v1", facts, metrics_path=metrics))
          .option("checkpointLocation", os.path.join(workdir, "ckpt")).trigger(availableNow=True).start())
     q.awaitTermination()
     [row] = spark.read.format("delta").load(facts).collect()
     assert row["read_seconds"] > 0 and row["read_mb"] > 0
     assert row["network_wait_ms"] is None and row["source_rtt_ms"] is None  # the fake has no server
     assert not [f for f in os.listdir(metrics) if f.endswith(".json")]  # folded and removed
+
+
+def test_stream_facade_declares_the_options_once(delta_spark, workdir):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    db.commit(CI, [(2, {"order_id": 1, "status": "new"})], at=T0)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    options = {"backend": "fake", "fakePath": os.path.join(workdir, "src"), "captureInstance": CI,
+               "columns": COLUMNS}
+    q = stream(spark, options).to_delta(target, "facade-v1", ckpt, facts, trigger={"availableNow": True})
+    q.awaitTermination()
+    assert spark.read.format("delta").load(target).count() == 1
+    [row] = spark.read.format("delta").load(facts).collect()
+    assert row["read_seconds"] > 0  # metrics defaulted under the (local) checkpoint
+    assert os.path.isdir(os.path.join(ckpt, "_mssql_cdc_metrics"))
+    assert "metricsPath" not in options  # the caller's dict is not changed
 
 
 def test_migrations_bring_an_older_table_up_once(delta_spark, workdir, monkeypatch):

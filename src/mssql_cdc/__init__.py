@@ -2,6 +2,7 @@
 completeness ("partition finalization") signal for downstream consumers."""
 
 from .client import DataLossError, make_client
+from .pipeline import stream
 from .source import HAS_ADMISSION_CONTROL, OPERATIONS, MssqlCdcDataSource
 
 __all__ = [
@@ -11,6 +12,7 @@ __all__ = [
     "OPERATIONS",
     "make_client",
     "register",
+    "stream",
 ]
 __version__ = "0.1.0"
 

@@ -2,6 +2,7 @@
 
 **Status:** accepted  
 **Date:** 2026-09-29T10:12:04-03:00
+**Amended:** 2026-09-29T10:48:30-03:00, the round trip moved to the partitions; `stream()` declares the options once
 
 ## Context
 On a production source the reader was network-bound: round trips of 180–950 ms, and the
@@ -36,3 +37,17 @@ the bronze schema should not.
 * `metricsPath` must be a directory every node can write and the driver can read: a local
   path on a single node, or a FUSE path such as a Unity Catalog Volume.
 * `read_seconds` sums partitions (task-seconds) and includes Spark taking the rows.
+
+## Amendment: no source options in the sink, one declaration
+Measuring the round trip in the sink meant passing the stream's options (with the
+credentials) to `delta_sink` as well and holding a second connection per query. Each
+partition now makes one `SELECT 1` on its own connection just before reading and records
+it with its other metrics; `source_rtt_ms` is the median over the batch's partitions, and
+`delta_sink` lost `source_options`: the sink never connects to SQL Server. Facts migration 1
+was revised in place for the new meaning of `source_rtt_ms`, the same day it was written
+and before any release.
+
+`mssql_cdc.stream(spark, options).to_delta(target, app_id, checkpoint, facts_table)` wires
+source and sink from one set of options. Knowing the checkpoint, it defaults `metricsPath`
+to `<checkpoint>/_mssql_cdc_metrics` when that is a path Python can write on every node
+(no URI scheme); otherwise metrics stay off unless `metricsPath` is set.

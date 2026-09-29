@@ -218,7 +218,9 @@ class _BaseReader(DataSourceStreamReader):
         target = to_arrow_schema(self.schema, timezone="UTC")  # TIMESTAMP columns are UTC instants
         client = self.client
         started, rows, nbytes = time.perf_counter(), 0, 0
-        wait_before = client.network_wait_ms() if self.metrics_path else None
+        if self.metrics_path:  # one round trip and the session's wait so far, before reading
+            rtt = client.ping(1)
+            wait_before = client.network_wait_ms()
         try:
             for batch in client.iter_changes(
                 partition.capture_instance,
@@ -245,6 +247,7 @@ class _BaseReader(DataSourceStreamReader):
                 wait_after = client.network_wait_ms()
                 _write_metrics(self.metrics_path, partition, {
                     "rows": rows, "bytes": nbytes, "seconds": time.perf_counter() - started,
+                    "rtt_ms": rtt[0] if rtt else None,
                     "network_wait_ms": (None if wait_before is None or wait_after is None
                                         else wait_after - wait_before),
                 })
