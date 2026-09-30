@@ -67,8 +67,10 @@ class FakeCdcClient(CdcClient):
             return json.load(fh)
 
     def _name(self, ci: str) -> str:
-        """The instance as created: SQL Server's default collation ignores case."""
-        return next((n for n in self._mins() if n.lower() == ci.lower()), ci)
+        """The instance as created: the exact name first, else ignoring case (SQL Server's
+        default collation), as ``SqlCdcClient.source_table``."""
+        mins = self._mins()
+        return ci if ci in mins else next((n for n in mins if n.lower() == ci.lower()), ci)
 
     # -- CdcClient ------------------------------------------------------------
     def max_lsn(self):

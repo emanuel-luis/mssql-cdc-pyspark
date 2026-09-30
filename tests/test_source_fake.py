@@ -412,6 +412,16 @@ def test_fail_on_data_loss_false_skips_to_min_lsn_without_inverted_ranges(workdi
     assert _order_ids(reader, planned) == [6, 7, 8, 9]
 
 
+def test_fake_resolves_the_exact_capture_instance_first(workdir):
+    from mssql_cdc.fake import FakeCdcClient
+
+    FakeCdcDatabase(os.path.join(workdir, "src"), ["dbo_Orders", "dbo_orders"])
+    client = FakeCdcClient(os.path.join(workdir, "src"))
+    # as SqlCdcClient.source_table: a case-sensitive database can hold both
+    assert client.source_table("dbo_orders").table == "dbo_orders"
+    assert client.source_table("dbo_Orders").table == "dbo_Orders"
+
+
 def test_a_range_without_rows_leaves_its_metrics_file_with_its_end_commit_time(workdir):
     from pyspark.sql.streaming.datasource import ReadAllAvailable
 
