@@ -61,6 +61,20 @@ def _read(spark, out):
     return spark.read.parquet(out) if os.path.exists(out) else None
 
 
+def _reader(workdir, **options):
+    from pyspark.sql.types import IntegerType, StructField, StructType
+
+    from mssql_cdc.source import MssqlCdcStreamReader
+
+    opts = {"backend": "fake", "fakePath": os.path.join(workdir, "src"), "captureInstance": CI,
+            "numPartitions": "1", **{k: str(v) for k, v in options.items()}}
+    return MssqlCdcStreamReader(opts, StructType([StructField("order_id", IntegerType())]))
+
+
+def _order_ids(reader, ranges):
+    return [x for r in ranges for b in reader.read(r) for x in b.column("order_id").to_pylist()]
+
+
 def test_available_now_splits_on_commit_boundaries(spark, workdir):
     _db(workdir, n_tx=10, rows_per_tx=3)
     batches, out = _run(spark, workdir, maxCommitsPerBatch=4)
@@ -275,3 +289,116 @@ def test_snapshot_reads_the_current_rows_in_key_ranges(spark, workdir):
     assert {(r["_operation"], r["_start_lsn"], r["_seqval"], r["_command_id"]) for r in rows} == {
         (0, at, None, None)}
     assert {r["_commit_ts"] for r in rows} == {datetime.fromisoformat(FakeCdcClient(src).lsn_to_time(at))}
+
+
+def test_available_now_stops_at_the_max_lsn_it_started_with(workdir):
+    from pyspark.sql.streaming.datasource import ReadAllAvailable, ReadMaxRows
+
+    db = _db(workdir, n_tx=2)
+    reader = _reader(workdir)
+    start = reader.initialOffset()
+    reader.prepareForTriggerAvailableNow()
+    seen = reader.client.max_lsn()
+    db.commit(CI, [(2, _order(900))], at=T0 + timedelta(hours=1))  # after the trigger started
+    assert reader.latestOffset(start, ReadAllAvailable())["lsn"] == seen
+    s = start
+    while (nxt := reader.latestOffset(s, ReadMaxRows(1))) != s:
+        s = nxt
+    assert s["lsn"] == seen
+
+
+def test_driver_guard_and_empty_ranges(workdir):
+    from pyspark.sql.streaming.datasource import ReadAllAvailable
+
+    db = _db(workdir, n_tx=1)
+    reader = _reader(workdir)
+    start = reader.initialOffset()
+    end = reader.latestOffset(start, ReadAllAvailable())
+    db.cleanup(CI, db.commit(CI, [(2, _order(900))], at=T0 + timedelta(hours=1)))
+    # after cleanup passed `end`, only the `end <= start` early return keeps these empty
+    assert reader.partitions(end, end) == [] and reader.partitions(end, start) == []
+    with pytest.raises(DataLossError, match="re-snapshot is required"):
+        reader.partitions(start, reader.latestOffset(start, ReadAllAvailable()))
+
+
+def test_fail_on_data_loss_false_skips_to_min_lsn_without_inverted_ranges(workdir):
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    lsns = [db.commit(CI, [(2, _order(i))], at=T0 + timedelta(minutes=i)) for i in range(10)]
+    db.cleanup(CI, lsns[6])
+    reader = _reader(workdir, failOnDataLoss="false", maxCommitsPerBatch=2)
+    start, planned = {"lsn": lsns[0], "commit_ts": ""}, []
+    while (end := reader.latestOffset(start, reader.getDefaultReadLimit())) != start:
+        planned += reader.partitions(start, end)
+        start = end
+    assert all(r.from_lsn <= r.to_lsn for r in planned)  # invariant 3
+    assert (planned[0].from_lsn, planned[0].to_lsn) == (lsns[6], lsns[6])
+    assert _order_ids(reader, planned) == [6, 7, 8, 9]
+
+
+def test_a_range_without_rows_leaves_no_metrics_file(workdir):
+    from pyspark.sql.streaming.datasource import ReadAllAvailable
+
+    db = _db(workdir, n_tx=1)
+    metrics = os.path.join(workdir, "metrics")
+    reader = _reader(workdir, metricsPath=metrics)
+    start = reader.initialOffset()
+    busy = reader.latestOffset(start, ReadAllAvailable())
+    db.idle(at=T0 + timedelta(hours=1))
+    idle = reader.latestOffset(busy, ReadAllAvailable())
+    # the sink skips a batch without rows, so it would never fold (and remove) its file
+    _order_ids(reader, reader.partitions(start, busy) + reader.partitions(busy, idle))
+    assert len([f for f in os.listdir(metrics) if f.endswith(".json")]) == 1
+
+
+def test_snapshot_is_stamped_with_the_lsn_recorded_before_the_read(workdir):
+    from pyspark.sql.types import IntegerType, StringType, StructField, StructType
+
+    from mssql_cdc.source import MssqlCdcSnapshotReader
+
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: "order_id"})
+    db.commit(CI, [(2, {"order_id": 1})], at=T0)
+    schema = StructType([StructField("_start_lsn", StringType()), StructField("order_id", IntegerType())])
+    reader = MssqlCdcSnapshotReader({"backend": "fake", "fakePath": src, "captureInstance": CI,
+                                     "numPartitions": "1"}, schema)
+    [part] = reader.partitions()
+    newer = db.commit(CI, [(2, {"order_id": 2})], at=T0 + timedelta(minutes=1))  # during the read
+    rows = [r for b in reader.read(part) for r in b.to_pylist()]
+    assert {r["order_id"] for r in rows} == {1, 2}
+    assert {r["_start_lsn"] for r in rows} == {part.lsn} and part.lsn < newer
+
+
+def test_starting_lsn_is_exclusive(workdir):
+    from pyspark.sql.streaming.datasource import ReadAllAvailable
+
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    lsns = [db.commit(CI, [(2, _order(i))], at=T0 + timedelta(minutes=i)) for i in range(5)]
+    reader = _reader(workdir, startingLsn=lsns[1].lower())
+    start = reader.initialOffset()
+    assert start["lsn"] == lsns[1]
+    ranges = reader.partitions(start, reader.latestOffset(start, ReadAllAvailable()))
+    assert _order_ids(reader, ranges) == [2, 3, 4]
+
+
+def test_snapshot_of_a_non_integer_key_is_one_partition(workdir):
+    from pyspark.sql.types import StringType, StructField, StructType
+
+    from mssql_cdc.source import MssqlCdcSnapshotReader
+
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: "code"})
+    for i in range(5):
+        db.commit(CI, [(2, {"code": f"C{i}", "status": "new"})], at=T0 + timedelta(minutes=i))
+    schema = StructType([StructField("code", StringType()), StructField("status", StringType())])
+    reader = MssqlCdcSnapshotReader({"backend": "fake", "fakePath": src, "captureInstance": CI,
+                                     "numPartitions": "4"}, schema)
+    [part] = reader.partitions()
+    assert (part.key, part.lo, part.hi) == (None, None, None)
+    assert sum(b.num_rows for b in reader.read(part)) == 5
+
+
+def test_include_command_id_false_drops_the_column(spark, workdir):
+    _db(workdir, n_tx=2)
+    _, out = _run(spark, workdir, includeCommandId="false")
+    df = _read(spark, out)
+    assert "_command_id" not in df.columns and df.count() == 6

@@ -152,8 +152,8 @@ class _Common:
         self.num_partitions = (max(1, default_num_partitions or os.cpu_count() or 1)
                                if num_partitions == "auto" else int(num_partitions))
         self.batch_size = int(_opt(options, "arrowBatchSize", "10000"))
-        # optional: a directory (local or FUSE, e.g. /Volumes/...) where each partition read
-        # leaves its metrics for delta_sink(metrics_path=...) to fold into the batch facts
+        # optional: a directory (local or FUSE, e.g. /Volumes/...) where each partition that
+        # read rows leaves its metrics for delta_sink(metrics_path=...) to fold into the batch facts
         self.metrics_path = _opt(options, "metricsPath")
         meta_names = {n for n, _ in METADATA_COLUMNS}
         self.field_names = list(schema.fieldNames())
@@ -201,6 +201,8 @@ class _BaseReader(_Common, DataSourceStreamReader):
         # failOnDataLoss=false: skip ahead to what cleanup left
         from_lsn = max(from_lsn, self._guard_retention(self.client, from_lsn))
         to_lsn = end["lsn"]
+        if from_lsn > to_lsn:  # invariant 3: cleanup left nothing up to end
+            return []
         if self.num_partitions <= 1:
             return [LsnRange(self.capture_instance, from_lsn, to_lsn)]
         bounds = [b for b in self.client.split_points(self.capture_instance, from_lsn, to_lsn,
@@ -236,10 +238,10 @@ class _BaseReader(_Common, DataSourceStreamReader):
         target = to_arrow_schema(self.schema, timezone="UTC")  # TIMESTAMP columns are UTC instants
         client = self.client
         started, rows, nbytes = time.perf_counter(), 0, 0
-        if self.metrics_path:  # one round trip and the session's wait so far, before reading
-            rtt = client.ping(1)
-            wait_before = client.network_wait_ms()
         try:
+            if self.metrics_path:  # one round trip and the session's wait so far, before reading
+                rtt = client.ping(1)
+                wait_before = client.network_wait_ms()
             for batch in client.iter_changes(
                 partition.capture_instance,
                 partition.from_lsn,
@@ -261,7 +263,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
             # Cleanup may have run since partitions() checked. It moves min_lsn before it
             # deletes rows, so min_lsn past from_lsn now means rows may be missing.
             min_lsn = self._guard_retention(client, partition.from_lsn)
-            if self.metrics_path:
+            if self.metrics_path and rows:  # the sink never folds (or removes) an empty batch's file
                 wait_after = client.network_wait_ms()
                 try:
                     watermark = client.lsn_to_time(min_lsn)

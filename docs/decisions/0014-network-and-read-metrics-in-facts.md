@@ -2,7 +2,8 @@
 
 **Status:** accepted  
 **Date:** 2026-09-29T10:12:04-03:00  
-**Amended:** 2026-09-29T10:48:30-03:00, the round trip moved to the partitions; `stream()` declares the options once
+**Amended:** 2026-09-29T10:48:30-03:00, the round trip moved to the partitions; `stream()` declares the options once  
+**Amended:** 2026-09-29T22:15:55-03:00, a partition that read no rows leaves no file (see Amendment 2)
 
 ## Context
 On a production source the reader was network-bound: round trips of 180–950 ms, and the
@@ -19,7 +20,7 @@ the bronze schema should not.
 * `CdcClient.ping(samples)` (round trips of `SELECT 1`) and `network_wait_ms()` (the
   session's `ASYNC_NETWORK_IO` from `sys.dm_exec_session_wait_stats`, which a session may
   read for itself without `VIEW SERVER STATE`).
-* Source option `metricsPath`: each partition read writes one JSON file there (LSN range,
+* Source option `metricsPath`: each partition that read rows writes one JSON file there (LSN range,
   rows, bytes, seconds, the change in `ASYNC_NETWORK_IO` over the read).
 * `delta_sink(..., source_options=..., metrics_path=...)`: the sink pings SQL Server once
   per batch over one connection kept for the query run (`source_rtt_ms`), sums the files of
@@ -51,3 +52,11 @@ and before any release.
 source and sink from one set of options. Knowing the checkpoint, it defaults `metricsPath`
 to `<checkpoint>/_mssql_cdc_metrics` when that is a path Python can write on every node
 (no URI scheme); otherwise metrics stay off unless `metricsPath` is set.
+
+## Amendment 2: only partitions that read rows leave a file
+The sink skips a batch without rows, so it never folded or removed the files of an empty
+batch's partitions, and they piled up in `metricsPath` on a quiet source. A partition that
+read no rows now writes no file. The cost: in a batch with rows, a partition that read none
+(with `numPartitions` > 1, for example a trailing range of idle mapping entries) still
+pings and reads the wait counter, but is left out of `read_seconds`, `network_wait_ms` and
+the `source_rtt_ms` median. Such a partition returns no data, so its share is small.
