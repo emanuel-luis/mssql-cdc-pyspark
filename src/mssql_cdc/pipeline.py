@@ -165,9 +165,9 @@ class CdcStream:
 
         from . import migrations
         from .client import make_client
-        from .sink import BRONZE_COMMENT, _utc_now, bronze_columns
+        from .sink import BRONZE_COMMENT, _utc_now, _write, bronze_columns
         from .source import snapshot_lsn
-        from .tables import delta_table, is_path
+        from .tables import delta_table
 
         started_at, t0 = _utc_now(), time.monotonic()
         with closing(make_client(self.options)) as client:
@@ -182,13 +182,7 @@ class CdcStream:
         )
         migrations.ensure(self.spark, target, "bronze", bronze_columns(rows), BRONZE_COMMENT)
         meta = json.dumps({"snapshot": ci, **offset})
-        writer = (
-            rows.write.format("delta")
-            .mode("append")
-            .option("userMetadata", meta)
-            .option("mergeSchema", "true")  # as the stream's appends (ADR 0023)
-        )
-        writer.save(target) if is_path(target) else writer.saveAsTable(target)
+        _write(rows, target, None, None, meta, merge_schema=True)  # as the stream's (ADR 0023)
         duration_ms = round((time.monotonic() - t0) * 1000)
         # this snapshot's own commit (auto compaction may commit after it); an empty table
         # writes no commit at all

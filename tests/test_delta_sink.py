@@ -354,6 +354,22 @@ def test_replayed_batch_is_ignored(delta_spark, workdir):
     assert spark.read.format("delta").load(target).count() == 1
 
 
+def test_a_type_bronze_cannot_take_says_to_enable_type_widening(delta_spark, workdir):
+    from mssql_cdc.client import SchemaChangedError
+    from mssql_cdc.sink import _write
+
+    spark, target = delta_spark, os.path.join(workdir, "bronze")
+    _write(spark.sql("SELECT CAST(1.5 AS DECIMAL(9,2)) AS amount"), target, None, None)
+    wider = spark.sql("SELECT CAST(2.5 AS DECIMAL(18,4)) AS amount")  # after an ALTER COLUMN
+    with pytest.raises(SchemaChangedError, match=r"delta\.enableTypeWidening' = 'true'"):
+        _write(wider, target, "type-test", 0, merge_schema=True)
+    spark.sql(
+        f"ALTER TABLE delta.`{target}` SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true')"
+    )
+    _write(wider, target, "type-test", 0, merge_schema=True)  # mergeSchema widens it
+    assert dict(spark.read.format("delta").load(target).dtypes)["amount"] == "decimal(18,4)"
+
+
 def test_the_readers_events_become_event_rows_and_new_columns_join_bronze(delta_spark, workdir):
     from pyspark.sql import functions as F
 
@@ -518,6 +534,7 @@ def test_snapshot_on_switch_fills_a_column_only_the_newer_instance_captures(
         CI, [(2, {"order_id": 3, "status": "new", "note": "gift"})], at=T0 + timedelta(minutes=6)
     )
     bronze = run()
+    assert bronze.where("_operation IN (3, 4)").count() == 0  # note alone: no change row in v1
     assert _snapshots(bronze) == 2  # the bootstrap, and one after the switch
     assert latest(bronze, "order_id", "note") == [(0, "vip"), (1, None), (2, None), (3, "gift")]
     assert _snapshots(run()) == 2  # the next batches do not cross a switch

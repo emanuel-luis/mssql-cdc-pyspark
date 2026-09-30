@@ -335,25 +335,36 @@ def _lag(source_max: datetime | None, position: datetime | None) -> float | None
 def _write(
     df: DataFrame,
     target: str,
-    app_id: str,
-    version: int,
+    app_id: str | None,
+    version: int | None,
     metadata: str | None = None,
     merge_schema: bool = False,
 ):
-    writer = (
-        df.write.format("delta")
-        .mode("append")
-        .option("txnAppId", app_id)
-        .option("txnVersion", version)
-    )
+    """Append ``df`` to ``target``; idempotent with ``app_id`` and ``version``. With
+    ``merge_schema`` (bronze), a column type the table cannot take raises
+    ``SchemaChangedError`` saying what to do, instead of Delta's bare "Failed to merge
+    fields" (ADR 0023)."""
+    writer = df.write.format("delta").mode("append")
+    if app_id is not None:
+        writer = writer.option("txnAppId", app_id).option("txnVersion", version)
     if metadata is not None:
         writer = writer.option("userMetadata", metadata)
     if merge_schema:
         writer = writer.option("mergeSchema", "true")
-    if is_path(target):
-        writer.save(target)
-    else:
-        writer.saveAsTable(target)
+    try:
+        writer.save(target) if is_path(target) else writer.saveAsTable(target)
+    except Exception as exc:
+        if not merge_schema or "DELTA_FAILED_TO_MERGE_FIELDS" not in str(exc):
+            raise
+        from .client import SchemaChangedError
+
+        name = f"delta.`{target}`" if is_path(target) else target
+        raise SchemaChangedError(
+            f"{target}: the type of a column changed on the source and the table cannot take "
+            f"the new one ({str(exc).splitlines()[0]}). For a widening, run ALTER TABLE {name} "
+            "SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true') and restart; otherwise "
+            "write to a new table or rewrite this one."
+        ) from exc
 
 
 def delta_sink(

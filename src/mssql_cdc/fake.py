@@ -11,7 +11,8 @@ It reproduces the parts of CDC the data source relies on:
   which a snapshot reads (tiled like NTILE) and cleanup does not touch;
 * up to two capture instances per source table (ADR 0023): a newer one starts at the next
   commit, and from there every commit lands in both, each with only its own captured
-  columns and its own ``__$command_id``; DDL rows (``sys.sp_cdc_get_ddl_history``), a DROP
+  columns and its own ``__$command_id`` (an update that changes none of an instance's
+  columns writes no row there); DDL rows (``sys.sp_cdc_get_ddl_history``), a DROP
   COLUMN also removing the column from the source table, which a snapshot then cannot select.
 
 An instance's table is named after the first instance of it (the one the constructor
@@ -371,7 +372,21 @@ class FakeCdcDatabase:
         same = self._same_table(capture_instance)
         for k, (name, meta) in enumerate(same):
             keep = {c.lower() for c, _ in meta["columns"]} if meta.get("columns") else None
-            for cmd, (op, row) in enumerate(changes, start=1):
+            captured = [
+                row if keep is None else {c: v for c, v in row.items() if c.lower() in keep}
+                for _, row in changes
+            ]
+            for cmd, (op, _) in enumerate(changes, start=1):
+                row, pair = captured[cmd - 1], {3: cmd, 4: cmd - 2}.get(op, -1)  # other image
+                # an update of columns this instance does not capture writes no change row
+                # (SQL Server 2022, ADR 0023); compared by value, SQL Server by column
+                if (
+                    keep is not None
+                    and 0 <= pair < len(captured)
+                    and changes[pair][0] == 7 - op
+                    and captured[pair] == row
+                ):
+                    continue
                 self._append(
                     os.path.join("changes", f"{name}.jsonl"),
                     {
@@ -380,9 +395,7 @@ class FakeCdcDatabase:
                         # differs per instance, as on SQL Server (ADR 0023); order kept
                         "command_id": cmd + k,
                         "operation": op,
-                        "row": row
-                        if keep is None
-                        else {c: v for c, v in row.items() if c.lower() in keep},
+                        "row": row,
                     },
                 )
         self._append(_MAPPING, {"start_lsn": start, "tran_end_time": self._ts(at)})
