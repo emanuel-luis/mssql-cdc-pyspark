@@ -7,5 +7,4 @@ spark-warehouse/
 metastore_db/
 derby.log
 lab/results/
-lab/_work/
 notes/

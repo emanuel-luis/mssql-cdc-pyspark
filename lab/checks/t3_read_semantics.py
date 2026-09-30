@@ -16,8 +16,6 @@ import sys
 
 from ..common import connect, ct_count, max_lsn, report, rows, scalar, wait_for_rows
 
-COLS = "__$start_lsn, __$seqval, __$operation"
-
 
 def _changes(conn, from_lsn, to_lsn):
     return rows(conn, """

@@ -15,7 +15,9 @@ Per-batch timings are saved in lab/results for the write-up.
 
 Locally:     python -m lab.checks.t7_end_to_end
 Databricks:  main(["--schema", "lab.cdc", "--checkpoint", "/Volumes/lab/cdc/ckpt/t7"])
-             (the SQL Server must be reachable from the cluster)
+             (the SQL Server must be reachable from the cluster). --checkpoint is a
+             base directory: each run checkpoints in a fresh subdirectory of it, and
+             the t7_* tables in --schema are dropped at the start of each run.
 """
 
 import argparse
@@ -54,24 +56,28 @@ def _wait_stable(conn, ci, polls=3, every=2.0, timeout=180):
 def main(argv=None) -> bool:
     p = argparse.ArgumentParser()
     p.add_argument("--schema", help="catalog.schema for managed tables (default: local paths)")
-    p.add_argument("--checkpoint", help="checkpoint location (default: temp dir)")
+    p.add_argument("--checkpoint",
+                   help="base directory, one fresh subdirectory per run (default: temp dir)")
     p.add_argument("--transactions", type=int, default=300)
     p.add_argument("--max-commits", type=int, default=100)
-    p.add_argument("--num-partitions", type=int, default=1)
+    p.add_argument("--num-partitions", default="auto")
     p.add_argument("--backend", default="mssql-python", choices=["mssql-python", "arrow-odbc"])
     p.add_argument("--idle-minutes", type=float, default=0)
     p.add_argument("--destructive", action="store_true")
     a = p.parse_args(argv)
 
     base = tempfile.mkdtemp(prefix="t7-")
-    target = f"{a.schema}.bronze_orders" if a.schema else os.path.join(base, "bronze_orders")
-    facts = f"{a.schema}.ingestion_facts" if a.schema else os.path.join(base, "ingestion_facts")
-    control = f"{a.schema}.table_finalization" if a.schema else os.path.join(base, "table_finalization")
-    ckpt = a.checkpoint or os.path.join(base, "ckpt")
+    target = f"{a.schema}.t7_bronze_orders" if a.schema else os.path.join(base, "bronze_orders")
+    facts = f"{a.schema}.t7_ingestion_facts" if a.schema else os.path.join(base, "ingestion_facts")
+    control = f"{a.schema}.t7_table_finalization" if a.schema else os.path.join(base, "table_finalization")
     app_id = f"t7-{uuid.uuid4().hex[:8]}"  # new checkpoint -> new app id
+    ckpt = os.path.join(a.checkpoint, app_id) if a.checkpoint else os.path.join(base, "ckpt")
 
     spark = get_spark("t7-e2e")
     register(spark)
+    if a.schema:  # each run starts from empty tables, as it does from a fresh checkpoint
+        for t in (target, facts, control):
+            spark.sql(f"DROP TABLE IF EXISTS {t}")
     conn = connect()
     wl = Workload(seed=7)
     mix = {"insert": 0.5, "update": 0.35, "delete": 0.15}

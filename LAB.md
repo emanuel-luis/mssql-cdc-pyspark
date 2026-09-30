@@ -46,7 +46,7 @@ at the same time.
 |---|---|---|---|
 | `t1_idle_heartbeat` | `max_lsn` keeps advancing while the DB is idle (dummy entries in `cdc.lsn_time_mapping`), and how often | SQL Server | the core claim; how far finalization lags on a quiet database |
 | `t2_timezone` | which clock `tran_end_time` follows; no commit-time regressions | SQL Server (run with `MSSQL_TZ=UTC` and with a non-UTC zone) | the `sourceTimeZone` option; finalization periods |
-| `t3_read_semantics` | op codes and `__$command_id` ordering; PK update shape; `from > to` errors; `--destructive`: purged range errors | SQL Server | reader design; retention guard |
+| `t3_read_semantics` | op codes and `__$command_id` ordering; PK update shape; `from > to` returns no rows; `--destructive`: a purged range reads as empty (why the reader re-checks `min_lsn`) | SQL Server | reader design; retention guard |
 | `t4_watermark_concurrency` | no rows ever appear below an already observed `max_lsn`; LSN order is commit order | SQL Server | `max_lsn` as a safe low watermark |
 | `t5_engine` | the runtime supports Python streaming sources with admission control and `AvailableNow` | Spark only | platform requirements |
 | `t6_delta_semantics` | `userMetadata` on MERGE; idempotent append and MERGE | Spark + Delta | sink idempotency; facts |
@@ -60,6 +60,7 @@ python -m lab.checks.t4_watermark_concurrency --long-seconds 120
 python -m lab.checks.t1_idle_heartbeat --minutes 11 --interval 10
 python -m lab.checks.t5_engine
 python -m lab.checks.t6_delta_semantics
+python -m lab.checks.t8_fetch_throughput --rows 200000   # informational; creates dbo.fetch_bench
 python -m lab.checks.t7_end_to_end --idle-minutes 6    # idle entries come about every 5 min
 # destructive, last:
 python -m lab.checks.t3_read_semantics --destructive
@@ -85,7 +86,8 @@ saving.
 ## 4. Results
 
 Evidence files are in the `lab-results` artifact of the CI run linked in each row
-(GitHub keeps artifacts for 90 days; rerun the workflow to regenerate them).
+(GitHub keeps artifacts for 90 days; start the workflow with "Run workflow" to regenerate
+them, since re-running a push run skips t1 and the destructive t7).
 
 | Check | Platform / version | Result | Evidence (`lab/results/...`) |
 |---|---|---|---|
@@ -99,3 +101,4 @@ Evidence files are in the `lab-results` artifact of the CI run linked in each ro
 | t5 | DBR 18.2 (Spark 4.1.0), dedicated single node, Azure | PASS | one-off job run; result kept in the workspace copy of `lab/results` |
 | t6 `--schema` | DBR 18.2 (Spark 4.1.0), dedicated single node, Unity Catalog managed tables | PASS | same run |
 | t7 `--idle-minutes 6 --destructive` | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI | PASS: idle offset advanced, guard stopped the stream | [`t7_end_to_end-20260928T223005Z.json`](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/36490066001) |
+| t8 | SQL Server 2022 CU27, local | INFO: 200k rows; Arrow with two (max) columns 22–26k rows/s vs 34–39k without (batch 10k), 28–30k vs 34–35k (batch 50k); fetchall 10–18k | local runs 2026-09-29 |

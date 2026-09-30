@@ -52,9 +52,7 @@ def rows(conn, sql: str, params=()):
     cur = conn.cursor()
     cur.execute(sql, tuple(params))
     try:
-        return cur.fetchall()
-    except Exception:  # noqa: BLE001 - statement without a result set
-        return []
+        return cur.fetchall() if cur.description else []
     finally:
         cur.close()
 

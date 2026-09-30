@@ -5,8 +5,8 @@ against the file-backed fake CDC with maxCommitsPerBatch, and checks that the
 engine split it on commit boundaries and exposed commit_ts in the end offset.
 
 Locally:     python -m lab.checks.t5_engine
-Databricks:  run in a notebook with a path visible to all nodes, e.g.
-             main(["--path", "/Volumes/lab/cdc/tmp/t5"])
+Databricks:  main() in a notebook on a single-node cluster; leave --path at its
+             default (see docs/DATABRICKS.md, item 1).
 """
 
 import argparse

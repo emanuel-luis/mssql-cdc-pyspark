@@ -124,12 +124,9 @@ class Workload:
         cur.close()
         print(f"committed {transactions} transactions x {rows_per_tx} rows")
 
-    def long_transaction(self, seconds: float, order_id: int | None = None) -> int:
+    def long_transaction(self, seconds: float) -> int:
         cur = self.conn.cursor()
-        oid = order_id or self.insert_order(cur)
-        if order_id:
-            cur.execute("INSERT INTO dbo.orders (order_id, customer_id, status, amount) VALUES (?, 1, 'long_tx', 1)",
-                        (order_id,))
+        oid = self.insert_order(cur)
         time.sleep(seconds)
         self.conn.commit()
         cur.close()
