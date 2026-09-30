@@ -8,7 +8,14 @@ It reproduces the parts of CDC the data source relies on:
 * a per-instance low watermark (``sys.fn_cdc_get_min_lsn``) that cleanup moves
   before it deletes the change rows below it;
 * for instances given a key (one column or several), the source table's current rows,
-  which a snapshot reads (tiled like NTILE) and cleanup does not touch.
+  which a snapshot reads (tiled like NTILE) and cleanup does not touch;
+* up to two capture instances per source table (ADR 0023): a newer one starts at the next
+  commit, and from there every commit lands in both, each with only its own captured
+  columns and its own ``__$command_id``; DDL rows (``sys.sp_cdc_get_ddl_history``).
+
+An instance's table is named after the first instance of it (the one the constructor
+declares). Captured columns (Spark DDL, per instance) are optional; without them the
+instance keeps every column of every change and ``columns`` must be passed to the source.
 
 State lives in plain files so that the Spark driver and every executor process
 see the same data (Python workers are separate processes, even locally).
@@ -18,17 +25,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 
 import pyarrow as pa
 
 from . import lsn as _lsn
-from .client import CdcClient, SourceTable
+from .client import CaptureInstance, CdcClient, DdlChange, SourceTable
 
 _MAPPING = "lsn_time_mapping.jsonl"
 _MIN = "min_lsn.json"
 _KEYS = "keys.json"
+_INSTANCES = "instances.json"  # name -> {"table", "created", "columns": [[name, type]] | None}
 
 
 def _read_jsonl(path: str) -> list[dict]:
@@ -36,6 +45,18 @@ def _read_jsonl(path: str) -> list[dict]:
         return []
     with open(path, encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
+
+
+def _read_json(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _write_json(path: str, value) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(value, fh)
 
 
 def _key_columns(key) -> list[str]:
@@ -46,6 +67,48 @@ def _key_columns(key) -> list[str]:
 def _sort_key(values) -> tuple:
     """A key tuple in SQL Server's ORDER BY order: column by column, NULL first."""
     return tuple((v is not None, v) for v in values)
+
+
+def _parse_columns(columns) -> list[list[str]] | None:
+    """Spark DDL (``"id INT, amount DECIMAL(18,2)"``), or a list of names (typed STRING) or
+    of (name, type) pairs."""
+    if columns is None:
+        return None
+    if isinstance(columns, str):
+        out = []
+        for part in re.split(r",(?![^()]*\))", columns):  # commas outside parentheses
+            name, _, typ = part.strip().partition(" ")
+            out.append([name.strip("`"), typ.strip().upper() or "STRING"])
+        return out
+    return [[c, "STRING"] if isinstance(c, str) else [c[0], c[1]] for c in columns]
+
+
+def _instances(path: str) -> dict:
+    """Every capture instance; ones created before instances.json existed are their own table."""
+    known = _read_json(os.path.join(path, _INSTANCES))
+    for name in _read_json(os.path.join(path, _MIN)):
+        known.setdefault(name, {"table": name, "created": None, "columns": None})
+    return known
+
+
+def _resolve(path: str, ci: str) -> tuple[str | None, list[tuple[str, dict]]]:
+    """The instance named ``ci`` (exact first, else ignoring case; None when gone) and every
+    instance of its table, oldest first. A gone ``ci`` still names its table when the table
+    is named after it, as ``SqlCdcClient`` follows a default instance name."""
+    known = _instances(path)
+    name = ci if ci in known else next((n for n in known if n.lower() == ci.lower()), None)
+    if name is not None:
+        table = known[name]["table"]
+    else:
+        table = next((m["table"] for m in known.values() if m["table"].lower() == ci.lower()), None)
+        if table is None:
+            raise ValueError(f"Capture instance {ci!r} not found")
+    mins = _read_json(os.path.join(path, _MIN))
+    same = sorted(
+        ((n, m) for n, m in known.items() if m["table"] == table),
+        key=lambda nm: (nm[1]["created"] or "", mins.get(nm[0], "")),
+    )
+    return name, same
 
 
 class FakeCdcClient(CdcClient):
@@ -60,11 +123,7 @@ class FakeCdcClient(CdcClient):
         return _read_jsonl(os.path.join(self.path, "changes", f"{self._name(ci)}.jsonl"))
 
     def _mins(self) -> dict:
-        p = os.path.join(self.path, _MIN)
-        if not os.path.exists(p):
-            return {}
-        with open(p, encoding="utf-8") as fh:
-            return json.load(fh)
+        return _read_json(os.path.join(self.path, _MIN))
 
     def _name(self, ci: str) -> str:
         """The instance as created: the exact name first, else ignoring case (SQL Server's
@@ -121,23 +180,52 @@ class FakeCdcClient(CdcClient):
         return points
 
     def _keys(self) -> dict:
-        p = os.path.join(self.path, _KEYS)
-        if not os.path.exists(p):
-            return {}
-        with open(p, encoding="utf-8") as fh:
-            return json.load(fh)
+        return _read_json(os.path.join(self.path, _KEYS))
 
     def source_table(self, capture_instance):
-        start = self.min_lsn(capture_instance)  # not found -> ValueError, like the real one
-        name = self._name(capture_instance)
-        return SourceTable("dbo", name, _key_columns(self._keys().get(name)), start)
+        name, same = _resolve(self.path, capture_instance)  # not found -> ValueError
+        name = name or same[-1][0]  # gone: the table's newest instance
+        table = same[0][1]["table"]
+        return SourceTable("dbo", table, _key_columns(self._keys().get(table)), self.min_lsn(name))
+
+    def capture_instances(self, capture_instance):
+        mins = self._mins()
+        out = []
+        for name, meta in _resolve(self.path, capture_instance)[1]:
+            cols = meta.get("columns") or []
+            out.append(
+                CaptureInstance(
+                    name,
+                    mins.get(name),
+                    meta["created"],
+                    [c for c, _ in cols],
+                    [t for _, t in cols],
+                )
+            )
+        return out
+
+    def ddl_history(self, capture_instance, from_lsn, to_lsn):
+        rows = _read_jsonl(os.path.join(self.path, "ddl", f"{self._name(capture_instance)}.jsonl"))
+        return [
+            DdlChange(
+                r["lsn"],
+                self.lsn_to_time(r["lsn"]),
+                r["column"],
+                r["required_column_update"],
+                r["command"],
+            )
+            for r in rows
+            if from_lsn < r["lsn"] <= to_lsn
+        ]
+
+    def captured_columns(self, capture_instance):
+        cols = _instances(self.path).get(self._name(capture_instance), {}).get("columns")
+        if not cols:
+            return super().captured_columns(capture_instance)  # no metadata: 'columns' required
+        return ", ".join(f"`{c}` {t}" for c, t in cols)
 
     def _table(self, table: str) -> list[dict]:
-        p = os.path.join(self.path, "tables", f"{table}.json")
-        if not os.path.exists(p):
-            return []
-        with open(p, encoding="utf-8") as fh:
-            return list(json.load(fh).values())
+        return list(_read_json(os.path.join(self.path, "tables", f"{table}.json")).values())
 
     def key_range(self, schema, table, key):
         keys = [r[key] for r in self._table(table) if r.get(key) is not None]
@@ -203,16 +291,18 @@ class FakeCdcDatabase:
         capture_instances: Iterable[str],
         start_lsn: int = 0x2A_0000_0100_0001,
         keys: dict[str, str | list[str]] | None = None,
+        columns: dict[str, str] | None = None,
     ):
         """``keys``: capture instance -> key column, or a list of them. Instances with a key
         also keep the source table's current rows (what a snapshot reads), updated by every
-        commit."""
+        commit. ``columns``: capture instance -> its captured columns as Spark DDL, what
+        ``sp_cdc_get_captured_columns`` would report (the source then infers its schema)."""
         self.path = path
         os.makedirs(os.path.join(path, "changes"), exist_ok=True)
         os.makedirs(os.path.join(path, "tables"), exist_ok=True)
+        os.makedirs(os.path.join(path, "ddl"), exist_ok=True)
         if keys:
-            with open(os.path.join(path, _KEYS), "w", encoding="utf-8") as fh:
-                json.dump(keys, fh)
+            _write_json(os.path.join(path, _KEYS), keys)
         self._keys = FakeCdcClient(path)._keys()
         self._next = start_lsn
         existing = _read_jsonl(os.path.join(path, _MAPPING))
@@ -221,8 +311,19 @@ class FakeCdcDatabase:
         mins_path = os.path.join(path, _MIN)
         if not os.path.exists(mins_path):
             first = _lsn.from_int(self._next)
-            with open(mins_path, "w", encoding="utf-8") as fh:
-                json.dump({ci: first for ci in capture_instances}, fh)
+            names = list(capture_instances)
+            _write_json(mins_path, {ci: first for ci in names})
+            _write_json(
+                os.path.join(path, _INSTANCES),
+                {
+                    ci: {
+                        "table": ci,
+                        "created": None,
+                        "columns": _parse_columns((columns or {}).get(ci)),
+                    }
+                    for ci in names
+                },
+            )
 
     def _append(self, rel: str, row: dict) -> None:
         with open(os.path.join(self.path, rel), "a", encoding="utf-8") as fh:
@@ -238,39 +339,51 @@ class FakeCdcDatabase:
         at = at or datetime.now(timezone.utc).replace(tzinfo=None)
         return at.isoformat(timespec="milliseconds")
 
+    def _same_table(self, capture_instance: str) -> list[tuple[str, dict]]:
+        """Every instance of ``capture_instance``'s table; an undeclared name is its own."""
+        try:
+            return _resolve(self.path, capture_instance)[1]
+        except ValueError:
+            return [(capture_instance, {"table": capture_instance, "columns": None})]
+
     def commit(
         self, capture_instance: str, changes: Sequence[tuple[int, dict]], at: datetime | None = None
     ) -> str:
-        """One transaction. ``changes`` is a list of (operation, row) with CDC codes 1-4."""
+        """One transaction on the table ``capture_instance`` tracks (an instance of it, or the
+        table's name). ``changes`` is a list of (operation, row) with CDC codes 1-4. Every
+        instance of the table captures it, with its own columns and command ids."""
         start = self._new_lsn()
         seq = _lsn.to_int(start)
-        for cmd, (op, row) in enumerate(changes, start=1):
-            self._append(
-                os.path.join("changes", f"{capture_instance}.jsonl"),
-                {
-                    "start_lsn": start,
-                    "seqval": _lsn.from_int(seq + cmd),
-                    "operation": op,
-                    "command_id": cmd,
-                    "row": row,
-                },
-            )
+        same = self._same_table(capture_instance)
+        for k, (name, meta) in enumerate(same):
+            keep = {c.lower() for c, _ in meta["columns"]} if meta.get("columns") else None
+            for cmd, (op, row) in enumerate(changes, start=1):
+                self._append(
+                    os.path.join("changes", f"{name}.jsonl"),
+                    {
+                        "start_lsn": start,
+                        "seqval": _lsn.from_int(seq + cmd),  # the same in every instance
+                        # differs per instance, as on SQL Server (ADR 0023); order kept
+                        "command_id": cmd + k,
+                        "operation": op,
+                        "row": row
+                        if keep is None
+                        else {c: v for c, v in row.items() if c.lower() in keep},
+                    },
+                )
         self._append(_MAPPING, {"start_lsn": start, "tran_end_time": self._ts(at)})
-        keys = _key_columns(self._keys.get(capture_instance))
+        table = same[0][1]["table"]
+        keys = _key_columns(self._keys.get(table))
         if keys:  # the source table: after-images replace, deletes remove, before-images do nothing
-            p = os.path.join(self.path, "tables", f"{capture_instance}.json")
-            table = {}
-            if os.path.exists(p):
-                with open(p, encoding="utf-8") as fh:
-                    table = json.load(fh)
+            p = os.path.join(self.path, "tables", f"{table}.json")
+            rows = _read_json(p)
             for op, row in changes:
                 ident = json.dumps([row[k] for k in keys])
                 if op in (2, 4):
-                    table[ident] = row
+                    rows[ident] = row
                 elif op == 1:
-                    table.pop(ident, None)
-            with open(p, "w", encoding="utf-8") as fh:
-                json.dump(table, fh)
+                    rows.pop(ident, None)
+            _write_json(p, rows)
         return start
 
     def idle(self, at: datetime | None = None) -> str:
@@ -283,12 +396,77 @@ class FakeCdcDatabase:
         """Like sys.sp_cdc_cleanup_change_table: move the low watermark, then delete the
         change rows below it."""
         p = os.path.join(self.path, _MIN)
-        with open(p, encoding="utf-8") as fh:
-            mins = json.load(fh)
+        mins = _read_json(p)
         mins[capture_instance] = low_water_mark
-        with open(p, "w", encoding="utf-8") as fh:
-            json.dump(mins, fh)
+        _write_json(p, mins)
         path = os.path.join(self.path, "changes", f"{capture_instance}.jsonl")
         kept = [r for r in _read_jsonl(path) if r["start_lsn"] >= low_water_mark]
         with open(path, "w", encoding="utf-8") as fh:
             fh.writelines(json.dumps(r) + "\n" for r in kept)
+
+    # -- schema changes (ADR 0023) ---------------------------------------------
+    def add_capture_instance(
+        self, table_ci_name: str, columns, at: datetime | None = None, name: str | None = None
+    ) -> str:
+        """Like sys.sp_cdc_enable_table with a new @capture_instance on the table that
+        ``table_ci_name`` (an instance of it, or its name) tracks. It starts at the next
+        commit's LSN, captures ``columns`` (Spark DDL, a list of names, or (name, type)
+        pairs) and is named ``name``, by default ``<table>_v2`` (or the next free number).
+        Returns the name."""
+        same = _resolve(self.path, table_ci_name)[1]
+        if len(same) >= 2:
+            raise ValueError("A table can have at most two capture instances")
+        table = same[0][1]["table"]
+        known = _instances(self.path)
+        if name is None:
+            n = 2
+            while f"{table}_v{n}" in known:
+                n += 1
+            name = f"{table}_v{n}"
+        known[name] = {"table": table, "created": self._ts(at), "columns": _parse_columns(columns)}
+        _write_json(os.path.join(self.path, _INSTANCES), known)
+        mins = _read_json(os.path.join(self.path, _MIN))
+        mins[name] = _lsn.from_int(self._next)  # the next commit is its first
+        _write_json(os.path.join(self.path, _MIN), mins)
+        return name
+
+    def drop_capture_instance(self, name: str) -> None:
+        """Like sys.sp_cdc_disable_table: the instance, its change rows and its DDL history go."""
+        name = _resolve(self.path, name)[0] or name
+        for rel in (_INSTANCES, _MIN):
+            state = _read_json(os.path.join(self.path, rel))
+            state.pop(name, None)
+            _write_json(os.path.join(self.path, rel), state)
+        for rel in (os.path.join("changes", f"{name}.jsonl"), os.path.join("ddl", f"{name}.jsonl")):
+            if os.path.exists(os.path.join(self.path, rel)):
+                os.remove(os.path.join(self.path, rel))
+
+    def ddl(
+        self,
+        capture_instance: str,
+        column: str | None,
+        required_column_update: bool,
+        command: str,
+        new_type: str | None = None,
+    ) -> str:
+        """A DDL statement on the table, recorded by each of its instances at a new LSN
+        (after the last commit; the next commit's is larger). ``new_type``: a captured
+        column's new Spark type (ALTER COLUMN), which the instances then report. Returns the
+        LSN."""
+        lsn = self._new_lsn()
+        known = _instances(self.path)
+        for name, _ in self._same_table(capture_instance):
+            self._append(
+                os.path.join("ddl", f"{name}.jsonl"),
+                {
+                    "lsn": lsn,
+                    "column": column,
+                    "required_column_update": required_column_update,
+                    "command": command,
+                },
+            )
+            for col in known.get(name, {}).get("columns") or []:
+                if new_type and column and col[0].lower() == column.lower():
+                    col[1] = new_type.upper()
+        _write_json(os.path.join(self.path, _INSTANCES), known)
+        return lsn

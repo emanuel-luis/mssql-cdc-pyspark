@@ -20,12 +20,23 @@ Usage::
             .load())  # columns inferred from CDC metadata; "columns" (DDL) overrides
 
 When ``columns`` is omitted, the captured columns and their types come from
-``sys.sp_cdc_get_captured_columns`` at ``load()`` time, on the driver.
+``sys.sp_cdc_get_captured_columns`` at ``load()`` time, on the driver: the union of every
+capture instance of the table, since a batch may read two (ADR 0023).
+
+Schema changes (ADR 0023). Every planning lists the table's capture instances and the DDL
+each recorded inside the batch (``sys.sp_cdc_get_ddl_history``). A captured column whose
+type no longer fits the query's fails the batch before anything is read
+(``SchemaChangedError``); other DDL is logged and, with ``metricsPath``, left there as an
+event file for the sink (``schemaChangePolicy=fail`` fails on any DDL). A newer instance of
+the same table takes over at its ``start_lsn`` S: a batch reads the older one below S and
+the newer one from S, and a column an instance lacks reads NULL. Offsets do not change.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -64,6 +75,9 @@ METADATA_COLUMNS = [
 ]
 # 1-4 are SQL Server's __$operation codes; 0 marks a snapshot row (ADR 0016)
 OPERATIONS = {0: "snapshot", 1: "delete", 2: "insert", 3: "update_before", 4: "update_after"}
+SCHEMA_CHANGE_POLICIES = ("classify", "fail")
+
+_log = logging.getLogger(__name__)
 
 
 def _opt(options, key: str, default=None):
@@ -73,6 +87,54 @@ def _opt(options, key: str, default=None):
 
 def _truthy(value) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "y")
+
+
+# -- types across schema changes (ADR 0023) ------------------------------------
+_INTS = ["tinyint", "smallint", "int", "bigint"]
+_DIGITS = {"tinyint": 3, "smallint": 5, "int": 10, "bigint": 20}
+_DECIMAL = re.compile(r"^decimal\((\d+),(\d+)\)$")
+
+
+def _fits(old: str, new: str) -> bool:
+    """Whether every value of Spark type ``old`` fits ``new`` unchanged: the same type, or
+    a widening Delta type widening also accepts."""
+    old, new = (re.sub(r"\s+", "", t).lower() for t in (old, new))
+    if old == new:
+        return True
+    if old in _INTS and new in _INTS:
+        return _INTS.index(old) < _INTS.index(new)
+    if (old, new) in (("float", "double"), ("date", "timestamp_ntz")):
+        return True
+    if old in _INTS and new == "double":
+        return old != "bigint"
+    n, o = _DECIMAL.match(new), _DECIMAL.match(old)
+    if n and old in _INTS:
+        return int(n[1]) - int(n[2]) >= _DIGITS[old]
+    if n and o:
+        return int(n[2]) >= int(o[2]) and int(n[1]) - int(n[2]) >= int(o[1]) - int(o[2])
+    return False
+
+
+def union_columns(instances) -> str:
+    """Spark DDL of the columns of every capture instance (``CaptureInstance``, oldest first),
+    by name in capture order, older first. A column two instances type differently takes
+    the newer's type when it holds the older's values; otherwise ``SchemaChangedError``."""
+    from .client import SchemaChangedError
+
+    cols: dict[str, tuple[str, str, str]] = {}  # lower name -> (name, type, instance)
+    for inst in instances:
+        for name, typ in zip(inst.columns, inst.column_types):
+            seen = cols.get(name.lower())
+            if seen and not _fits(seen[1], typ):
+                raise SchemaChangedError(
+                    f"Capture instances {seen[2]!r} and {inst.name!r} of the same table capture "
+                    f"{name!r} as {seen[1]} and {typ}, and the newer type does not hold the older's "
+                    "values. Pass 'columns' with a type that holds both, or disable the older "
+                    f"instance once the stream has read past {inst.name!r}'s start "
+                    f"({inst.start_lsn})."
+                )
+            cols[name.lower()] = (seen[0] if seen else name, typ, inst.name)
+    return ", ".join(f"`{n.replace('`', '``')}` {t}" for n, t, _ in cols.values())
 
 
 def _write_metrics(path: str, partition: LsnRange, metrics: dict) -> None:
@@ -90,11 +152,28 @@ def _write_metrics(path: str, partition: LsnRange, metrics: dict) -> None:
         pass
 
 
+def _write_event(path: str, kind: str, ci: str, lsn: str, commit_ts, detail: str) -> None:
+    """One JSON per event, for the sink to fold into the facts (ADR 0023): named by its kind
+    and LSN, so a replanned batch rewrites the same file. Best effort, like the metrics."""
+    import json
+
+    try:
+        os.makedirs(path, exist_ok=True)
+        name = os.path.join(path, f"event-{kind}-{lsn}.json")
+        body = {"event": kind, "capture_instance": ci, "lsn": lsn, "commit_ts": commit_ts}
+        with open(name + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump({**body, "detail": detail}, fh)
+        os.replace(name + ".tmp", name)
+    except OSError as exc:
+        _log.warning("mssql_cdc: could not write the %s event file in %s: %s", kind, path, exc)
+
+
 @dataclass
 class LsnRange(InputPartition):
-    capture_instance: str
+    capture_instance: str  # the instance this range reads: batches can span two (ADR 0023)
     from_lsn: str  # inclusive
     to_lsn: str  # inclusive
+    columns: list[str] | None = None  # the source columns it has; None: all. The rest read NULL
 
 
 class MssqlCdcDataSource(DataSource):
@@ -113,7 +192,8 @@ class MssqlCdcDataSource(DataSource):
         return ", ".join(meta) + ", " + columns
 
     def _captured_columns(self) -> str:
-        """Without ``columns``, read the captured columns from CDC metadata (driver side)."""
+        """Without ``columns``, the union of the captured columns of every capture instance
+        of the table, from CDC metadata (driver side)."""
         from .client import make_client
 
         ci = _opt(self.options, "captureInstance")
@@ -121,7 +201,11 @@ class MssqlCdcDataSource(DataSource):
             raise ValueError("Option 'captureInstance' is required (e.g. 'dbo_orders')")
         client = make_client(self.options)
         try:
-            return client.captured_columns(ci)
+            instances = client.capture_instances(ci)
+            for inst in instances:
+                if not inst.columns or None in inst.column_types:
+                    return client.captured_columns(inst.name)  # raises, naming what is missing
+            return union_columns(instances)
         finally:
             client.close()
 
@@ -165,11 +249,20 @@ class _Common:
         # optional: a directory (local or FUSE, e.g. /Volumes/...) where each partition leaves
         # its metrics for delta_sink(metrics_path=...) to fold into the batch facts
         self.metrics_path = _opt(options, "metricsPath")
+        policy = str(_opt(options, "schemaChangePolicy", "classify")).strip().lower()
+        if policy not in SCHEMA_CHANGE_POLICIES:
+            raise ValueError(f"schemaChangePolicy must be 'classify' or 'fail', not {policy!r}")
+        self.schema_change_policy = policy
+        self.explicit_columns = bool(_opt(options, "columns"))
         meta_names = {n for n, _ in METADATA_COLUMNS}
         self.field_names = list(schema.fieldNames())
         self.source_columns = [f for f in self.field_names if f not in meta_names]
         self.schema = schema
         self._client = None
+        # driver side (ADR 0023): the capture instance names seen this run, gone ones first,
+        # then oldest to newest; and the type each source column is expected to have
+        self._names = [self.capture_instance]
+        self._expected: dict[str, str] | None = None
 
     # A live DB connection must never be pickled to executors.
     def __getstate__(self):
@@ -185,6 +278,30 @@ class _Common:
             self._client = make_client(self.options)
         return self._client
 
+    def _instances(self, client) -> list:
+        """Every capture instance of the source table, oldest first (``CaptureInstance``).
+        Looked up by the newest name seen this run first, so an instance disabled after a
+        newer one took over is followed (ADR 0023)."""
+        error: ValueError | None = None
+        for name in reversed(self._names):
+            try:
+                found = client.capture_instances(name)
+                break
+            except ValueError as exc:
+                error = error or exc
+        else:
+            assert error is not None  # _names is never empty
+            raise error
+        current = {i.name.lower() for i in found}
+        self._names = [n for n in self._names if n.lower() not in current]
+        self._names += [i.name for i in found]
+        return found
+
+    def _gone(self, instances) -> list[str]:
+        """Instance names seen this run (or configured) that the table no longer has."""
+        current = {i.name.lower() for i in instances}
+        return [n for n in self._names if n.lower() not in current]
+
 
 class _BaseReader(_Common, DataSourceStreamReader):
     # -- offsets --------------------------------------------------------------
@@ -194,8 +311,10 @@ class _BaseReader(_Common, DataSourceStreamReader):
     def initialOffset(self) -> dict:
         start = (_opt(self.options, "startingLsn", "earliest") or "earliest").strip()
         if start.lower() == "earliest":
-            # offsets hold the last *processed* LSN, so start just before min_lsn
-            lsn = self.client.decrement_lsn(self.client.min_lsn(self.capture_instance))
+            # offsets hold the last *processed* LSN, so start just before min_lsn (of the
+            # table's oldest capture instance: a batch reads it below the newer's start)
+            oldest = self._instances(self.client)[0].name
+            lsn = self.client.decrement_lsn(self.client.min_lsn(oldest))
         elif start.lower() == "latest":
             lsn = self.client.max_lsn()
         else:
@@ -207,40 +326,198 @@ class _BaseReader(_Common, DataSourceStreamReader):
     def partitions(self, start: dict, end: dict):
         if end["lsn"] <= start["lsn"]:
             return []
-        from_lsn = self.client.increment_lsn(start["lsn"])
-        # failOnDataLoss=false: skip ahead to what cleanup left
-        from_lsn = max(from_lsn, self._guard_retention(self.client, from_lsn))
+        client = self.client
+        instances = self._instances(client)
+        expected = self._expected_types(instances)
+        from_lsn = client.increment_lsn(start["lsn"])
         to_lsn = end["lsn"]
-        if from_lsn > to_lsn:  # invariant 3: cleanup left nothing up to end
-            return []
-        if self.num_partitions <= 1:
-            return [LsnRange(self.capture_instance, from_lsn, to_lsn)]
-        bounds = [
-            b
-            for b in self.client.split_points(
-                self.capture_instance, from_lsn, to_lsn, self.num_partitions
-            )
-            if b
-        ]
-        if not bounds or bounds[-1] != to_lsn:
-            bounds.append(to_lsn)
-        ranges, lo = [], from_lsn
-        for hi in bounds:
-            if hi < lo:
-                continue
-            ranges.append(LsnRange(self.capture_instance, lo, hi))
-            lo = self.client.increment_lsn(hi)
+        pieces = self._pieces(client, instances, from_lsn, to_lsn)
+        # schema checks first: a batch that fails them reads nothing (ADR 0023)
+        events = self._check_ddl(client, [i for i, _, _ in pieces], start["lsn"], to_lsn, expected)
+        for older, inst in pairwise(instances):
+            if any(p[0] is inst and p[1] == inst.start_lsn for p in pieces):  # crosses its start
+                self._check_switch(older, inst)
+                detail = f"{older.name} -> {inst.name}"
+                ts = client.lsn_to_time(inst.start_lsn)
+                events.append(("capture_instance_switched", inst.name, inst.start_lsn, ts, detail))
+        ranges = []
+        gone = self._gone(instances)
+        for inst, lo, hi in pieces:
+            # failOnDataLoss=false: skip ahead to what cleanup left
+            oldest = inst is instances[0]
+            lo = max(lo, self._guard_retention(client, inst.name, lo, gone if oldest else []))
+            if lo <= hi:  # invariant 3: cleanup may have left nothing up to hi
+                ranges += self._split(client, inst, lo, hi)
+        for kind, ci, lsn, ts, detail in events:
+            _log.warning("mssql_cdc: %s on %s at %s: %s", kind, ci, lsn, detail)
+            if self.metrics_path:  # for the sink to fold into the facts
+                _write_event(self.metrics_path, kind, ci, lsn, ts, detail)
         return ranges
 
-    def _guard_retention(self, client, from_lsn: str) -> str:
-        """Invariant 4: fail when CDC cleanup purged change data at or after ``from_lsn``."""
-        min_lsn = client.min_lsn(self.capture_instance)
+    def _pieces(self, client, instances, lo: str, hi: str) -> list[tuple]:
+        """[lo, hi] cut at each newer instance's start S: (instance, from, to) with the
+        older instance up to S - 1 and the newer one from S. Never an empty piece."""
+        usable = [instances[0], *(i for i in instances[1:] if i.start_lsn)]
+        pieces = []
+        for inst, nxt in zip(usable, [*usable[1:], None]):
+            s = nxt.start_lsn if nxt is not None else None
+            if s is None or s > hi:
+                pieces.append((inst, lo, hi))
+                break
+            if lo < s:
+                pieces.append((inst, lo, client.decrement_lsn(s)))
+            lo = max(lo, s)
+        return pieces
+
+    def _split(self, client, inst, lo: str, hi: str) -> list[LsnRange]:
+        """[lo, hi] of one instance in up to numPartitions ranges of about the same rows."""
+        cols = self._columns_of(inst)
+        if self.num_partitions <= 1:
+            return [LsnRange(inst.name, lo, hi, cols)]
+        bounds = [b for b in client.split_points(inst.name, lo, hi, self.num_partitions) if b]
+        if not bounds or bounds[-1] != hi:
+            bounds.append(hi)
+        ranges = []
+        for b in bounds:
+            if b < lo:
+                continue
+            ranges.append(LsnRange(inst.name, lo, b, cols))
+            lo = client.increment_lsn(b)
+        return ranges
+
+    def _columns_of(self, inst) -> list[str] | None:
+        """The query's source columns ``inst`` captures; None when it has them all (or its
+        columns are unknown)."""
+        if not inst.columns:
+            return None
+        have = {c.lower() for c in inst.columns}
+        cols = [c for c in self.source_columns if c.lower() in have]
+        return None if len(cols) == len(self.source_columns) else cols
+
+    def _expected_types(self, instances) -> dict[str, str]:
+        """lower name -> the Spark type the query reads a source column as, to compare the
+        captured types with: the schema's when inferred; with 'columns', the captured types
+        at this run's first planning (the declared ones are the user's own conversions)."""
+        if self._expected is None:
+            if self.explicit_columns:
+                self._expected = {
+                    c.lower(): t
+                    for i in instances
+                    for c, t in zip(i.columns, i.column_types)
+                    if t is not None
+                }
+            else:
+                wanted = {c.lower() for c in self.source_columns}
+                self._expected = {
+                    f.name.lower(): f.dataType.simpleString()
+                    for f in self.schema.fields
+                    if f.name.lower() in wanted
+                }
+        return self._expected
+
+    def _check_ddl(self, client, used, start: str, end: str, expected) -> list[tuple]:
+        """D1 of ADR 0023: the DDL the instances read by this batch recorded in (start, end].
+        A captured column whose type no longer fits the query's, or with
+        schemaChangePolicy=fail any DDL, raises ``SchemaChangedError``; the rest become
+        'schema_change' events."""
+        from .client import SchemaChangedError
+
+        found: dict = {}
+        for inst in {i.name: i for i in used}.values():  # one call per instance
+            for d in client.ddl_history(inst.name, start, end):
+                found.setdefault(d.lsn, (inst, d))  # recorded by both instances: once
+        if not found:
+            return []
+        changes = [found[lsn] for lsn in sorted(found)]
+        if self.schema_change_policy == "fail":
+            inst, d = changes[0]
+            raise SchemaChangedError(
+                f"{inst.name}: DDL at {d.lsn} ({d.command!r}) inside the batch, and "
+                "schemaChangePolicy=fail. Restart the query to re-infer the schema (and enable "
+                "delta.enableTypeWidening on bronze for a widening); the replayed batch holds "
+                "the same DDL, so restart with schemaChangePolicy=classify to go past it."
+            )
+        wanted = {c.lower() for c in self.source_columns}
+        changed = {
+            f"{c} {t} (read as {expected[c.lower()]})"
+            for inst in used
+            for c, t in zip(inst.columns, inst.column_types)
+            if c.lower() in wanted
+            and c.lower() in expected
+            and not (t and _fits(t, expected[c.lower()]))
+        }
+        if changed:
+            commands = "; ".join(f"{d.lsn}: {d.command}" for _, d in changes)
+            fix = "update 'columns'" if self.explicit_columns else "re-infer the schema"
+            raise SchemaChangedError(
+                f"{used[0].name}: the type of captured column(s) {', '.join(sorted(changed))} "
+                f"changed inside the batch ({commands}). Restart the query to {fix} (and "
+                "enable delta.enableTypeWidening on bronze for a widening)."
+            )
+        return [
+            (
+                "schema_change",
+                inst.name,
+                d.lsn,
+                d.commit_ts,
+                (f"{d.column}: {d.command}" if d.column else d.command)[:500],
+            )
+            for inst, d in changes
+        ]
+
+    def _check_switch(self, older, newer) -> None:
+        """D2 of ADR 0023: follow ``newer`` from its start only when the query's schema holds
+        what it captures; otherwise fail at the boundary, before reading past it, so the next
+        load() infers the new columns. With 'columns' the declared list decides."""
+        new = [
+            c for c in newer.columns if c.lower() not in {s.lower() for s in self.source_columns}
+        ]
+        if self.explicit_columns:
+            if new:
+                _log.warning(
+                    "mssql_cdc: %s captures %s, which 'columns' does not list: not read",
+                    newer.name,
+                    ", ".join(new),
+                )
+            return
+        from .client import SchemaChangedError
+
+        query = {f.name.lower(): f.dataType.simpleString() for f in self.schema.fields}
+        changed = [
+            f"{c} {t} (read as {query[c.lower()]})"
+            for c, t in zip(newer.columns, newer.column_types)
+            if c.lower() in query and not (t and _fits(t, query[c.lower()]))
+        ]
+        what = []
+        if new:
+            what.append(f"new column(s) {', '.join(new)}")
+        if changed:
+            what.append(f"other type(s) {', '.join(changed)}")
+        if what:
+            raise SchemaChangedError(
+                f"Capture instance {newer.name!r} took over from {older.name!r} at "
+                f"{newer.start_lsn} with {'; '.join(what)}. Restart the query to re-infer the "
+                "schema (and "
+                "enable delta.enableTypeWidening on bronze for a widening); it resumes there."
+            )
+
+    def _guard_retention(self, client, capture_instance: str, from_lsn: str, gone=()) -> str:
+        """Invariant 4: fail when change data at or after ``from_lsn`` is gone from
+        ``capture_instance``. ``gone``: older instances of the table disabled meanwhile."""
+        min_lsn = client.min_lsn(capture_instance)
         if from_lsn < min_lsn and self.fail_on_data_loss:
             from .client import DataLossError
 
+            why = (
+                f"it starts at {min_lsn} and the changes from {from_lsn} were only in "
+                f"capture instance {', '.join(map(repr, gone))}, disabled before the stream "
+                "read them (not CDC cleanup)"
+                if gone
+                else f"change data from {from_lsn} was purged by CDC cleanup (current min_lsn "
+                f"is {min_lsn})"
+            )
             raise DataLossError(
-                f"{self.capture_instance}: change data from {from_lsn} was purged by CDC "
-                f"cleanup (current min_lsn is {min_lsn}). A re-snapshot is required. "
+                f"{capture_instance}: {why}. A re-snapshot is required. "
                 "Set failOnDataLoss=false to skip ahead (loses changes)."
             )
         return min_lsn
@@ -251,6 +528,8 @@ class _BaseReader(_Common, DataSourceStreamReader):
         from pyspark.sql.pandas.types import to_arrow_schema
 
         target = to_arrow_schema(self.schema, timezone="UTC")  # TIMESTAMP columns are UTC instants
+        cols = self.source_columns if partition.columns is None else partition.columns
+        absent = [c for c in self.source_columns if c not in cols]  # read as typed NULL
         client = self.client
         started, rows, nbytes = time.perf_counter(), 0, 0
         try:
@@ -261,7 +540,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 partition.capture_instance,
                 partition.from_lsn,
                 partition.to_lsn,
-                self.source_columns,
+                cols,
                 self.include_command_id,
                 self.batch_size,
             ):
@@ -272,12 +551,16 @@ class _BaseReader(_Common, DataSourceStreamReader):
                     "_capture_instance",
                     pa.array([partition.capture_instance] * table.num_rows, pa.string()),
                 )
+                for name in absent:
+                    table = table.append_column(
+                        name, pa.nulls(table.num_rows, target.field(name).type)
+                    )
                 table = table.select(self.field_names).cast(target)
                 rows, nbytes = rows + table.num_rows, nbytes + table.nbytes
                 yield from table.to_batches()
             # Cleanup may have run since partitions() checked. It moves min_lsn before it
             # deletes rows, so min_lsn past from_lsn now means rows may be missing.
-            min_lsn = self._guard_retention(client, partition.from_lsn)
+            min_lsn = self._guard_retention(client, partition.capture_instance, partition.from_lsn)
             if self.metrics_path:  # rows or not: a batch that read none writes its facts row too
                 wait_after = client.network_wait_ms()
                 try:
@@ -399,6 +682,7 @@ class KeyRange(InputPartition):
     types: list[str] | None  # the keys' SQL types, bounds bound as CAST(? AS type); None: integers
     lo: tuple | None  # inclusive, one value per key; None: open, plus the rows that sort first
     hi: tuple | None  # exclusive; None: open
+    columns: list[str] | None = None  # the source columns the table still has; None: all
 
 
 class MssqlCdcSnapshotReader(_Common, DataSourceReader):
@@ -406,19 +690,27 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         client = self.client
         from .lsn import normalize
 
-        source = client.source_table(self.capture_instance)
+        # the configured instance, or the newest of its table once it is disabled (ADR 0023)
+        instances = self._instances(client)
+        ci = self.capture_instance
+        if ci.lower() not in {i.name.lower() for i in instances}:
+            ci = instances[-1].name
+        source = client.source_table(ci)
         given = _opt(self.options, "snapshotLsn")
         lsn = normalize(given) if given else snapshot_lsn(client, source)
         commit_ts = client.lsn_to_time(lsn)
         schema, table, keys = source.schema, source.table, source.keys
+        # a captured column the table no longer has reads NULL, like its later change rows
+        present = client.present_columns(ci, self.source_columns)
+        columns = None if len(present) == len(self.source_columns) else present
 
         def ranges(keys, types, bounds):
             return [
-                KeyRange(self.capture_instance, lsn, commit_ts, schema, table, keys, types, a, b)
+                KeyRange(ci, lsn, commit_ts, schema, table, keys, types, a, b, columns)
                 for a, b in pairwise([None, *bounds, None])
             ]
 
-        if self.num_partitions <= 1 or not keys or not set(keys) <= set(self.source_columns):
+        if self.num_partitions <= 1 or not keys or not set(keys) <= set(present):
             return ranges([], None, [])
         if len(keys) == 1:
             # One integer key: uniform ranges over MIN..MAX, two seeks. NTILE would read and
@@ -431,7 +723,7 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
                 n = min(self.num_partitions, hi - lo + 1)
                 return ranges(keys, None, [(lo + (hi - lo + 1) * i // n,) for i in range(1, n)])
         # Composite or non-integer key: tiles of the rows by NTILE, bounds typed per column.
-        types = client.key_types(self.capture_instance, keys)
+        types = client.key_types(ci, keys)
         if None in types:
             return ranges([], None, [])
         return ranges(keys, types, client.key_tiles(schema, table, keys, self.num_partitions))
@@ -452,12 +744,13 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
             "_command_id": (None, pa.int32()),
             "_commit_ts": (commit_ts, pa.timestamp("us")),
         }
+        cols = self.source_columns if partition.columns is None else partition.columns
         client = self.client
         try:
             for batch in client.iter_table(
                 partition.schema,
                 partition.table,
-                self.source_columns,
+                cols,
                 partition.keys,
                 partition.types,
                 partition.lo,
@@ -471,6 +764,10 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
                     if name in meta:
                         value, typ = meta[name]
                         table = table.append_column(name, pa.array([value] * table.num_rows, typ))
+                    elif name not in cols:  # dropped from the source table: typed NULL
+                        table = table.append_column(
+                            name, pa.nulls(table.num_rows, target.field(name).type)
+                        )
                 yield from table.select(self.field_names).cast(target).to_batches()
         finally:
             client.close()

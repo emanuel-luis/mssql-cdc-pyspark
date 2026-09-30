@@ -35,6 +35,11 @@ class DataLossError(RuntimeError):
     """Raised when requested change data was already purged by CDC cleanup."""
 
 
+class SchemaChangedError(RuntimeError):
+    """Raised when the source's schema changed in a way the running query cannot absorb:
+    restart it to re-infer the schema (ADR 0023)."""
+
+
 class SourceTable(NamedTuple):
     """The table a capture instance tracks (``sys.sp_cdc_help_change_data_capture``)."""
 
@@ -42,6 +47,41 @@ class SourceTable(NamedTuple):
     table: str
     keys: list[str]  # columns of the unique index CDC identifies rows by; [] without one
     start_lsn: str | None  # the instance's low endpoint; known before capture reaches it
+
+
+class CaptureInstance(NamedTuple):
+    """One capture instance of a source table (SQL Server allows two per table)."""
+
+    name: str
+    start_lsn: str | None  # its low endpoint, as sys.fn_cdc_get_min_lsn once capture reaches it
+    create_date: str | None  # ISO-8601 in the server's clock; orders the instances
+    columns: list[str]  # captured columns, in capture order; [] when unknown (the fake)
+    column_types: list[str | None]  # their default Spark types; None: no default mapping
+
+
+class DdlChange(NamedTuple):
+    """A DDL statement on the tracked table (``sys.sp_cdc_get_ddl_history``)."""
+
+    lsn: str
+    commit_ts: str | None  # commit time (UTC, ms) of the last commit at or before ``lsn``
+    column: str | None  # the column an ADD, ALTER COLUMN or DROP COLUMN names; None otherwise
+    required_column_update: bool  # a captured column's type changed
+    command: str
+
+
+# ALTER TABLE t ADD c ..., ALTER COLUMN c ..., DROP COLUMN c: only the column's name
+_DDL_COLUMN_RE = re.compile(
+    r"\b(?:ADD|ALTER\s+COLUMN|DROP\s+COLUMN)\s+(\[(?:[^\]]|\]\])+\]|[^\s,(]+)", re.IGNORECASE
+)
+_NOT_A_COLUMN = {"CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "DEFAULT", "INDEX"}
+
+
+def _ddl_column(command: str) -> str | None:
+    m = _DDL_COLUMN_RE.search(command or "")
+    if not m or m[1].upper() in _NOT_A_COLUMN:
+        return None
+    name = m[1]
+    return name[1:-1].replace("]]", "]") if name.startswith("[") else name
 
 
 def _check_ident(name: str, what: str) -> str:
@@ -269,6 +309,21 @@ class CdcClient(ABC):
         column by column with NULL first, like ORDER BY. A None bound is open, so the range
         open below also holds the rows whose leading key is NULL. ``types``: the key columns'
         SQL types for the bounds (``key_types``); None for integer bounds."""
+
+    # -- schema changes and capture instance switches (ADR 0023) ----------------
+    @abstractmethod
+    def capture_instances(self, capture_instance: str) -> list[CaptureInstance]:
+        """Every capture instance of the table ``capture_instance`` tracks, oldest first. A
+        dropped ``capture_instance`` is followed to its table when that can be told."""
+
+    @abstractmethod
+    def ddl_history(self, capture_instance: str, from_lsn: str, to_lsn: str) -> list[DdlChange]:
+        """DDL on the tracked table recorded by ``capture_instance`` with LSN in (from, to]."""
+
+    def present_columns(self, capture_instance: str, columns: Sequence[str]) -> list[str]:
+        """Which of ``columns`` the source table still has, for a snapshot to read (the rest
+        it fills with NULL)."""
+        return list(columns)
 
     def captured_columns(self, capture_instance: str) -> str:
         """Spark DDL of the captured columns, in capture order."""
@@ -581,6 +636,96 @@ class SqlCdcClient(CdcClient):
             ddl.append(f"`{name.replace('`', '``')}` {typ}")
         return ", ".join(ddl)
 
+    def capture_instances(self, capture_instance):
+        # ponytail: one sp_cdc_get_captured_columns per instance per call (every planning);
+        # cache by (name, create_date) if planning time shows up in profiles.
+        out = []
+        for r in self._resolve(capture_instance)[1]:
+            cols = self._captured_rows(r["capture_instance"])
+            types = []
+            for c in cols:
+                try:
+                    types.append(
+                        _spark_type(c["data_type"], c["numeric_precision"], c["numeric_scale"])
+                    )
+                except ValueError:
+                    types.append(None)  # fine unless the query reads it; load() says so
+            created = r.get("create_date")
+            out.append(
+                CaptureInstance(
+                    r["capture_instance"],
+                    self._hex(r["start_lsn"]),
+                    created.isoformat(timespec="milliseconds") if created else None,
+                    [_check_column(c["column_name"]) for c in cols],
+                    types,
+                )
+            )
+        return out
+
+    def ddl_history(self, capture_instance, from_lsn, to_lsn):
+        # The documented API, not cdc.ddl_history (invariant 11): it needs what
+        # sp_cdc_get_captured_columns needs. Its ddl_lsn comes back binary, like start_lsn in
+        # source_table; the few rows (one per DDL) are filtered here.
+        ci = _check_ident(capture_instance, "capture instance")
+        rows = [
+            r
+            for batch in self._b.batches(
+                "EXEC sys.sp_cdc_get_ddl_history @capture_instance = ?", (ci,), 1000
+            )
+            for r in batch.to_pylist()
+        ]
+        out = []
+        for r in rows:
+            lsn = _lsn.normalize(r["ddl_lsn"])
+            if from_lsn < lsn <= to_lsn:
+                out.append(
+                    DdlChange(
+                        lsn,
+                        self._commit_time_at_or_before(lsn),
+                        _ddl_column(r["ddl_command"]),
+                        bool(r["required_column_update"]),
+                        r["ddl_command"],
+                    )
+                )
+        return sorted(out)
+
+    def _commit_time_at_or_before(self, lsn: str) -> str | None:
+        # A DDL's LSN is no commit's: sys.fn_cdc_map_lsn_to_time returns NULL for it (SQL
+        # Server 2022). The last commit before it, one seek on the mapping's key.
+        value = self._b.scalar(
+            "SELECT TOP (1) CONVERT(varchar(23), "
+            + self._utc("tran_end_time")
+            + ", 126) FROM cdc.lsn_time_mapping WHERE start_lsn <= CONVERT(binary(10), ?, 1) "
+            "ORDER BY start_lsn DESC",
+            (lsn,),
+        )
+        return datetime.fromisoformat(value).isoformat(timespec="milliseconds") if value else None
+
+    def present_columns(self, capture_instance, columns):
+        # A dropped captured column stays in the capture instance; one added back under the
+        # same name is another column (a new column_id), so match by column_id, not by name.
+        rows = self._resolve(capture_instance)[1]
+        captured = {}
+        for r in rows:  # oldest first: the newest instance capturing a column wins
+            for c in self._captured_rows(r["capture_instance"]):
+                captured[c["column_name"].lower()] = c["column_id"]
+        sql = (
+            "SELECT name, column_id FROM sys.columns "
+            "WHERE object_id = OBJECT_ID(QUOTENAME(?) + '.' + QUOTENAME(?))"
+        )
+        live = {
+            r["name"].lower(): r["column_id"]
+            for batch in self._b.batches(
+                sql, (rows[0]["source_schema"], rows[0]["source_table"]), 1000
+            )
+            for r in batch.to_pylist()
+        }
+        return [
+            c
+            for c in columns
+            if c.lower() in live and captured.get(c.lower(), live[c.lower()]) == live[c.lower()]
+        ]
+
     # -- data -----------------------------------------------------------------
     def iter_changes(
         self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size
@@ -608,10 +753,15 @@ class SqlCdcClient(CdcClient):
         yield from self._change_table_batches(ci, sql, (from_lsn, to_lsn), batch_size)
 
     # -- snapshot (ADR 0016) ----------------------------------------------------
-    def source_table(self, capture_instance):
-        # The documented API, not cdc.change_tables (invariant 11). Called without
-        # arguments it lists the capture instances whose captured columns the login can
-        # SELECT, which the query functions already require.
+    def _resolve(self, capture_instance: str) -> tuple[dict | None, list[dict]]:
+        """The ``sys.sp_cdc_help_change_data_capture`` row of ``capture_instance`` (None when
+        it is gone) and the rows of every instance of its table, oldest first.
+
+        The documented API, not cdc.change_tables (invariant 11). Called without arguments
+        it lists the capture instances whose captured columns the login can SELECT, which
+        the query functions already require. @source_schema/@source_name applies the same
+        check to one table, so this one listing already holds every instance of it.
+        """
         ci = _check_ident(capture_instance, "capture instance")
         listed = [
             r
@@ -628,12 +778,43 @@ class SqlCdcClient(CdcClient):
             raise ValueError(
                 f"Capture instance {ci!r} matches {names} ignoring case: pass the exact name."
             )
-        if not rows:
-            raise ValueError(
-                f"Capture instance {ci!r} not found, or the login lacks SELECT on its source "
-                "columns (or membership in its gating role)."
-            )
-        r = rows[0]
+
+        def table(r: dict) -> tuple[str, str]:
+            return r["source_schema"], r["source_table"]
+
+        if rows:
+            found, key = rows[0], table(rows[0])
+        else:
+            # Gone, e.g. disabled after a newer instance took over (ADR 0023). A default
+            # name (<schema>_<table>) still tells its table.
+            tables = {table(r) for r in listed if "_".join(table(r)).lower() == ci.lower()}
+            if len(tables) != 1:
+                similar = [
+                    r["capture_instance"]
+                    for r in listed
+                    if r["capture_instance"].lower().startswith(ci.lower())
+                    or ci.lower().startswith("_".join(table(r)).lower() + "_")
+                ]
+                hint = (
+                    f" Capture instances of what may be its table: {', '.join(map(repr, similar))}"
+                    f"; if {ci!r} was disabled, set captureInstance to the newer one."
+                    if similar
+                    else ""
+                )
+                raise ValueError(
+                    f"Capture instance {ci!r} not found, or the login lacks SELECT on its source "
+                    f"columns (or membership in its gating role).{hint}"
+                )
+            found, key = None, tables.pop()
+        same = sorted(
+            (r for r in listed if table(r) == key),
+            key=lambda r: (str(r.get("create_date") or ""), self._hex(r["start_lsn"]) or ""),
+        )
+        return found, same
+
+    def source_table(self, capture_instance):
+        found, same = self._resolve(capture_instance)
+        r = found or same[-1]  # gone: the table's newest instance
         keys = re.findall(r"\[([^\]]+)\]", r["index_column_list"] or "")  # "[a], [b]"
         return SourceTable(
             _check_column(r["source_schema"]),
@@ -725,7 +906,8 @@ class SqlCdcClient(CdcClient):
                 raise PermissionError(
                     f"The login cannot read the change table cdc.[{ci}_CT]. Beyond what the CDC "
                     f"query functions need, the reader needs: GRANT SELECT ON cdc.[{ci}_CT] "
-                    "TO <user> (ADR 0009)."
+                    "TO <user> (ADR 0009). Each capture instance has its own change table: a "
+                    "new instance of the table needs its own grant."
                 ) from exc
             raise
 

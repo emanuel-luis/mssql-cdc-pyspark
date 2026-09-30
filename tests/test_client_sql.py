@@ -1,5 +1,7 @@
 """SqlCdcClient builds T-SQL; check the generated statements without a server."""
 
+from datetime import datetime
+
 import pyarrow as pa
 import pytest
 
@@ -234,29 +236,243 @@ def test_change_table_permission_error_names_the_grant():
                 "'dbo_orders_CT', database 'db', schema 'cdc'."
             )
 
-    with pytest.raises(PermissionError, match=r"GRANT SELECT ON cdc\.\[dbo_orders_CT\]"):
+    with pytest.raises(PermissionError, match=r"GRANT SELECT ON cdc\.\[dbo_orders_CT\].*own grant"):
         list(SqlCdcClient(Denied()).iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
     with pytest.raises(PermissionError, match=r"GRANT SELECT ON cdc\.\[dbo_orders_CT\]"):
         SqlCdcClient(Denied(), source_timezone="UTC").split_points("dbo_orders", "0x01", "0x02", 4)
 
 
-def test_schema_infers_columns_when_option_missing(monkeypatch):
+def _instance(ci, table, start, created=None, schema="dbo"):
+    """One row of sys.sp_cdc_help_change_data_capture."""
+    return {
+        "capture_instance": ci,
+        "source_schema": schema,
+        "source_table": table,
+        "index_column_list": "[id]",
+        "start_lsn": start,
+        "create_date": created,
+    }
+
+
+class Cdc(Recorder):
+    """A server with capture instances: the CDC procedures and sys.columns answer from
+    ``instances`` (help rows), ``captured`` (instance -> captured column rows), ``ddl`` (ddl
+    history rows) and ``live`` (the source table's sys.columns rows)."""
+
+    def __init__(self, instances, captured, ddl=(), live=()):
+        super().__init__(scalar_value="2026-09-30T13:25:00", tz="UTC")
+        self.instances, self.captured, self.ddl, self.live = instances, captured, ddl, live
+
+    def batches(self, sql, params, batch_size):
+        self.calls.append((sql, tuple(params)))
+        if "sp_cdc_help_change_data_capture" in sql:
+            rows = self.instances
+        elif "sp_cdc_get_captured_columns" in sql:
+            rows = self.captured.get(params[0], [])
+        elif "sp_cdc_get_ddl_history" in sql:
+            rows = [r for r in self.ddl if r["capture_instance"] == params[0]]
+        else:
+            rows = self.live if "sys.columns" in sql else []
+        return iter([pa.RecordBatch.from_pylist(rows)] if rows else [])
+
+
+V1, V2 = "0x0000002A000001000100", "0x0000002A000002000100"
+
+
+def _bin(lsn):  # the help listing returns start_lsn as binary(10)
+    return bytes.fromhex(lsn[2:])
+
+
+ORDERS = [
+    _instance("dbo_orders_v2", "orders", _bin(V2), datetime(2026, 9, 30, 13, 25)),
+    _instance("dbo_other", "other", _bin(V1), datetime(2026, 9, 1)),
+    _instance("dbo_orders", "orders", _bin(V1), datetime(2026, 9, 1, 10)),
+]
+CAPTURED = {
+    "dbo_orders": [
+        _col(1, "id", "int", 10, 0),
+        _col(2, "amount", "decimal", 9, 2),
+        _col(3, "g", "geography"),
+    ],
+    "dbo_orders_v2": [
+        _col(1, "id", "int", 10, 0),
+        _col(2, "amount", "decimal", 18, 4),
+        _col(3, "note", "varchar", length=10),
+    ],
+    "dbo_other": [_col(1, "id", "int", 10, 0)],
+}
+
+
+def test_capture_instances_lists_the_table_s_instances_oldest_first():
+    from mssql_cdc.client import CaptureInstance
+
+    rec = Cdc(ORDERS, CAPTURED)
+    both = [
+        CaptureInstance(
+            "dbo_orders",
+            V1,
+            "2026-09-01T10:00:00.000",
+            ["id", "amount", "g"],
+            ["INT", "DECIMAL(9,2)", None],  # geography: fine unless the query reads it
+        ),
+        CaptureInstance(
+            "dbo_orders_v2",
+            V2,
+            "2026-09-30T13:25:00.000",
+            ["id", "amount", "note"],
+            ["INT", "DECIMAL(18,4)", "STRING"],
+        ),
+    ]
+    assert SqlCdcClient(rec).capture_instances("DBO_ORDERS") == both
+    # one listing (the documented API, invariant 11), then each instance's captured columns
+    assert [c for c in rec.calls if "sp_cdc" in c[0]] == [
+        ("EXEC sys.sp_cdc_help_change_data_capture", ()),
+        ("EXEC sys.sp_cdc_get_captured_columns @capture_instance = ?", ("dbo_orders",)),
+        ("EXEC sys.sp_cdc_get_captured_columns @capture_instance = ?", ("dbo_orders_v2",)),
+    ]
+    assert SqlCdcClient(Cdc(ORDERS, CAPTURED)).capture_instances("dbo_orders_v2") == both
+    # a tie on start_lsn (cleanup moves every instance's): the later create_date is newer
+    tied = [dict(r, start_lsn=_bin(V2)) for r in ORDERS]
+    names = [i.name for i in SqlCdcClient(Cdc(tied, CAPTURED)).capture_instances("dbo_orders")]
+    assert names == ["dbo_orders", "dbo_orders_v2"]
+    with pytest.raises(ValueError):
+        SqlCdcClient(rec).capture_instances("dbo_orders; DROP TABLE x")
+
+
+def test_a_disabled_capture_instance_is_followed_to_its_table():
+    listed = [r for r in ORDERS if r["capture_instance"] != "dbo_orders"]  # disabled
+    client = SqlCdcClient(Cdc(listed, CAPTURED))
+    # its default name (<schema>_<table>) still tells the table
+    assert [i.name for i in client.capture_instances("dbo_orders")] == ["dbo_orders_v2"]
+    assert client.source_table("dbo_orders") == ("dbo", "orders", ["id"], V2)
+    # a custom name does not: the error names the instances that may be its table's
+    with pytest.raises(ValueError, match=r"not found.*'dbo_orders_v2'.*set captureInstance"):
+        client.capture_instances("dbo_orders_old")
+    with pytest.raises(ValueError, match=r"not found[^']*\.$"):
+        client.capture_instances("sales_items")
+
+
+def test_ddl_history_keeps_the_batch_range():
+    def ddl(lsn, command, rcu=False):
+        return {
+            "source_schema": "dbo",
+            "source_table": "orders",
+            "capture_instance": "dbo_orders",
+            "required_column_update": rcu,
+            "ddl_command": command,
+            "ddl_lsn": bytes.fromhex(lsn),  # binary, like start_lsn in the help listing
+            "ddl_time": datetime(2026, 9, 30, 13, 25),
+        }
+
+    rec = Cdc(
+        ORDERS,
+        CAPTURED,
+        ddl=[
+            ddl(
+                "0000002A000001000300",
+                "ALTER TABLE dbo.orders ALTER COLUMN [amount] dec(18,4)",
+                True,
+            ),
+            ddl("0000002A000001000200", "ALTER TABLE dbo.orders ADD note varchar(10) NULL"),
+            ddl("0000002A000001000100", "ALTER TABLE dbo.orders DROP COLUMN g"),  # = from
+            ddl("0000002A000001000400", "ALTER TABLE dbo.orders ADD CONSTRAINT d DEFAULT 0 FOR x"),
+            ddl("0000002A000001000500", "ALTER TABLE dbo.orders ALTER COLUMN id bigint", True),
+        ],
+    )
+    client = SqlCdcClient(rec)
+    changes = client.ddl_history("dbo_orders", "0x0000002A000001000100", "0x0000002A000001000400")
+    assert [(c.lsn, c.column, c.required_column_update) for c in changes] == [
+        ("0x0000002A000001000200", "note", False),
+        ("0x0000002A000001000300", "amount", True),
+        ("0x0000002A000001000400", None, False),  # (from, to]: from out, to in
+    ]
+    assert changes[0].command == "ALTER TABLE dbo.orders ADD note varchar(10) NULL"
+    assert changes[0].commit_ts == "2026-09-30T13:25:00.000"  # the commit at or before it, UTC
+    # not fn_cdc_map_lsn_to_time: a DDL's LSN is no commit's, and it returns NULL for it
+    commit_time = (
+        "SELECT TOP (1) CONVERT(varchar(23), CAST(tran_end_time AS datetime2(3)), 126) "
+        "FROM cdc.lsn_time_mapping WHERE start_lsn <= CONVERT(binary(10), ?, 1) "
+        "ORDER BY start_lsn DESC"
+    )
+    assert (commit_time, ("0x0000002A000001000200",)) in rec.calls
+    assert ("EXEC sys.sp_cdc_get_ddl_history @capture_instance = ?", ("dbo_orders",)) in rec.calls
+    with pytest.raises(ValueError):
+        client.ddl_history("dbo_orders; DROP TABLE x", "0x01", "0x02")
+
+
+def test_present_columns_match_the_source_table_by_column_id():
+    def col(ordinal, name, column_id):
+        return {**_col(ordinal, name, "int", 10, 0), "column_id": column_id}
+
+    captured = {
+        "dbo_orders": [col(1, "id", 1), col(2, "b", 2), col(3, "c", 3)],
+        "dbo_orders_v2": [col(1, "id", 1), col(2, "c", 3), col(3, "d", 5)],
+    }
+    live = [  # b dropped and added again: another column_id; e never captured
+        {"name": "id", "column_id": 1},
+        {"name": "c", "column_id": 3},
+        {"name": "d", "column_id": 5},
+        {"name": "b", "column_id": 6},
+        {"name": "e", "column_id": 7},
+    ]
+    rec = Cdc([r for r in ORDERS if r["source_table"] == "orders"], captured, live=live)
+    assert SqlCdcClient(rec).present_columns("dbo_orders", ["ID", "b", "c", "d", "e", "x"]) == [
+        "ID",
+        "c",
+        "d",
+        "e",
+    ]
+    assert rec.calls[-1] == (
+        (
+            "SELECT name, column_id FROM sys.columns "
+            "WHERE object_id = OBJECT_ID(QUOTENAME(?) + '.' + QUOTENAME(?))"
+        ),
+        ("dbo", "orders"),
+    )
+
+
+def _load(monkeypatch, backend, **options):
     import mssql_cdc.client as client_mod
     from mssql_cdc.source import MssqlCdcDataSource
 
-    client = SqlCdcClient(Rows([_col(1, "order_id", "int", 10, 0)]))
+    client = SqlCdcClient(backend)
     closed = []
     client.close = lambda: closed.append(True)
     monkeypatch.setattr(client_mod, "make_client", lambda options: client)
-    schema = MssqlCdcDataSource({"captureInstance": "dbo_orders"}).schema()
-    assert schema.endswith("_commit_ts TIMESTAMP_NTZ, `order_id` INT") and closed
-    explicit = MssqlCdcDataSource({"captureInstance": "dbo_orders", "columns": "id BIGINT"})
-    assert explicit.schema().endswith(", id BIGINT")
+    try:
+        return MssqlCdcDataSource({"captureInstance": "dbo_orders", **options}).schema()
+    finally:
+        assert closed or "columns" in options  # an inferred schema closes its connection
+
+
+def test_schema_infers_columns_when_option_missing(monkeypatch):
+    backend = Cdc([ORDERS[1]], {"dbo_other": [_col(1, "order_id", "int", 10, 0)]})
+    schema = _load(monkeypatch, backend, captureInstance="dbo_other")
+    assert schema.endswith("_commit_ts TIMESTAMP_NTZ, `order_id` INT")
+    explicit = _load(monkeypatch, backend, columns="id BIGINT")
+    assert explicit.endswith(", id BIGINT")
+
+
+def test_schema_is_the_union_of_the_capture_instances(monkeypatch):
+    from mssql_cdc import SchemaChangedError
+
+    captured = {**CAPTURED, "dbo_orders": CAPTURED["dbo_orders"][:2]}
+    # by name in capture order, older first; a wider type in the newer instance wins
+    assert _load(monkeypatch, Cdc(ORDERS, captured)).endswith(
+        "_commit_ts TIMESTAMP_NTZ, `id` INT, `amount` DECIMAL(18,4), `note` STRING"
+    )
+    narrower = {**captured, "dbo_orders_v2": [_col(1, "amount", "decimal", 9, 3)]}
+    with pytest.raises(SchemaChangedError, match=r"'amount' as DECIMAL\(9,2\) and DECIMAL\(9,3\)"):
+        _load(monkeypatch, Cdc(ORDERS, narrower))
+    with pytest.raises(ValueError, match="geography.*'columns'"):  # a column the query reads
+        _load(monkeypatch, Cdc(ORDERS, CAPTURED))
 
 
 def test_fake_backend_still_requires_columns(tmp_path):
+    from mssql_cdc.fake import FakeCdcDatabase
     from mssql_cdc.source import MssqlCdcDataSource
 
+    FakeCdcDatabase(str(tmp_path), ["dbo_orders"])  # no captured columns declared
     ds = MssqlCdcDataSource(
         {"backend": "fake", "fakePath": str(tmp_path), "captureInstance": "dbo_orders"}
     )

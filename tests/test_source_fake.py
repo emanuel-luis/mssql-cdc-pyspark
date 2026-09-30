@@ -10,6 +10,7 @@ import os
 import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from typing import ClassVar
 
 import pytest
@@ -40,14 +41,20 @@ def _db(path, n_tx=0, rows_per_tx=3, start=T0):
     return db
 
 
-def _run(spark, path, **options):
+def _opts(path, **options) -> dict:
+    """The fake source's options; an option given as None is left out."""
     opts = {
         "backend": "fake",
         "fakePath": os.path.join(path, "src"),
         "captureInstance": CI,
         "columns": COLUMNS,
+        **{k: str(v) for k, v in options.items()},
     }
-    opts.update({k: str(v) for k, v in options.items()})
+    return {k: v for k, v in opts.items() if options.get(k, "") is not None}
+
+
+def _run(spark, path, **options):
+    opts = _opts(path, **options)
     name = "q_" + uuid.uuid4().hex[:8]
     out = os.path.join(path, "out")
     q = (
@@ -553,3 +560,348 @@ def test_include_command_id_false_drops_the_column(spark, workdir):
     _, out = _run(spark, workdir, includeCommandId="false")
     df = _read(spark, out)
     assert "_command_id" not in df.columns and df.count() == 6
+
+
+# --------------------------------------------------------------------------- #
+# Schema changes and a second capture instance (ADR 0023)
+# --------------------------------------------------------------------------- #
+V2_COLUMNS = "order_id INT, status STRING, amount DECIMAL(20,4), note STRING"
+
+
+def _noted(i, **kw):
+    return {**_order(i, **kw), "note": f"n{i}"}
+
+
+def _switch(path, before=5, after=5, v2_columns=COLUMNS):
+    """``before`` commits captured by CI only, then a newer instance of its table starting at
+    the next commit, then ``after`` commits captured by both. Returns the database, the
+    newer instance's name, its start S (the first commit after it) and the commit LSNs."""
+    db = FakeCdcDatabase(os.path.join(path, "src"), [CI], columns={CI: COLUMNS})
+    c = [db.commit(CI, [(2, _noted(i))], at=T0 + timedelta(minutes=i)) for i in range(before)]
+    v2 = db.add_capture_instance(CI, v2_columns, at=T0 + timedelta(minutes=before))
+    c += [
+        db.commit(CI, [(2, _noted(i))], at=T0 + timedelta(minutes=i))
+        for i in range(before, before + after)
+    ]
+    return db, v2, c[before], c
+
+
+def _stream_reader(spark, path, **options):
+    """A stream reader with the schema load() gives these options (inferred with
+    ``columns=None``), as Spark builds it."""
+    from mssql_cdc.source import MssqlCdcStreamReader
+
+    opts = _opts(path, **{"numPartitions": 1, **options})
+    schema = spark.createDataFrame([], MssqlCdcDataSource(opts).schema()).schema
+    return MssqlCdcStreamReader(opts, schema)
+
+
+def _plan(reader, start, end):
+    return reader.partitions({"lsn": start, "commit_ts": ""}, {"lsn": end, "commit_ts": ""})
+
+
+def _rows(reader, ranges):
+    return [r for p in ranges for b in reader.read(p) for r in b.to_pylist()]
+
+
+def _events(metrics) -> dict:
+    """The event files the reader left in ``metrics``, by name."""
+    out = {}
+    for name in sorted(os.listdir(metrics)) if os.path.exists(metrics) else []:
+        if name.startswith("event-"):
+            with open(os.path.join(metrics, name), encoding="utf-8") as fh:
+                out[name] = json.load(fh)
+    return out
+
+
+def _ms(minutes):
+    return (T0 + timedelta(minutes=minutes)).isoformat(timespec="milliseconds")
+
+
+def test_a_newer_capture_instance_takes_over_at_its_start_lsn(spark, workdir):
+    _, v2, s, _ = _switch(workdir)
+    metrics = os.path.join(workdir, "metrics")
+    # 4 commits a batch: the second reads commits 4-7, across S (commit 5)
+    batches, out = _run(
+        spark, workdir, columns=None, numPartitions=3, maxCommitsPerBatch=4, metricsPath=metrics
+    )
+    assert [b["numInputRows"] for b in batches if b["numInputRows"]] == [4, 4, 2]
+    rows = _read(spark, out).collect()
+    assert len({(r["_start_lsn"], r["_seqval"], r["_operation"]) for r in rows}) == len(rows) == 10
+    # the instance each row came from, with its own command ids (v2's differ, like SQL Server's)
+    got = sorted((r["order_id"], r["_capture_instance"], r["_command_id"]) for r in rows)
+    assert got == [(i, CI, 1) if i < 5 else (i, v2, 2) for i in range(10)]
+    assert all((r["_start_lsn"] < s) == (r["_capture_instance"] == CI) for r in rows)
+    # the batch that crossed S left the switch there, for the sink's facts
+    assert _events(metrics) == {
+        f"event-capture_instance_switched-{s}.json": {
+            "event": "capture_instance_switched",
+            "capture_instance": v2,
+            "lsn": s,
+            "commit_ts": _ms(5),
+            "detail": f"{CI} -> {v2}",
+        }
+    }
+
+
+def test_partitions_split_at_the_newer_start_without_empty_ranges(spark, workdir):
+    from mssql_cdc.lsn import from_int, to_int
+
+    _, v2, s, c = _switch(workdir)
+    reader = _stream_reader(spark, workdir, numPartitions=2)
+
+    def plan(start, end):
+        ranges = _plan(reader, start, end)
+        assert all(r.from_lsn <= r.to_lsn for r in ranges)  # invariant 3
+        assert all(r.to_lsn < s if r.capture_instance == CI else r.from_lsn >= s for r in ranges)
+        for a, b in pairwise(ranges):  # contiguous: every LSN in exactly one range
+            assert to_int(b.from_lsn) == to_int(a.to_lsn) + 1
+        return [(r.capture_instance, r.from_lsn, r.to_lsn) for r in ranges]
+
+    before, below = from_int(to_int(c[0]) - 1), from_int(to_int(s) - 1)
+    whole = plan(before, c[9])
+    assert (whole[0][1], whole[-1][2]) == (c[0], c[9])
+    assert [ci for ci, _, _ in whole].count(v2) == 2 and len(whole) >= 4  # both sides split
+    ids = sorted(r["order_id"] for r in _rows(reader, _plan(reader, before, c[9])))
+    assert ids == list(range(10))
+    # S on an edge: a batch that starts at S, one that ends below it, one that ends at it
+    assert plan(below, c[9])[0] == (v2, s, plan(below, c[9])[0][2])
+    assert {ci for ci, _, _ in plan(below, c[9])} == {v2}
+    assert {ci for ci, _, _ in plan(c[1], c[4])} == {CI}
+    edge = plan(c[3], c[5])
+    assert edge[-1] == (v2, s, s) and {ci for ci, _, _ in edge[:-1]} == {CI}
+
+
+def test_replays_across_the_newer_start_plan_and_read_the_same(spark, workdir):
+    _, _, _, c = _switch(workdir)
+    first = _stream_reader(spark, workdir, numPartitions=3)
+    planned = _plan(first, c[2], c[8])
+    again = _stream_reader(spark, workdir, numPartitions=3)  # a restart replays the batch
+    assert _plan(first, c[2], c[8]) == planned == _plan(again, c[2], c[8])
+    assert _rows(first, planned) == _rows(again, _plan(again, c[2], c[8]))
+    assert [r["order_id"] for r in _rows(first, planned)] == [3, 4, 5, 6, 7, 8]
+
+
+def test_the_schema_is_the_union_and_a_missing_column_reads_null(spark, workdir):
+    _switch(workdir, v2_columns=V2_COLUMNS)  # no updated_at, a note, a wider amount
+    assert (
+        MssqlCdcDataSource(_opts(workdir, columns=None))
+        .schema()
+        .endswith(
+            "`order_id` INT, `status` STRING, `amount` DECIMAL(20,4), "
+            "`updated_at` TIMESTAMP_NTZ, `note` STRING"
+        )
+    )
+    _, out = _run(spark, workdir, columns=None, numPartitions=2)
+    df = _read(spark, out)
+    assert dict(df.dtypes)["amount"] == "decimal(20,4)"
+    got = sorted((r["order_id"], r["updated_at"] is None, r["note"]) for r in df.collect())
+    assert got == [(i, False, None) if i < 5 else (i, True, f"n{i}") for i in range(10)]
+
+
+def test_a_narrower_type_in_the_newer_instance_fails_at_load(workdir):
+    from mssql_cdc import SchemaChangedError
+
+    _switch(workdir, v2_columns="order_id INT, amount DECIMAL(10,2)")
+    with pytest.raises(
+        SchemaChangedError, match=r"'amount' as DECIMAL\(18,2\) and DECIMAL\(10,2\)"
+    ):
+        MssqlCdcDataSource(_opts(workdir, columns=None)).schema()
+
+
+def test_the_retention_guard_checks_each_instance(spark, workdir):
+    db, v2, _, c = _switch(workdir)
+    reader = _stream_reader(spark, workdir)
+    db.cleanup(CI, c[3])  # the older instance lost its rows below commit 3
+    assert _plan(reader, c[5], c[9])  # a batch past S reads only the newer one
+    with pytest.raises(DataLossError, match=f"{CI}: change data from .* purged by CDC cleanup"):
+        _plan(reader, c[1], c[9])
+    # the newer instance's start moves with its cleanup; the older one still has what lies
+    # below, so that is read there instead of failing
+    db.cleanup(v2, c[7])
+    got = [
+        (r["order_id"], r["_capture_instance"]) for r in _rows(reader, _plan(reader, c[5], c[9]))
+    ]
+    assert got == [(6, CI), (7, v2), (8, v2), (9, v2)]
+    planned = _plan(reader, c[7], c[9])
+    db.cleanup(v2, c[9])  # after planning: the executor checks the range's own instance
+    with pytest.raises(DataLossError, match=f"{v2}: change data from 0x"):
+        _rows(reader, planned)
+
+
+def test_a_type_change_fails_the_batch_before_it_reads(spark, workdir):
+    from mssql_cdc import SchemaChangedError
+
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI], columns={CI: COLUMNS})
+    c = [db.commit(CI, [(2, _order(i))], at=T0 + timedelta(minutes=i)) for i in range(3)]
+    reader = _stream_reader(spark, workdir, columns=None)  # amount DECIMAL(18,2)
+    command = "ALTER TABLE dbo.orders ALTER COLUMN amount decimal(20,4)"
+    ddl = db.ddl(CI, "amount", True, command, new_type="DECIMAL(20,4)")
+    c += [db.commit(CI, [(2, _order(i, amount="1.2345"))]) for i in (3, 4)]
+    assert [r["order_id"] for r in _rows(reader, _plan(reader, c[0], c[2]))] == [1, 2]
+    with pytest.raises(SchemaChangedError, match=r"amount DECIMAL\(20,4\) \(read as decimal"):
+        _plan(reader, c[2], c[4])
+    # restarted: re-inferred as DECIMAL(20,4), the same batch goes through; the DDL an event
+    metrics = os.path.join(workdir, "metrics")
+    again = _stream_reader(spark, workdir, columns=None, metricsPath=metrics)
+    assert [str(r["amount"]) for r in _rows(again, _plan(again, c[2], c[4]))] == ["1.2345"] * 2
+    assert [(e["event"], e["lsn"]) for e in _events(metrics).values()] == [("schema_change", ddl)]
+
+
+def test_a_running_query_stops_at_a_type_change(spark, workdir):
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI], columns={CI: COLUMNS})
+    for i in range(3):
+        db.commit(CI, [(2, _order(i))], at=T0 + timedelta(minutes=i))
+    name = "q_" + uuid.uuid4().hex[:8]
+    q = (
+        spark.readStream.format("mssql_cdc")
+        .options(**_opts(workdir, columns=None, numPartitions=1))
+        .load()
+        .writeStream.format("memory")
+        .queryName(name)
+        .option("checkpointLocation", os.path.join(workdir, "ckpt"))
+        .trigger(processingTime="1 second")
+        .start()
+    )
+    try:
+        q.processAllAvailable()
+        command = "ALTER TABLE dbo.orders ALTER COLUMN amount decimal(20,4)"
+        db.ddl(CI, "amount", True, command, new_type="DECIMAL(20,4)")
+        db.commit(CI, [(2, _order(3, amount="1.2345"))])
+        with pytest.raises(Exception, match="Restart the query to re-infer the schema"):
+            q.processAllAvailable()
+    finally:
+        q.stop()
+    assert spark.sql(f"SELECT COUNT(*) FROM {name}").first()[0] == 3  # nothing of that batch
+
+
+def test_add_and_drop_column_continue_with_an_event_file(spark, workdir):
+    from mssql_cdc import SchemaChangedError
+
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI], columns={CI: COLUMNS})
+    c0 = db.commit(CI, [(2, _order(0))], at=T0)
+    metrics = os.path.join(workdir, "metrics")
+    reader = _stream_reader(spark, workdir, columns=None, metricsPath=metrics)
+    quiet = _stream_reader(spark, workdir, columns=None)
+    strict = _stream_reader(spark, workdir, columns=None, schemaChangePolicy="fail")
+    add = db.ddl(CI, "note", False, "ALTER TABLE dbo.orders ADD note varchar(10) NULL")
+    drop = db.ddl(CI, "status", False, "ALTER TABLE dbo.orders DROP COLUMN status")
+    row = {k: v for k, v in _order(1).items() if k != "status"}  # captured after the drop
+    c1 = db.commit(CI, [(2, row)], at=T0 + timedelta(minutes=1))
+    assert [(r["order_id"], r["status"]) for r in _rows(reader, _plan(reader, c0, c1))] == [
+        (1, None)
+    ]
+    assert _events(metrics) == {
+        f"event-schema_change-{lsn}.json": {
+            "event": "schema_change",
+            "capture_instance": CI,
+            "lsn": lsn,
+            "commit_ts": _ms(0),  # the commit at or before the DDL
+            "detail": detail,
+        }
+        for lsn, detail in [
+            (add, "note: ALTER TABLE dbo.orders ADD note varchar(10) NULL"),
+            (drop, "status: ALTER TABLE dbo.orders DROP COLUMN status"),
+        ]
+    }
+    assert _plan(quiet, c0, c1)  # without metricsPath: a warning in the log only
+    with pytest.raises(SchemaChangedError, match="schemaChangePolicy=fail"):
+        _plan(strict, c0, c1)
+    with pytest.raises(ValueError, match="schemaChangePolicy must be"):
+        _stream_reader(spark, workdir, schemaChangePolicy="ignore")
+
+
+def test_a_newer_instance_with_new_columns_stops_at_its_start(spark, workdir):
+    from mssql_cdc import SchemaChangedError
+
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI], columns={CI: COLUMNS})
+    c = [db.commit(CI, [(2, _noted(i))], at=T0 + timedelta(minutes=i)) for i in range(3)]
+    running = _stream_reader(spark, workdir, columns=None)  # loaded before the new instance
+    declared = _stream_reader(spark, workdir)  # columns=COLUMNS
+    v2 = db.add_capture_instance(CI, f"{COLUMNS}, note STRING")
+    c += [db.commit(CI, [(2, _noted(i))], at=T0 + timedelta(minutes=i)) for i in (3, 4)]
+    assert [r["order_id"] for r in _rows(running, _plan(running, c[0], c[2]))] == [1, 2]
+    with pytest.raises(SchemaChangedError, match=f"'{v2}' took over from '{CI}' .* note"):
+        _plan(running, c[2], c[4])  # before reading past S
+    # the declared columns decide: followed in place, the new column not read
+    assert [r["order_id"] for r in _rows(declared, _plan(declared, c[2], c[4]))] == [3, 4]
+    # restarted, the schema has the new column and the batch goes through
+    metrics = os.path.join(workdir, "metrics")
+    again = _stream_reader(spark, workdir, columns=None, metricsPath=metrics)
+    assert [r["note"] for r in _rows(again, _plan(again, c[2], c[4]))] == ["n3", "n4"]
+    assert [e["detail"] for e in _events(metrics).values()] == [f"{CI} -> {v2}"]
+
+
+def test_a_disabled_configured_instance_is_followed_to_the_newer_one(spark, workdir):
+    from mssql_cdc.source import MssqlCdcSnapshotReader
+
+    db, v2, _, c = _switch(workdir)
+    _run(spark, workdir, columns=None)
+    db.drop_capture_instance(CI)  # the DBA's last step, once the stream is past S
+    db.commit(CI, [(2, _noted(10))], at=T0 + timedelta(minutes=10))
+    batches, out = _run(spark, workdir, columns=None)  # still configured as CI
+    assert [b["numInputRows"] for b in batches if b["numInputRows"]] == [1]
+    assert {(r["order_id"], r["_capture_instance"]) for r in _read(spark, out).collect()} >= {
+        (10, v2)
+    }
+    # a new stream from before S: those changes were only in the disabled instance
+    reader = _stream_reader(spark, workdir, columns=None, startingLsn=c[1])
+    with pytest.raises(DataLossError, match=f"only in capture instance '{CI}', disabled before"):
+        _plan(reader, c[1], c[9])
+    snapshot = MssqlCdcSnapshotReader(_opts(workdir, numPartitions=1), reader.schema)
+    assert {p.capture_instance for p in snapshot.partitions()} == {v2}
+
+
+def test_a_snapshot_reads_null_for_a_column_the_table_no_longer_has(monkeypatch, workdir):
+    from pyspark.sql.types import IntegerType, StringType, StructField, StructType
+
+    from mssql_cdc.fake import FakeCdcClient
+    from mssql_cdc.source import MssqlCdcSnapshotReader
+
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: "order_id"})
+    db.commit(CI, [(2, {"order_id": 1, "status": "new"})], at=T0)
+    # SqlCdcClient matches by column_id (test_client_sql); here: status was dropped
+    monkeypatch.setattr(
+        FakeCdcClient, "present_columns", lambda self, ci, cols: [c for c in cols if c != "status"]
+    )
+    schema = StructType(
+        [StructField("order_id", IntegerType()), StructField("status", StringType())]
+    )
+    reader = MssqlCdcSnapshotReader(
+        {"backend": "fake", "fakePath": src, "captureInstance": CI, "numPartitions": "1"}, schema
+    )
+    [part] = reader.partitions()
+    assert part.columns == ["order_id"]
+    assert [r for b in reader.read(part) for r in b.to_pylist()] == [
+        {"order_id": 1, "status": None}
+    ]
+
+
+def test_foreach_batch_finds_the_event_files_of_its_batch(spark, workdir):
+    # the sink folds them at the start of foreachBatch (ADR 0023): planning comes first
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI], columns={CI: COLUMNS})
+    db.commit(CI, [(2, _order(0))], at=T0)
+    metrics, seen = os.path.join(workdir, "metrics"), []
+
+    def sink(df, batch_id):
+        seen.append((batch_id, list(_events(metrics))))
+        df.count()
+
+    q = (
+        spark.readStream.format("mssql_cdc")
+        .options(**_opts(workdir, columns=None, numPartitions=1, metricsPath=metrics))
+        .load()
+        .writeStream.foreachBatch(sink)
+        .option("checkpointLocation", os.path.join(workdir, "ckpt"))
+        .trigger(processingTime="1 second")
+        .start()
+    )
+    try:
+        q.processAllAvailable()
+        add = db.ddl(CI, "note", False, "ALTER TABLE dbo.orders ADD note varchar(10) NULL")
+        db.commit(CI, [(2, _order(1))], at=T0 + timedelta(minutes=1))
+        q.processAllAvailable()
+    finally:
+        q.stop()
+    assert seen[0] == (0, []) and seen[-1][1] == [f"event-schema_change-{add}.json"]
