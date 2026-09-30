@@ -81,7 +81,8 @@ tests/             pytest suite (fake backend runs the real Spark engine).
   integration/     the source against SQL Server 2022 in Docker (testcontainers), -m sqlserver.
 examples/          local_pipeline.py, databricks_notebook.py.
 docs/              ARCHITECTURE, DESIGN, DEVELOPMENT, CONNECTORS, DATABRICKS, ROADMAP,
-                   REFERENCES, decisions/ (ADRs).
+                   REFERENCES, RELEASING (PyPI via release.yml), decisions/ (ADRs).
+CHANGELOG.md       Keep a Changelog; each release states its state compatibility (ADR 0021).
 notes/             Local only, gitignored: research notes in Portuguese (context, not spec).
 ```
 

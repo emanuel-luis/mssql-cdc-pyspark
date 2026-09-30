@@ -2,7 +2,7 @@
 
 | # | Decision | Status | Date | Amended |
 |---|---|---|---|---|
-| [0001](0001-python-datasource-v2.md) | Python DataSource V2 instead of a JVM connector | accepted | 2026-09-28T16:13:29-03:00 |  |
+| [0001](0001-python-datasource-v2.md) | Python DataSource V2 instead of a JVM connector | accepted | 2026-09-28T16:13:29-03:00 | 2026-09-30T11:07:08-03:00 |
 | [0002](0002-lsn-offsets-with-commit-time.md) | Offsets are hex LSNs carrying the commit time | accepted | 2026-09-28T16:13:29-03:00 |  |
 | [0003](0003-mssql-python-default-backend.md) | `mssql-python` as default driver, `arrow-odbc` as fallback | accepted | 2026-09-28T16:13:29-03:00 | 2026-09-28T21:44:31-03:00 |
 | [0004](0004-verdict-in-control-table.md) | `finalized_until` in a control table, never in table properties | accepted | 2026-09-28T16:13:29-03:00 |  |
@@ -20,6 +20,8 @@
 | [0016](0016-bootstrap-snapshot-at-a-recorded-lsn.md) | Bootstrap with a snapshot stamped with an LSN recorded before the read | accepted | 2026-09-29T12:38:28-03:00 |  |
 | [0017](0017-retention-headroom-in-facts.md) | Retention headroom in the ingestion facts | accepted | 2026-09-29T14:58:53-03:00 |  |
 | [0018](0018-automatic-resnapshot-after-data-loss.md) | Automatic re-snapshot after CDC data loss | accepted | 2026-09-29T17:46:41-03:00 |  |
+| [0021](0021-compatibility-policy-for-0x.md) | Compatibility policy for 0.x: the state contract is stable | accepted | 2026-09-30T11:07:08-03:00 |  |
+| [0022](0022-defer-spark-changes-changelog.md) | Defer a Spark `CHANGES` changelog connector | accepted | 2026-09-30T11:07:08-03:00 |  |
 
 New ADRs: copy the format, next number, one decision per file. Put the time the
 decision is recorded in `**Date:**` (ISO-8601 with the UTC offset, e.g.

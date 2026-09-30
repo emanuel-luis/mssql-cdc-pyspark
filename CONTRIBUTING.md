@@ -9,3 +9,5 @@
 4. Design changes need an ADR in `docs/decisions/`.
 5. Keep the README options table and output schema in sync with the options read in
    `src/mssql_cdc/source.py` and `client.make_client`.
+6. User-visible changes get an entry under `## [Unreleased]` in `CHANGELOG.md`; breaking
+   ones follow ADR 0021. Releases: `docs/RELEASING.md`.

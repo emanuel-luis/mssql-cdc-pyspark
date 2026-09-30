@@ -95,4 +95,6 @@ behind `SELECT ... CHANGES FROM VERSION ...`. It is only available to JVM
 connectors. SQL Server CDC maps naturally: `__$operation` -> `_change_type`,
 LSN hex -> `_commit_version`, `tran_end_time` -> `_commit_timestamp`, and the
 requirement that "all rows of a single commit must appear in the same micro-batch"
-is exactly how this source cuts batches. A Scala implementation is a candidate v0.2.
+is exactly how this source cuts batches. A Scala implementation is deferred: see
+[ADR 0022](decisions/0022-defer-spark-changes-changelog.md) for why, and for what it would
+take (timestamp-aligned cuts, because commits can share a `tran_end_time`).

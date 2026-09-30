@@ -1,7 +1,8 @@
 # 0001: Python DataSource V2 instead of a JVM connector
 
 **Status:** accepted  
-**Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)
+**Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)  
+**Amended:** 2026-09-30T11:07:08-03:00, the `CHANGES` connector deferred (ADR 0022)
 
 ## Context
 The project must be platform-agnostic and "100% PySpark": installable with pip on local
@@ -19,5 +20,5 @@ Implement the source with `pyspark.sql.datasource` (`DataSource`,
   workers, which need the SQL Server driver installed.
 * No column pruning, no streaming filter pushdown, no `ReportsSourceMetrics`, and only
   built-in `ReadLimit`s. `maxCommitsPerBatch` reuses `ReadMaxRows` with commit semantics.
-* Spark 4.2's DSv2 `Changelog`/`CHANGES` API is JVM-only; that is a later, separate
-  deliverable (roadmap v0.3).
+* Spark 4.2's DSv2 `Changelog`/`CHANGES` API is JVM-only; a connector for it would be a
+  separate deliverable, deferred by ADR 0022.
