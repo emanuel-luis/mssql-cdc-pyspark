@@ -71,7 +71,17 @@ writes to the source.
   (`failOnDataLoss=true`) and a re-snapshot is needed. The reader reads the change
   table directly (ADR 0009), which returns a purged range as empty rather than failing,
   so every task checks `min_lsn` again after its read: cleanup moves the watermark
-  before it deletes, so a purge during the read cannot go unnoticed.
+  before it deletes, so a purge during the read cannot go unnoticed. With two capture
+  instances each range checks its own instance; a gap left by an older instance dropped
+  before the stream read it is data loss too, and the error says so (ADR 0023).
+* **Schema changes**: every planning reads the DDL the batch's instances recorded in
+  `(start, end]` (`sys.sp_cdc_get_ddl_history`, readable by the least-privilege login and
+  never behind `max_lsn` in the measurements). A captured column whose type changed fails the
+  batch before it reads anything (`SchemaChangedError`: restart to re-infer the schema);
+  other DDL is a warning and a facts event, or a failure with `schemaChangePolicy=fail`. A
+  newer capture instance of the table is followed from its start LSN, in place when the
+  query's schema holds its columns, otherwise with a `SchemaChangedError` at that boundary so
+  the restart infers them (ADR 0023).
 * **Recovery**: `to_delta(on_data_loss="resnapshot")` runs the same test before the query
   starts (when there is a range to read) and, when it fails, re-snapshots into a new checkpoint generation instead of
   failing every run until someone steps in. The purged history stays lost, and is recorded

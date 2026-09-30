@@ -32,8 +32,9 @@ flowchart TB
 ```
 
 * **Source**: Spark Python DataSource V2 (`pyspark.sql.datasource`). One stream per
-  capture instance. `mssql_cdc_snapshot` is its batch sibling: the tracked table's current
-  rows in the same schema, stamped with one LSN, for the initial load (ADR 0016).
+  source table: its capture instance, and the newer one it switches to (ADR 0023).
+  `mssql_cdc_snapshot` is its batch sibling: the tracked table's current rows in the same
+  schema, stamped with one LSN, for the initial load (ADR 0016).
 * **Client**: the only code that knows T-SQL. The reader depends on the `CdcClient`
   interface, so the fake can replace SQL Server in tests.
 * **Backends**: turn a query into Arrow record batches. Interchangeable because every
@@ -72,16 +73,20 @@ sequenceDiagram
   R-->>E: end = {lsn, commit_ts}
   Note over E: offset log written (checkpoint)
   E->>R: partitions(start, end)
-  R->>S: fn_cdc_increment_lsn(start), fn_cdc_get_min_lsn(ci)
+  R->>S: sp_cdc_help_change_data_capture: the table's instances, their start_lsn
+  R->>S: sp_cdc_get_ddl_history(ci): DDL in (start, end]  (a type change: SchemaChangedError)
+  R->>S: fn_cdc_increment_lsn(start), fn_cdc_get_min_lsn(ci) per instance read
   R->>S: NTILE split points on cdc.ci_CT (numPartitions > 1)
-  R-->>E: [LsnRange(from, to), ...]  or DataLossError
+  R-->>E: [LsnRange(ci, from, to), ...], cut at a newer instance's start  or DataLossError
+  Note over R: events (schema_change, capture_instance_switched) as files in metricsPath
   E->>X: read(LsnRange)
   X->>S: cdc.ci_CT WHERE start_lsn BETWEEN from AND to, JOIN lsn_time_mapping
   S-->>X: Arrow record batches
   X->>S: fn_cdc_get_min_lsn(ci)  (cleanup during the read? then DataLossError)
   X-->>E: batches cast to the Spark schema
   E->>D: foreachBatch(df, batch_id)
-  D->>D: append (txnAppId, txnVersion=batch_id, userMetadata=facts)
+  D->>D: append (txnAppId, txnVersion=batch_id, userMetadata=facts, mergeSchema)
+  D->>D: facts: the batch's row and its event rows, one commit
   Note over E: commit log written
   E->>F: after the query (AvailableNow) or on progress
   F->>F: MERGE finalized_until = GREATEST(old, trunc(end.commit_ts))
@@ -101,6 +106,25 @@ sequenceDiagram
 * Replays: Spark re-runs an uncommitted batch with the same `(start, end)`. `read()` is
   deterministic for a range as long as CDC cleanup has not purged it; if it has, the
   guard fails the query.
+
+### A second capture instance
+
+A table can have two capture instances, the newer one usually capturing a column the older
+does not ([ADR 0023](decisions/0023-schema-changes-and-capture-instance-switching.md)). The
+newer one's `start_lsn` S is the commit LSN of its enable, and from S on every commit is in
+both. `partitions()` lists the table's instances on every planning and cuts the batch at S:
+
+```
+start                S - 1 | S                        end
+  |------ older: cdc.dbo_orders_CT ------|------ newer: cdc.dbo_orders_v2_CT ------|
+```
+
+Offsets stay database-wide LSNs, so the checkpoint needs nothing new, and a replay cuts at
+the same place. Each range reads its own instance's columns, NULL for the ones it lacks;
+`load()` infers the union of both. The first batch that reads the newer instance leaves a
+`capture_instance_switched` event for the facts: from then on the DBA can disable the older
+one (`sql/switch_capture_instance.sql`). DDL inside a batch leaves a `schema_change` event;
+a changed type fails the batch before it reads anything (`SchemaChangedError`).
 
 ### Generations (`to_delta`)
 
@@ -129,13 +153,17 @@ automatic re-snapshot, or failed one, per `resnapshot_interval_days`
 
 Metadata columns `_capture_instance, _start_lsn, _seqval, _operation, _command_id,
 _commit_ts`, then the captured columns. The ordering key for applying changes is
-`(_start_lsn, _command_id, _seqval, _operation)`. Snapshot rows have `_operation = 0`, the
-snapshot's LSN as `_start_lsn` and NULL `_seqval` and `_command_id`.
+`(_start_lsn, _command_id, _seqval, _operation)`. `_command_id` is numbered per capture
+instance, but all rows of one `_start_lsn` come from one instance, so the key holds across a
+switch; `(_start_lsn, _seqval, _operation)` identifies a change across instances.
+`_capture_instance` is the instance the row was read from. Snapshot rows have
+`_operation = 0`, the snapshot's LSN as `_start_lsn` and NULL `_seqval` and `_command_id`.
 
 Captured columns come from the `columns` option (DDL) or, when it is omitted, from CDC
 metadata at `load()` time on the driver: `sys.sp_cdc_get_captured_columns`, sorted by
-`column_ordinal` (`SqlCdcClient.captured_columns`). It needs only the permissions of the
-CDC query functions. Default type mapping:
+`column_ordinal` (`SqlCdcClient.captured_columns`), for every capture instance of the table,
+joined by name, older instance first. It needs only the permissions of the CDC query
+functions. Default type mapping:
 
 | SQL Server | Spark |
 |---|---|
@@ -159,8 +187,8 @@ backend has no type metadata and always needs `columns`.
 
 | Table | Grain | Written by | Notes |
 |---|---|---|---|
-| bronze (e.g. `bronze_orders`) | one row per change | `delta_sink` | append-only; `_batch_id` added; commit `userMetadata` holds the batch facts |
-| facts (optional) | one row per micro-batch, including batches that read no change rows (`rows = 0`, no target commit: the offset moved past idle entries or other tables' commits), and one per snapshot `to_delta` takes (bootstrap or re-snapshot) | `delta_sink`, `write_event` | snapshot rows have `event` `'bootstrap'` or `'resnapshot'` (NULL for batches), no `batch_id`, and on a re-snapshot the purged gap in `lost_from_ts`/`lost_to_ts` ([ADR 0018](decisions/0018-automatic-resnapshot-after-data-loss.md)); durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write), `written_at`, and optional network and read metrics (`source_rtt_ms`, `read_seconds`, `read_mb`, `network_wait_ms`; [ADR 0014](decisions/0014-network-and-read-metrics-in-facts.md)), the batch's end offset (`end_lsn`, `end_commit_ts`), and, measured from it, the retention headroom (`retention_watermark_ts`, `retention_headroom_hours`; [ADR 0017](decisions/0017-retention-headroom-in-facts.md)) and the ingestion lag, with the capture lag (`source_max_commit_ts`, `capture_lag_seconds`, `ingestion_lag_seconds`; [ADR 0020](decisions/0020-capture-and-ingestion-lag-in-facts.md)) |
+| bronze (e.g. `bronze_orders`) | one row per change | `delta_sink` | append-only; `_batch_id` added; commit `userMetadata` holds the batch facts; appends with `mergeSchema`, so a column a newer capture instance captures joins the table ([ADR 0023](decisions/0023-schema-changes-and-capture-instance-switching.md)) |
+| facts (optional) | one row per micro-batch, including batches that read no change rows (`rows = 0`, no target commit: the offset moved past idle entries or other tables' commits), one per snapshot `to_delta` takes (bootstrap or re-snapshot), and one per schema change or capture instance switch a batch read past | `delta_sink`, `write_event` | snapshot rows have `event` `'bootstrap'` or `'resnapshot'` (NULL for batches), no `batch_id`, and on a re-snapshot the purged gap in `lost_from_ts`/`lost_to_ts` ([ADR 0018](decisions/0018-automatic-resnapshot-after-data-loss.md)); `'schema_change'` and `'capture_instance_switched'` rows have the batch's `batch_id`, `rows = 0`, the change's LSN and what changed in `detail`, written in one commit with the batch's row ([ADR 0023](decisions/0023-schema-changes-and-capture-instance-switching.md)): rebuild only from `'bootstrap'` and `'resnapshot'` rows; durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write), `written_at`, and optional network and read metrics (`source_rtt_ms`, `read_seconds`, `read_mb`, `network_wait_ms`; [ADR 0014](decisions/0014-network-and-read-metrics-in-facts.md)), the batch's end offset (`end_lsn`, `end_commit_ts`), and, measured from it, the retention headroom (`retention_watermark_ts`, `retention_headroom_hours`; [ADR 0017](decisions/0017-retention-headroom-in-facts.md)) and the ingestion lag, with the capture lag (`source_max_commit_ts`, `capture_lag_seconds`, `ingestion_lag_seconds`; [ADR 0020](decisions/0020-capture-and-ingestion-lag-in-facts.md)) |
 | `table_finalization` | one row per target table | `finalization.advance`, `apply_changes` | `finalized_until`, `end_lsn`, `end_commit_ts`, `updated_at`; `applied_lsn` and `snapshot_lsn` for silver tables: how far bronze is applied, and the snapshot last rebuilt from |
 | silver (e.g. `silver_orders`) | one row per source key | `apply_changes` | current state: captured columns plus `_start_lsn` and `_commit_ts` of the row's image; deletes remove rows; rebuilt from the newest snapshot after a re-snapshot ([ADR 0019](decisions/0019-silver-helper-applies-the-change-log.md)) |
 

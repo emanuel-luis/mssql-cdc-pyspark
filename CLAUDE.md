@@ -80,6 +80,7 @@ lab/
   checks/t1..t8    Hypothesis checks against SQL Server / Spark / Delta (see LAB.md).
 sql/00_setup.sql   Lab database, two CDC-tracked tables.
 sql/heartbeat.sql  Optional Agent job that keeps max_lsn moving on a quiet database (ADR 0010).
+sql/switch_capture_instance.sql  The DBA's steps to move a table to a new capture instance (ADR 0023).
 tests/             pytest suite (fake backend runs the real Spark engine).
   integration/     the source against SQL Server 2022 in Docker (testcontainers), -m sqlserver.
 examples/          local_pipeline.py, databricks_notebook.py.
@@ -97,7 +98,10 @@ notes/             Local only, gitignored: research notes in Portuguese (context
 2. **Batches are commit-history prefixes.** A batch reads the closed interval
    `[fn_cdc_increment_lsn(start), end]` of the change table `cdc.<ci>_CT` (not
    `fn_cdc_get_all_changes_*`, ADR 0009) with `end <= sys.fn_cdc_get_max_lsn()`, and ends
-   on a commit boundary (`maxCommitsPerBatch` counts `cdc.lsn_time_mapping` rows).
+   on a commit boundary (`maxCommitsPerBatch` counts `cdc.lsn_time_mapping` rows). When the
+   table has a newer capture instance, the interval is cut at its `start_lsn` S: the older
+   instance's change table below S, the newer one's from S, each range naming its own
+   (ADR 0023).
 3. **No empty ranges.** `partitions()` returns `[]` when `end <= start`; never plan a
    range with `from > to`.
 4. **Retention guard, twice.** On the driver, if `increment(start) < fn_cdc_get_min_lsn(ci)`;
@@ -106,6 +110,8 @@ notes/             Local only, gitignored: research notes in Portuguese (context
    Raise `DataLossError` unless `failOnDataLoss=false`. Silent skipping is data loss.
    A third check, `to_delta(on_data_loss="resnapshot")`'s pre-flight, applies the driver's
    test before the query starts and re-snapshots into a new generation instead (ADR 0018).
+   With two capture instances, `ci` is the instance the range reads; the pre-flight uses the
+   table's oldest (ADR 0023).
 5. **Executors are stateless.** `read()` opens and closes its own connection; the
    reader drops `_client` in `__getstate__`. Nothing live gets pickled.
 6. **LSNs cross every boundary as hex strings.** Bound as `CONVERT(binary(10), ?, 1)`,
@@ -120,14 +126,22 @@ notes/             Local only, gitignored: research notes in Portuguese (context
 10. **Platform-agnostic core.** Nothing under `src/mssql_cdc` imports `dbutils`,
     `databricks.*` or other platform APIs. Platform glue belongs in `examples/` and docs.
 11. **Least privilege.** Beyond what the CDC query functions need, the reader needs only
-    `SELECT` on `cdc.<ci>_CT` (ADR 0009). Metadata comes from documented APIs
-    (`sys.sp_cdc_get_captured_columns`, `sys.fn_cdc_*`); do not add reads of other `cdc.*`
-    tables except `cdc.lsn_time_mapping`, which needs no grant.
+    `SELECT` on `cdc.<ci>_CT` of each capture instance it reads (ADR 0009). Metadata comes
+    from documented APIs (`sys.sp_cdc_get_captured_columns`,
+    `sys.sp_cdc_help_change_data_capture`, `sys.sp_cdc_get_ddl_history`, `sys.fn_cdc_*`); do
+    not add reads of other `cdc.*` tables except `cdc.lsn_time_mapping`, which needs no
+    grant. The library never creates or drops capture instances.
 12. **Snapshot LSN first.** A snapshot is stamped with the `max_lsn` recorded *before* the
     table is read, and a rerun returns the LSN of the snapshot already written, never a newer
     one (ADR 0016). Snapshot rows are `_operation = 0`; never read with `NOLOCK`.
 13. **SQL injection.** Anything inlined into T-SQL (capture instance, columns, timezone,
     integers) goes through the validators in `client.py`.
+14. **Schema changes are checked before the read.** DDL inside a batch's range is found on
+    the driver while planning; a changed captured type fails the batch before any row is
+    read (`SchemaChangedError`). Columns are compared by `column_id`, never by name alone.
+    `_command_id` is per capture instance: order across instances by
+    `(_start_lsn, _seqval, _operation)`. Only `'bootstrap'` and `'resnapshot'` facts events
+    are snapshots (ADR 0023).
 
 ## Testing strategy
 

@@ -23,8 +23,13 @@
       in 3 days): seed the target from a copy, start at a recorded `startingLsn`.
 - [ ] NTILE tiles for sparse single integer keys, if uneven MIN..MAX ranges show up
       (NTILE scans and spools the key, MIN..MAX is two seeks).
-- [ ] **Schema changes**: detect `cdc.ddl_history`; support switching to a second
-      capture instance without losing changes.
+- [x] **Schema changes**: DDL detected on the driver through `sys.sp_cdc_get_ddl_history`
+      (a type change fails the batch before it reads, other DDL is a facts event); the
+      stream follows a second capture instance of the table from its start LSN without
+      losing changes, bronze takes new columns (`mergeSchema`), optional snapshot at the
+      switch (ADR 0023, `sql/switch_capture_instance.sql`).
+- [ ] Lab check t9 for the switch under a continuous writer, also against SQL Server 2017;
+      on production SQL Server 2016, check that the change tables have `__$command_id`.
 - [x] **Silver helper**: apply changes to a target with MERGE, latest image per key by
       `(_start_lsn, _command_id, _seqval, _operation)`, deletes honoured, operation 0
       (snapshot) as an upsert, rebuild from the newest snapshot after a re-snapshot; propagate
