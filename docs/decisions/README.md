@@ -18,7 +18,7 @@
 | [0014](0014-network-and-read-metrics-in-facts.md) | Network and read metrics in the ingestion facts | accepted | 2026-09-29T10:12:04-03:00 | 2026-09-29T10:48:30-03:00, 2026-09-29T22:15:55-03:00, 2026-09-30T15:16:41-03:00, 2026-09-30T17:47:32-03:00 |
 | [0015](0015-split-batches-by-change-rows.md) | Split batches by the change table's rows | accepted | 2026-09-29T10:31:46-03:00 |  |
 | [0016](0016-bootstrap-snapshot-at-a-recorded-lsn.md) | Bootstrap with a snapshot stamped with an LSN recorded before the read | accepted | 2026-09-29T12:38:28-03:00 | 2026-09-30T11:02:01-03:00, 2026-09-30T15:21:04-03:00 |
-| [0017](0017-retention-headroom-in-facts.md) | Retention headroom in the ingestion facts | accepted | 2026-09-29T14:58:53-03:00 | 2026-09-30T15:16:41-03:00 |
+| [0017](0017-retention-headroom-in-facts.md) | Retention headroom in the ingestion facts | accepted | 2026-09-29T14:58:53-03:00 | 2026-09-30T15:16:41-03:00, 2026-09-30T17:47:32-03:00 |
 | [0018](0018-automatic-resnapshot-after-data-loss.md) | Automatic re-snapshot after CDC data loss | accepted | 2026-09-29T17:46:41-03:00 |  |
 | [0019](0019-silver-helper-applies-the-change-log.md) | A silver helper applies the bronze change log to a current-state table | accepted | 2026-09-30T11:07:22-03:00 |  |
 | [0020](0020-capture-and-ingestion-lag-in-facts.md) | Capture and ingestion lag in the ingestion facts | accepted | 2026-09-30T10:33:11-03:00 | 2026-09-30T15:16:41-03:00 |

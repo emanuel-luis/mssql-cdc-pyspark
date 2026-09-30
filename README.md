@@ -117,7 +117,11 @@ in the facts is how far the stream's position, the batch's end offset (`end_comm
 ahead of what CDC cleanup has deleted; alert when it falls, or when facts stop arriving
 ([ADR 0017](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0017-retention-headroom-in-facts.md)). Every micro-batch writes a
 facts row, those that read no rows included (`rows = 0`), so facts that stop arriving mean
-the stream or CDC capture stopped (ADRs 0017 and 0020, amended).
+the stream or CDC capture stopped (ADRs 0017 and 0020, amended). That is one facts commit
+per trigger: with the heartbeat, a quiet stream with the default trigger runs a batch about
+every 10 s, some 8,600 rows and small files a day. Bound it with a `processingTime`
+trigger, and compact the facts table (auto compaction, or a scheduled `OPTIMIZE` and
+`VACUUM`).
 
 They also carry two lags, each with its own alert
 ([ADR 0020](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0020-capture-and-ingestion-lag-in-facts.md)).

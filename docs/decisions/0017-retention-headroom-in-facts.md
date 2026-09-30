@@ -2,7 +2,8 @@
 
 **Status:** accepted  
 **Date:** 2026-09-29T14:58:53-03:00  
-**Amended:** 2026-09-30T15:16:41-03:00, measured from the batch's end offset, and a batch without rows writes its row (see the Amendment)
+**Amended:** 2026-09-30T15:16:41-03:00, measured from the batch's end offset, and a batch without rows writes its row (see the Amendment)  
+**Amended:** 2026-09-30T17:47:32-03:00, the facts write rate that follows (last bullet of the Amendment)
 
 ## Context
 CDC cleanup deletes change rows by age whether or not anyone has read them. A stream that
@@ -60,3 +61,10 @@ Now:
 * Migration 5 also gives existing tables the new column comment.
 * `tests/test_delta_sink.py` checks the headroom of an empty batch and of a batch whose end
   offset is past its last change against the fake's timeline.
+* The cost: one facts commit (a row and a small file) per micro-batch, where a quiet table
+  used to write none. With the heartbeat (ADR 0010) a quiet stream with the default trigger
+  runs a batch about every 10 s, some 8,600 commits a day; 50 such streams into one facts
+  table, about 430,000. A `processingTime` trigger bounds the rate (the liveness alert's
+  resolution is then the trigger interval), and the facts table needs compaction (auto
+  compaction, or a scheduled `OPTIMIZE` and `VACUUM`). Writing an empty batch's row only
+  after a minimum interval was left out: the trigger already sets the rate.
