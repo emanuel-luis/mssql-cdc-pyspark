@@ -17,7 +17,8 @@ built on Spark's Python DataSource V2 API, plus a **completeness signal**
 > `AvailableNow`, admission control, retention guard) is covered by unit tests
 > against a file-backed CDC simulator. SQL Server behaviour is covered by the
 > `lab/` checks, which run locally against Docker and in GitHub Actions against
-> SQL Server 2022. See [LAB.md](LAB.md).
+> SQL Server 2022; `tests/integration` runs the source against SQL Server 2022 in Docker
+> (testcontainers). See [LAB.md](LAB.md).
 
 ## Why
 
@@ -167,7 +168,8 @@ or a Volume; not a URI or `/dbfs/`); run one job per stream
 | `captureInstance` | required | e.g. `dbo_orders` |
 | `columns` | inferred | DDL of the captured columns to read. Inferred with `sys.sp_cdc_get_captured_columns` when omitted; required for `backend=fake` |
 | `connectionString` | required | `mssql-python` / ODBC 18 connection string |
-| `backend` | `mssql-python` | `mssql-python`, `arrow-odbc`, or `fake` (tests) |
+| `backend` | `mssql-python` | `mssql-python`, `arrow-odbc`, or `fake` (tests; reads `fakePath`) |
+| `connectTimeout` | `30` | login timeout in seconds (mssql-python backend) |
 | `startingLsn` | `earliest` | `earliest`, `latest`, or an LSN (`0x...`), treated as already processed. `to_delta(bootstrap=True)` sets it to the snapshot's LSN; after a re-snapshot (generation `n > 0`) `to_delta` ignores it and starts at that snapshot |
 | `maxCommitsPerBatch` | unlimited | commits (from `cdc.lsn_time_mapping`) per micro-batch |
 | `numPartitions` | `auto` | split each batch into commit-aligned LSN ranges (a snapshot: into ranges of an integer key), one connection each. `auto`: the cores of the session that called `register()` (`defaultParallelism`), else the driver's CPU count; set a number to cap the load on the source |
@@ -176,7 +178,7 @@ or a Volume; not a URI or `/dbfs/`); run one job per stream
 | `includeCommandId` | `true` | read `__$command_id` (ordering within a transaction) |
 | `arrowBatchSize` | `10000` | rows per Arrow batch fetched from the driver |
 | `snapshotLsn` | `max_lsn` before the read | `mssql_cdc_snapshot` only: the LSN stamped on the snapshot rows |
-| `metricsPath` | none (`stream()`: `_mssql_cdc_metrics` under the live generation's checkpoint for local/FUSE checkpoints, see [Generations](docs/ARCHITECTURE.md#generations-to_delta)) | directory (local, or FUSE such as a Volume) where each partition leaves its round trip, read time, MB and network wait for `delta_sink(metrics_path=...)` to fold into the facts |
+| `metricsPath` | none (`stream()`: `_mssql_cdc_metrics` under the live generation's checkpoint for local/FUSE checkpoints, see [Generations](docs/ARCHITECTURE.md#generations-to_delta)) | directory (local, or FUSE such as a Volume) where each partition that read rows leaves its round trip, read time, MB and network wait for `delta_sink(metrics_path=...)` to fold into the facts |
 
 ### Output schema
 

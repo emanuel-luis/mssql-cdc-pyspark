@@ -4,6 +4,8 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
 
 jobs:
   unit:
@@ -72,10 +74,13 @@ jobs:
       - run: python -m lab.checks.t5_engine
       - run: python -m lab.checks.t6_delta_semantics
       - run: python -m lab.checks.t7_end_to_end --transactions 200 --max-commits 50
+      - run: python examples/local_pipeline.py
       - name: t1 idle heartbeat (informational; measures the interval between idle entries)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: python -m lab.checks.t1_idle_heartbeat --minutes 11 --interval 10
         continue-on-error: true
       - name: t7 with idle period and retention guard (destructive, last)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: python -m lab.checks.t7_end_to_end --transactions 50 --idle-minutes 6 --destructive
         continue-on-error: true
       - uses: actions/upload-artifact@v4

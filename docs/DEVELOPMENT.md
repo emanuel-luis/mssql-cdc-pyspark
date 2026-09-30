@@ -143,9 +143,10 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
 
 * `unit`: pytest with Delta on Ubuntu, Java 17, Python 3.11.
 * `integration`: `pytest -m sqlserver` (testcontainers on the runner's Docker).
-* `lab`: a SQL Server 2022 service container with Agent, then workload and checks
-  t2–t7; t1 and the destructive t7 are `continue-on-error`. Results are uploaded as the
-  `lab-results` artifact.
+* `lab`: a SQL Server 2022 service container with Agent, then workload, checks t2–t7 and
+  `examples/local_pipeline.py`. t1 and the destructive t7 run only on the weekly schedule
+  or a manual dispatch ("Run workflow"), and are `continue-on-error`. Results are uploaded
+  as the `lab-results` artifact.
 
 ## Releasing (later)
 

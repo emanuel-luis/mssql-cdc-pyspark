@@ -15,13 +15,16 @@ flowchart TB
     FK[fake.FakeCdcClient<br/>files]
     SK[sink.delta_sink<br/>foreachBatch]
     FN[finalization<br/>advance / is_final]
+    PL[pipeline.CdcStream<br/>to_delta, snapshot, generations]
   end
+  PL --> DS
+  PL --> SK
   DS --> RD --> CL
   DS --> SN --> CL
   CL --> SQL --> BE1 & BE2
   CL --> FK
   RD -. micro-batches .-> SK
-  SN -. bootstrap .-> SK
+  SN -. snapshot rows .-> PL
   SK -. after commit .-> FN
 ```
 
@@ -64,7 +67,8 @@ sequenceDiagram
   Note over E: offset log written (checkpoint)
   E->>R: partitions(start, end)
   R->>S: fn_cdc_increment_lsn(start), fn_cdc_get_min_lsn(ci)
-  R-->>E: [LsnRange(from, to)]  or DataLossError
+  R->>S: NTILE split points on cdc.ci_CT (numPartitions > 1)
+  R-->>E: [LsnRange(from, to), ...]  or DataLossError
   E->>X: read(LsnRange)
   X->>S: cdc.ci_CT WHERE start_lsn BETWEEN from AND to, JOIN lsn_time_mapping
   S-->>X: Arrow record batches
