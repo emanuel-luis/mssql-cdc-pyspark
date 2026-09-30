@@ -38,13 +38,20 @@ def main(argv=None) -> bool:
     t0 = datetime(2026, 1, 1, 10, 0)
     for i in range(10):
         db.commit("dbo_orders", [(2, {"order_id": i})], at=t0 + timedelta(minutes=i))
-    q = (spark.readStream.format("mssql_cdc")
-         .option("backend", "fake").option("fakePath", os.path.join(a.path, "src"))
-         .option("captureInstance", "dbo_orders").option("columns", "order_id INT")
-         .option("maxCommitsPerBatch", "3").load()
-         .writeStream.format("memory").queryName("t5_out")
-         .option("checkpointLocation", os.path.join(a.path, "ckpt"))
-         .trigger(availableNow=True).start())
+    q = (
+        spark.readStream.format("mssql_cdc")
+        .option("backend", "fake")
+        .option("fakePath", os.path.join(a.path, "src"))
+        .option("captureInstance", "dbo_orders")
+        .option("columns", "order_id INT")
+        .option("maxCommitsPerBatch", "3")
+        .load()
+        .writeStream.format("memory")
+        .queryName("t5_out")
+        .option("checkpointLocation", os.path.join(a.path, "ckpt"))
+        .trigger(availableNow=True)
+        .start()
+    )
     q.awaitTermination()
     progress = [json.loads(x.json) if hasattr(x, "json") else x for x in q.recentProgress]
     sizes = [x["numInputRows"] for x in progress if x["numInputRows"]]
@@ -53,9 +60,17 @@ def main(argv=None) -> bool:
     checks = [
         ("spark / pyspark", None, f"{spark.version} / {pyspark.__version__}"),
         ("runtime", None, os.environ.get("DATABRICKS_RUNTIME_VERSION", "local")),
-        ("latestOffset signature", None, str(inspect.signature(DataSourceStreamReader.latestOffset))),
+        (
+            "latestOffset signature",
+            None,
+            str(inspect.signature(DataSourceStreamReader.latestOffset)),
+        ),
         ("admission control + AvailableNow API", HAS_ADMISSION_CONTROL, str(HAS_ADMISSION_CONTROL)),
-        ("batches split on commit boundaries", sizes == [3, 3, 3, 1], f"{sizes} (expected [3, 3, 3, 1])"),
+        (
+            "batches split on commit boundaries",
+            sizes == [3, 3, 3, 1],
+            f"{sizes} (expected [3, 3, 3, 1])",
+        ),
         ("rows read", total == 10, str(total)),
         ("commit_ts in end offset", bool(end and end.get("commit_ts")), json.dumps(end)),
     ]

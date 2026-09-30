@@ -34,8 +34,11 @@ def main(argv=None) -> bool:
     def long_tx():
         try:
             c = connect(autocommit=False)
-            c.cursor().execute("INSERT INTO dbo.orders (order_id, customer_id, status, amount) "
-                               "VALUES (?, 1, 'long_tx', 1)", (long_id,))
+            c.cursor().execute(
+                "INSERT INTO dbo.orders (order_id, customer_id, status, amount) "
+                "VALUES (?, 1, 'long_tx', 1)",
+                (long_id,),
+            )
             time.sleep(a.long_seconds)
             c.commit()
             c.close()
@@ -46,8 +49,11 @@ def main(argv=None) -> bool:
         try:
             c = connect(autocommit=True)
             for i in range(n_short):
-                c.cursor().execute("INSERT INTO dbo.orders (order_id, customer_id, status, amount) "
-                                   "VALUES (?, 1, 'short_tx', 1)", (base + 1 + i,))
+                c.cursor().execute(
+                    "INSERT INTO dbo.orders (order_id, customer_id, status, amount) "
+                    "VALUES (?, 1, 'short_tx', 1)",
+                    (base + 1 + i,),
+                )
                 time.sleep(1)
             c.close()
         except Exception as exc:  # noqa: BLE001 - reported by the main thread
@@ -76,26 +82,48 @@ def main(argv=None) -> bool:
     if errors:
         return report("t4_watermark_concurrency", [("workload", False, repr(errors[0]))])
 
-    divergent = [(m, then, ct_count(admin, "dbo_orders", m)) for m, then in probes
-                 if ct_count(admin, "dbo_orders", m) != then]
-    order = rows(admin, """
+    divergent = [
+        (m, then, ct_count(admin, "dbo_orders", m))
+        for m, then in probes
+        if ct_count(admin, "dbo_orders", m) != then
+    ]
+    order = rows(
+        admin,
+        """
         SELECT c.order_id, CONVERT(varchar(22), c.__$start_lsn, 1), m.tran_begin_time, m.tran_end_time
         FROM cdc.dbo_orders_CT c JOIN cdc.lsn_time_mapping m ON m.start_lsn = c.__$start_lsn
         WHERE c.order_id BETWEEN ? AND ? AND c.__$operation = 2 ORDER BY c.__$start_lsn""",
-                 (base, base + n_short))
+        (base, base + n_short),
+    )
     long_row = next(r for r in order if r[0] == long_id)
-    began_after_committed_before = sum(1 for r in order if r[0] != long_id and r[2] > long_row[2] and r[1] < long_row[1])
-    commit_order_violations = sum(1 for r in order if r[0] != long_id and r[1] > long_row[1] and r[3] < long_row[3])
+    began_after_committed_before = sum(
+        1 for r in order if r[0] != long_id and r[2] > long_row[2] and r[1] < long_row[1]
+    )
+    commit_order_violations = sum(
+        1 for r in order if r[0] != long_id and r[1] > long_row[1] and r[3] < long_row[3]
+    )
     checks = [
-        ("probes where rows appeared below an observed max_lsn", len(divergent) == 0,
-         f"{len(divergent)} of {len(probes)}"),
-        ("short txs that began after the long tx but got a lower LSN", began_after_committed_before > 0,
-         f"{began_after_committed_before} (LSN order is commit order, not begin order)"),
-        ("txs with higher LSN but earlier commit time than the long tx", commit_order_violations == 0,
-         str(commit_order_violations)),
+        (
+            "probes where rows appeared below an observed max_lsn",
+            len(divergent) == 0,
+            f"{len(divergent)} of {len(probes)}",
+        ),
+        (
+            "short txs that began after the long tx but got a lower LSN",
+            began_after_committed_before > 0,
+            f"{began_after_committed_before} (LSN order is commit order, not begin order)",
+        ),
+        (
+            "txs with higher LSN but earlier commit time than the long tx",
+            commit_order_violations == 0,
+            str(commit_order_violations),
+        ),
     ]
-    return report("t4_watermark_concurrency", checks, {"probes": probes, "divergent": divergent,
-                                                       "long_tx": long_row})
+    return report(
+        "t4_watermark_concurrency",
+        checks,
+        {"probes": probes, "divergent": divergent, "long_tx": long_row},
+    )
 
 
 if __name__ == "__main__":

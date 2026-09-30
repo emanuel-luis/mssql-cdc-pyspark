@@ -25,13 +25,18 @@ def _read(spark, server, ci, checkpoint=None, **options):
         spark.readStream.format("mssql_cdc")
         .option("connectionString", server.connection_string)
         .option("captureInstance", ci)
-        .options(**options).load()
+        .options(**options)
+        .load()
         .writeStream.trigger(availableNow=True)
     )
     if checkpoint:  # file sink next to the checkpoint: its metadata must live as long
         out = os.path.join(checkpoint, "out")
-        q = writer.format("parquet").option("path", out).option(
-            "checkpointLocation", os.path.join(checkpoint, "ckpt")).start()
+        q = (
+            writer.format("parquet")
+            .option("path", out)
+            .option("checkpointLocation", os.path.join(checkpoint, "ckpt"))
+            .start()
+        )
         q.awaitTermination()
         return (spark.read.parquet(out) if os.path.exists(out) else None), q
     q = writer.format("memory").queryName(name).start()
@@ -73,15 +78,37 @@ TYPES_DDL = """
   c_rv rowversion, c_alias sysname"""
 
 EXPECTED_TYPES = [
-    ("id", "int"), ("c_bit", "boolean"), ("c_tiny", "smallint"), ("c_small", "smallint"),
-    ("c_big", "bigint"), ("c_real", "float"), ("c_float", "double"),
-    ("c_dec", "decimal(18,2)"), ("c_num", "decimal(38,10)"), ("c_money", "decimal(19,4)"),
-    ("c_smallmoney", "decimal(10,4)"), ("c_date", "date"), ("c_dt", "timestamp_ntz"),
-    ("c_dt2", "timestamp_ntz"), ("c_sdt", "timestamp_ntz"), ("c_dto", "timestamp"),
-    ("c_time", "string"), ("c_char", "string"), ("c_vc", "string"), ("c_nchar", "string"),
-    ("c_nvc", "string"), ("c_vcmax", "string"), ("c_text", "string"), ("c_ntext", "string"),
-    ("c_xml", "string"), ("c_guid", "string"), ("c_bin", "binary"), ("c_vbin", "binary"),
-    ("c_image", "binary"), ("c_rv", "binary"), ("c_alias", "string"),
+    ("id", "int"),
+    ("c_bit", "boolean"),
+    ("c_tiny", "smallint"),
+    ("c_small", "smallint"),
+    ("c_big", "bigint"),
+    ("c_real", "float"),
+    ("c_float", "double"),
+    ("c_dec", "decimal(18,2)"),
+    ("c_num", "decimal(38,10)"),
+    ("c_money", "decimal(19,4)"),
+    ("c_smallmoney", "decimal(10,4)"),
+    ("c_date", "date"),
+    ("c_dt", "timestamp_ntz"),
+    ("c_dt2", "timestamp_ntz"),
+    ("c_sdt", "timestamp_ntz"),
+    ("c_dto", "timestamp"),
+    ("c_time", "string"),
+    ("c_char", "string"),
+    ("c_vc", "string"),
+    ("c_nchar", "string"),
+    ("c_nvc", "string"),
+    ("c_vcmax", "string"),
+    ("c_text", "string"),
+    ("c_ntext", "string"),
+    ("c_xml", "string"),
+    ("c_guid", "string"),
+    ("c_bin", "binary"),
+    ("c_vbin", "binary"),
+    ("c_image", "binary"),
+    ("c_rv", "binary"),
+    ("c_alias", "string"),
 ]
 
 
@@ -103,11 +130,23 @@ def test_inferred_columns_round_trip_every_mapped_type(spark, sqlserver):
     assert [(n, t) for n, t in df.dtypes if not n.startswith("_")] == EXPECTED_TYPES
 
     row = df.first().asDict()
-    assert {k: row[k] for k in ("id", "c_bit", "c_tiny", "c_small", "c_big", "c_real", "c_float")} == {
-        "id": 1, "c_bit": True, "c_tiny": 200, "c_small": -3, "c_big": 9000000000,
-        "c_real": 1.5, "c_float": 2.25}
+    assert {
+        k: row[k] for k in ("id", "c_bit", "c_tiny", "c_small", "c_big", "c_real", "c_float")
+    } == {
+        "id": 1,
+        "c_bit": True,
+        "c_tiny": 200,
+        "c_small": -3,
+        "c_big": 9000000000,
+        "c_real": 1.5,
+        "c_float": 2.25,
+    }
     assert (row["c_dec"], row["c_num"], row["c_money"], row["c_smallmoney"]) == (
-        Decimal("12.34"), Decimal("1.0000000001"), Decimal("12.3456"), Decimal("1.2345"))
+        Decimal("12.34"),
+        Decimal("1.0000000001"),
+        Decimal("12.3456"),
+        Decimal("1.2345"),
+    )
     assert row["c_date"] == date(2026, 9, 28)
     assert row["c_dt"] == datetime(2026, 9, 28, 13, 50, 1, 123000)
     assert row["c_dt2"] == datetime(2026, 9, 28, 13, 50, 1, 123456)  # Spark keeps microseconds
@@ -115,11 +154,24 @@ def test_inferred_columns_round_trip_every_mapped_type(spark, sqlserver):
     # TIMESTAMP is an instant; render it in the session zone (UTC), not the local one
     assert df.selectExpr("CAST(c_dto AS STRING)").first()[0] == "2026-09-28 16:50:01.123456"
     assert row["c_time"] == "13:50:01.123456700"
-    assert (row["c_char"], row["c_vc"], row["c_nchar"], row["c_nvc"]) == ("abc", "hello", "xyz", "olá")
-    assert (row["c_vcmax"], row["c_text"], row["c_ntext"], row["c_xml"]) == ("a" * 10, "txt", "ntxt", "<a>1</a>")
+    assert (row["c_char"], row["c_vc"], row["c_nchar"], row["c_nvc"]) == (
+        "abc",
+        "hello",
+        "xyz",
+        "olá",
+    )
+    assert (row["c_vcmax"], row["c_text"], row["c_ntext"], row["c_xml"]) == (
+        "a" * 10,
+        "txt",
+        "ntxt",
+        "<a>1</a>",
+    )
     assert row["c_guid"] == "6F9619FF-8B86-D011-B42D-00C04FC964FF"
     assert (bytes(row["c_bin"]), bytes(row["c_vbin"]), bytes(row["c_image"])) == (
-        b"\x01\x02\x03\x04", b"\x0a\x0b", b"\x0c")
+        b"\x01\x02\x03\x04",
+        b"\x0a\x0b",
+        b"\x0c",
+    )
     assert len(row["c_rv"]) == 8 and row["c_alias"] == "alias"
 
 
@@ -130,10 +182,14 @@ def test_unsupported_type_fails_at_load_with_a_pointer_to_columns(spark, sqlserv
 
 
 def test_stream_resumes_from_checkpoint_with_transactions_in_order(spark, sqlserver, workdir):
-    ci = sqlserver.cdc_table("orders", "order_id INT NOT NULL PRIMARY KEY, status VARCHAR(20) NOT NULL")
-    sqlserver.run("BEGIN TRAN; INSERT INTO dbo.orders VALUES (1, 'new'); "
-                  "UPDATE dbo.orders SET status = 'paid' WHERE order_id = 1; "
-                  "DELETE FROM dbo.orders WHERE order_id = 1; COMMIT")
+    ci = sqlserver.cdc_table(
+        "orders", "order_id INT NOT NULL PRIMARY KEY, status VARCHAR(20) NOT NULL"
+    )
+    sqlserver.run(
+        "BEGIN TRAN; INSERT INTO dbo.orders VALUES (1, 'new'); "
+        "UPDATE dbo.orders SET status = 'paid' WHERE order_id = 1; "
+        "DELETE FROM dbo.orders WHERE order_id = 1; COMMIT"
+    )
     sqlserver.wait_for_changes(ci, 4)  # insert, update before/after, delete
 
     first, _ = _read(spark, sqlserver, ci, checkpoint=workdir, arrowBatchSize="3")
@@ -179,9 +235,12 @@ def test_purged_range_stops_the_stream(spark, sqlserver, workdir):
     sqlserver.run("INSERT INTO dbo.purge_probe VALUES (3)")
     sqlserver.wait_for_changes(ci, 3)
     # the cleanup job's work, done now: rows below the new low watermark are deleted
-    sqlserver.run("DECLARE @lw binary(10) = sys.fn_cdc_get_max_lsn(); "
-                  "EXEC sys.sp_cdc_cleanup_change_table @capture_instance = ?, "
-                  "@low_water_mark = @lw, @threshold = 5000", (ci,))
+    sqlserver.run(
+        "DECLARE @lw binary(10) = sys.fn_cdc_get_max_lsn(); "
+        "EXEC sys.sp_cdc_cleanup_change_table @capture_instance = ?, "
+        "@low_water_mark = @lw, @threshold = 5000",
+        (ci,),
+    )
     with pytest.raises(Exception, match="re-snapshot is required"):
         _read(spark, sqlserver, ci, checkpoint=workdir)
 
@@ -199,7 +258,10 @@ def test_heartbeat_script_keeps_an_idle_stream_current(spark, sqlserver, workdir
         _, q1 = _read(spark, sqlserver, ci, checkpoint=workdir)
         time.sleep(25)  # dbo.quiet gets no writes; only the Agent job does
         _, q2 = _read(spark, sqlserver, ci, checkpoint=workdir)
-        first, second = end_offset_from_progress(q1.lastProgress), end_offset_from_progress(q2.lastProgress)
+        first, second = (
+            end_offset_from_progress(q1.lastProgress),
+            end_offset_from_progress(q2.lastProgress),
+        )
         utc_now = sqlserver.run("SELECT SYSUTCDATETIME()")[0][0]
         assert second["lsn"] > first["lsn"]
         # idle, SQL Server alone moves max_lsn about every 5 minutes (lab t1)
@@ -214,7 +276,9 @@ def test_pre_2022_offset_fallback_matches_the_named_zone(sqlserver):
     class Pre2022(MssqlPythonBackend):  # SQL Server 2016-2019 have no CURRENT_TIMEZONE_ID()
         def scalar(self, sql, params=()):
             if "CURRENT_TIMEZONE_ID" in sql:
-                raise RuntimeError("'CURRENT_TIMEZONE_ID' is not a recognized built-in function name.")
+                raise RuntimeError(
+                    "'CURRENT_TIMEZONE_ID' is not a recognized built-in function name."
+                )
             return super().scalar(sql, params)
 
     named = make_client({"connectionString": sqlserver.connection_string})
@@ -242,7 +306,9 @@ def test_split_points_balance_rows_across_uneven_commits(sqlserver):
     ci = sqlserver.cdc_table("skewed", "id INT NOT NULL PRIMARY KEY")
     for i in range(8):
         sqlserver.run("INSERT INTO dbo.skewed VALUES (?)", (i,))
-    sqlserver.run("INSERT INTO dbo.skewed SELECT 100 + n FROM (VALUES (0),(1),(2),(3),(4),(5),(6),(7)) v(n)")
+    sqlserver.run(
+        "INSERT INTO dbo.skewed SELECT 100 + n FROM (VALUES (0),(1),(2),(3),(4),(5),(6),(7)) v(n)"
+    )
     sqlserver.wait_for_changes(ci, 16)
     client = make_client({"connectionString": sqlserver.connection_string})
     try:
@@ -252,8 +318,14 @@ def test_split_points_balance_rows_across_uneven_commits(sqlserver):
         for b in bounds:
             ranges.append((prev, b))
             prev = client.increment_lsn(b)
-        sizes = [sqlserver.run(f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE __$start_lsn BETWEEN "
-                               "CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)", r)[0][0] for r in ranges]
+        sizes = [
+            sqlserver.run(
+                f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE __$start_lsn BETWEEN "
+                "CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)",
+                r,
+            )[0][0]
+            for r in ranges
+        ]
         assert sizes == [8, 8]
     finally:
         client.close()
@@ -266,31 +338,46 @@ def test_stream_facade_records_network_metrics_from_a_real_server(delta_spark, s
     sqlserver.run("INSERT INTO dbo.net_probe VALUES (1)")
     sqlserver.wait_for_changes(ci, 1)
     target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
-    q = stream(delta_spark, {"connectionString": sqlserver.connection_string, "captureInstance": ci}) \
-        .to_delta(target, "net-v1", ckpt, facts, trigger={"availableNow": True})
+    q = stream(
+        delta_spark, {"connectionString": sqlserver.connection_string, "captureInstance": ci}
+    ).to_delta(target, "net-v1", ckpt, facts, trigger={"availableNow": True})
     q.awaitTermination()
     [row] = delta_spark.read.format("delta").load(facts).collect()
     assert row["source_rtt_ms"] > 0 and row["read_mb"] > 0
     assert row["network_wait_ms"] is not None  # own session's ASYNC_NETWORK_IO, no extra grant
-    assert row["retention_watermark_ts"] <= row["max_commit_ts"] and row["retention_headroom_hours"] >= 0
+    assert (
+        row["retention_watermark_ts"] <= row["max_commit_ts"]
+        and row["retention_headroom_hours"] >= 0
+    )
 
 
 def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(
-        delta_spark, sqlserver, workdir, latest):
+    delta_spark, sqlserver, workdir, latest
+):
     from mssql_cdc import stream
 
     # rows written before CDC was enabled exist only in the table: only a snapshot has them
     sqlserver.run("CREATE TABLE dbo.boot (id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL)")
     sqlserver.run("INSERT INTO dbo.boot SELECT n, 'old' FROM (VALUES (1),(2),(3),(4),(5),(6)) t(n)")
-    sqlserver.run("EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'boot', "
-                  "@role_name = NULL, @supports_net_changes = 0")
+    sqlserver.run(
+        "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'boot', "
+        "@role_name = NULL, @supports_net_changes = 0"
+    )
     ci = "dbo_boot"
     # No wait for capture: on a quiet database max_lsn stays below the new instance's first
     # LSN (and fn_cdc_get_min_lsn returns NULL) for up to ~5 minutes, and on a database capture
     # has never written to max_lsn is NULL too (run this test alone); the snapshot needs neither.
-    conn = sqlserver.login("boot_reader", "GRANT SELECT ON dbo.boot TO boot_reader",
-                           "GRANT SELECT ON cdc.dbo_boot_CT TO boot_reader")
-    options = {"connectionString": conn, "captureInstance": ci, "numPartitions": "3", "arrowBatchSize": "1"}
+    conn = sqlserver.login(
+        "boot_reader",
+        "GRANT SELECT ON dbo.boot TO boot_reader",
+        "GRANT SELECT ON cdc.dbo_boot_CT TO boot_reader",
+    )
+    options = {
+        "connectionString": conn,
+        "captureInstance": ci,
+        "numPartitions": "3",
+        "arrowBatchSize": "1",
+    }
     client = make_client(options)
     try:  # the documented API names the table and its key for a least-privilege login
         source = client.source_table(ci)
@@ -300,24 +387,30 @@ def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(
     target, ckpt = os.path.join(workdir, "bronze"), os.path.join(workdir, "ckpt")
 
     def run():
-        q = stream(delta_spark, options).to_delta(target, "boot-v1", ckpt,
-                                                  trigger={"availableNow": True}, bootstrap=True)
+        q = stream(delta_spark, options).to_delta(
+            target, "boot-v1", ckpt, trigger={"availableNow": True}, bootstrap=True
+        )
         q.awaitTermination()
         return delta_spark.read.format("delta").load(target)
 
     first = run()
     assert sorted((r["id"], r["v"], r["_operation"]) for r in first.collect()) == [
-        (i, "old", 0) for i in range(1, 7)]
+        (i, "old", 0) for i in range(1, 7)
+    ]
     sqlserver.run("UPDATE dbo.boot SET v = 'new' WHERE id = 2")
     sqlserver.run("DELETE FROM dbo.boot WHERE id = 3")
     sqlserver.run("INSERT INTO dbo.boot VALUES (7, 'new')")
     sqlserver.wait_for_changes(ci, 4)
     second = run()
     assert second.where("_operation = 0").count() == 6 and second.count() == 10
-    assert latest(second, "id", "v") == sorted((r[0], r[1]) for r in sqlserver.run("SELECT id, v FROM dbo.boot"))
+    assert latest(second, "id", "v") == sorted(
+        (r[0], r[1]) for r in sqlserver.run("SELECT id, v FROM dbo.boot")
+    )
 
 
-def test_resnapshot_recovers_a_stream_whose_changes_were_purged(delta_spark, sqlserver, workdir, latest):
+def test_resnapshot_recovers_a_stream_whose_changes_were_purged(
+    delta_spark, sqlserver, workdir, latest
+):
     from mssql_cdc import stream
 
     ci = sqlserver.cdc_table("resnap", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL")
@@ -327,9 +420,15 @@ def test_resnapshot_recovers_a_stream_whose_changes_were_purged(delta_spark, sql
     options = {"connectionString": sqlserver.connection_string, "captureInstance": ci}
 
     def run():
-        q = stream(delta_spark, options).to_delta(target, "resnap-v1", ckpt, facts,
-                                                  trigger={"availableNow": True}, bootstrap=True,
-                                                  on_data_loss="resnapshot")
+        q = stream(delta_spark, options).to_delta(
+            target,
+            "resnap-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            on_data_loss="resnapshot",
+        )
         q.awaitTermination()
         return delta_spark.read.format("delta").load(target)
 
@@ -340,14 +439,19 @@ def test_resnapshot_recovers_a_stream_whose_changes_were_purged(delta_spark, sql
     sqlserver.run("UPDATE dbo.resnap SET v = 'new' WHERE id = 1")
     sqlserver.run("DELETE FROM dbo.resnap WHERE id = 2")
     sqlserver.wait_for_changes(ci, 7)
-    sqlserver.run("DECLARE @lw binary(10) = sys.fn_cdc_get_max_lsn(); "
-                  "EXEC sys.sp_cdc_cleanup_change_table @capture_instance = ?, "
-                  "@low_water_mark = @lw, @threshold = 5000", (ci,))
+    sqlserver.run(
+        "DECLARE @lw binary(10) = sys.fn_cdc_get_max_lsn(); "
+        "EXEC sys.sp_cdc_cleanup_change_table @capture_instance = ?, "
+        "@low_water_mark = @lw, @threshold = 5000",
+        (ci,),
+    )
 
     bronze = run()  # detects the purge, re-snapshots, starts generation 1
     assert bronze.where("_operation = 0").select("_start_lsn").distinct().count() == 2
     # id 2's delete was purged unread: only a rebuild from the newest snapshot drops it
-    assert latest(bronze, "id", "v") == sorted((r[0], r[1]) for r in sqlserver.run("SELECT id, v FROM dbo.resnap"))
+    assert latest(bronze, "id", "v") == sorted(
+        (r[0], r[1]) for r in sqlserver.run("SELECT id, v FROM dbo.resnap")
+    )
     [event] = delta_spark.read.format("delta").load(facts).where("event = 'resnapshot'").collect()
     assert event["app_id"] == "resnap-v1.g1" and event["rows"] == 3
     assert event["lost_from_ts"] <= event["lost_to_ts"]

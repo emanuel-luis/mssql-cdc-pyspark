@@ -50,27 +50,34 @@ BRONZE_COLUMN_COMMENTS = {
     "_start_lsn": (
         "Commit LSN of the source transaction (__$start_lsn) as 0x + 20 uppercase hex. "
         "All changes of one transaction share it; string order is commit order. On snapshot "
-        "rows, the LSN recorded before the table was read: the row is at least that recent."),
+        "rows, the LSN recorded before the table was read: the row is at least that recent."
+    ),
     "_seqval": (
         "Position of the change in the transaction log (__$seqval), 0x + 20 hex. "
-        "Tie-breaker only: order by _command_id first. NULL on snapshot rows."),
+        "Tie-breaker only: order by _command_id first. NULL on snapshot rows."
+    ),
     "_operation": (
         "What happened to the row: 1 = delete, 2 = insert, 3 = update (row before), "
-        "4 = update (row after), 0 = snapshot (the row as read from the source table)."),
+        "4 = update (row after), 0 = snapshot (the row as read from the source table)."
+    ),
     "_command_id": (
-        "Order of the statement within its transaction (__$command_id). NULL on snapshot rows."),
+        "Order of the statement within its transaction (__$command_id). NULL on snapshot rows."
+    ),
     "_commit_ts": (
         "Commit time of the source transaction, UTC (from cdc.lsn_time_mapping); on snapshot "
-        "rows, the commit time of their _start_lsn."),
+        "rows, the commit time of their _start_lsn."
+    ),
     "_batch_id": (
         "Micro-batch that wrote the row; with the sink's app_id, the key of its row in the "
-        "ingestion facts table. NULL on snapshot rows."),
+        "ingestion facts table. NULL on snapshot rows."
+    ),
 }
 
 
 def bronze_columns(df: DataFrame) -> list[tuple]:
     """The bronze table's creation columns: ``df``'s fields with their comments."""
     return [(f.name, f.dataType, BRONZE_COLUMN_COMMENTS.get(f.name)) for f in df.schema]
+
 
 FACTS_COMMENT = (
     "One row per non-empty micro-batch written by mssql-cdc-pyspark's delta_sink: what was "
@@ -80,34 +87,63 @@ FACTS_COMMENT = (
     "(see its comment)."
 )
 FACTS_COLUMNS = [
-    ("app_id", "STRING", (
-        "Identity of the sink that wrote the batch (Delta txnAppId of the target write). "
-        "Stable for the life of one streaming checkpoint; a new checkpoint needs a new app_id.")),
-    ("batch_id", "BIGINT", (
-        "Structured Streaming micro-batch id. With app_id, the idempotency key: a replayed "
-        "batch is skipped, so it never appears twice.")),
+    (
+        "app_id",
+        "STRING",
+        (
+            "Identity of the sink that wrote the batch (Delta txnAppId of the target write). "
+            "Stable for the life of one streaming checkpoint; a new checkpoint needs a new app_id."
+        ),
+    ),
+    (
+        "batch_id",
+        "BIGINT",
+        (
+            "Structured Streaming micro-batch id. With app_id, the idempotency key: a replayed "
+            "batch is skipped, so it never appears twice."
+        ),
+    ),
     ("rows", "BIGINT", "Change rows written to the target in this batch, all operations."),
     ("min_lsn", "STRING", "Smallest source commit LSN (__$start_lsn, 0x + 20 hex) in the batch."),
     ("max_lsn", "STRING", "Largest source commit LSN in the batch; hex strings sort in LSN order."),
     ("min_commit_ts", "TIMESTAMP_NTZ", "Earliest source commit time in the batch, UTC."),
-    ("max_commit_ts", "TIMESTAMP_NTZ", (
-        "Latest source commit time in the batch, UTC. written_at minus this is the batch's "
-        "ingestion latency.")),
+    (
+        "max_commit_ts",
+        "TIMESTAMP_NTZ",
+        (
+            "Latest source commit time in the batch, UTC. written_at minus this is the batch's "
+            "ingestion latency."
+        ),
+    ),
     ("deletes", "BIGINT", "Rows with operation 1 (delete)."),
     ("inserts", "BIGINT", "Rows with operation 2 (insert)."),
-    ("updates", "BIGINT", (
-        "Updated rows, counted once: operation 4 (the row after). Each has an operation 3 "
-        "row (the row before) that is not counted here.")),
+    (
+        "updates",
+        "BIGINT",
+        (
+            "Updated rows, counted once: operation 4 (the row after). Each has an operation 3 "
+            "row (the row before) that is not counted here."
+        ),
+    ),
     ("started_at", "TIMESTAMP_NTZ", "When the sink started processing the batch, UTC."),
-    ("duration_ms", "BIGINT", (
-        "Milliseconds from started_at to the end of the target write: the read from SQL "
-        "Server, these facts and the append. Offset planning and the checkpoint commit are "
-        "not included.")),
+    (
+        "duration_ms",
+        "BIGINT",
+        (
+            "Milliseconds from started_at to the end of the target write: the read from SQL "
+            "Server, these facts and the append. Offset planning and the checkpoint commit are "
+            "not included."
+        ),
+    ),
     *NETWORK_COLUMNS,
     *RETENTION_COLUMNS,
     *EVENT_COLUMNS,
     ("target", "STRING", "Table name or path the batch was written to."),
-    ("written_at", "TIMESTAMP_NTZ", "When this facts row was written, after the target commit, UTC."),
+    (
+        "written_at",
+        "TIMESTAMP_NTZ",
+        "When this facts row was written, after the target commit, UTC.",
+    ),
 ]
 _FACT_FIELDS = [name for name, _, _ in FACTS_COLUMNS]
 FACTS_SCHEMA = ", ".join(f"{name} {data_type}" for name, data_type, _ in FACTS_COLUMNS)
@@ -137,8 +173,9 @@ def batch_facts(df: DataFrame) -> dict:
 
 def _json(facts: dict) -> str:
     """Facts as the target commit's userMetadata; commit times as ISO-8601 with milliseconds."""
-    return json.dumps(facts, separators=(",", ":"),
-                      default=lambda v: v.isoformat(timespec="milliseconds"))
+    return json.dumps(
+        facts, separators=(",", ":"), default=lambda v: v.isoformat(timespec="milliseconds")
+    )
 
 
 def _fold_metrics(path: str, lo: str, hi: str) -> tuple[dict, list[str]]:
@@ -168,8 +205,11 @@ def _fold_metrics(path: str, lo: str, hi: str) -> tuple[dict, list[str]]:
 
 
 def _headroom(watermark: datetime | None, max_commit_ts: datetime | None) -> dict:
-    hours = (None if watermark is None or max_commit_ts is None
-             else round((max_commit_ts - watermark).total_seconds() / 3600, 2))
+    hours = (
+        None
+        if watermark is None or max_commit_ts is None
+        else round((max_commit_ts - watermark).total_seconds() / 3600, 2)
+    )
     return {"retention_watermark_ts": watermark, "retention_headroom_hours": hours}
 
 
@@ -188,8 +228,9 @@ def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str 
         writer.saveAsTable(target)
 
 
-def delta_sink(target: str, app_id: str, facts_table: str | None = None,
-               metrics_path: str | None = None):
+def delta_sink(
+    target: str, app_id: str, facts_table: str | None = None, metrics_path: str | None = None
+):
     """Return a ``foreachBatch`` function.
 
     ``app_id`` must be stable for the lifetime of a checkpoint. If the checkpoint is
@@ -219,14 +260,23 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None,
             _write(out, target, app_id, batch_id, _json(facts))
             if facts_table:
                 duration_ms = round((time.monotonic() - t0) * 1000)
-                folded, files = (_fold_metrics(metrics_path, facts["min_lsn"], facts["max_lsn"])
-                                 if metrics_path else ({}, []))
-                facts.update(folded, started_at=started_at, duration_ms=duration_ms,
-                             **_headroom(folded.get("retention_watermark_ts"), facts["max_commit_ts"]),
-                             target=target, written_at=_utc_now())
+                folded, files = (
+                    _fold_metrics(metrics_path, facts["min_lsn"], facts["max_lsn"])
+                    if metrics_path
+                    else ({}, [])
+                )
+                facts.update(
+                    folded,
+                    started_at=started_at,
+                    duration_ms=duration_ms,
+                    **_headroom(folded.get("retention_watermark_ts"), facts["max_commit_ts"]),
+                    target=target,
+                    written_at=_utc_now(),
+                )
                 ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
-                facts_df = spark.createDataFrame([tuple(facts.get(k) for k in _FACT_FIELDS)],
-                                                 FACTS_SCHEMA)  # event columns stay NULL
+                facts_df = spark.createDataFrame(
+                    [tuple(facts.get(k) for k in _FACT_FIELDS)], FACTS_SCHEMA
+                )  # event columns stay NULL
                 _write(facts_df, facts_table, f"{app_id}#facts", batch_id)
                 for name in files:  # folded into this batch's facts; a replay rewrites them
                     try:
@@ -239,10 +289,23 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None,
     return write_batch
 
 
-def write_event(spark, facts_table: str, event: str, *, app_id: str, txn_app_id: str, version: int,
-                target: str, lsn: str, commit_ts: str, rows: int | None = None,
-                started_at: datetime | None = None, duration_ms: int | None = None,
-                lost_from_ts: datetime | None = None, lost_to_ts: datetime | None = None) -> None:
+def write_event(
+    spark,
+    facts_table: str,
+    event: str,
+    *,
+    app_id: str,
+    txn_app_id: str,
+    version: int,
+    target: str,
+    lsn: str,
+    commit_ts: str,
+    rows: int | None = None,
+    started_at: datetime | None = None,
+    duration_ms: int | None = None,
+    lost_from_ts: datetime | None = None,
+    lost_to_ts: datetime | None = None,
+) -> None:
     """Record a snapshot (``event`` 'bootstrap' or 'resnapshot') as one facts row.
 
     The row has no ``batch_id``; ``lsn`` and ``commit_ts`` are the snapshot's offset.
@@ -250,12 +313,25 @@ def write_event(spark, facts_table: str, event: str, *, app_id: str, txn_app_id:
     is skipped by Delta.
     """
     ts = datetime.fromisoformat(commit_ts) if commit_ts else None
-    facts = {"app_id": app_id, "rows": rows, "min_lsn": lsn, "max_lsn": lsn,
-             "min_commit_ts": ts, "max_commit_ts": ts, "deletes": 0, "inserts": 0, "updates": 0,
-             "started_at": started_at, "duration_ms": duration_ms,
-             **_headroom(lost_to_ts, ts),
-             "event": event, "lost_from_ts": lost_from_ts, "lost_to_ts": lost_to_ts,
-             "target": target, "written_at": _utc_now()}
+    facts = {
+        "app_id": app_id,
+        "rows": rows,
+        "min_lsn": lsn,
+        "max_lsn": lsn,
+        "min_commit_ts": ts,
+        "max_commit_ts": ts,
+        "deletes": 0,
+        "inserts": 0,
+        "updates": 0,
+        "started_at": started_at,
+        "duration_ms": duration_ms,
+        **_headroom(lost_to_ts, ts),
+        "event": event,
+        "lost_from_ts": lost_from_ts,
+        "lost_to_ts": lost_to_ts,
+        "target": target,
+        "written_at": _utc_now(),
+    }
     migrations.ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
     df = spark.createDataFrame([tuple(facts.get(k) for k in _FACT_FIELDS)], FACTS_SCHEMA)
     _write(df, facts_table, txn_app_id, version)

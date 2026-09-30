@@ -34,8 +34,10 @@ def migrate(spark, table: str, kind: str) -> int:
     version = int(properties.get(SCHEMA_VERSION_PROPERTY, 0))  # unstamped = created before any
     for number, migration in enumerate(migrations[version:], start=version + 1):
         migration.apply(spark, table)
-        spark.sql(f"ALTER TABLE {table_ref(table)} SET TBLPROPERTIES "
-                  f"('{SCHEMA_VERSION_PROPERTY}' = '{number}')")
+        spark.sql(
+            f"ALTER TABLE {table_ref(table)} SET TBLPROPERTIES "
+            f"('{SCHEMA_VERSION_PROPERTY}' = '{number}')"
+        )
     return max(version, len(migrations))
 
 
@@ -44,8 +46,13 @@ def ensure(spark, table: str, kind: str, columns, comment: str) -> None:
     bring an existing one up to it."""
     from ..tables import create_if_not_exists
 
-    create_if_not_exists(spark, table, columns, comment,
-                         properties={SCHEMA_VERSION_PROPERTY: str(current_version(kind))})
+    create_if_not_exists(
+        spark,
+        table,
+        columns,
+        comment,
+        properties={SCHEMA_VERSION_PROPERTY: str(current_version(kind))},
+    )
     migrate(spark, table, kind)
 
 
@@ -59,6 +66,10 @@ def add_columns(spark, table: str, columns) -> None:
         if isinstance(data_type, str):
             data_type = spark.createDataFrame([], f"`{name}` {data_type}").schema[0].dataType
         fields.append(StructField(name, data_type, True, {"comment": comment} if comment else {}))
-    writer = (spark.createDataFrame([], StructType(fields)).write.format("delta")
-              .mode("append").option("mergeSchema", "true"))
+    writer = (
+        spark.createDataFrame([], StructType(fields))
+        .write.format("delta")
+        .mode("append")
+        .option("mergeSchema", "true")
+    )
     writer.save(table) if is_path(table) else writer.saveAsTable(table)

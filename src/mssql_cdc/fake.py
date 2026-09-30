@@ -89,8 +89,11 @@ class FakeCdcClient(CdcClient):
 
     def split_points(self, capture_instance, from_lsn, to_lsn, n):
         # like SqlCdcClient: tiles of the capture instance's change rows, bound = last LSN
-        lsns = sorted(r["start_lsn"] for r in self._changes(capture_instance)
-                      if from_lsn <= r["start_lsn"] <= to_lsn)
+        lsns = sorted(
+            r["start_lsn"]
+            for r in self._changes(capture_instance)
+            if from_lsn <= r["start_lsn"] <= to_lsn
+        )
         if not lsns:
             return []
         n = max(1, min(int(n), len(lsns)))
@@ -136,14 +139,14 @@ class FakeCdcClient(CdcClient):
             chunk = rows[i : i + batch_size]
             yield pa.RecordBatch.from_pydict({c: [r.get(c) for r in chunk] for c in columns})
 
-    def iter_changes(self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size):
+    def iter_changes(
+        self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size
+    ):
         times = {r["start_lsn"]: r["tran_end_time"] for r in self._mapping()}
-        rows = [
-            r
-            for r in self._changes(capture_instance)
-            if from_lsn <= r["start_lsn"] <= to_lsn
-        ]
-        rows.sort(key=lambda r: (r["start_lsn"], r.get("command_id", 0), r["seqval"], r["operation"]))
+        rows = [r for r in self._changes(capture_instance) if from_lsn <= r["start_lsn"] <= to_lsn]
+        rows.sort(
+            key=lambda r: (r["start_lsn"], r.get("command_id", 0), r["seqval"], r["operation"])
+        )
         for i in range(0, len(rows), batch_size):
             chunk = rows[i : i + batch_size]
             data = {
@@ -164,8 +167,13 @@ class FakeCdcClient(CdcClient):
 class FakeCdcDatabase:
     """Writer side of the fake: simulates transactions, idle time and cleanup."""
 
-    def __init__(self, path: str, capture_instances: Iterable[str], start_lsn: int = 0x2A_0000_0100_0001,
-                 keys: dict[str, str] | None = None):
+    def __init__(
+        self,
+        path: str,
+        capture_instances: Iterable[str],
+        start_lsn: int = 0x2A_0000_0100_0001,
+        keys: dict[str, str] | None = None,
+    ):
         """``keys``: capture instance -> key column. Instances with a key also keep the source
         table's current rows (what a snapshot reads), updated by every commit."""
         self.path = path
@@ -199,7 +207,9 @@ class FakeCdcDatabase:
         at = at or datetime.now(timezone.utc).replace(tzinfo=None)
         return at.isoformat(timespec="milliseconds")
 
-    def commit(self, capture_instance: str, changes: Sequence[tuple[int, dict]], at: datetime | None = None) -> str:
+    def commit(
+        self, capture_instance: str, changes: Sequence[tuple[int, dict]], at: datetime | None = None
+    ) -> str:
         """One transaction. ``changes`` is a list of (operation, row) with CDC codes 1-4."""
         start = self._new_lsn()
         seq = _lsn.to_int(start)

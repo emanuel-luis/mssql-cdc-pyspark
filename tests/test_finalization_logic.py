@@ -12,7 +12,9 @@ def test_truncate():
 
 def test_candidate_excludes_period_containing_end():
     # batch ended at 14:37 -> everything before 14:00 is final, 14:00-15:00 is not
-    assert candidate({"lsn": "0x1", "commit_ts": "2026-09-28T14:37:12.345"}) == datetime(2026, 9, 28, 14)
+    assert candidate({"lsn": "0x1", "commit_ts": "2026-09-28T14:37:12.345"}) == datetime(
+        2026, 9, 28, 14
+    )
     assert candidate({"lsn": "0x1", "commit_ts": ""}) is None
     assert candidate(None) is None
 
@@ -27,4 +29,7 @@ def test_end_offset_from_progress_accepts_str_or_dict():
 def test_table_ref():
     assert table_ref("lab.cdc.orders") == "lab.cdc.orders"
     assert table_ref("/tmp/x") == "delta.`/tmp/x`"
-    assert table_ref("abfss://c@a.dfs.core.windows.net/x") == "delta.`abfss://c@a.dfs.core.windows.net/x`"
+    assert (
+        table_ref("abfss://c@a.dfs.core.windows.net/x")
+        == "delta.`abfss://c@a.dfs.core.windows.net/x`"
+    )

@@ -107,7 +107,9 @@ def save_result(name: str, payload: dict) -> Path:
     return path
 
 
-def report(name: str, checks: list[tuple[str, bool | None, str]], extra: dict | None = None) -> bool:
+def report(
+    name: str, checks: list[tuple[str, bool | None, str]], extra: dict | None = None
+) -> bool:
     """Print PASS/FAIL/INFO lines, persist results, return overall success."""
     print(f"\n== {name}")
     ok = True
@@ -115,7 +117,12 @@ def report(name: str, checks: list[tuple[str, bool | None, str]], extra: dict | 
         tag = "INFO" if passed is None else ("PASS" if passed else "FAIL")
         ok = ok and passed is not False
         print(f"[{tag}] {label}: {detail}")
-    path = save_result(name, {"checks": [{"label": l, "passed": p, "detail": d} for l, p, d in checks],
-                              "extra": extra or {}})
+    path = save_result(
+        name,
+        {
+            "checks": [{"label": l, "passed": p, "detail": d} for l, p, d in checks],
+            "extra": extra or {},
+        },
+    )
     print(f"-> {'OK' if ok else 'FAILED'} (saved {path.relative_to(ROOT)})")
     return ok

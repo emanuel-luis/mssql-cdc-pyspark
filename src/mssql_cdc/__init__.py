@@ -30,4 +30,6 @@ def register(spark) -> None:
 
     cores = available_cores(spark)
     for base in (MssqlCdcDataSource, MssqlCdcSnapshotDataSource):
-        spark.dataSource.register(type(base.__name__, (base,), {"default_num_partitions": cores or None}))
+        spark.dataSource.register(
+            type(base.__name__, (base,), {"default_num_partitions": cores or None})
+        )

@@ -24,8 +24,9 @@ class SqlServer:
     timezone_name = SERVER_TZ_WINDOWS
 
     def __init__(self, host: str, port: int):
-        self.base = (f"Server={host},{port};UID=sa;PWD={PASSWORD};"
-                     "Encrypt=yes;TrustServerCertificate=yes;")
+        self.base = (
+            f"Server={host},{port};UID=sa;PWD={PASSWORD};Encrypt=yes;TrustServerCertificate=yes;"
+        )
         self.connection_string = self.base + f"Database={DATABASE};"
         self._conn = None
 
@@ -62,8 +63,11 @@ class SqlServer:
     def cdc_table(self, name: str, columns_ddl: str) -> str:
         """Create ``dbo.<name>`` with CDC on; returns the capture instance."""
         self.run(f"CREATE TABLE dbo.[{name}] ({columns_ddl})")
-        self.run("EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = ?, "
-                 "@role_name = NULL, @supports_net_changes = 0", (name,))
+        self.run(
+            "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = ?, "
+            "@role_name = NULL, @supports_net_changes = 0",
+            (name,),
+        )
         return f"dbo_{name}"
 
     def wait_for_changes(self, capture_instance: str, rows: int, timeout: float = 120) -> None:
@@ -86,16 +90,23 @@ def sqlserver():
     from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
     container = (
-        DockerContainer(IMAGE, platform="linux/amd64", env={
-            "ACCEPT_EULA": "Y",
-            "MSSQL_PID": "Developer",
-            "MSSQL_AGENT_ENABLED": "true",  # CDC capture runs as an Agent job
-            "MSSQL_SA_PASSWORD": PASSWORD,
-            "TZ": SERVER_TZ,
-        })
+        DockerContainer(
+            IMAGE,
+            platform="linux/amd64",
+            env={
+                "ACCEPT_EULA": "Y",
+                "MSSQL_PID": "Developer",
+                "MSSQL_AGENT_ENABLED": "true",  # CDC capture runs as an Agent job
+                "MSSQL_SA_PASSWORD": PASSWORD,
+                "TZ": SERVER_TZ,
+            },
+        )
         .with_exposed_ports(1433)
-        .waiting_for(LogMessageWaitStrategy("SQL Server is now ready for client connections")
-                     .with_startup_timeout(300))
+        .waiting_for(
+            LogMessageWaitStrategy(
+                "SQL Server is now ready for client connections"
+            ).with_startup_timeout(300)
+        )
     )
     with container:
         server = SqlServer(container.get_container_host_ip(), int(container.get_exposed_port(1433)))

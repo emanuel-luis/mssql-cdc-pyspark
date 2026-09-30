@@ -32,7 +32,11 @@ def _order(i, status="new", amount="10.00", at=T0):
 def _db(path, n_tx=0, rows_per_tx=3, start=T0):
     db = FakeCdcDatabase(os.path.join(path, "src"), [CI])
     for t in range(n_tx):
-        db.commit(CI, [(2, _order(t * 100 + r)) for r in range(rows_per_tx)], at=start + timedelta(minutes=t))
+        db.commit(
+            CI,
+            [(2, _order(t * 100 + r)) for r in range(rows_per_tx)],
+            at=start + timedelta(minutes=t),
+        )
     return db
 
 
@@ -47,10 +51,15 @@ def _run(spark, path, **options):
     name = "q_" + uuid.uuid4().hex[:8]
     out = os.path.join(path, "out")
     q = (
-        spark.readStream.format("mssql_cdc").options(**opts).load()
-        .writeStream.format("parquet").option("path", out)
+        spark.readStream.format("mssql_cdc")
+        .options(**opts)
+        .load()
+        .writeStream.format("parquet")
+        .option("path", out)
         .option("checkpointLocation", os.path.join(path, "ckpt"))
-        .queryName(name).trigger(availableNow=True).start()
+        .queryName(name)
+        .trigger(availableNow=True)
+        .start()
     )
     q.awaitTermination()
     progress = [json.loads(p.json) if hasattr(p, "json") else p for p in q.recentProgress]
@@ -67,8 +76,13 @@ def _reader(workdir, **options):
 
     from mssql_cdc.source import MssqlCdcStreamReader
 
-    opts = {"backend": "fake", "fakePath": os.path.join(workdir, "src"), "captureInstance": CI,
-            "numPartitions": "1", **{k: str(v) for k, v in options.items()}}
+    opts = {
+        "backend": "fake",
+        "fakePath": os.path.join(workdir, "src"),
+        "captureInstance": CI,
+        "numPartitions": "1",
+        **{k: str(v) for k, v in options.items()},
+    }
     return MssqlCdcStreamReader(opts, StructType([StructField("order_id", IntegerType())]))
 
 
@@ -125,8 +139,13 @@ def test_cleanup_between_planning_and_read_fails_the_task(spark, workdir):
     from mssql_cdc.source import MssqlCdcStreamReader
 
     db = _db(workdir, n_tx=3)
-    opts = {"backend": "fake", "fakePath": os.path.join(workdir, "src"), "captureInstance": CI,
-            "columns": COLUMNS, "numPartitions": "1"}
+    opts = {
+        "backend": "fake",
+        "fakePath": os.path.join(workdir, "src"),
+        "captureInstance": CI,
+        "columns": COLUMNS,
+        "numPartitions": "1",
+    }
     schema = spark.createDataFrame([], MssqlCdcDataSource(opts).schema()).schema
     reader = MssqlCdcStreamReader(opts, schema)
     start = reader.initialOffset()
@@ -184,7 +203,9 @@ def test_timestamp_column_is_a_utc_instant(spark, workdir):
     db.commit(CI, [(2, {"order_id": 1, "paid_at": "2026-09-28T13:50:00-03:00"})], at=T0)
     _, out = _run(spark, workdir, columns="order_id INT, paid_at TIMESTAMP")
     # rendered in the session time zone (UTC); collect() would use the local zone
-    assert _read(spark, out).selectExpr("CAST(paid_at AS STRING)").first()[0] == "2026-09-28 16:50:00"
+    assert (
+        _read(spark, out).selectExpr("CAST(paid_at AS STRING)").first()[0] == "2026-09-28 16:50:00"
+    )
 
 
 def test_register_carries_the_session_cores_to_the_workers():
@@ -255,10 +276,18 @@ def test_num_partitions_defaults_to_the_session_cores(spark, workdir):
     name = "q_" + uuid.uuid4().hex[:8]
     q = (
         spark.readStream.format("mssql_cdc")
-        .options(backend="fake", fakePath=os.path.join(workdir, "src"), captureInstance=CI, columns=COLUMNS)
+        .options(
+            backend="fake",
+            fakePath=os.path.join(workdir, "src"),
+            captureInstance=CI,
+            columns=COLUMNS,
+        )
         .load()
         .withColumn("pid", F.spark_partition_id())  # one Spark partition per planned LSN range
-        .writeStream.format("memory").queryName(name).trigger(availableNow=True).start()
+        .writeStream.format("memory")
+        .queryName(name)
+        .trigger(availableNow=True)
+        .start()
     )
     q.awaitTermination()
     pids = {r[0] for r in spark.sql(f"SELECT DISTINCT pid FROM {name}").collect()}
@@ -275,14 +304,20 @@ def test_partitions_hold_the_same_rows_even_when_commits_differ_in_size(workdir)
     for i in range(8):  # eight one-row commits, then one commit with eight rows
         db.commit(CI, [(2, {"order_id": i})], at=T0 + timedelta(minutes=i))
     db.commit(CI, [(2, {"order_id": 100 + r}) for r in range(8)], at=T0 + timedelta(minutes=9))
-    opts = {"backend": "fake", "fakePath": os.path.join(workdir, "src"), "captureInstance": CI,
-            "numPartitions": "2"}
+    opts = {
+        "backend": "fake",
+        "fakePath": os.path.join(workdir, "src"),
+        "captureInstance": CI,
+        "numPartitions": "2",
+    }
     reader = MssqlCdcStreamReader(opts, StructType([StructField("order_id", IntegerType())]))
     start = reader.initialOffset()
     ranges = reader.partitions(start, reader.latestOffset(start, ReadAllAvailable()))
     client = reader.client
-    sizes = [sum(b.num_rows for b in client.iter_changes(CI, r.from_lsn, r.to_lsn, [], False, 100))
-             for r in ranges]
+    sizes = [
+        sum(b.num_rows for b in client.iter_changes(CI, r.from_lsn, r.to_lsn, [], False, 100))
+        for r in ranges
+    ]
     assert sizes == [8, 8]  # by commits it would be 5 commits / 5 rows and 4 commits / 11 rows
 
 
@@ -300,19 +335,31 @@ def test_snapshot_reads_the_current_rows_in_key_ranges(spark, workdir):
     db.commit(CI, [(1, {"order_id": 5, "status": "new"})])
     db.commit(CI, [(2, {"order_id": None, "status": "no key"})])  # a unique index allows one NULL
     at = db.idle(at=T0 + timedelta(hours=1))
-    opts = {"backend": "fake", "fakePath": src, "captureInstance": CI,
-            "columns": "order_id INT, status STRING", "numPartitions": "4"}
+    opts = {
+        "backend": "fake",
+        "fakePath": src,
+        "captureInstance": CI,
+        "columns": "order_id INT, status STRING",
+        "numPartitions": "4",
+    }
 
-    schema = StructType([StructField("order_id", IntegerType()), StructField("status", StringType())])
+    schema = StructType(
+        [StructField("order_id", IntegerType()), StructField("status", StringType())]
+    )
     ranges = MssqlCdcSnapshotReader(opts, schema).partitions()
     assert [(r.lo, r.hi) for r in ranges] == [(None, 2), (2, 5), (5, 7), (7, None)]  # keys 0..9
 
     rows = spark.read.format("mssql_cdc_snapshot").options(**opts).load().collect()
     assert sorted(((r["order_id"], r["status"]) for r in rows), key=str) == sorted(
-        [(i, "paid" if i == 3 else "new") for i in range(10) if i != 5] + [(None, "no key")], key=str)
+        [(i, "paid" if i == 3 else "new") for i in range(10) if i != 5] + [(None, "no key")],
+        key=str,
+    )
     assert {(r["_operation"], r["_start_lsn"], r["_seqval"], r["_command_id"]) for r in rows} == {
-        (0, at, None, None)}
-    assert {r["_commit_ts"] for r in rows} == {datetime.fromisoformat(FakeCdcClient(src).lsn_to_time(at))}
+        (0, at, None, None)
+    }
+    assert {r["_commit_ts"] for r in rows} == {
+        datetime.fromisoformat(FakeCdcClient(src).lsn_to_time(at))
+    }
 
 
 def test_available_now_stops_at_the_max_lsn_it_started_with(workdir):
@@ -382,9 +429,12 @@ def test_snapshot_is_stamped_with_the_lsn_recorded_before_the_read(workdir):
     src = os.path.join(workdir, "src")
     db = FakeCdcDatabase(src, [CI], keys={CI: "order_id"})
     db.commit(CI, [(2, {"order_id": 1})], at=T0)
-    schema = StructType([StructField("_start_lsn", StringType()), StructField("order_id", IntegerType())])
-    reader = MssqlCdcSnapshotReader({"backend": "fake", "fakePath": src, "captureInstance": CI,
-                                     "numPartitions": "1"}, schema)
+    schema = StructType(
+        [StructField("_start_lsn", StringType()), StructField("order_id", IntegerType())]
+    )
+    reader = MssqlCdcSnapshotReader(
+        {"backend": "fake", "fakePath": src, "captureInstance": CI, "numPartitions": "1"}, schema
+    )
     [part] = reader.partitions()
     newer = db.commit(CI, [(2, {"order_id": 2})], at=T0 + timedelta(minutes=1))  # during the read
     rows = [r for b in reader.read(part) for r in b.to_pylist()]
@@ -414,8 +464,9 @@ def test_snapshot_of_a_non_integer_key_is_one_partition(workdir):
     for i in range(5):
         db.commit(CI, [(2, {"code": f"C{i}", "status": "new"})], at=T0 + timedelta(minutes=i))
     schema = StructType([StructField("code", StringType()), StructField("status", StringType())])
-    reader = MssqlCdcSnapshotReader({"backend": "fake", "fakePath": src, "captureInstance": CI,
-                                     "numPartitions": "4"}, schema)
+    reader = MssqlCdcSnapshotReader(
+        {"backend": "fake", "fakePath": src, "captureInstance": CI, "numPartitions": "4"}, schema
+    )
     [part] = reader.partitions()
     assert (part.key, part.lo, part.hi) == (None, None, None)
     assert sum(b.num_rows for b in reader.read(part)) == 5

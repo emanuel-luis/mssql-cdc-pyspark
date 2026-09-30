@@ -187,7 +187,9 @@ class CdcClient(ABC):
 # --------------------------------------------------------------------------- #
 class Backend(ABC):
     @abstractmethod
-    def batches(self, sql: str, params: Sequence[str], batch_size: int) -> Iterator[pa.RecordBatch]: ...
+    def batches(
+        self, sql: str, params: Sequence[str], batch_size: int
+    ) -> Iterator[pa.RecordBatch]: ...
 
     def scalar(self, sql: str, params: Sequence[str] = ()):
         for batch in self.batches(sql, params, 1):
@@ -288,7 +290,9 @@ class SqlCdcClient(CdcClient):
             except ValueError:
                 raise
             except Exception:  # noqa: BLE001 - no such function before 2022; driver-specific type
-                self._offset_min = int(self._b.scalar("SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())"))
+                self._offset_min = int(
+                    self._b.scalar("SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())")
+                )
         if self._tz is not None:
             return self._tz
         assert self._offset_min is not None  # the fallback above set it
@@ -428,7 +432,8 @@ class SqlCdcClient(CdcClient):
         try:
             value = self._b.scalar(
                 "SELECT wait_time_ms FROM sys.dm_exec_session_wait_stats "
-                "WHERE session_id = @@SPID AND wait_type = 'ASYNC_NETWORK_IO'")
+                "WHERE session_id = @@SPID AND wait_type = 'ASYNC_NETWORK_IO'"
+            )
         except Exception:  # noqa: BLE001 - a metric must never fail a read
             return None
         return int(value or 0)
@@ -442,9 +447,13 @@ class SqlCdcClient(CdcClient):
             "columns (or membership in its gating role). Pass 'columns' explicitly."
         )
         try:
-            rows = [r for batch in self._b.batches(
-                "EXEC sys.sp_cdc_get_captured_columns @capture_instance = ?", (ci,), 1000)
-                for r in batch.to_pylist()]
+            rows = [
+                r
+                for batch in self._b.batches(
+                    "EXEC sys.sp_cdc_get_captured_columns @capture_instance = ?", (ci,), 1000
+                )
+                for r in batch.to_pylist()
+            ]
         except Exception as exc:  # Error 22981, driver-specific type
             raise ValueError(not_found) from exc
         if not rows:
@@ -460,7 +469,9 @@ class SqlCdcClient(CdcClient):
         return ", ".join(ddl)
 
     # -- data -----------------------------------------------------------------
-    def iter_changes(self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size):
+    def iter_changes(
+        self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size
+    ):
         # The change table itself, not cdc.fn_cdc_get_all_changes_<ci>: the function does
         # not return __$command_id (ADR 0009). Unlike the function, the table does not
         # reject a range that cleanup purged; the reader re-checks min_lsn after reading.
@@ -489,22 +500,32 @@ class SqlCdcClient(CdcClient):
         # arguments it lists the capture instances whose captured columns the login can
         # SELECT, which the query functions already require.
         ci = _check_ident(capture_instance, "capture instance")
-        rows = [r for batch in self._b.batches("EXEC sys.sp_cdc_help_change_data_capture", (), 1000)
-                for r in batch.to_pylist() if r["capture_instance"] == ci]
+        rows = [
+            r
+            for batch in self._b.batches("EXEC sys.sp_cdc_help_change_data_capture", (), 1000)
+            for r in batch.to_pylist()
+            if r["capture_instance"] == ci
+        ]
         if not rows:
             raise ValueError(
                 f"Capture instance {ci!r} not found, or the login lacks SELECT on its source "
-                "columns (or membership in its gating role).")
+                "columns (or membership in its gating role)."
+            )
         r = rows[0]
         keys = re.findall(r"\[([^\]]+)\]", r["index_column_list"] or "")  # "[a], [b]"
-        return SourceTable(_check_column(r["source_schema"]), _check_column(r["source_table"]),
-                           [_check_column(k) for k in keys], self._hex(r["start_lsn"]))
+        return SourceTable(
+            _check_column(r["source_schema"]),
+            _check_column(r["source_table"]),
+            [_check_column(k) for k in keys],
+            self._hex(r["start_lsn"]),
+        )
 
     def key_range(self, schema, table, key):
         t, k = f"[{_check_column(schema)}].[{_check_column(table)}]", f"[{_check_column(key)}]"
         # two scalar subqueries: each is one seek on an index led by the key
         for batch in self._b.batches(
-                f"SELECT (SELECT MIN({k}) FROM {t}) AS lo, (SELECT MAX({k}) FROM {t}) AS hi", (), 1):
+            f"SELECT (SELECT MIN({k}) FROM {t}) AS lo, (SELECT MAX({k}) FROM {t}) AS hi", (), 1
+        ):
             if batch.num_rows:
                 row = batch.to_pylist()[0]
                 return row["lo"], row["hi"]
@@ -520,9 +541,12 @@ class SqlCdcClient(CdcClient):
             if lo is not None:
                 where.append(f"{k} >= {int(lo)}")
             if hi is not None:
-                where.append(f"({k} < {int(hi)} OR {k} IS NULL)" if lo is None else f"{k} < {int(hi)}")
-        sql = (f"SELECT {cols} FROM [{_check_column(schema)}].[{_check_column(table)}]"
-               + (" WHERE " + " AND ".join(where) if where else ""))
+                where.append(
+                    f"({k} < {int(hi)} OR {k} IS NULL)" if lo is None else f"{k} < {int(hi)}"
+                )
+        sql = f"SELECT {cols} FROM [{_check_column(schema)}].[{_check_column(table)}]" + (
+            " WHERE " + " AND ".join(where) if where else ""
+        )
         yield from self._b.batches(sql, (), batch_size)
 
     def _change_table_batches(self, ci: str, sql: str, params, batch_size: int):

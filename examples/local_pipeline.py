@@ -26,13 +26,21 @@ CONTROL = f"{WORK}/table_finalization"
 
 spark = get_spark("mssql-cdc-local")
 
-options = {"connectionString": connection_string(), "captureInstance": "dbo_orders",
-           "sourceTimeZone": SOURCE_TZ, "maxCommitsPerBatch": "500"}
+options = {
+    "connectionString": connection_string(),
+    "captureInstance": "dbo_orders",
+    "sourceTimeZone": SOURCE_TZ,
+    "maxCommitsPerBatch": "500",
+}
 # bootstrap: snapshot dbo.orders into bronze once, then stream the changes after it
-query = stream(spark, options).to_delta(BRONZE, "orders-bronze-v1",
-                                        checkpoint=f"{WORK}/_checkpoints/orders_bronze",
-                                        facts_table=FACTS, trigger={"availableNow": True},
-                                        bootstrap=True)
+query = stream(spark, options).to_delta(
+    BRONZE,
+    "orders-bronze-v1",
+    checkpoint=f"{WORK}/_checkpoints/orders_bronze",
+    facts_table=FACTS,
+    trigger={"availableNow": True},
+    bootstrap=True,
+)
 query.awaitTermination()
 
 # Data is committed; now (and only now) advance the verdict.

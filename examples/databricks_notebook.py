@@ -25,10 +25,14 @@ conn = (
 
 options = {"connectionString": conn, "captureInstance": "dbo_orders", "maxCommitsPerBatch": "500"}
 # bootstrap: snapshot dbo.orders into bronze once, then stream the changes after it
-query = stream(spark, options).to_delta(f"{SCHEMA}.bronze_orders", "orders-bronze-v1",
-                                        checkpoint="/Volumes/lab/cdc/checkpoints/orders_bronze",
-                                        facts_table=f"{SCHEMA}.ingestion_facts",
-                                        trigger={"availableNow": True}, bootstrap=True)
+query = stream(spark, options).to_delta(
+    f"{SCHEMA}.bronze_orders",
+    "orders-bronze-v1",
+    checkpoint="/Volumes/lab/cdc/checkpoints/orders_bronze",
+    facts_table=f"{SCHEMA}.ingestion_facts",
+    trigger={"availableNow": True},
+    bootstrap=True,
+)
 query.awaitTermination()
 
 # COMMAND ----------

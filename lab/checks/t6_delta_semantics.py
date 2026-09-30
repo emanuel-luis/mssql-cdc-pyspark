@@ -37,27 +37,42 @@ def main(argv=None) -> bool:
         spark.sql(f"CREATE TABLE {ref(name)} ({ddl}) USING delta")
 
     def history(name, n=5):
-        return spark.sql(f"DESCRIBE HISTORY {ref(name)} LIMIT {n}").select(
-            "version", "operation", "userMetadata").collect()
+        return (
+            spark.sql(f"DESCRIBE HISTORY {ref(name)} LIMIT {n}")
+            .select("version", "operation", "userMetadata")
+            .collect()
+        )
 
     checks = []
     create("um", "id INT, v STRING")
     spark.sql(f"INSERT INTO {ref('um')} VALUES (1, 'a')")
     key = "spark.databricks.delta.commitInfo.userMetadata"
     spark.conf.set(key, json.dumps({"probe": "merge-sql"}))
-    spark.sql(f"MERGE INTO {ref('um')} t USING (SELECT 1 AS id, 'b' AS v) s ON t.id = s.id "
-              "WHEN MATCHED THEN UPDATE SET v = s.v")
+    spark.sql(
+        f"MERGE INTO {ref('um')} t USING (SELECT 1 AS id, 'b' AS v) s ON t.id = s.id "
+        "WHEN MATCHED THEN UPDATE SET v = s.v"
+    )
     spark.conf.unset(key)
     from delta.tables import DeltaTable
 
-    dt = DeltaTable.forName(spark, ref("um")) if a.schema else DeltaTable.forPath(spark, f"{base}/um")
+    dt = (
+        DeltaTable.forName(spark, ref("um"))
+        if a.schema
+        else DeltaTable.forPath(spark, f"{base}/um")
+    )
     spark.conf.set(key, json.dumps({"probe": "merge-python"}))
-    (dt.alias("t").merge(spark.createDataFrame([(1, "c")], "id int, v string").alias("s"), "t.id = s.id")
-       .whenMatchedUpdateAll().execute())
+    (
+        dt.alias("t")
+        .merge(spark.createDataFrame([(1, "c")], "id int, v string").alias("s"), "t.id = s.id")
+        .whenMatchedUpdateAll()
+        .execute()
+    )
     spark.conf.unset(key)
     metas = [h["userMetadata"] or "" for h in history("um")]
     checks.append(("userMetadata on SQL MERGE", any("merge-sql" in m for m in metas), str(metas)))
-    checks.append(("userMetadata on Python MERGE", any("merge-python" in m for m in metas), str(metas)))
+    checks.append(
+        ("userMetadata on Python MERGE", any("merge-python" in m for m in metas), str(metas))
+    )
 
     create("txn", "id INT")
     df = spark.createDataFrame([(1,), (2,)], "id int")
@@ -65,19 +80,28 @@ def main(argv=None) -> bool:
         w = df.write.format("delta").mode("append").option("txnAppId", "t6").option("txnVersion", 1)
         w.saveAsTable(ref("txn")) if a.schema else w.save(f"{base}/txn")
     n = spark.sql(f"SELECT count(*) FROM {ref('txn')}").first()[0]
-    checks.append(("replayed append skipped (txnAppId/txnVersion)", n == 2, f"{n} rows (expected 2)"))
+    checks.append(
+        ("replayed append skipped (txnAppId/txnVersion)", n == 2, f"{n} rows (expected 2)")
+    )
 
     create("txn_merge", "id INT")
     spark.conf.set("spark.databricks.delta.write.txnAppId", "t6-merge")
     spark.conf.set("spark.databricks.delta.write.txnVersion", "1")
     for _ in range(2):
-        spark.sql(f"MERGE INTO {ref('txn_merge')} t USING (SELECT 1 AS id) s ON t.id = s.id "
-                  "WHEN NOT MATCHED THEN INSERT *")
+        spark.sql(
+            f"MERGE INTO {ref('txn_merge')} t USING (SELECT 1 AS id) s ON t.id = s.id "
+            "WHEN NOT MATCHED THEN INSERT *"
+        )
     spark.conf.unset("spark.databricks.delta.write.txnAppId")
     spark.conf.unset("spark.databricks.delta.write.txnVersion")
     merges = [h for h in history("txn_merge", 10) if h["operation"] == "MERGE"]
-    checks.append(("replayed MERGE skipped (session txn confs)", len(merges) == 1,
-                   f"{len(merges)} MERGE commits (expected 1)"))
+    checks.append(
+        (
+            "replayed MERGE skipped (session txn confs)",
+            len(merges) == 1,
+            f"{len(merges)} MERGE commits (expected 1)",
+        )
+    )
     return report("t6_delta_semantics", checks)
 
 

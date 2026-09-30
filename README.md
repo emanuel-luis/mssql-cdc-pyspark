@@ -79,8 +79,13 @@ options = {
     "maxCommitsPerBatch": "500",
 }
 query = stream(spark, options).to_delta(
-    "bronze.orders", app_id="orders-v1", checkpoint="/Volumes/cat/sch/vol/ckpt/orders",
-    facts_table="ops.ingestion_facts", trigger={"availableNow": True}, bootstrap=True)
+    "bronze.orders",
+    app_id="orders-v1",
+    checkpoint="/Volumes/cat/sch/vol/ckpt/orders",
+    facts_table="ops.ingestion_facts",
+    trigger={"availableNow": True},
+    bootstrap=True,
+)
 query.awaitTermination()
 
 end = finalization.end_offset_from_progress(query.lastProgress)
@@ -121,8 +126,9 @@ query = (
     .option("captureInstance", "dbo_orders")
     .option("maxCommitsPerBatch", "500")
     .load()
-    .writeStream.foreachBatch(delta_sink("bronze.orders", app_id="orders-v1",
-                                         facts_table="ops.ingestion_facts"))
+    .writeStream.foreachBatch(
+        delta_sink("bronze.orders", app_id="orders-v1", facts_table="ops.ingestion_facts")
+    )
     .option("checkpointLocation", "/checkpoints/orders")
     .trigger(availableNow=True)
     .start()
@@ -144,9 +150,15 @@ checkpoint you passed.
 
 ```python
 query = stream(spark, options).to_delta(
-    "bronze.orders", app_id="orders-v1", checkpoint="/Volumes/cat/sch/vol/ckpt/orders",
-    facts_table="ops.ingestion_facts", trigger={"availableNow": True}, bootstrap=True,
-    on_data_loss="resnapshot", resnapshot_interval_days=7)
+    "bronze.orders",
+    app_id="orders-v1",
+    checkpoint="/Volumes/cat/sch/vol/ckpt/orders",
+    facts_table="ops.ingestion_facts",
+    trigger={"availableNow": True},
+    bootstrap=True,
+    on_data_loss="resnapshot",
+    resnapshot_interval_days=7,
+)
 ```
 
 The changes between the last offset read and the retention watermark are lost for good. The

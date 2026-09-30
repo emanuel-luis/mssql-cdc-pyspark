@@ -155,8 +155,11 @@ class _Common:
         num_partitions = str(_opt(options, "numPartitions", "auto")).strip().lower()
         # auto: the session's cores (register()), else this driver node's CPUs. Each
         # partition opens its own connection to SQL Server.
-        self.num_partitions = (max(1, default_num_partitions or os.cpu_count() or 1)
-                               if num_partitions == "auto" else int(num_partitions))
+        self.num_partitions = (
+            max(1, default_num_partitions or os.cpu_count() or 1)
+            if num_partitions == "auto"
+            else int(num_partitions)
+        )
         self.batch_size = int(_opt(options, "arrowBatchSize", "10000"))
         # optional: a directory (local or FUSE, e.g. /Volumes/...) where each partition that
         # read rows leaves its metrics for delta_sink(metrics_path=...) to fold into the batch facts
@@ -211,8 +214,13 @@ class _BaseReader(_Common, DataSourceStreamReader):
             return []
         if self.num_partitions <= 1:
             return [LsnRange(self.capture_instance, from_lsn, to_lsn)]
-        bounds = [b for b in self.client.split_points(self.capture_instance, from_lsn, to_lsn,
-                                                      self.num_partitions) if b]
+        bounds = [
+            b
+            for b in self.client.split_points(
+                self.capture_instance, from_lsn, to_lsn, self.num_partitions
+            )
+            if b
+        ]
         if not bounds or bounds[-1] != to_lsn:
             bounds.append(to_lsn)
         ranges, lo = [], from_lsn
@@ -269,20 +277,31 @@ class _BaseReader(_Common, DataSourceStreamReader):
             # Cleanup may have run since partitions() checked. It moves min_lsn before it
             # deletes rows, so min_lsn past from_lsn now means rows may be missing.
             min_lsn = self._guard_retention(client, partition.from_lsn)
-            if self.metrics_path and rows:  # the sink never folds (or removes) an empty batch's file
+            if (
+                self.metrics_path and rows
+            ):  # the sink never folds (or removes) an empty batch's file
                 wait_after = client.network_wait_ms()
                 try:
                     watermark = client.lsn_to_time(min_lsn)
                 except Exception:  # noqa: BLE001 - a metric must never fail a read
                     watermark = None
-                _write_metrics(self.metrics_path, partition, {
-                    "rows": rows, "bytes": nbytes, "seconds": time.perf_counter() - started,
-                    "rtt_ms": rtt[0] if rtt else None,
-                    "network_wait_ms": (None if wait_before is None or wait_after is None
-                                        else wait_after - wait_before),
-                    # what cleanup has deleted up to, as a commit time (ADR 0017)
-                    "retention_watermark_ts": watermark,
-                })
+                _write_metrics(
+                    self.metrics_path,
+                    partition,
+                    {
+                        "rows": rows,
+                        "bytes": nbytes,
+                        "seconds": time.perf_counter() - started,
+                        "rtt_ms": rtt[0] if rtt else None,
+                        "network_wait_ms": (
+                            None
+                            if wait_before is None or wait_after is None
+                            else wait_after - wait_before
+                        ),
+                        # what cleanup has deleted up to, as a commit time (ADR 0017)
+                        "retention_watermark_ts": watermark,
+                    },
+                )
         finally:
             client.close()
             self._client = None
@@ -378,15 +397,21 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         # ponytail: uniform ranges over MIN..MAX of an integer leading key column (two seeks);
         # sparse or skewed keys give uneven partitions. Tile with NTILE if that shows up.
         key = keys[0] if keys and keys[0] in self.source_columns else None
-        lo, hi = client.key_range(schema, table, key) if key and self.num_partitions > 1 else (None, None)
+        lo, hi = (
+            client.key_range(schema, table, key)
+            if key and self.num_partitions > 1
+            else (None, None)
+        )
         whole = [KeyRange(self.capture_instance, lsn, commit_ts, schema, table, None, None, None)]
         if not all(isinstance(v, int) and not isinstance(v, bool) for v in (lo, hi)) or hi == lo:
             return whole
         n = min(self.num_partitions, hi - lo + 1)
         cuts = [lo + (hi - lo + 1) * i // n for i in range(1, n)]
         bounds = [None, *cuts, None]
-        return [KeyRange(self.capture_instance, lsn, commit_ts, schema, table, key, a, b)
-                for a, b in pairwise(bounds)]
+        return [
+            KeyRange(self.capture_instance, lsn, commit_ts, schema, table, key, a, b)
+            for a, b in pairwise(bounds)
+        ]
 
     def read(self, partition: KeyRange) -> Iterator:  # type: ignore[override]  # partitions() only plans KeyRange
         from datetime import datetime
@@ -406,8 +431,15 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         }
         client = self.client
         try:
-            for batch in client.iter_table(partition.schema, partition.table, self.source_columns,
-                                           partition.key, partition.lo, partition.hi, self.batch_size):
+            for batch in client.iter_table(
+                partition.schema,
+                partition.table,
+                self.source_columns,
+                partition.key,
+                partition.lo,
+                partition.hi,
+                self.batch_size,
+            ):
                 if batch.num_rows == 0:
                     continue
                 table = pa.Table.from_batches([batch])

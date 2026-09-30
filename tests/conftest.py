@@ -19,9 +19,13 @@ def _builder(delta: bool):
     if delta:
         from delta import configure_spark_with_delta_pip
 
-        b = b.config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension").config(
-            "spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog"
-        ).config("spark.databricks.delta.snapshotPartitions", "1")  # tiny tables: not 50 tasks per read
+        b = (
+            b.config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+            .config(
+                "spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+            )
+            .config("spark.databricks.delta.snapshotPartitions", "1")
+        )  # tiny tables: not 50 tasks per read
         b = configure_spark_with_delta_pip(b)
     return b
 
@@ -79,11 +83,17 @@ def latest():
             points.append(facts.where("event IS NOT NULL").agg(F.max("max_lsn")).first()[0])
         since = max(p for p in points if p)
         last = Window.partitionBy(key).orderBy(
-            F.col("_start_lsn").desc(), F.col("_command_id").desc_nulls_last(),
-            F.col("_seqval").desc_nulls_last(), F.col("_operation").desc())
-        rows = (df.where((F.col("_start_lsn") >= since) & (F.col("_operation") != 3))
-                .withColumn("n", F.row_number().over(last)).where("n = 1 AND _operation != 1")
-                .collect())
+            F.col("_start_lsn").desc(),
+            F.col("_command_id").desc_nulls_last(),
+            F.col("_seqval").desc_nulls_last(),
+            F.col("_operation").desc(),
+        )
+        rows = (
+            df.where((F.col("_start_lsn") >= since) & (F.col("_operation") != 3))
+            .withColumn("n", F.row_number().over(last))
+            .where("n = 1 AND _operation != 1")
+            .collect()
+        )
         return sorted((r[key], r[value]) for r in rows)
 
     return rebuild

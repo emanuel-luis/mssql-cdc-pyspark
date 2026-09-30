@@ -17,4 +17,11 @@ Never edit, reorder or remove a migration that has shipped: its position is its 
 
 from .base import SCHEMA_VERSION_PROPERTY, Migration, add_columns, current_version, ensure, migrate
 
-__all__ = ["SCHEMA_VERSION_PROPERTY", "Migration", "add_columns", "current_version", "ensure", "migrate"]
+__all__ = [
+    "SCHEMA_VERSION_PROPERTY",
+    "Migration",
+    "add_columns",
+    "current_version",
+    "ensure",
+    "migrate",
+]

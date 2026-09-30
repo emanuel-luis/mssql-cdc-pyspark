@@ -23,8 +23,13 @@ def delta_table(spark, name_or_path: str):
     return DeltaTable.forName(spark, name_or_path)
 
 
-def create_if_not_exists(spark, name_or_path: str, columns: Iterable[tuple], comment: str | None = None,
-                         properties: dict | None = None):
+def create_if_not_exists(
+    spark,
+    name_or_path: str,
+    columns: Iterable[tuple],
+    comment: str | None = None,
+    properties: dict | None = None,
+):
     """``columns``: ``(name, type, comment)``; ``type`` is a DDL string or a Spark DataType.
 
     A no-op when the table exists: its schema, comments and properties are left as they
@@ -33,7 +38,9 @@ def create_if_not_exists(spark, name_or_path: str, columns: Iterable[tuple], com
     from delta.tables import DeltaTable
 
     builder = DeltaTable.createIfNotExists(spark)
-    builder = builder.location(name_or_path) if is_path(name_or_path) else builder.tableName(name_or_path)
+    builder = (
+        builder.location(name_or_path) if is_path(name_or_path) else builder.tableName(name_or_path)
+    )
     if comment:
         builder = builder.comment(comment)
     for key, value in (properties or {}).items():

@@ -30,8 +30,12 @@ class Workload:
         Faker.seed(seed)
         self.rnd = random.Random(seed)
         self.conn = connect(autocommit=False)
-        self.next_customer = (scalar(self.conn, "SELECT ISNULL(MAX(customer_id), 0) FROM dbo.customers") or 0) + 1
-        self.next_order = (scalar(self.conn, "SELECT ISNULL(MAX(order_id), 0) FROM dbo.orders") or 0) + 1
+        self.next_customer = (
+            scalar(self.conn, "SELECT ISNULL(MAX(customer_id), 0) FROM dbo.customers") or 0
+        ) + 1
+        self.next_order = (
+            scalar(self.conn, "SELECT ISNULL(MAX(order_id), 0) FROM dbo.orders") or 0
+        ) + 1
         self.conn.commit()
 
     # -- single statements ------------------------------------------------------
@@ -60,8 +64,11 @@ class Workload:
             "UPDATE dbo.orders SET status = ?, amount = amount + ?, updated_at = SYSUTCDATETIME() "
             "WHERE order_id = (SELECT TOP 1 order_id FROM dbo.orders WITH (READPAST) "
             "WHERE order_id >= ? ORDER BY order_id)",
-            (self.rnd.choice(STATUSES[1:]), Decimal(self.rnd.randint(0, 500)) / 100,
-             self.rnd.randint(1, max(1, self.next_order - 1))),
+            (
+                self.rnd.choice(STATUSES[1:]),
+                Decimal(self.rnd.randint(0, 500)) / 100,
+                self.rnd.randint(1, max(1, self.next_order - 1)),
+            ),
         )
 
     def delete_order(self, cur) -> None:
@@ -105,7 +112,9 @@ class Workload:
         cur.close()
         return n
 
-    def stream(self, tps: float, duration: float, mix: dict[str, float], max_statements: int) -> None:
+    def stream(
+        self, tps: float, duration: float, mix: dict[str, float], max_statements: int
+    ) -> None:
         end, count, stmts = time.time() + duration, 0, 0
         interval = 1.0 / tps
         while time.time() < end:
@@ -147,7 +156,9 @@ def _mix(text: str) -> dict[str, float]:
 
 
 def main(argv=None) -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--locale", default="en_US")
     sub = p.add_subparsers(dest="cmd", required=True)
