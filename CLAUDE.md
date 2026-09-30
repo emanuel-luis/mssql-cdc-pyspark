@@ -164,8 +164,11 @@ about every 5 minutes (t1); `sql/heartbeat.sql` brings `max_lsn`'s lag to ~10 s
 * CI's `lint` job runs `ruff check`, `ruff format --check` and `mypy` (config in
   `pyproject.toml`) and gates every other job: run them before pushing. A broad `except`
   says why: `# noqa: BLE001 - <reason>`.
-* PySpark is an optional extra (`[spark]`): platforms ship their own. Do not add hard
-  dependencies to `[project].dependencies` beyond `pyarrow`.
+* PySpark is an optional extra (`[spark]`) because platforms ship their own: installing
+  PyPI `pyspark` on Databricks, EMR, Dataproc or Fabric, or next to Databricks Connect,
+  conflicts with the platform's Spark (DBR 18.2 is Spark 4.1). Do not add hard dependencies
+  to `[project].dependencies` beyond `pyarrow` and `mssql-python` (the default backend,
+  ADR 0003).
 * Keep the README options table and output schema in sync with the options read in
   `src/mssql_cdc/source.py` and `client.make_client`.
 * Changing the control, facts, bronze or silver schema: update its creation columns *and* append a

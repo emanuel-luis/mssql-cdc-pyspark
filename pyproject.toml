@@ -21,13 +21,13 @@ classifiers = [
   "Topic :: Database",
   "Typing :: Typed",
 ]
-dependencies = ["pyarrow>=14"]
+# mssql-python is the default backend, imported only when it opens a connection (ADR 0003).
+dependencies = ["pyarrow>=14", "mssql-python>=1.5"]
 
 [project.optional-dependencies]
 # PySpark itself is not a hard dependency: managed platforms (Databricks, EMR,
 # Fabric...) ship their own. Install the "spark" extra for local runs.
 spark = ["pyspark>=4.2", "delta-spark>=4.4"]
-mssql = ["mssql-python>=1.5"]
 arrow-odbc = ["arrow-odbc>=10"]
 
 [dependency-groups]
@@ -37,7 +37,6 @@ dev = [
     "pyspark>=4.2",
     "delta-spark>=4.4",
     "faker>=30",
-    "mssql-python>=1.5",
     "testcontainers>=4.15",
     "ruff>=0.16",
     "mypy>=2.0",

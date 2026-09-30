@@ -706,15 +706,13 @@ name = "mssql-cdc-pyspark"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "mssql-python" },
     { name = "pyarrow" },
 ]
 
 [package.optional-dependencies]
 arrow-odbc = [
     { name = "arrow-odbc" },
-]
-mssql = [
-    { name = "mssql-python" },
 ]
 spark = [
     { name = "delta-spark" },
@@ -725,7 +723,6 @@ spark = [
 dev = [
     { name = "delta-spark" },
     { name = "faker" },
-    { name = "mssql-python" },
     { name = "mypy" },
     { name = "pyspark" },
     { name = "pytest" },
@@ -737,17 +734,16 @@ dev = [
 requires-dist = [
     { name = "arrow-odbc", marker = "extra == 'arrow-odbc'", specifier = ">=10" },
     { name = "delta-spark", marker = "extra == 'spark'", specifier = ">=4.4" },
-    { name = "mssql-python", marker = "extra == 'mssql'", specifier = ">=1.5" },
+    { name = "mssql-python", specifier = ">=1.5" },
     { name = "pyarrow", specifier = ">=14" },
     { name = "pyspark", marker = "extra == 'spark'", specifier = ">=4.2" },
 ]
-provides-extras = ["spark", "mssql", "arrow-odbc"]
+provides-extras = ["spark", "arrow-odbc"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "delta-spark", specifier = ">=4.4" },
     { name = "faker", specifier = ">=30" },
-    { name = "mssql-python", specifier = ">=1.5" },
     { name = "mypy", specifier = ">=2.0" },
     { name = "pyspark", specifier = ">=4.2" },
     { name = "pytest", specifier = ">=8" },

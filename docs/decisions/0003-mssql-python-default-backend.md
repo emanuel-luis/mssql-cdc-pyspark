@@ -2,7 +2,8 @@
 
 **Status:** accepted. Survey in `docs/CONNECTORS.md`.  
 **Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)  
-**Amended:** 2026-09-28T21:44:31-03:00, the `(max)` caveat measured (lab t8)
+**Amended:** 2026-09-28T21:44:31-03:00, the `(max)` caveat measured (lab t8)  
+**Amended:** 2026-09-30T16:14:54-03:00, installed with the package instead of the `[mssql]` extra
 
 ## Context
 `read()` yields Arrow record batches from executors. The driver should fetch natively into
@@ -23,3 +24,18 @@ ADBC (closed binary, separate installer) and turbodbc (no binary type support).
   columns cost about a quarter of the throughput (26k vs 34k rows/s), and the Arrow fetch
   stays 2–3x faster than `fetchall()` either way. A cost, not a cliff.
 * On Linux, `mssql-python` needs `libltdl7`, `libkrb5-3` and `libgssapi-krb5-2`.
+
+## Amendment: `mssql-python` is installed with the package
+`mssql-python` moves from the `[mssql]` extra into `[project].dependencies`: the default
+backend should work after `pip install mssql-cdc-pyspark`, without an extra the user has to
+know about. The extra is removed rather than kept as an alias, since nothing has been
+released with it. `[spark]` and `[arrow-odbc]` stay.
+
+* The import stays lazy inside `MssqlPythonBackend`, so importing `mssql_cdc` on a node
+  without the driver's system libraries still works, and `arrow-odbc` and `fake` users are
+  unaffected.
+* Costs: every install pulls `azure-identity` (with `msal` and `cryptography`)
+  transitively, and `arrow-odbc` users carry a driver they do not use.
+* The Linux system libraries (`libltdl7`, `libkrb5-3`, `libgssapi-krb5-2`) are still not
+  installed by pip; platforms whose image lacks them need an init script
+  (`docs/DATABRICKS.md`).
