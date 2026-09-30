@@ -1,6 +1,8 @@
 """SQL Server CDC for PySpark: a DataSource V2 streaming source plus a
 completeness ("partition finalization") signal for downstream consumers."""
 
+import importlib.metadata
+
 from .client import DataLossError, make_client
 from .pipeline import stream
 from .source import HAS_ADMISSION_CONTROL, OPERATIONS, MssqlCdcDataSource
@@ -14,7 +16,7 @@ __all__ = [
     "register",
     "stream",
 ]
-__version__ = "0.1.0"
+__version__ = importlib.metadata.version("mssql-cdc-pyspark")
 
 
 def register(spark) -> None:

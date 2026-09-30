@@ -13,8 +13,13 @@ license-files = ["LICENSE"]
 authors = [{ name = "Emanuel Luis" }]
 keywords = ["spark", "pyspark", "sql-server", "cdc", "delta-lake", "datasource-v2", "arrow"]
 classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
   "Topic :: Database",
+  "Typing :: Typed",
 ]
 dependencies = ["pyarrow>=14"]
 
@@ -39,7 +44,11 @@ dev = [
 ]
 
 [project.urls]
+Homepage = "https://github.com/emanuel-luis/mssql-cdc-pyspark"
 Repository = "https://github.com/emanuel-luis/mssql-cdc-pyspark"
+Issues = "https://github.com/emanuel-luis/mssql-cdc-pyspark/issues"
+Changelog = "https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/emanuel-luis/mssql-cdc-pyspark#readme"
 
 [tool.setuptools.packages.find]
 where = ["src"]
