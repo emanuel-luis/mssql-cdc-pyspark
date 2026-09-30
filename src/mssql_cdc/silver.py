@@ -140,7 +140,7 @@ def apply_changes(
         )
     version = int(delta_table(spark, bronze).history(1).first()["version"])
     changes = spark.sql(f"SELECT * FROM {table_ref(bronze)} VERSION AS OF {version}").where(
-        F.col("_capture_instance") == capture_instance
+        F.lower("_capture_instance") == capture_instance.lower()  # as SQL Server resolves it
     )
     # ponytail: a scan for operation 0 on every call (file stats skip change-only files);
     # keep the newest snapshot LSN in the control table if it shows up.

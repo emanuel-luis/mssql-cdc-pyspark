@@ -292,6 +292,26 @@ def test_split_points_tile_the_change_rows_of_the_capture_instance():
     assert "lsn_time_mapping" not in sql and params == ("0x01", "0x02")
 
 
+def test_source_table_matches_the_capture_instance_ignoring_case():
+    def row(ci, table):
+        return {
+            "capture_instance": ci,
+            "source_schema": "dbo",
+            "source_table": table,
+            "index_column_list": "[id]",
+            "start_lsn": "0x0000002a000001000001",
+        }
+
+    # stored upper-case, configured lower-case: the CDC functions resolve it, so does this
+    client = SqlCdcClient(Rows([row("dbo_ORDER_ITEMS", "ORDER_ITEMS")]))
+    assert client.source_table("dbo_order_items").table == "ORDER_ITEMS"
+    # a case-sensitive database can hold both: the exact name wins, else neither does
+    client = SqlCdcClient(Rows([row("dbo_Orders", "Orders"), row("dbo_orders", "orders")]))
+    assert client.source_table("dbo_orders").table == "orders"
+    with pytest.raises(ValueError, match="matches 'dbo_Orders', 'dbo_orders' ignoring case"):
+        client.source_table("DBO_ORDERS")
+
+
 def test_snapshot_queries():
     class Help(Recorder):
         def batches(self, sql, params, batch_size):

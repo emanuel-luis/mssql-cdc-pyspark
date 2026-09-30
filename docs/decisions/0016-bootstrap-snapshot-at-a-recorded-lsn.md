@@ -2,7 +2,8 @@
 
 **Status:** accepted  
 **Date:** 2026-09-29T12:38:28-03:00  
-**Amended:** 2026-09-30T11:02:01-03:00, NTILE tiles for composite and non-integer keys (see the Amendment)
+**Amended:** 2026-09-30T11:02:01-03:00, NTILE tiles for composite and non-integer keys (see the Amendment)  
+**Amended:** 2026-09-30T15:21:04-03:00, the capture instance matches ignoring case (see Amendment 2)
 
 ## Context
 The stream starts from what CDC retention still holds (`startingLsn=earliest`), which is
@@ -117,3 +118,20 @@ connection: slow on a big table.
 * ponytail: the NTILE query reads and spools the whole key; a range would be cheaper with
   `ROW_NUMBER` over the index and a separate `COUNT(*)`, if a large table shows it. Typed
   bounds are untested on the `arrow-odbc` backend, like the rest of it (ADR 0003).
+
+## Amendment 2: the capture instance matches ignoring case
+A production SQL Server 2016 stores `dbo_ORDER_ITEMS` and the config says
+`dbo_order_items`. The stream worked: `fn_cdc_get_min_lsn`,
+`sp_cdc_get_captured_columns` and the change table resolve the name under the database's
+collation, case-insensitive by default. `source_table` compared the rows of
+`sp_cdc_help_change_data_capture` exactly and reported the instance as not found, which
+broke the snapshot, `bootstrap`, `on_data_loss="resnapshot"` and silver's key inference.
+
+* `source_table` takes the exact name first, else the one name equal to it ignoring case;
+  two such names (a case-sensitive database can hold both) raise an error naming them.
+* "A snapshot of the capture instance" in the target, and silver's rows of it (ADR 0019),
+  match `_capture_instance` ignoring case, so a rerun spelled differently finds the snapshot
+  and takes no second one. The column keeps the name as the options gave it.
+* The fake resolves names the same way. `tests/test_client_sql.py`,
+  `tests/test_delta_sink.py`, `tests/test_silver.py` and `tests/integration` (a bootstrap
+  with the name upper-cased, then a rerun in its own case) check it.

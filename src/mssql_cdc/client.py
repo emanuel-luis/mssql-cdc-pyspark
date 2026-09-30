@@ -613,12 +613,21 @@ class SqlCdcClient(CdcClient):
         # arguments it lists the capture instances whose captured columns the login can
         # SELECT, which the query functions already require.
         ci = _check_ident(capture_instance, "capture instance")
-        rows = [
+        listed = [
             r
             for batch in self._b.batches("EXEC sys.sp_cdc_help_change_data_capture", (), 1000)
             for r in batch.to_pylist()
-            if r["capture_instance"] == ci
         ]
+        # The CDC functions and the change table resolve the name case-insensitively under
+        # the default collation, so a config may not match the stored case: exact first.
+        rows = [r for r in listed if r["capture_instance"] == ci] or [
+            r for r in listed if r["capture_instance"].lower() == ci.lower()
+        ]
+        if len(rows) > 1:
+            names = ", ".join(repr(r["capture_instance"]) for r in rows)
+            raise ValueError(
+                f"Capture instance {ci!r} matches {names} ignoring case: pass the exact name."
+            )
         if not rows:
             raise ValueError(
                 f"Capture instance {ci!r} not found, or the login lacks SELECT on its source "
@@ -712,7 +721,7 @@ class SqlCdcClient(CdcClient):
         try:
             yield from self._b.batches(sql, params, batch_size)
         except Exception as exc:
-            if "denied" in str(exc) and f"{ci}_CT" in str(exc):
+            if "denied" in str(exc) and f"{ci}_CT".lower() in str(exc).lower():
                 raise PermissionError(
                     f"The login cannot read the change table cdc.[{ci}_CT]. Beyond what the CDC "
                     f"query functions need, the reader needs: GRANT SELECT ON cdc.[{ci}_CT] "

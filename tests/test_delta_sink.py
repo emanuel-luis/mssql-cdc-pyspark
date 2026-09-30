@@ -301,14 +301,14 @@ def test_bootstrap_snapshots_once_and_the_stream_continues_from_it(delta_spark, 
         "numPartitions": "2",
     }
 
-    def run():
-        q = stream(spark, options).to_delta(
+    def run(ci=CI):
+        q = stream(spark, {**options, "captureInstance": ci}).to_delta(
             target, "boot-v1", ckpt, trigger={"availableNow": True}, bootstrap=True
         )
         q.awaitTermination()
         return spark.read.format("delta").load(target)
 
-    first = run()
+    first = run("DBO_ORDERS")  # SQL Server matches the name ignoring case; so does the rerun
     assert first.where("_operation = 0").count() == 5 and first.count() == 5  # 0..5 minus 4
     db.commit(
         CI,

@@ -392,14 +392,14 @@ def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(
         client.close()
     target, ckpt = os.path.join(workdir, "bronze"), os.path.join(workdir, "ckpt")
 
-    def run():
-        q = stream(delta_spark, options).to_delta(
+    def run(name=ci):
+        q = stream(delta_spark, {**options, "captureInstance": name}).to_delta(
             target, "boot-v1", ckpt, trigger={"availableNow": True}, bootstrap=True
         )
         q.awaitTermination()
         return delta_spark.read.format("delta").load(target)
 
-    first = run()
+    first = run(ci.upper())  # the default collation matches the name ignoring case
     assert sorted((r["id"], r["v"], r["_operation"]) for r in first.collect()) == [
         (i, "old", 0) for i in range(1, 7)
     ]

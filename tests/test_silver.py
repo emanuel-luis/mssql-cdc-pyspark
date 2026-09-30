@@ -232,7 +232,9 @@ def test_keys_come_from_the_capture_instance_when_not_given(delta_spark, workdir
         apply_changes(delta_spark, o.bronze, o.silver, CI, control_table=o.control)
     with pytest.raises(ValueError, match="not captured columns"):
         apply_changes(delta_spark, o.bronze, o.silver, CI, ["id"], control_table=o.control)
-    apply_changes(delta_spark, o.bronze, o.silver, CI, control_table=o.control, options=o.options)
+    # in another case than bronze's rows and the fake's instance: both match ignoring it
+    ci = CI.upper()
+    apply_changes(delta_spark, o.bronze, o.silver, ci, control_table=o.control, options=o.options)
     assert o.rows() == o.source() == [(1, "new")]
     unkeyed = FakeCdcDatabase(os.path.join(workdir, "unkeyed"), ["dbo_x"])
     with pytest.raises(ValueError, match="no unique index"):

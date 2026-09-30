@@ -57,7 +57,7 @@ class FakeCdcClient(CdcClient):
         return _read_jsonl(os.path.join(self.path, _MAPPING))
 
     def _changes(self, ci: str) -> list[dict]:
-        return _read_jsonl(os.path.join(self.path, "changes", f"{ci}.jsonl"))
+        return _read_jsonl(os.path.join(self.path, "changes", f"{self._name(ci)}.jsonl"))
 
     def _mins(self) -> dict:
         p = os.path.join(self.path, _MIN)
@@ -66,16 +66,20 @@ class FakeCdcClient(CdcClient):
         with open(p, encoding="utf-8") as fh:
             return json.load(fh)
 
+    def _name(self, ci: str) -> str:
+        """The instance as created: SQL Server's default collation ignores case."""
+        return next((n for n in self._mins() if n.lower() == ci.lower()), ci)
+
     # -- CdcClient ------------------------------------------------------------
     def max_lsn(self):
         m = self._mapping()
         return m[-1]["start_lsn"] if m else _lsn.ZERO_LSN
 
     def min_lsn(self, capture_instance):
-        mins = self._mins()
-        if capture_instance not in mins:
+        mins, name = self._mins(), self._name(capture_instance)
+        if name not in mins:
             raise ValueError(f"Capture instance {capture_instance!r} not found")
-        return mins[capture_instance]
+        return mins[name]
 
     def increment_lsn(self, lsn):
         return _lsn.from_int(_lsn.to_int(lsn) + 1)
@@ -123,8 +127,8 @@ class FakeCdcClient(CdcClient):
 
     def source_table(self, capture_instance):
         start = self.min_lsn(capture_instance)  # not found -> ValueError, like the real one
-        keys = _key_columns(self._keys().get(capture_instance))
-        return SourceTable("dbo", capture_instance, keys, start)
+        name = self._name(capture_instance)
+        return SourceTable("dbo", name, _key_columns(self._keys().get(name)), start)
 
     def _table(self, table: str) -> list[dict]:
         p = os.path.join(self.path, "tables", f"{table}.json")

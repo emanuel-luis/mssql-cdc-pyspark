@@ -179,10 +179,11 @@ class CdcStream:
             exists = self.spark.catalog.tableExists(target)
         if not exists:
             return None
+        # ignoring case, as SQL Server resolves the name: a rerun may spell it differently
         row = (
             delta_table(self.spark, target)
             .toDF()
-            .where((F.col("_operation") == 0) & (F.col("_capture_instance") == ci))
+            .where((F.col("_operation") == 0) & (F.lower("_capture_instance") == ci.lower()))
             .agg(F.max("_start_lsn").alias("lsn"), F.max("_commit_ts").alias("ts"))
             .first()
         )
