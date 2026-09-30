@@ -8,6 +8,6 @@ Append only; see ``mssql_cdc.migrations``. For example::
     ]
 """
 
-from .base import Migration, add_columns  # noqa: F401 - used by the migrations below
+from .base import Migration
 
 MIGRATIONS: list[Migration] = []

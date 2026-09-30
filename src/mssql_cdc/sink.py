@@ -219,10 +219,7 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None,
                 duration_ms = round((time.monotonic() - t0) * 1000)
                 folded, files = (_fold_metrics(metrics_path, facts["min_lsn"], facts["max_lsn"])
                                  if metrics_path else ({}, []))
-                facts.update(started_at=started_at, duration_ms=duration_ms,
-                             source_rtt_ms=folded.get("source_rtt_ms"),
-                             read_seconds=folded.get("read_seconds"), read_mb=folded.get("read_mb"),
-                             network_wait_ms=folded.get("network_wait_ms"),
+                facts.update(folded, started_at=started_at, duration_ms=duration_ms,
                              **_headroom(folded.get("retention_watermark_ts"), facts["max_commit_ts"]),
                              target=target, written_at=_utc_now())
                 ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
@@ -243,8 +240,7 @@ def delta_sink(target: str, app_id: str, facts_table: str | None = None,
 def write_event(spark, facts_table: str, event: str, *, app_id: str, txn_app_id: str, version: int,
                 target: str, lsn: str, commit_ts: str, rows: int | None = None,
                 started_at: datetime | None = None, duration_ms: int | None = None,
-                lost_from_ts: datetime | None = None, lost_to_ts: datetime | None = None,
-                retention_watermark_ts: datetime | None = None) -> None:
+                lost_from_ts: datetime | None = None, lost_to_ts: datetime | None = None) -> None:
     """Record a snapshot (``event`` 'bootstrap' or 'resnapshot') as one facts row.
 
     The row has no ``batch_id``; ``lsn`` and ``commit_ts`` are the snapshot's offset.
@@ -252,10 +248,10 @@ def write_event(spark, facts_table: str, event: str, *, app_id: str, txn_app_id:
     is skipped by Delta.
     """
     ts = datetime.fromisoformat(commit_ts) if commit_ts else None
-    facts = {"app_id": app_id, "batch_id": None, "rows": rows, "min_lsn": lsn, "max_lsn": lsn,
+    facts = {"app_id": app_id, "rows": rows, "min_lsn": lsn, "max_lsn": lsn,
              "min_commit_ts": ts, "max_commit_ts": ts, "deletes": 0, "inserts": 0, "updates": 0,
              "started_at": started_at, "duration_ms": duration_ms,
-             **_headroom(retention_watermark_ts, ts),
+             **_headroom(lost_to_ts, ts),
              "event": event, "lost_from_ts": lost_from_ts, "lost_to_ts": lost_to_ts,
              "target": target, "written_at": _utc_now()}
     migrations.ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)

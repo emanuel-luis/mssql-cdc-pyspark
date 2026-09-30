@@ -8,7 +8,6 @@ from typing import Callable
 from ..tables import delta_table, is_path, table_ref
 
 SCHEMA_VERSION_PROPERTY = "mssql_cdc.schema_version"
-KINDS = ("bronze", "control", "facts")
 
 
 @dataclass(frozen=True)

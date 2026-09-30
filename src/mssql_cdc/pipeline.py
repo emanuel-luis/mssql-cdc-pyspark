@@ -97,7 +97,10 @@ def _last_offset(checkpoint: str) -> dict | None:
 
 class CdcStream:
     def __init__(self, spark, options: dict):
+        from . import register  # lazy: the package imports this module
+
         self.spark, self.options = spark, dict(options)
+        register(spark)
 
     def _capture_instance(self) -> str:
         ci = _opt(self.options, "captureInstance")
@@ -127,7 +130,7 @@ class CdcStream:
         ``started_at`` and ``duration_ms`` of its event row in the facts table."""
         from pyspark.sql import functions as F
 
-        from . import migrations, register
+        from . import migrations
         from .client import make_client
         from .sink import BRONZE_COMMENT, _utc_now, bronze_columns
         from .source import snapshot_lsn
@@ -137,7 +140,6 @@ class CdcStream:
         with closing(make_client(self.options)) as client:
             lsn = snapshot_lsn(client, client.source_table(ci))
             offset = {"lsn": lsn, "commit_ts": client.lsn_to_time(lsn) or ""}
-        register(self.spark)
         rows = (self.spark.read.format("mssql_cdc_snapshot").options(**self.options)
                 .option("snapshotLsn", lsn).load()
                 .withColumn("_batch_id", F.lit(None).cast("int")))
@@ -251,8 +253,7 @@ class CdcStream:
         write_event(self.spark, facts_table, "resnapshot", app_id=_generation(checkpoint, app_id, n)[1],
                     txn_app_id=f"{app_id}#events", version=n, target=target,
                     lsn=offset["lsn"], commit_ts=offset["commit_ts"], **timing,
-                    lost_from_ts=_ts(start["commit_ts"]), lost_to_ts=lost_to,
-                    retention_watermark_ts=lost_to)
+                    lost_from_ts=_ts(start["commit_ts"]), lost_to_ts=lost_to)
         state = {"generation": n, "snapshot_lsn": offset["lsn"], "commit_ts": offset["commit_ts"],
                  "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
         _write_state(checkpoint, state)
@@ -272,7 +273,6 @@ class CdcStream:
         ``resnapshot_interval_days`` must exceed the CDC retention: a second loss within it
         raises ``DataLossError`` instead of snapshotting again.
         """
-        from . import register
         from .sink import delta_sink
 
         if on_data_loss not in ("fail", "resnapshot"):
@@ -289,7 +289,6 @@ class CdcStream:
                                  "tell downstream to rebuild, and from which LSN")
         if bootstrap and _opt(self.options, "startingLsn"):
             raise ValueError("bootstrap=True sets startingLsn itself; pass one or the other")
-        register(self.spark)
         state = _read_state(checkpoint)
         if on_data_loss == "resnapshot":
             state = self._recover(target, app_id, checkpoint, facts_table, state,
