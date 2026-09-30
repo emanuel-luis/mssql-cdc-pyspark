@@ -91,11 +91,16 @@ EVENT_COLUMNS = [
         "event",
         "STRING",
         (
-            "What the row records: NULL for a micro-batch; 'bootstrap' for the initial snapshot of "
-            "the target; 'resnapshot' for a snapshot taken because CDC cleanup purged changes "
-            "before the stream read them. Event rows have no batch_id; min_lsn = max_lsn is the "
-            "LSN the snapshot is stamped with, and the only trace of a snapshot of an empty table "
-            "(rows = 0), which writes no target rows."
+            "What the row records: NULL for a micro-batch. Snapshots, with no batch_id: "
+            "'bootstrap' for the initial snapshot of the target; 'resnapshot' for a snapshot taken "
+            "because CDC cleanup purged changes before the stream read them; min_lsn = max_lsn is "
+            "the LSN the snapshot is stamped with, and the only trace of a snapshot of an empty "
+            "table (rows = 0), which writes no target rows. Changes to the source (ADR 0023), with "
+            "the batch_id of the batch that read past them and rows = 0: 'schema_change' for DDL "
+            "on the source table, 'capture_instance_switched' when the stream first read a newer "
+            "capture instance of the table (the older one can be dropped from then on); min_lsn = "
+            "max_lsn is the change's LSN, detail says what changed. Downstream rebuilds only from "
+            "'bootstrap' and 'resnapshot' rows."
         ),
     ),
     (
@@ -177,9 +182,9 @@ END_COLUMNS = [
             "after this batch, the largest to_lsn of its partitions. At or after max_lsn: offsets "
             "follow CDC capture (sys.fn_cdc_get_max_lsn), which moves with idle entries and with "
             "other tables' commits, so on a quiet table it keeps moving while its batches read no "
-            "rows. On event rows, the snapshot's LSN. NULL unless the source option metricsPath "
-            "and delta_sink(metrics_path=...) are set, and on a batch that planned no range to "
-            "read (a new checkpoint's first batch when nothing is new)."
+            "rows. On event rows, the snapshot's or the change's LSN. NULL unless the source "
+            "option metricsPath and delta_sink(metrics_path=...) are set, and on a batch that "
+            "planned no range to read (a new checkpoint's first batch when nothing is new)."
         ),
     ),
     (
@@ -190,7 +195,22 @@ END_COLUMNS = [
             "had read after this batch, whether the batch had rows or not. retention_headroom_hours "
             "and ingestion_lag_seconds are measured from it. Later than max_commit_ts, the batch's "
             "last change, when the table changed less recently than the database. On event rows, "
-            "the snapshot's commit time. NULL under the same condition as end_lsn."
+            "the snapshot's or the change's commit time. NULL under the same condition as end_lsn."
+        ),
+    ),
+]
+
+# Migration 6 (2026-09-30): schema changes and capture instance switches as event rows of the
+# batch that read past them (ADR 0023). The migration also gives existing tables the new
+# comments of the columns event rows now use differently.
+DETAIL_COLUMNS = [
+    (
+        "detail",
+        "STRING",
+        (
+            "On 'schema_change' and 'capture_instance_switched' rows, what changed, as the reader "
+            "reported it: the columns the DDL touched, or 'old -> new' capture instance. NULL on "
+            "other rows."
         ),
     ),
 ]
@@ -204,6 +224,14 @@ def _end_offset(spark, table: str) -> None:
     set_comments(spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in changed}, FACTS_COMMENT)
 
 
+def _source_events(spark, table: str) -> None:
+    from ..sink import FACTS_COLUMNS, FACTS_COMMENT
+
+    add_columns(spark, table, DETAIL_COLUMNS)
+    changed = ("batch_id", "rows", "event", "end_lsn", "end_commit_ts")
+    set_comments(spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in changed}, FACTS_COMMENT)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         "network and read metrics", lambda spark, table: add_columns(spark, table, NETWORK_COLUMNS)
@@ -214,4 +242,5 @@ MIGRATIONS: list[Migration] = [
     Migration("snapshot events", lambda spark, table: add_columns(spark, table, EVENT_COLUMNS)),
     Migration("lag metrics", lambda spark, table: add_columns(spark, table, LAG_COLUMNS)),
     Migration("end offset", _end_offset),
+    Migration("source change events", _source_events),
 ]

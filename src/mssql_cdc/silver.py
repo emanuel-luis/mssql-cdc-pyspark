@@ -9,6 +9,12 @@ the latest image per key by ``(_start_lsn, _command_id, _seqval, _operation)``; 
 3 (the row before an update) is ignored, 1 deletes the key, 0 (snapshot), 2 and 4 upsert it.
 Run it after the stream, in the same job or another; one job per silver table.
 
+* Capture instances: after the stream switched to a newer capture instance of the table,
+  bronze holds rows of both (ADR 0023); with ``options`` both are read from SQL Server.
+  ``_command_id`` is numbered per instance, but all rows of one ``_start_lsn`` come from
+  one, so the order holds. A row in the range of any other instance fails the call rather
+  than being skipped. A column bronze gained is added to silver (older rows read NULL).
+
 * Position: ``applied_lsn`` in the control table, the highest ``_start_lsn`` applied,
   recorded after the MERGE. A crash in between leaves it behind, and applying from behind
   changes nothing: each key takes the latest image of a range that reaches the head of
@@ -17,8 +23,8 @@ Run it after the stream, in the same job or another; one job per silver table.
   last rebuilt from (the highest ``_start_lsn`` of its operation-0 rows, or ``max_lsn`` of
   the facts' event rows for ``bronze``: an emptied table's snapshot has only its event),
   silver is rebuilt from it, so keys absent from the snapshot and the changes after it are
-  deleted. The events carry no capture instance, so ``bronze`` holds one capture instance,
-  as its verdict already requires.
+  deleted. The events carry no capture instance, so ``bronze`` holds one source table, as
+  its verdict already requires. Only 'bootstrap' and 'resnapshot' events are snapshots.
 * Verdict: silver's ``finalized_until`` advances to the bronze verdict read before bronze
   itself. Bronze commits its rows before its verdict (ADR 0005), so the rows applied hold
   every commit up to it: silver never claims more than it has applied.
@@ -103,11 +109,14 @@ def apply_changes(
     granularity: str = "hour",
 ) -> dict:
     """Bring ``target`` up to the capture instance's changes in ``bronze``, a table fed by
-    that capture instance alone. Until the stream creates ``bronze``, it does nothing.
+    that capture instance alone (and the newer ones of its table it switched to). Until the
+    stream creates ``bronze``, it does nothing.
 
     ``keys``: the source's key columns; without them, read from the capture instance's
-    unique index through ``options`` (the stream's). ``control_table`` keeps the position
-    and gets the verdict; ``bronze``'s own verdict must be under the same name or path.
+    unique index through ``options`` (the stream's), which also name the table's other
+    capture instances: needed once bronze holds a newer one's rows. ``control_table`` keeps
+    the position and gets the verdict; ``bronze``'s own verdict must be under the same name
+    or path.
     ``facts_table``: the stream's, needed to see the re-snapshot of an emptied table.
     Returns ``{"rebuilt", "applied_lsn", "finalized_until"}``.
     """
@@ -131,17 +140,20 @@ def apply_changes(
     points = []
     if facts_table and exists(spark, facts_table):
         facts = delta_table(spark, facts_table).toDF()
+        snapshots = F.col("event").isin("bootstrap", "resnapshot")  # not the source's changes
         points.append(
-            _one(
-                facts.where(F.col("event").isNotNull() & (F.col("target") == bronze)).agg(
-                    F.max("max_lsn")
-                )
-            )
+            _one(facts.where(snapshots & (F.col("target") == bronze)).agg(F.max("max_lsn")))
         )
     version = int(delta_table(spark, bronze).history(1).first()["version"])
-    changes = spark.sql(f"SELECT * FROM {table_ref(bronze)} VERSION AS OF {version}").where(
-        F.lower("_capture_instance") == capture_instance.lower()  # as SQL Server resolves it
-    )
+    pinned = spark.sql(f"SELECT * FROM {table_ref(bronze)} VERSION AS OF {version}")
+    # ignoring case, as SQL Server resolves the names
+    instances = [capture_instance.lower()]
+    if options:
+        from .pipeline import _instances
+
+        instances = _instances(options, capture_instance)
+    ours = F.lower("_capture_instance").isin(instances)
+    changes = pinned.where(ours)
     # ponytail: a scan for operation 0 on every call (file stats skip change-only files);
     # keep the newest snapshot LSN in the control table if it shows up.
     points.append(_one(changes.where(F.col("_operation") == 0).agg(F.max("_start_lsn"))))
@@ -151,10 +163,20 @@ def apply_changes(
     rebuild = applied is None or (
         snapshot is not None and (rebuilt_from is None or snapshot > rebuilt_from)
     )
+    since = F.lit(True)
     if not rebuild:
-        changes = changes.where(F.col("_start_lsn") > F.lit(applied))
+        since = F.col("_start_lsn") > F.lit(applied)
     elif snapshot:
-        changes = changes.where(F.col("_start_lsn") >= snapshot)
+        since = F.col("_start_lsn") >= snapshot
+    changes = changes.where(since)
+    # a row of another instance would be skipped for good: a switch silver was not told about
+    other = _one(pinned.where(since & ~ours).select("_capture_instance"))
+    if other is not None:
+        raise ValueError(
+            f"{bronze} holds rows of capture instance {other!r}, which is not "
+            f"{capture_instance!r} or another capture instance of its table"
+            + ("" if options else ": pass options (the stream's) to read them from SQL Server")
+        )
 
     captured = [f for f in changes.schema if f.name not in BRONZE_COLUMN_COMMENTS]
     names = [f.name for f in captured]
@@ -168,6 +190,10 @@ def apply_changes(
         [(f.name, f.dataType, None) for f in captured] + SILVER_COLUMNS,
         SILVER_COMMENT,
     )
+    have = set(delta_table(spark, target).toDF().columns)
+    new = [(f.name, f.dataType, None) for f in captured if f.name not in have]
+    if new:  # captured by a newer capture instance: bronze gained it, so does silver
+        migrations.add_columns(spark, target, new)
 
     top = _one(changes.agg(F.max("_start_lsn")))
     merged = top is not None or (rebuild and snapshot is not None)

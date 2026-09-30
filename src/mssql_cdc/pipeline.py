@@ -26,6 +26,11 @@ a checkpoint path Python and Spark resolve alike: local, or a Volume) and as an 
 the facts table, which it requires. At most once per ``resnapshot_interval_days``. A purge
 while the query runs still fails it with ``DataLossError``; the next run recovers. Run one
 job per stream (ADR 0018).
+
+The stream follows a newer capture instance of its table (ADR 0023): snapshots in the target
+are found under any capture instance of the table, and ``snapshot_on_switch=True`` appends a
+snapshot after the batch that first reads the newer one, so that rows unchanged since then
+carry the columns only it captures instead of NULL.
 """
 
 from __future__ import annotations
@@ -75,6 +80,23 @@ def _write_state(checkpoint: str, state: dict) -> None:
     os.replace(path + ".tmp", path)  # a crash leaves the old state or the new one
 
 
+def _instances(options: dict, ci: str) -> list[str]:
+    """``ci`` and the other capture instances of its source table, lower-cased (SQL Server
+    resolves names ignoring case): after a switch the target holds rows of each (ADR 0023)."""
+    from .client import make_client
+
+    with closing(make_client(options)) as client:
+        return sorted({ci.lower(), *(i.name.lower() for i in client.capture_instances(ci))})
+
+
+def _min_lsn(client, ci: str) -> str:
+    """How far back the capture instances of ``ci``'s table still hold changes: the oldest
+    one's ``min_lsn``. After a switch the older instance holds what precedes the newer one's
+    start; once it is dropped, what only it held is gone too (ADR 0023)."""
+    instances = client.capture_instances(ci)
+    return client.min_lsn(instances[0].name if instances else ci)
+
+
 def _last_offset(checkpoint: str) -> dict | None:
     """The source offset of the checkpoint's last committed batch: its last processed LSN.
 
@@ -115,10 +137,11 @@ class CdcStream:
         """Append the tracked table's current rows to ``target`` as operation 0 and return the
         offset they are stamped with, for the stream's ``startingLsn``.
 
-        The LSN is recorded before the table is read. Once ``target`` holds a snapshot of this
-        capture instance, its offset is returned and nothing is read, so a rerun cannot skip
-        the changes after it. ``resnapshot=True`` takes a new one: after a DataLossError, with
-        a new checkpoint and app_id; downstream, rebuild from the newest snapshot.
+        The LSN is recorded before the table is read. Once ``target`` holds a snapshot taken
+        under any capture instance of this table, its offset is returned and nothing is read,
+        so a rerun cannot skip the changes after it. ``resnapshot=True`` takes a new one:
+        after a DataLossError, with a new checkpoint and app_id; downstream, rebuild from the
+        newest snapshot.
         ``to_delta(on_data_loss="resnapshot")`` does all of that itself.
         """
         ci = self._capture_instance()
@@ -152,7 +175,12 @@ class CdcStream:
         )
         migrations.ensure(self.spark, target, "bronze", bronze_columns(rows), BRONZE_COMMENT)
         meta = json.dumps({"snapshot": ci, **offset})
-        writer = rows.write.format("delta").mode("append").option("userMetadata", meta)
+        writer = (
+            rows.write.format("delta")
+            .mode("append")
+            .option("userMetadata", meta)
+            .option("mergeSchema", "true")  # as the stream's appends (ADR 0023)
+        )
         writer.save(target) if is_path(target) else writer.saveAsTable(target)
         duration_ms = round((time.monotonic() - t0) * 1000)
         # this snapshot's own commit (auto compaction may commit after it); an empty table
@@ -170,21 +198,18 @@ class CdcStream:
     def _last_snapshot(self, target: str, ci: str) -> dict | None:
         from pyspark.sql import functions as F
 
-        from .tables import delta_table, is_path
+        from .tables import delta_table, exists
 
-        if is_path(target):
-            from delta.tables import DeltaTable
-
-            exists = DeltaTable.isDeltaTable(self.spark, target)
-        else:
-            exists = self.spark.catalog.tableExists(target)
-        if not exists:
+        if not exists(self.spark, target):
             return None
         # ignoring case, as SQL Server resolves the name: a rerun may spell it differently
         row = (
             delta_table(self.spark, target)
             .toDF()
-            .where((F.col("_operation") == 0) & (F.lower("_capture_instance") == ci.lower()))
+            .where(
+                (F.col("_operation") == 0)
+                & F.lower("_capture_instance").isin(_instances(self.options, ci))
+            )
             .agg(F.max("_start_lsn").alias("lsn"), F.max("_commit_ts").alias("ts"))
             .first()
         )
@@ -253,7 +278,7 @@ class CdcStream:
             # the source's retention guard, which runs only when there is a range to read
             if (client.max_lsn() or ZERO_LSN) <= start["lsn"]:
                 return None
-            low = client.min_lsn(ci)
+            low = _min_lsn(client, ci)
             if client.increment_lsn(start["lsn"]) >= low:
                 return None
             lost_to = _ts(client.lsn_to_time(low))
@@ -263,8 +288,9 @@ class CdcStream:
             if done and (done["lsn"] <= start["lsn"] or client.increment_lsn(done["lsn"]) < low):
                 done = None
         lost = (
-            f"{ci}: CDC cleanup deleted changes after {start['lsn']} before the stream read "
-            f"them (min_lsn is {low})"
+            f"{ci}: CDC no longer holds the changes after {start['lsn']} that the stream has "
+            f"not read (min_lsn of the table's oldest capture instance is {low}): cleanup purged "
+            "them, or the capture instance that held them was dropped"
         )
         last = state.get("failed_at") or (state.get("at") if n else None)
         now = datetime.now(timezone.utc)
@@ -278,7 +304,7 @@ class CdcStream:
         _write_state(checkpoint, {**state, "recovering": start})
         offset, timing = (done, {}) if done else self._take_snapshot(target, ci)
         with closing(make_client(self.options)) as client:
-            if client.increment_lsn(offset["lsn"]) < client.min_lsn(ci):
+            if client.increment_lsn(offset["lsn"]) < _min_lsn(client, ci):
                 _write_state(
                     checkpoint,
                     {**state, "recovering": start, "failed_at": now.isoformat(timespec="seconds")},
@@ -324,6 +350,7 @@ class CdcStream:
         bootstrap: bool = False,
         on_data_loss: str = "fail",
         resnapshot_interval_days: float = 7.0,
+        snapshot_on_switch: bool = False,
     ):
         """Start the stream into ``target`` through ``delta_sink``; returns the StreamingQuery.
 
@@ -335,11 +362,20 @@ class CdcStream:
         see the module doc).
         ``resnapshot_interval_days`` must exceed the CDC retention: a second loss within it
         raises ``DataLossError`` instead of snapshotting again.
+        ``snapshot_on_switch``: after the batch that first reads a newer capture instance of the
+        table, append a snapshot, so that rows unchanged since then carry the columns only the
+        newer instance captures, instead of NULL (ADR 0023). It reads the reader's events from
+        the metrics directory, so a URI checkpoint needs ``metricsPath``.
         """
         from .sink import delta_sink
 
         if on_data_loss not in ("fail", "resnapshot"):
             raise ValueError(f"on_data_loss must be 'fail' or 'resnapshot', not {on_data_loss!r}")
+        if snapshot_on_switch and not _opt(self.options, "metricsPath") and _URI.match(checkpoint):
+            raise ValueError(
+                "snapshot_on_switch=True learns of a switch from the reader's events in "
+                "metricsPath, which a URI checkpoint has no default for: set it"
+            )
         if on_data_loss == "resnapshot":
             # Spark resolves /dbfs/x as dbfs:/dbfs/x, Python as dbfs:/x: two directories
             if _URI.match(checkpoint) or f"{checkpoint}/".startswith("/dbfs/"):
@@ -382,18 +418,22 @@ class CdcStream:
         metrics = _opt(options, "metricsPath")
         if metrics:  # one directory per stream: the sink folds and removes every file in it
             metrics = os.path.join(metrics, sink_id)
-        elif facts_table and metrics is None and not _URI.match(checkpoint):
+        elif (facts_table or snapshot_on_switch) and metrics is None and not _URI.match(checkpoint):
             metrics = os.path.join(checkpoint, "_mssql_cdc_metrics")
         if metrics:
             options = {k: v for k, v in options.items() if k.lower() != "metricspath"}
             options["metricsPath"] = metrics
+        write = delta_sink(target, sink_id, facts_table, metrics_path=metrics)  # removes its files
+        if snapshot_on_switch:
+            assert metrics  # checked above
+            write = _snapshot_after_switch(
+                write, dict(self.options), self._capture_instance(), target, metrics
+            )
         writer = (
             self.spark.readStream.format("mssql_cdc")
             .options(**options)
             .load()
-            .writeStream.foreachBatch(
-                delta_sink(target, sink_id, facts_table, metrics_path=metrics)  # removes its files
-            )
+            .writeStream.foreachBatch(write)
             .option("checkpointLocation", checkpoint)
         )
         if trigger:
@@ -401,6 +441,23 @@ class CdcStream:
         if query_name:
             writer = writer.queryName(query_name)
         return writer.start()
+
+
+def _snapshot_after_switch(sink, options: dict, ci: str, target: str, metrics: str):
+    """``sink``, then a snapshot of the table after the batch that first read a newer capture
+    instance (``to_delta(snapshot_on_switch=True)``). Holds no session: Spark Connect pickles
+    ``foreachBatch`` functions."""
+    from .sink import _read_events
+
+    def write(df, batch_id):
+        switched = any(
+            e.get("event") == "capture_instance_switched" for e in _read_events(metrics)[1]
+        )
+        sink(df, batch_id)  # folds the events into the facts and removes their files
+        if switched:  # a replay after a crash here snapshots again: harmless, only slower
+            CdcStream(df.sparkSession, options)._take_snapshot(target, ci)
+
+    return write
 
 
 def stream(spark, options: dict) -> CdcStream:

@@ -16,13 +16,23 @@
   ``ASYNC_NETWORK_IO`` into the batch facts, with the batch's end offset, the retention
   watermark and headroom (ADR 0017) and the capture and ingestion lag (ADR 0020), both
   measured from that end offset. The sink never connects to SQL Server itself.
-  The directory belongs to one stream. The sink empties it before the batch is read (what is
-  left is a dead attempt's), then folds every file in it and removes them: micro-batches run
-  one at a time and the partitions are read inside ``foreachBatch``, so every file there is
-  the current batch's, and a retried task rewrites its file under the same name
+  The directory belongs to one stream. The sink removes the partitions' files before the
+  batch is read (what is left is a dead attempt's), then folds every one in it and removes
+  them: micro-batches run one at a time and the partitions are read inside ``foreachBatch``,
+  so every file there is the current batch's, and a retried task rewrites its file under the
+  same name
   (``<from>-<to>.json``). Selecting files by the rows' LSNs would miss the partitions that
   read none, such as the trailing one that ends at the end offset. Metrics never fail a
   batch. ``mssql_cdc.stream()`` wires both ends from one set of options.
+* Changes to the source are facts too (ADR 0023): while planning a batch the reader leaves an
+  ``event-<kind>-<lsn>.json`` file in the same directory for a schema change or a switch to a
+  newer capture instance. The sink writes each as an event row of the batch, in the same
+  commit as the batch's own row, so a replay writes both or neither, and removes the files
+  only after that (the partitions' files are removed before the read; these stay). Without
+  a facts table they are removed unwritten: the reader has logged them.
+* Bronze appends use ``mergeSchema``: a column that a newer capture instance captures joins
+  the table (older rows read NULL). A changed type fails the append unless the table has
+  ``delta.enableTypeWidening`` and the change widens.
 * Snapshots are facts too: ``write_event()`` records the bootstrap and every re-snapshot
   after data loss as one row with ``event`` set and no ``batch_id`` (ADR 0018), idempotent
   the same way.
@@ -45,6 +55,7 @@ from pyspark.sql import functions as F
 
 from . import migrations
 from .migrations.facts import (
+    DETAIL_COLUMNS,
     END_COLUMNS,
     EVENT_COLUMNS,
     LAG_COLUMNS,
@@ -58,10 +69,15 @@ BRONZE_COMMENT = (
     "One row per change: an update is two rows (operation 3, the row before; 4, the row after). "
     "Order changes by (_start_lsn, _command_id, _seqval, _operation). Rows with operation 0 "
     "are a snapshot of the source table, all at one _start_lsn that precedes the changes read "
-    "after it."
+    "after it. A column the source table gained through a newer capture instance is added when "
+    "the stream first reads it (older rows read NULL); a column it lost stays, NULL from then on."
 )
 BRONZE_COLUMN_COMMENTS = {
-    "_capture_instance": "CDC capture instance the change came from, e.g. dbo_orders.",
+    "_capture_instance": (
+        "CDC capture instance the change came from, e.g. dbo_orders: after the stream switched to "
+        "a newer capture instance of the table (from that instance's start LSN on), the newer "
+        "one. On snapshot rows, the instance the snapshot was taken for."
+    ),
     "_start_lsn": (
         "Commit LSN of the source transaction (__$start_lsn) as 0x + 20 uppercase hex. "
         "All changes of one transaction share it; string order is commit order. On snapshot "
@@ -76,7 +92,11 @@ BRONZE_COLUMN_COMMENTS = {
         "4 = update (row after), 0 = snapshot (the row as read from the source table)."
     ),
     "_command_id": (
-        "Order of the statement within its transaction (__$command_id). NULL on snapshot rows."
+        "Order of the statement within its transaction (__$command_id). Numbered per capture "
+        "instance: another instance of the table numbers the same change differently, so it "
+        "orders rows only within one _start_lsn (all rows of a commit come from one instance); "
+        "(_start_lsn, _seqval, _operation) identifies a change across instances. NULL on "
+        "snapshot rows."
     ),
     "_commit_ts": (
         "Commit time of the source transaction, UTC (from cdc.lsn_time_mapping); on snapshot "
@@ -100,8 +120,9 @@ FACTS_COMMENT = (
     "what was written (counts, LSN and commit-time ranges), how far the stream had read "
     "(end_lsn, end_commit_ts) and how long it took. The same facts are in each target commit's "
     "userMetadata (batches with rows only), which Delta log cleanup eventually drops. Each "
-    "snapshot stream().to_delta takes (bootstrap or re-snapshot) adds one row, with event set "
-    "(see its comment)."
+    "snapshot stream().to_delta takes (bootstrap or re-snapshot), each schema change on the "
+    "source and each switch to a newer capture instance adds one row, with event set (see its "
+    "comment)."
 )
 FACTS_COLUMNS = [
     (
@@ -117,7 +138,8 @@ FACTS_COLUMNS = [
         "BIGINT",
         (
             "Structured Streaming micro-batch id. With app_id, the idempotency key: a replayed "
-            "batch is skipped, so it never appears twice."
+            "batch is skipped, so its row (event NULL) never appears twice. Its 'schema_change' "
+            "and 'capture_instance_switched' rows carry it too; snapshot event rows have none."
         ),
     ),
     (
@@ -127,8 +149,8 @@ FACTS_COLUMNS = [
             "Change rows written to the target in this batch, all operations. 0 when the batch "
             "read none: its end offset moved only past idle entries or other tables' commits (or, "
             "on a new checkpoint's first batch, not at all), so it wrote nothing to the target, "
-            "just this row (LSN and commit-time ranges NULL, counts 0). On event rows, the rows "
-            "of the snapshot."
+            "just this row (LSN and commit-time ranges NULL, counts 0). On 'bootstrap' and "
+            "'resnapshot' rows, the rows of the snapshot; 0 on other event rows."
         ),
     ),
     ("min_lsn", "STRING", "Smallest source commit LSN (__$start_lsn, 0x + 20 hex) in the batch."),
@@ -167,6 +189,7 @@ FACTS_COLUMNS = [
     *EVENT_COLUMNS,
     *LAG_COLUMNS,
     *END_COLUMNS,
+    *DETAIL_COLUMNS,
     ("target", "STRING", "Table name or path the batch was written to."),
     (
         "written_at",
@@ -208,19 +231,63 @@ def _json(facts: dict) -> str:
     )
 
 
-def _clear_metrics(path: str) -> None:
-    """Remove the metrics files in ``path``, the unreadable ones too."""
-    for name in glob.glob(os.path.join(path, "*.json")):
+def _files(path: str, events: bool = False) -> list[str]:
+    """The partitions' metrics files in ``path`` or, with ``events``, the reader's event files
+    (``event-<kind>-<lsn>.json``, ADR 0023)."""
+    return [
+        name
+        for name in glob.glob(os.path.join(path, "*.json"))
+        if os.path.basename(name).startswith("event-") == events
+    ]
+
+
+def _remove(names: list[str]) -> None:
+    for name in names:
         try:
             os.remove(name)
         except OSError:
             pass
 
 
+def _read_events(path: str) -> tuple[list[str], list[dict]]:
+    """The reader's events waiting in ``path``: the files read and their contents. An
+    unreadable file is not returned, so it is never removed unfolded."""
+    names, events = [], []
+    for name in _files(path, events=True):
+        try:
+            with open(name, encoding="utf-8") as fh:
+                events.append(json.load(fh))
+        except (OSError, ValueError):
+            continue
+        names.append(name)
+    return names, events
+
+
+def _event_row(event: dict, **batch) -> dict:
+    """A facts row for one of the reader's events: in the batch that read past it, 0 rows."""
+    ts = datetime.fromisoformat(event["commit_ts"]) if event.get("commit_ts") else None
+    lsn = event["lsn"]
+    return {
+        **batch,
+        "event": event["event"],
+        "detail": event.get("detail"),
+        "rows": 0,
+        "deletes": 0,
+        "inserts": 0,
+        "updates": 0,
+        "min_lsn": lsn,
+        "max_lsn": lsn,
+        "end_lsn": lsn,
+        "min_commit_ts": ts,
+        "max_commit_ts": ts,
+        "end_commit_ts": ts,
+    }
+
+
 def _fold_metrics(path: str) -> dict:
     """Fold every metrics file in ``path``: all are the current batch's (see the module doc)."""
     picked = []
-    for name in glob.glob(os.path.join(path, "*.json")):
+    for name in _files(path):
         try:
             with open(name, encoding="utf-8") as fh:
                 picked.append(json.load(fh))
@@ -265,7 +332,14 @@ def _lag(source_max: datetime | None, position: datetime | None) -> float | None
     return round((source_max - position).total_seconds(), 3)
 
 
-def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str | None = None):
+def _write(
+    df: DataFrame,
+    target: str,
+    app_id: str,
+    version: int,
+    metadata: str | None = None,
+    merge_schema: bool = False,
+):
     writer = (
         df.write.format("delta")
         .mode("append")
@@ -274,6 +348,8 @@ def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str 
     )
     if metadata is not None:
         writer = writer.option("userMetadata", metadata)
+    if merge_schema:
+        writer = writer.option("mergeSchema", "true")
     if is_path(target):
         writer.save(target)
     else:
@@ -291,7 +367,8 @@ def delta_sink(
 
     ``metrics_path`` feeds the facts table (see the module doc): the directory of the source
     option ``metricsPath``, used by no other stream. Its files are removed after each batch,
-    with or without a facts table; without ``metrics_path`` nothing removes them.
+    with or without a facts table; without ``metrics_path`` nothing removes them. It also
+    carries the reader's schema change and capture instance switch events to the facts.
     """
     created: set[str] = set()  # once per query run, not once per batch
 
@@ -304,17 +381,20 @@ def delta_sink(
         started_at, t0 = _utc_now(), time.monotonic()
         df = df.persist()
         try:
-            if metrics_path:  # the batch is not read yet: any file here is a dead attempt's
-                _clear_metrics(metrics_path)
+            if metrics_path:  # the batch is not read yet: a partition's file is a dead attempt's
+                _remove(_files(metrics_path))
             facts = batch_facts(df)  # reads the batch: its partitions write their metrics files
             facts.update({"batch_id": batch_id, "app_id": app_id})
             spark = df.sparkSession
             if facts["rows"]:  # a batch that read none writes no target commit, only its facts
                 out = df.withColumn("_batch_id", F.lit(batch_id).cast("int"))
                 ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
-                _write(out, target, app_id, batch_id, _json(facts))
+                # mergeSchema: a column a newer capture instance captures joins bronze (ADR 0023)
+                _write(out, target, app_id, batch_id, _json(facts), merge_schema=True)
             duration_ms = round((time.monotonic() - t0) * 1000)
             folded = _fold_metrics(metrics_path) if metrics_path else {}
+            # the reader's events, written while it planned this batch (or a dead attempt)
+            names, events = _read_events(metrics_path) if metrics_path else ([], [])
             if facts_table:
                 # where the stream is: the end offset, not the batch's last change, which on a
                 # quiet table lags it (the batch's last change as a fallback, without metrics)
@@ -329,12 +409,15 @@ def delta_sink(
                     written_at=_utc_now(),
                 )
                 ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
+                keys = {k: facts[k] for k in ("app_id", "batch_id", "target", "written_at")}
+                rows = [facts, *(_event_row(e, **keys) for e in events)]
                 facts_df = spark.createDataFrame(
-                    [tuple(facts.get(k) for k in _FACT_FIELDS)], FACTS_SCHEMA
-                )  # event columns stay NULL
+                    [tuple(r.get(k) for k in _FACT_FIELDS) for r in rows], FACTS_SCHEMA
+                )  # the batch's row has event NULL
+                # one commit: the batch's row and its events are written, or skipped, together
                 _write(facts_df, facts_table, f"{app_id}#facts", batch_id)
             if metrics_path:  # folded into this batch's facts; a replay rewrites them
-                _clear_metrics(metrics_path)
+                _remove(_files(metrics_path) + names)
         finally:
             df.unpersist()
 

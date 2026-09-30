@@ -73,14 +73,16 @@ def latest():
     """``latest(df, key, value, facts=None)``: sorted (key, value) of the latest image per key
     in a bronze DataFrame, as a MERGE downstream applies it, rebuilt from the newest snapshot
     on: a re-snapshot leaves no delete row for the gap (ADR 0016). With ``facts``, a newer
-    snapshot event counts too: an empty table's snapshot has no rows (ADR 0018)."""
+    snapshot event counts too: an empty table's snapshot has no rows (ADR 0018); the source's
+    change events are no snapshots (ADR 0023)."""
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
     def rebuild(df, key, value, facts=None):
         points = [df.where("_operation = 0").agg(F.max("_start_lsn")).first()[0]]
         if facts is not None:
-            points.append(facts.where("event IS NOT NULL").agg(F.max("max_lsn")).first()[0])
+            snapshots = "event IN ('bootstrap', 'resnapshot')"
+            points.append(facts.where(snapshots).agg(F.max("max_lsn")).first()[0])
         since = max(p for p in points if p)
         last = Window.partitionBy(key).orderBy(
             F.col("_start_lsn").desc(),

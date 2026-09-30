@@ -112,6 +112,7 @@ def test_tables_are_created_typed_and_commented(delta_spark, workdir):
 def test_facts_table_at_version_0_gains_every_column_and_the_current_comments(delta_spark, workdir):
     from mssql_cdc import migrations, tables
     from mssql_cdc.migrations.facts import (
+        DETAIL_COLUMNS,
         END_COLUMNS,
         EVENT_COLUMNS,
         LAG_COLUMNS,
@@ -122,7 +123,14 @@ def test_facts_table_at_version_0_gains_every_column_and_the_current_comments(de
 
     spark = delta_spark
     old = os.path.join(workdir, "facts_v0")
-    added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS + LAG_COLUMNS + END_COLUMNS
+    added = (
+        NETWORK_COLUMNS
+        + RETENTION_COLUMNS
+        + EVENT_COLUMNS
+        + LAG_COLUMNS
+        + END_COLUMNS
+        + DETAIL_COLUMNS
+    )
     # the facts shape before migration 1, with the comments it was created with
     v0 = [(n, t, "old's") if n == "rows" else (n, t, c) for n, t, c in FACTS_COLUMNS]
     tables.create_if_not_exists(
@@ -132,10 +140,10 @@ def test_facts_table_at_version_0_gains_every_column_and_the_current_comments(de
         "one row per non-empty batch",
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(spark, old, "facts") == 5
+    assert migrations.migrate(spark, old, "facts") == 6
     cols, description = _comments(spark, old)
     assert all(name in cols and cols[name][1] for name, _, _ in added)
-    # migration 5 rewrote the comments whose meaning changed: as a new table has them
+    # migrations 5 and 6 rewrote the comments whose meaning changed: as a new table has them
     assert {n: cols[n][1] for n, _, _ in FACTS_COLUMNS} == {n: c for n, _, c in FACTS_COLUMNS}
     assert description == FACTS_COMMENT
 
@@ -344,6 +352,235 @@ def test_replayed_batch_is_ignored(delta_spark, workdir):
     write(df, 7)
     write(df, 7)  # same batch id replayed after a failure
     assert spark.read.format("delta").load(target).count() == 1
+
+
+def test_the_readers_events_become_event_rows_and_new_columns_join_bronze(delta_spark, workdir):
+    from pyspark.sql import functions as F
+
+    spark = delta_spark
+    target, facts, metrics = (os.path.join(workdir, n) for n in ("bronze", "facts", "metrics"))
+    os.makedirs(metrics)
+    added, switch = "0x0000002A000001000021", "0x0000002A000001000031"
+
+    def plan():  # what the reader leaves while it plans the batch (ADR 0023)
+        for kind, lsn, ts, detail in (
+            ("schema_change", added, "2026-09-28T13:51:00.000", "note: ALTER TABLE ADD note"),
+            ("capture_instance_switched", switch, None, "dbo_orders -> dbo_orders_v2"),
+        ):
+            event = {"event": kind, "capture_instance": CI, "lsn": lsn, "commit_ts": ts}
+            with open(os.path.join(metrics, f"event-{kind}-{lsn}.json"), "w") as fh:
+                json.dump({**event, "detail": detail}, fh)
+
+    df = spark.createDataFrame(
+        [(CI, switch, switch, 2, 1, T0, 1, "new")],
+        "_capture_instance STRING, _start_lsn STRING, _seqval STRING, _operation INT, "
+        "_command_id INT, _commit_ts TIMESTAMP_NTZ, order_id INT, status STRING",
+    )
+    write = delta_sink(target, "events-v1", facts, metrics_path=metrics)
+    plan()
+    write(df, 3)
+    plan()  # a replay: the reader plans the batch again and leaves the same files
+    write(df, 3)
+    assert not os.listdir(metrics)  # folded, then removed
+    rows = spark.read.format("delta").load(facts).collect()
+    assert sorted((r["event"] or "", r["batch_id"], r["rows"]) for r in rows) == [
+        ("", 3, 1),
+        ("capture_instance_switched", 3, 0),
+        ("schema_change", 3, 0),
+    ]  # once each
+    ddl, switched = sorted((r for r in rows if r["event"]), key=lambda r: r["min_lsn"])
+    assert ddl["min_lsn"] == ddl["max_lsn"] == ddl["end_lsn"] == added
+    assert ddl["end_commit_ts"] == datetime(2026, 9, 28, 13, 51)
+    assert (ddl["detail"], ddl["app_id"], ddl["target"]) == (
+        "note: ALTER TABLE ADD note",
+        "events-v1",
+        target,
+    )
+    assert switched["detail"] == "dbo_orders -> dbo_orders_v2" and switched["end_commit_ts"] is None
+
+    write(df.withColumn("note", F.lit("gift")), 4)  # a column a newer instance captures
+    bronze = spark.read.format("delta").load(target)
+    assert sorted((r["_batch_id"], r["note"]) for r in bronze.collect()) == [(3, None), (4, "gift")]
+
+
+def test_a_bronze_table_at_version_0_gets_the_capture_instance_comments(delta_spark, workdir):
+    from mssql_cdc import migrations, tables
+    from mssql_cdc.sink import BRONZE_COLUMN_COMMENTS, BRONZE_COMMENT
+
+    old = os.path.join(workdir, "bronze_v0")
+    tables.create_if_not_exists(  # includeCommandId=false: no _command_id to comment
+        delta_spark,
+        old,
+        [("_capture_instance", "STRING", "old's"), ("_start_lsn", "STRING", "old's")],
+        properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
+    )
+    assert migrations.migrate(delta_spark, old, "bronze") == 1
+    cols, description = _comments(delta_spark, old)
+    assert cols["_capture_instance"][1] == BRONZE_COLUMN_COMMENTS["_capture_instance"]
+    assert cols["_start_lsn"][1] == "old's" and description == BRONZE_COMMENT
+
+
+# -- a newer capture instance of the table (ADR 0023) ----------------------------------------
+def _switching(workdir):
+    """A keyed fake whose capture instance reports its columns (the stream infers them), with
+    orders 0..2 inserted, and the stream options for it."""
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: "order_id"}, columns={CI: COLUMNS})
+    for i in range(3):
+        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+    return db, {"backend": "fake", "fakePath": src, "captureInstance": CI}
+
+
+def test_a_switch_adds_the_new_column_and_its_events_and_a_rerun_takes_no_snapshot(
+    delta_spark, workdir
+):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _switching(workdir)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+
+    def run():
+        q = stream(spark, options).to_delta(
+            target, "switch-v1", ckpt, facts, trigger={"availableNow": True}, bootstrap=True
+        )
+        q.awaitTermination()
+        return spark.read.format("delta").load(target)
+
+    run()  # the snapshot of orders 0..2
+    added = db.ddl(CI, "note", False, "ALTER TABLE [dbo].[orders] ADD [note] varchar(20) NULL")
+    db.commit(  # the old instance does not capture note
+        CI,
+        [(3, {"order_id": 1, "status": "new"}), (4, {"order_id": 1, "status": "paid"})],
+        at=T0 + timedelta(minutes=5),
+    )
+    v2 = db.add_capture_instance(CI, COLUMNS + ", note STRING")
+    start = db.commit(
+        CI, [(2, {"order_id": 3, "status": "new", "note": "gift"})], at=T0 + timedelta(minutes=6)
+    )
+    bronze = run()  # load() takes both instances' columns; below v2's start the old one is read
+    got = {(r["order_id"], r["_operation"]): r for r in bronze.where("_operation != 0").collect()}
+    assert (got[(1, 4)]["_capture_instance"], got[(1, 4)]["note"]) == (CI, None)
+    assert (got[(3, 2)]["_capture_instance"], got[(3, 2)]["note"]) == (v2, "gift")
+    assert got[(3, 2)]["_start_lsn"] == start
+    events = {
+        r["event"]: r
+        for r in spark.read.format("delta").load(facts).where("batch_id IS NOT NULL").collect()
+        if r["event"]
+    }
+    assert (
+        events["schema_change"]["min_lsn"] == added and "note" in events["schema_change"]["detail"]
+    )
+    switched = events["capture_instance_switched"]
+    assert switched["detail"] == f"{CI} -> {v2}" and switched["min_lsn"] == start
+
+    assert _snapshots(run()) == 1  # the snapshot is found under the older instance's name
+    db.drop_capture_instance(CI)  # the documented last step; the stream follows v2
+    db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=7))
+    bronze = run()
+    assert _snapshots(bronze) == 1
+    assert bronze.where(f"_capture_instance = '{v2}' AND _operation = 1").count() == 1
+
+
+def test_snapshot_on_switch_fills_a_column_only_the_newer_instance_captures(
+    delta_spark, workdir, latest
+):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _switching(workdir)
+    target, ckpt = os.path.join(workdir, "bronze"), os.path.join(workdir, "ckpt")
+
+    def run():
+        q = stream(spark, options).to_delta(
+            target,
+            "fill-v1",
+            ckpt,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot_on_switch=True,
+        )
+        q.awaitTermination()
+        return spark.read.format("delta").load(target)
+
+    run()
+    db.ddl(CI, "note", False, "ALTER TABLE [dbo].[orders] ADD [note] varchar(20) NULL")
+    db.commit(  # captured without note: the old instance does not have it
+        CI,
+        [
+            (3, {"order_id": 0, "status": "new", "note": None}),
+            (4, {"order_id": 0, "status": "new", "note": "vip"}),
+        ],
+        at=T0 + timedelta(minutes=5),
+    )
+    db.add_capture_instance(CI, COLUMNS + ", note STRING")
+    db.commit(
+        CI, [(2, {"order_id": 3, "status": "new", "note": "gift"})], at=T0 + timedelta(minutes=6)
+    )
+    bronze = run()
+    assert _snapshots(bronze) == 2  # the bootstrap, and one after the switch
+    assert latest(bronze, "order_id", "note") == [(0, "vip"), (1, None), (2, None), (3, "gift")]
+    assert _snapshots(run()) == 2  # the next batches do not cross a switch
+
+
+def test_a_snapshot_after_a_dropped_column_reads_it_as_null(delta_spark, workdir):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _switching(workdir)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    q = stream(spark, options).to_delta(
+        target, "drop-v1", ckpt, facts, trigger={"availableNow": True}, bootstrap=True
+    )
+    q.awaitTermination()
+    dropped = db.ddl(CI, "status", False, "ALTER TABLE [dbo].[orders] DROP COLUMN [status]")
+    db.commit(CI, [(2, {"order_id": 3})], at=T0 + timedelta(minutes=5))  # CDC captures NULL now
+    q = stream(spark, options).to_delta(
+        target, "drop-v1", ckpt, facts, trigger={"availableNow": True}
+    )
+    q.awaitTermination()  # the stream reads past the DROP: it warns, and the facts get an event
+    [event] = spark.read.format("delta").load(facts).where("event = 'schema_change'").collect()
+    assert event["min_lsn"] == dropped and "status" in event["detail"]
+    # SQL Server refuses to select the dropped column: the snapshot reads NULL for it instead
+    taken = stream(spark, options).snapshot(target, resnapshot=True)
+    rows = spark.read.format("delta").load(target).where(f"_start_lsn = '{taken['lsn']}'")
+    assert sorted((r["order_id"], r["status"]) for r in rows.where("_operation = 0").collect()) == [
+        (0, None),
+        (1, None),
+        (2, None),
+        (3, None),
+    ]
+
+
+def test_resnapshot_recovers_changes_only_a_dropped_older_instance_held(
+    delta_spark, workdir, latest
+):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _switching(workdir)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+
+    def run():
+        q = stream(spark, options).to_delta(
+            target,
+            "gone-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            on_data_loss="resnapshot",
+        )
+        q.awaitTermination()
+        return spark.read.format("delta").load(target)
+
+    run()  # from earliest: orders 0..2
+    db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=3))
+    db.add_capture_instance(CI, COLUMNS)
+    db.commit(CI, [(2, {"order_id": 5, "status": "new"})], at=T0 + timedelta(minutes=4))
+    db.drop_capture_instance(CI)  # too early: the delete of order 0 was only in it
+    bronze = run()
+    assert _generation(ckpt)["generation"] == 1
+    assert latest(bronze, "order_id", "status") == [(1, "new"), (2, "new"), (5, "new")]
 
 
 def _snapshots(df) -> int:
@@ -692,6 +929,7 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
 def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
     from mssql_cdc import migrations, stream, tables
     from mssql_cdc.migrations.facts import (
+        DETAIL_COLUMNS,
         END_COLUMNS,
         EVENT_COLUMNS,
         LAG_COLUMNS,
@@ -732,7 +970,14 @@ def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
         for name, kind in ((bronze, "bronze"), (facts, "facts"), (control, "control")):
             props = spark.sql(f"DESCRIBE DETAIL {name}").first()["properties"]
             assert props["mssql_cdc.schema_version"] == str(migrations.current_version(kind))
-        added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS + LAG_COLUMNS + END_COLUMNS
+        added = (
+            NETWORK_COLUMNS
+            + RETENTION_COLUMNS
+            + EVENT_COLUMNS
+            + LAG_COLUMNS
+            + END_COLUMNS
+            + DETAIL_COLUMNS
+        )
         tables.create_if_not_exists(
             spark,
             old,
@@ -740,7 +985,7 @@ def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
             properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
         )
         # add_columns through saveAsTable, set_comments on a table name
-        assert migrations.migrate(spark, old, "facts") == 5
+        assert migrations.migrate(spark, old, "facts") == 6
         assert {name for name, _, _ in added} <= set(spark.table(old).columns)
     finally:
         for name in (bronze, facts, control, old):

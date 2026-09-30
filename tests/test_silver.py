@@ -17,15 +17,18 @@ T0 = datetime(2026, 9, 30, 9, 0)
 class Orders:
     """A keyed fake, the stream into bronze, and apply_changes into silver."""
 
-    def __init__(self, spark, workdir):
+    def __init__(self, spark, workdir, infer=False):
+        """``infer``: the fake reports the captured columns, and the stream infers them."""
         self.spark, self.src = spark, os.path.join(workdir, "src")
-        self.db = FakeCdcDatabase(self.src, [CI], keys={CI: "order_id"})
+        self.db = FakeCdcDatabase(
+            self.src, [CI], keys={CI: "order_id"}, **({"columns": {CI: COLUMNS}} if infer else {})
+        )
         self.options = {
             "backend": "fake",
             "fakePath": self.src,
             "captureInstance": CI,
-            "columns": COLUMNS,
             "maxCommitsPerBatch": "2",
+            **({} if infer else {"columns": COLUMNS}),
         }
         self.bronze, self.silver, self.facts, self.control, self.ckpt = (
             os.path.join(workdir, n) for n in ("bronze", "silver", "facts", "control", "ckpt")
@@ -246,6 +249,33 @@ def test_keys_come_from_the_capture_instance_when_not_given(delta_spark, workdir
             control_table=o.control,
             options={"backend": "fake", "fakePath": unkeyed.path},
         )
+
+
+def test_silver_follows_the_switch_to_a_newer_capture_instance_and_gains_its_column(
+    delta_spark, workdir
+):
+    o = Orders(delta_spark, workdir, infer=True)
+    o.commit((2, _row(1, "new")), (2, _row(2, "new")))
+    o.run()
+    o.apply(options=o.options)
+    v2 = o.db.add_capture_instance(CI, COLUMNS + ", note STRING")
+    o.commit((3, _row(1, "new")), (4, {**_row(1, "paid"), "note": "gift"}))
+    o.commit((1, _row(2, "new")))
+    o.run()  # a restart: the new column is inferred, and the rows from v2's start are v2's
+
+    def rows():
+        got = o.spark.read.format("delta").load(o.silver).collect()
+        return sorted((r["order_id"], r["status"], r["note"]) for r in got)
+
+    with pytest.raises(ValueError, match=f"'{v2}'.*pass options"):
+        o.apply()  # without the options it cannot tell v2 is the same table's: never skipped
+    o.apply(options=o.options)
+    assert rows() == [(1, "paid", "gift")]
+    o.db.drop_capture_instance(CI)  # the stream and silver carry on with v2 alone
+    o.commit((2, {**_row(3, "new"), "note": "rush"}))
+    o.run()
+    assert not o.apply(options=o.options)["rebuilt"]
+    assert rows() == [(1, "paid", "gift"), (3, "new", "rush")]
 
 
 def test_a_control_table_at_version_0_gains_applied_lsn(delta_spark, workdir):
