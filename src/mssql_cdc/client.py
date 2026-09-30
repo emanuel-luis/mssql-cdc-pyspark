@@ -27,7 +27,8 @@ from . import lsn as _lsn
 
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _TZ_RE = re.compile(r"^[A-Za-z0-9 ._+\-/()]+$")
-_TYPE_RE = re.compile(r"^[a-z0-9]+(\((max|\d+(,\d+)?)\))?$")  # varchar(20), decimal(18,2), int
+# int, decimal(18,2), varchar(20) COLLATE Greek_CI_AS
+_TYPE_RE = re.compile(r"^[a-z0-9]+(\((max|\d+(,\d+)?)\))?( COLLATE [A-Za-z0-9_]+)?$")
 
 
 class DataLossError(RuntimeError):
@@ -120,44 +121,74 @@ def _check_type(sql_type: str) -> str:
     return sql_type
 
 
-def _key_where(keys: Sequence[str], types, lo, hi) -> tuple[str, list]:
-    """WHERE clause and parameters for ``lo <= (keys) < hi`` in the order ORDER BY sorts the
-    rows: column by column, NULL first. A None bound is open.
+def _key_select(select: str, keys: Sequence[str], types, lo, hi) -> tuple[str, list]:
+    """``select`` (no WHERE) over the rows with ``lo <= (keys) < hi`` in the order ORDER BY
+    sorts them: column by column, NULL first. A None bound is open. Returns the query and
+    its parameters, in the order of the ``?`` marks.
 
-    T-SQL has no row-value comparison, so ``(a, b) >= (x, y)`` becomes
-    ``a >= x AND (a > x OR (a = x AND b >= y))``. The leading ``a >= x`` is redundant but
-    sargable: without it SQL Server scans the table for every partition instead of seeking.
+    T-SQL has no row-value comparison, and a seek takes equalities on leading key columns
+    plus a range on the next one; anything else it filters row by row. So the range is cut
+    into disjoint pieces of that shape, one SELECT each, joined by UNION ALL. The leading
+    values both bounds share become equalities, then from (x, y) to (u, v) the pieces are
+    ``a = x AND b >= y``, ``a > x AND a < u`` and ``a = u AND b < v``: a range inside one
+    leading value is one seek, not a read of the whole value (``tests/integration``).
+    x and u can differ in Python and be equal in SQL (``'n'`` and ``'N'`` under a
+    case-insensitive collation): the first piece also checks ``(a, b) < (u, v)`` and the
+    last ``a > x``, which empties it, so every row still comes once.
+
     ``types`` None: integer bounds, inlined. Otherwise each bound is a parameter CAST to its
-    column's declared type, so a varchar key is never compared (and converted) as nvarchar.
+    column's declared type (and collation), so a varchar key is never compared as nvarchar.
     """
     ks = [f"[{_check_column(k)}]" for k in keys]
-    params: list = []
+    n = len(ks)
 
-    def cmp(i: int, op: str, v) -> str:  # one column against one bound value
+    def cmp(i: int, op: str, v) -> tuple[str, list]:  # one column against one bound value
         k = ks[i]
         if v is None:  # NULL sorts first: nothing is below it, everything is at or above it
-            return {"=": f"{k} IS NULL", ">": f"{k} IS NOT NULL", ">=": "1 = 1", "<": "1 = 0"}[op]
+            nulls = {"=": f"{k} IS NULL", ">": f"{k} IS NOT NULL", ">=": "1 = 1", "<": "1 = 0"}
+            return nulls[op], []
         if types is None:
-            x = str(int(v))
+            x, params = str(int(v)), []
         else:
-            params.append(v)
-            x = f"CAST(? AS {_check_type(types[i])})"
-        return f"({k} {op} {x} OR {k} IS NULL)" if op in ("<", "<=") else f"{k} {op} {x}"
+            t, _, coll = _check_type(types[i]).partition(" COLLATE ")
+            x, params = f"CAST(? {f'COLLATE {coll} ' if coll else ''}AS {t})", [v]
+        return (f"({k} {op} {x} OR {k} IS NULL)" if op == "<" else f"{k} {op} {x}"), params
 
-    def row_cmp(bound, op: str) -> str:  # (keys) op bound, op ">=" or "<"
-        parts = []
-        if len(ks) > 1 and bound[0] is not None:
-            parts.append(cmp(0, op[0] + "=", bound[0]))  # the redundant, sargable one
-        terms = []
-        for i in range(len(ks)):  # built in text order: cmp() appends the parameters
-            ands = [cmp(j, "=", bound[j]) for j in range(i)]
-            ands.append(cmp(i, op if i == len(ks) - 1 else op[0], bound[i]))
-            terms.append(ands[0] if len(ands) == 1 else "(" + " AND ".join(ands) + ")")
-        parts.append(terms[0] if len(terms) == 1 else "(" + " OR ".join(terms) + ")")
-        return " AND ".join(parts)
+    def conj(parts, wrap=False) -> tuple[str, list]:
+        sql = " AND ".join(s for s, _ in parts)
+        return (f"({sql})" if wrap and len(parts) > 1 else sql), [v for _, ps in parts for v in ps]
 
-    where = [row_cmp(b, op) for b, op in ((lo, ">="), (hi, "<")) if b is not None]
-    return " AND ".join(where), params
+    p = 0  # leading values both bounds share
+    while lo is not None and hi is not None and p < n - 1 and lo[p] == hi[p]:
+        p += 1
+    eq = [cmp(i, "=", lo[i]) for i in range(p)]  # p > 0 only with both bounds
+
+    def chain(bound, j: int, op: str) -> list:  # keys p..j-1 equal to bound, key j op bound
+        return [cmp(i, "=", bound[i]) for i in range(p, j)] + [cmp(j, op, bound[j])]
+
+    def below(bound) -> tuple[str, list]:  # (keys p..) < bound, row by row
+        terms = [conj(chain(bound, j, "<"), wrap=True) for j in range(p, n)]
+        return "(" + " OR ".join(s for s, _ in terms) + ")", [v for _, t in terms for v in t]
+
+    pieces = []  # key p: equal to lo's, between lo's and hi's, equal to hi's
+    if lo is not None:
+        pieces += [
+            eq + chain(lo, j, ">" if j < n - 1 else ">=") + ([below(hi)] if hi is not None else [])
+            for j in range(n - 1, p, -1)
+        ]
+    middle = [cmp(p, ">" if p < n - 1 else ">=", lo[p])] if lo is not None else []
+    pieces.append(eq + middle + ([cmp(p, "<", hi[p])] if hi is not None else []))
+    if hi is not None:
+        pieces += [
+            eq + chain(hi, j, "<") + ([cmp(p, ">", lo[p])] if lo is not None else [])
+            for j in range(p + 1, n)
+        ]
+    sql, params = [], []
+    for piece in pieces:
+        where, ps = conj(piece)
+        sql.append(f"{select} WHERE {where}" if where else select)
+        params += ps
+    return " UNION ALL ".join(sql), params
 
 
 # --------------------------------------------------------------------------- #
@@ -614,18 +645,48 @@ class SqlCdcClient(CdcClient):
         return None, None
 
     def key_types(self, capture_instance, keys):
-        types = {r["column_name"]: _sql_type(r) for r in self._captured_rows(capture_instance)}
-        return [types.get(k) for k in keys]
+        rows = self._captured_rows(capture_instance)
+        by_name = {r["column_name"]: r for r in rows}
+        types = [_sql_type(by_name[k]) if k in by_name else None for k in keys]
+        strings = [i for i, t in enumerate(types) if t and t.startswith(("char(", "varchar("))]
+        if strings:
+            # A string parameter is nvarchar, and CAST to varchar converts it with the code
+            # page of the database's default collation: a key in another code page loses
+            # characters and its bounds their order. Converted in the column's own collation
+            # they keep both. sys.columns shows the columns of a table the login can SELECT.
+            sql = (
+                "SELECT name, collation_name FROM sys.columns "
+                "WHERE object_id = OBJECT_ID(QUOTENAME(?) + '.' + QUOTENAME(?))"
+            )
+            params = (rows[0]["source_schema"], rows[0]["source_table"])
+            coll = {
+                r["name"]: r["collation_name"]
+                for batch in self._b.batches(sql, params, 1000)
+                for r in batch.to_pylist()
+            }
+            for i in strings:
+                c = coll.get(keys[i])
+                types[i] = f"{types[i]} COLLATE {_check_ident(c, 'collation')}" if c else None
+        # A datetime2(7) or datetimeoffset(7) bound comes back truncated to microseconds.
+        # That keeps its own column's order, but ahead of another key column two bounds can
+        # swap: (t, 5) < (t + 100 ns, 3) come back as (T, 5) > (T, 3), and the rows between
+        # them would land in two ranges. Only the last key column may be truncated.
+        for i in range(len(types) - 1):
+            if types[i] in ("datetime2(7)", "datetimeoffset(7)"):
+                types[i] = None
+        return types
 
     def key_tiles(self, schema, table, keys, n):
         # NTILE over the table's own rows, as split_points over the change table's (ADR 0015):
         # one ordered pass over the key; only the first key of each later tile comes back.
+        # The helper columns take CDC's own __$ prefix, so no key column can shadow them.
         t = f"[{_check_column(schema)}].[{_check_column(table)}]"
         k = ", ".join(f"[{_check_column(c)}]" for c in keys)
         sql = (
-            f"SELECT {k} FROM (SELECT {k}, g, LAG(g) OVER (ORDER BY {k}) AS p FROM ("
-            f"SELECT {k}, NTILE({int(n)}) OVER (ORDER BY {k}) AS g FROM {t}) a"
-            ") b WHERE g <> p ORDER BY g"
+            f"SELECT {k} FROM (SELECT {k}, [__$tile], "
+            f"LAG([__$tile]) OVER (ORDER BY {k}) AS [__$prev] FROM ("
+            f"SELECT {k}, NTILE({int(n)}) OVER (ORDER BY {k}) AS [__$tile] FROM {t}) a"
+            ") b WHERE [__$tile] <> [__$prev] ORDER BY [__$tile]"
         )
         return [
             tuple(row)
@@ -637,9 +698,12 @@ class SqlCdcClient(CdcClient):
         # READ COMMITTED, never NOLOCK: a dirty read can keep a row that a rollback then
         # removes, and no change row would ever correct it downstream.
         cols = ", ".join(f"[{_check_column(c)}]" for c in columns)
-        where, params = _key_where(keys, types, lo, hi)
-        sql = f"SELECT {cols} FROM [{_check_column(schema)}].[{_check_column(table)}]" + (
-            f" WHERE {where}" if where else ""
+        sql, params = _key_select(
+            f"SELECT {cols} FROM [{_check_column(schema)}].[{_check_column(table)}]",
+            keys,
+            types,
+            lo,
+            hi,
         )
         yield from self._b.batches(sql, params, batch_size)
 

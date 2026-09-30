@@ -8,6 +8,7 @@ import time
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -458,25 +459,41 @@ def test_resnapshot_recovers_a_stream_whose_changes_were_purged(
 
 
 _N = "(VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) t(n)"
+_CP1252 = "SQL_Latin1_General_CP1_CI_AS"  # the database default
 SNAPSHOT_TILES = {  # table: (columns, rows, the keys' types for the CASTs)
-    # a composite primary key led by a nvarchar, with a datetime2(7) whose bounds come back
-    # truncated to microseconds
+    # a composite primary key led by a nvarchar, ending in a datetime2(7) whose bounds come
+    # back truncated to microseconds (only the last key column may be)
     "snap_comp": (
         (
-            "region NVARCHAR(10) NOT NULL, at DATETIME2(7) NOT NULL, seq INT NOT NULL, v INT, "
-            "PRIMARY KEY (region, at, seq)"
+            "region NVARCHAR(10) NOT NULL, seq INT NOT NULL, at DATETIME2(7) NOT NULL, v INT, "
+            "PRIMARY KEY (region, seq, at)"
         ),
         (
-            "SELECT IIF(n < 5, N'n', N'ş'), DATEADD(second, n, "
-            f"CAST('2026-09-28T10:00:00.1234567' AS datetime2(7))), n, n FROM {_N}"
+            "SELECT IIF(n < 5, N'n', N'ş'), n, DATEADD(second, n, "
+            f"CAST('2026-09-28T10:00:00.1234567' AS datetime2(7))), n FROM {_N}"
         ),
-        ["nvarchar(10)", "datetime2(7)", "int"],
+        ["nvarchar(10)", "int", "datetime2(7)"],
     ),
     # one varchar key: an nvarchar parameter would convert the column
     "snap_code": (
         "code VARCHAR(12) NOT NULL PRIMARY KEY, v INT",
         f"SELECT CONCAT('k', n), n FROM {_N}",
-        ["varchar(12)"],
+        [f"varchar(12) COLLATE {_CP1252}"],
+    ),
+    # a varchar key in another code page than the database's: a bound CAST without the
+    # column's collation turns every letter into '?' (partitions of 0, 0 and 10 rows). The
+    # columns are named like the tiling query's helper columns once were
+    "snap_greek": (
+        "g VARCHAR(10) COLLATE Greek_CI_AS NOT NULL, p INT NOT NULL, v INT, PRIMARY KEY (g, p)",
+        f"SELECT NCHAR(913 + n), n, n FROM {_N}",  # Α, Β, ... Κ
+        ["varchar(10) COLLATE Greek_CI_AS", "int"],
+    ),
+    # 'n' and 'N' are one leading value in SQL and two in Python: tiles start at ('n', 4)
+    # and ('N', 7), and the range between them must not read the whole value twice
+    "snap_case": (
+        "region VARCHAR(5) NOT NULL, id INT NOT NULL, v INT, PRIMARY KEY (region, id)",
+        f"SELECT IIF(n % 2 = 0, 'n', 'N'), n, n FROM {_N}",
+        [f"varchar(5) COLLATE {_CP1252}", "int"],
     ),
 }
 
@@ -522,44 +539,66 @@ def _rows_read(plan):
     return sum(int(n) for n in re.findall(r'ActualRowsRead="(\d+)"', plan))
 
 
-def test_snapshot_ranges_seek_while_ntile_scans_and_spools(sqlserver):
-    from mssql_cdc.client import _key_where
+_ROWS = (  # n = 1..40000
+    "(SELECT TOP 40000 ROW_NUMBER() OVER (ORDER BY (SELECT 1)) n "
+    "FROM sys.all_columns a CROSS JOIN sys.all_columns b) t"
+)
+
+
+@pytest.mark.parametrize(
+    "name, company, typ",
+    [
+        ("snap_one", "1", "INT"),  # (company, id) with one company: every range inside it
+        ("snap_three", "n % 3", "INT"),  # ranges that cross from one company to the next
+        ("snap_twenty", "CONCAT('r', n % 20)", "VARCHAR(10)"),
+    ],
+)
+def test_each_snapshot_range_seeks_its_own_rows(sqlserver, name, company, typ):
+    from mssql_cdc.client import _key_select
 
     ci = sqlserver.cdc_table(
-        "snap_seek",
-        "region VARCHAR(10) NOT NULL, seq INT NOT NULL, v INT, PRIMARY KEY (region, seq)",
+        name, f"company {typ} NOT NULL, id INT NOT NULL, v INT, PRIMARY KEY (company, id)"
     )
-    sqlserver.run(
-        "INSERT INTO dbo.snap_seek SELECT CONCAT('r', n % 20), n, n FROM (SELECT TOP 20000 "
-        "ROW_NUMBER() OVER (ORDER BY (SELECT 1)) n FROM sys.all_columns a CROSS JOIN sys.all_columns b) t"
-    )
+    sqlserver.run(f"INSERT INTO dbo.{name} SELECT {company}, n, n FROM {_ROWS}")
     client = make_client({"connectionString": sqlserver.connection_string})
     try:
         keys = client.source_table(ci).keys
         types = client.key_types(ci, keys)
-        lo, hi = client.key_tiles("dbo", "snap_seek", keys, 4)[:2]
+        bounds = [None, *client.key_tiles("dbo", name, keys, 8), None]
     finally:
         client.close()
-    where, params = _key_where(keys, types, lo, hi)
-    rows, plan = _plan(sqlserver, f"SELECT * FROM dbo.snap_seek WHERE {where}", params)
-    assert rows == 5000 and "CONVERT_IMPLICIT" not in plan  # varchar compared as varchar
-    assert _rows_read(plan) < 10000  # a seek of about the range
-    # the same range without the redundant leading bounds: a scan of the whole table
-    v, i = "CAST(? AS varchar(10))", "CAST(? AS int)"
-    bare = (
-        f"([region] > {v} OR ([region] = {v} AND [seq] >= {i})) AND (([region] < {v} OR "
-        f"[region] IS NULL) OR ([region] = {v} AND ([seq] < {i} OR [seq] IS NULL)))"
+    for lo, hi in pairwise(bounds):
+        sql, params = _key_select(f"SELECT * FROM dbo.{name}", keys, types, lo, hi)
+        rows, plan = _plan(sqlserver, sql, params)
+        assert (rows, _rows_read(plan)) == (5000, 5000), (lo, hi)  # nothing read and dropped
+        assert "CONVERT_IMPLICIT" not in plan  # varchar compared as varchar
+
+
+def test_one_where_row_comparison_reads_the_whole_leading_value(sqlserver):
+    """Why the ranges are UNION ALL pieces: in one WHERE, the row comparison seeks only on
+    the leading column, and a range inside one leading value reads all of it."""
+    sqlserver.run(
+        "CREATE TABLE dbo.snap_where (company INT NOT NULL, id INT NOT NULL, code VARCHAR(10), "
+        "PRIMARY KEY (company, id))"
     )
-    bare_params = [lo[0], lo[0], lo[1], hi[0], hi[0], hi[1]]
-    rows, plan = _plan(sqlserver, f"SELECT * FROM dbo.snap_seek WHERE {bare}", bare_params)
-    assert rows == 5000 and _rows_read(plan) == 20000
-    # a bare nvarchar parameter converts the varchar column instead
-    _, plan = _plan(sqlserver, "SELECT * FROM dbo.snap_seek WHERE region >= ?", ["r1é"])
+    sqlserver.run(
+        f"INSERT INTO dbo.snap_where SELECT 1, n, CONCAT('r', n) FROM {_ROWS} WHERE n <= 10000"
+    )
+    i = "CAST(? AS int)"
+    where = (  # (company, id) >= (1, 2501) AND (company, id) < (1, 5001), sargable bounds first
+        f"[company] >= {i} AND ([company] > {i} OR ([company] = {i} AND [id] >= {i})) "
+        f"AND [company] <= {i} AND ([company] < {i} OR ([company] = {i} AND [id] < {i}))"
+    )
+    params = [1, 1, 1, 2501, 1, 1, 1, 5001]
+    rows, plan = _plan(sqlserver, f"SELECT * FROM dbo.snap_where WHERE {where}", params)
+    assert rows == 2500 and _rows_read(plan) == 10000
+    # a bare nvarchar parameter converts a varchar column instead of the other way round
+    _, plan = _plan(sqlserver, "SELECT * FROM dbo.snap_where WHERE code >= ?", ["r1é"])
     assert "CONVERT_IMPLICIT(nvarchar(10)," in plan
     # why one integer key keeps MIN..MAX (two seeks): NTILE reads the whole key and spools it
-    k = "[region], [seq]"
-    _, plan = _plan(sqlserver, f"SELECT {k}, NTILE(4) OVER (ORDER BY {k}) FROM dbo.snap_seek")
-    assert "Table Spool" in plan and _rows_read(plan) >= 20000
+    k = "[company], [id]"
+    _, plan = _plan(sqlserver, f"SELECT {k}, NTILE(4) OVER (ORDER BY {k}) FROM dbo.snap_where")
+    assert "Table Spool" in plan and _rows_read(plan) >= 10000
 
 
 def test_cdc_refuses_a_unique_index_over_nullable_columns(sqlserver):

@@ -176,6 +176,8 @@ class Rows(Recorder):
 def _col(ordinal, name, data_type, precision=None, scale=None, length=None, dt_precision=None):
     """One row of sys.sp_cdc_get_captured_columns (the columns the client reads)."""
     return {
+        "source_schema": "sales",
+        "source_table": "orders",
         "column_ordinal": ordinal,
         "column_name": name,
         "data_type": data_type,
@@ -350,28 +352,60 @@ def test_snapshot_queries():
         " WHERE [order_id] >= 10 AND ([order_id] < 20 OR [order_id] IS NULL)"
     )
     assert where((20,), None) == (" WHERE [order_id] >= 20", ())
-    # a composite key: expanded row comparison, bounds bound and CAST to the declared types
-    keys, types = ("region", "id"), ("varchar(10)", "int")
-    v, i = "CAST(? AS varchar(10))", "CAST(? AS int)"
-    sql, params = where(("n", 5), ("s", 1), keys, types)
-    assert sql == (
-        f" WHERE [region] >= {v} AND ([region] > {v} OR ([region] = {v} AND [id] >= {i}))"
-        f" AND ([region] <= {v} OR [region] IS NULL)"
-        f" AND (([region] < {v} OR [region] IS NULL)"
+    # a composite key: bounds bound and CAST to the declared types and collations, the range
+    # cut into seekable pieces (an equality prefix and one range each) joined by UNION ALL
+    s = " UNION ALL SELECT [order_id], [status] FROM [sales].[orders]"
+    keys, types = ("region", "id"), ("varchar(10) COLLATE Greek_CI_AS", "int")
+    v, i = "CAST(? COLLATE Greek_CI_AS AS varchar(10))", "CAST(? AS int)"
+    # inside one leading value: one piece, one seek
+    assert where(("n", 5), ("n", 9), keys, types) == (
+        f" WHERE [region] = {v} AND [id] >= {i} AND ([id] < {i} OR [id] IS NULL)",
+        ("n", 5, 9),
+    )
+    # across leading values: the rest of 'n', what lies between, the start of 's'. The first
+    # also checks < ('s', 1) and the last > 'n': both hold unless 'n' = 's' in SQL (a
+    # case-insensitive 'n' and 'N'), and then the first piece alone reads the range
+    below = (
+        f"(([region] < {v} OR [region] IS NULL)"
         f" OR ([region] = {v} AND ([id] < {i} OR [id] IS NULL)))"
     )
-    assert params == ("n", "n", "n", 5, "s", "s", "s", 1)  # in the order of the ? marks
+    assert where(("n", 5), ("s", 1), keys, types) == (
+        (
+            f" WHERE [region] = {v} AND [id] >= {i} AND {below}"
+            f"{s} WHERE [region] > {v} AND ([region] < {v} OR [region] IS NULL)"
+            f"{s} WHERE [region] = {v} AND ([id] < {i} OR [id] IS NULL) AND [region] > {v}"
+        ),
+        ("n", 5, "s", "s", 1, "n", "s", "s", 1, "n"),  # in the order of the ? marks
+    )
+    assert where(None, ("s", 1), keys, types) == (
+        (
+            f" WHERE ([region] < {v} OR [region] IS NULL)"
+            f"{s} WHERE [region] = {v} AND ([id] < {i} OR [id] IS NULL)"
+        ),
+        ("s", "s", 1),
+    )
+    assert where(("n", 5), None, keys, types) == (
+        f" WHERE [region] = {v} AND [id] >= {i}{s} WHERE [region] > {v}",
+        ("n", 5, "n"),
+    )
+    # three columns: the deepest piece first, integers inlined
+    sql, _ = where((1, 2, 3), (4, 5, 6), ("a", "b", "c"))
+    assert [p.split(" WHERE ")[1].split(" AND (([a]")[0] for p in sql.split(" UNION ALL ")] == [
+        "[a] = 1 AND [b] = 2 AND [c] >= 3",
+        "[a] = 1 AND [b] > 2",
+        "[a] > 1 AND ([a] < 4 OR [a] IS NULL)",
+        "[a] = 4 AND ([b] < 5 OR [b] IS NULL) AND [a] > 1",
+        "[a] = 4 AND [b] = 5 AND ([c] < 6 OR [c] IS NULL) AND [a] > 1",
+    ]
     # NULL bounds (defensive: SQL Server refuses a CDC index over nullable columns), sorting
     # first as in ORDER BY
     assert where((None, 5), (None, 9), keys, types) == (
-        (
-            f" WHERE ([region] IS NOT NULL OR ([region] IS NULL AND [id] >= {i}))"
-            f" AND (1 = 0 OR ([region] IS NULL AND ([id] < {i} OR [id] IS NULL)))"
-        ),
+        f" WHERE [region] IS NULL AND [id] >= {i} AND ([id] < {i} OR [id] IS NULL)",
         (5, 9),
     )
-    assert where(("n", None), None, keys, types)[0] == (
-        f" WHERE [region] >= {v} AND ([region] > {v} OR ([region] = {v} AND 1 = 1))"
+    assert where(("n", None), None, keys, types) == (
+        f" WHERE [region] = {v} AND 1 = 1{s} WHERE [region] > {v}",
+        ("n", "n"),
     )
     with pytest.raises(ValueError):
         where(("1; DROP TABLE x",), None)
@@ -379,6 +413,8 @@ def test_snapshot_queries():
         where(None, None, keys=("a]; DROP TABLE x --",))
     with pytest.raises(ValueError):
         where(("n",), None, keys=("region",), types=("int) OR 1=1 --",))
+    with pytest.raises(ValueError):
+        where(("n",), None, keys=("region",), types=("varchar(5) COLLATE x AS int) --",))
 
 
 def test_key_tiles_and_types_for_composite_or_non_integer_keys():
@@ -389,21 +425,26 @@ def test_key_tiles_and_types_for_composite_or_non_integer_keys():
     assert (
         sql
         == (
-            "SELECT [region], [id] FROM (SELECT [region], [id], g, "
-            "LAG(g) OVER (ORDER BY [region], [id]) AS p FROM (SELECT [region], [id], "
-            "NTILE(3) OVER (ORDER BY [region], [id]) AS g FROM [sales].[orders]) a"
-            ") b WHERE g <> p ORDER BY g"
+            "SELECT [region], [id] FROM (SELECT [region], [id], [__$tile], "
+            "LAG([__$tile]) OVER (ORDER BY [region], [id]) AS [__$prev] FROM ("
+            "SELECT [region], [id], NTILE(3) OVER (ORDER BY [region], [id]) AS [__$tile] "
+            "FROM [sales].[orders]) a) b WHERE [__$tile] <> [__$prev] ORDER BY [__$tile]"
         )
         and params == ()
-    )  # only the first key of tiles 2..n crosses the network
+    )  # only the first key of tiles 2..n crosses the network; no key column is named __$...
     with pytest.raises(ValueError):
         client.key_tiles("sales", "orders", ["id]) a; DROP TABLE x --"], 3)
     with pytest.raises(ValueError):
         client.key_tiles("sales", "orders", ["id"], "3; DROP TABLE x")
 
-    cols = SqlCdcClient(
-        Rows(
-            [
+    class Meta(Recorder):  # captured columns, then sys.columns
+        def __init__(self, collations):
+            super().__init__()
+            self.collations = collations
+
+        def batches(self, sql, params, batch_size):
+            self.calls.append((sql, tuple(params)))
+            captured = [
                 _col(1, "region", "varchar", length=10),
                 _col(2, "code", "nvarchar", length=20),
                 _col(3, "amount", "numeric", 18, 2),
@@ -412,19 +453,39 @@ def test_key_tiles_and_types_for_composite_or_non_integer_keys():
                 _col(6, "id", "bigint", 19, 0),
                 _col(7, "t", "time", dt_precision=7),
                 _col(8, "g", "geography"),
+                _col(9, "flag", "char", length=1),
             ]
-        )
-    )
+            rows = captured if "sp_cdc_get_captured_columns" in sql else self.collations
+            return iter([pa.RecordBatch.from_pylist(rows)])
+
+    meta = Meta([{"name": "region", "collation_name": "Greek_CI_AS"}])
+    cols = SqlCdcClient(meta)
     assert cols.key_types(
-        "dbo_orders", ["region", "code", "amount", "at", "day", "id", "t", "g", "missing"]
+        "dbo_orders",
+        ["region", "code", "amount", "at", "day", "id", "t", "g", "missing", "flag", "at"],
     ) == [
-        "varchar(10)",
+        "varchar(10) COLLATE Greek_CI_AS",  # converted in its own code page, not the default
         "nvarchar(20)",
         "numeric(18,2)",
-        "datetime2(7)",
+        None,  # truncated to microseconds ahead of another key column: bounds could swap
         "date",
         "bigint",
         None,  # time(7) comes back as time64[ns]: no Python value to bind
         None,  # no Spark mapping
         None,
+        None,  # a char column whose collation the login cannot see
+        "datetime2(7)",  # the last key column may be truncated
     ]
+    assert meta.calls[-1] == (
+        (
+            "SELECT name, collation_name FROM sys.columns "
+            "WHERE object_id = OBJECT_ID(QUOTENAME(?) + '.' + QUOTENAME(?))"
+        ),
+        ("sales", "orders"),
+    )
+    assert SqlCdcClient(meta).key_types("dbo_orders", ["id", "at"]) == ["bigint", "datetime2(7)"]
+    assert "sys.columns" not in meta.calls[-1][0]  # no string key, no collation lookup
+    with pytest.raises(ValueError):
+        SqlCdcClient(Meta([{"name": "region", "collation_name": "x; DROP"}])).key_types(
+            "dbo_orders", ["region"]
+        )

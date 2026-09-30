@@ -67,10 +67,20 @@ connection: slow on a big table.
   first key tuple of tiles 2..n comes back; partition i reads `start(i) <= key < start(i+1)`,
   the first one open below and the last open above. Fewer rows than `n`: one row per
   partition. Empty table, or one row: one partition.
-* T-SQL has no row-value comparison: `(a, b) >= (x, y)` is written
-  `a >= x AND (a > x OR (a = x AND b >= y))`. The leading `a >= x` is redundant but
-  sargable: with it a range of a 20000-row table reads about its own rows through a seek;
-  without it the plan scans all 20000 (`tests/integration`).
+* T-SQL has no row-value comparison, and a seek takes equalities on leading key columns
+  plus a range on the next one. Written in one WHERE,
+  `a >= x AND (a > x OR (a = x AND b >= y)) AND ...` seeks on `a` alone: a range inside one
+  value of `a` reads all of it (2500 rows out of 10000 read, `tests/integration`), and with
+  (company, id) keys and one company, n partitions read the table n times. So a range is
+  cut into disjoint pieces of the seekable shape, one SELECT each, joined by UNION ALL: the
+  leading values both bounds share become equalities, then from (x, y) to (u, v) the
+  pieces are `a = x AND b >= y`, `a > x AND a < u` and `a = u AND b < v`. Every range of
+  8 over 40000 rows, with one, three or twenty leading values, reads exactly its 5000 rows
+  (`tests/integration`).
+* x and u can differ in Python and be equal in SQL: `'n'` and `'N'` under a
+  case-insensitive collation. The first piece then also checks
+  `(a, b) < (u, v)` and the last `a > x`, which empties it, so the first piece alone reads
+  the range and every row still comes once (`tests/integration`, table `snap_case`).
 * The bounds come back typed through Arrow and are bound as parameters,
   `CAST(? AS <declared type>)`, with the type built from `sys.sp_cdc_get_captured_columns`
   (length, precision and scale; documented API, invariant 11) and validated before it is
@@ -78,20 +88,32 @@ connection: slow on a big table.
   column instead (`CONVERT_IMPLICIT` in the plan); the CAST keeps the column as it is. LSNs
   still cross as hex strings (invariant 6). `KeyRange` holds only plain Python values, so it
   pickles, and `read()` stays stateless (invariant 5).
+* A char or varchar bound is converted in its column's collation,
+  `CAST(? COLLATE <collation> AS varchar(n))`, the collation read from `sys.columns` (which
+  shows the columns of a table the login can SELECT; not a `cdc.*` table). Without it the
+  conversion uses the database default's code page: a Greek_CI_AS key in a CP1252 database
+  turns every letter into `?`, the bounds lose their order and the partitions come out 0, 0
+  and 10 rows instead of 4, 3 and 3 (`tests/integration`, table `snap_greek`). A column
+  whose collation is not visible stays one partition.
 * A bound need not be exact, only monotonic: consecutive ranges use complementary
   predicates, so every row lands in exactly one of them. datetime2(7) and datetimeoffset(7)
-  bounds come back truncated to microseconds, which only moves a boundary. A key with a
-  `time` column, or with a type that has no Spark mapping, stays one partition: `time` comes
-  back as Arrow time64[ns] (nine digits in `test_inferred_columns_round_trip_every_mapped_type`),
-  which has no Python value to bind.
+  bounds come back truncated to microseconds, which keeps their own column's order but can
+  swap two bounds when another key column follows: (t, 5) < (t + 100 ns, 3) come back as
+  (T, 5) > (T, 3). So only the last key column may have such a type; elsewhere the key stays
+  one partition. So does a key with a `time` column, or with a type that has no Spark
+  mapping: `time` comes back as Arrow time64[ns] (nine digits in
+  `test_inferred_columns_round_trip_every_mapped_type`), which has no Python value to bind.
+* The tiling query's helper columns are `[__$tile]` and `[__$prev]`, CDC's own prefix: named
+  `g` and `p` they collided with key columns of those names, and SQL Server refused the query.
 * NULL sorts first in every column, as in ORDER BY, so the first range would take rows with
   a NULL leading key. That is defensive: SQL Server refuses a CDC index over nullable columns
   (`tests/integration`). The fake allows NULL keys and follows the same order.
 * `FakeCdcDatabase(keys=...)` takes a column or a list of them, and the fake tiles like
   NTILE. `tests/test_client_sql.py` pins the queries; `tests/test_source_fake.py` checks
   that composite and string keys read every row exactly once, NULL keys and more partitions
-  than rows included; `tests/integration` reads a composite and a varchar primary key with
-  `numPartitions=3` in tiles of 4, 3 and 3 rows that together equal the table.
+  than rows included; `tests/integration` reads composite and varchar primary keys (a
+  non-default collation and mixed case included) with `numPartitions=3` in tiles of 4, 3
+  and 3 rows that together equal the table.
 * ponytail: the NTILE query reads and spools the whole key; a range would be cheaper with
   `ROW_NUMBER` over the index and a separate `COUNT(*)`, if a large table shows it. Typed
   bounds are untested on the `arrow-odbc` backend, like the rest of it (ADR 0003).
