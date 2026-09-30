@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -660,3 +661,378 @@ def test_silver_reads_a_composite_key_and_converges_to_the_source_table(
     # a primary-key update arrives as a delete of the old key and an insert of the new one,
     # which is why the before-images (operation 3) can be ignored
     assert {(1, "x"), (2, "z")} <= set(ops) and (3, "x") not in ops, ops
+
+
+# -- schema changes and capture instance switches (ADR 0023) ---------------------------------
+def _reader(sqlserver, table: str, *instances: str) -> str:
+    """A least-privilege login for ``dbo.<table>``: SELECT on it and on each change table."""
+    user = f"{table}_reader"
+    grants = [f"GRANT SELECT ON dbo.{table} TO {user}"]
+    grants += [f"GRANT SELECT ON cdc.[{ci}_CT] TO {user}" for ci in instances]
+    return sqlserver.login(user, *grants)
+
+
+def _writer(sqlserver, table: str, first_id: int):
+    """Commit an insert about every 30 ms (and every third commit an update of an earlier row)
+    on its own connection until the returned function is called; it returns the last id."""
+    stop, state = threading.Event(), {"last": None, "error": None}
+
+    def loop():
+        conn = sqlserver.connect()
+        cur = conn.cursor()
+        i = first_id
+        try:
+            while not stop.is_set():
+                try:
+                    cur.execute(f"INSERT INTO dbo.{table} VALUES (?, 'new')", (i,))
+                    if i % 3 == 0:
+                        cur.execute(f"UPDATE dbo.{table} SET v = ? WHERE id = ?", (f"u{i}", i - 2))
+                except Exception as exc:
+                    if "deadlock victim" in str(exc):  # the enable won: commit it again
+                        continue
+                    raise
+                state["last"], i = i, i + 1
+                time.sleep(0.03)
+        except Exception as exc:  # noqa: BLE001 - reported by finish()
+            state["error"] = exc
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+
+    def finish() -> int:
+        stop.set()
+        thread.join()
+        assert state["error"] is None, state["error"]
+        return state["last"]
+
+    return finish
+
+
+def _source(sqlserver, table: str, value: str = "v") -> list:
+    return sorted(tuple(r) for r in sqlserver.run(f"SELECT id, {value} FROM dbo.{table}"))
+
+
+def test_a_capture_instance_enabled_under_writes_takes_over_at_its_start_lsn(
+    delta_spark, sqlserver, workdir, latest
+):
+    from mssql_cdc import stream
+
+    ci = sqlserver.cdc_table("sw_live", "id INT NOT NULL PRIMARY KEY, v VARCHAR(20) NOT NULL")
+    sqlserver.run(f"INSERT INTO dbo.sw_live SELECT n, 'old' FROM {_N}")
+    options = {"connectionString": _reader(sqlserver, "sw_live", ci), "captureInstance": ci}
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+
+    def run():
+        q = stream(delta_spark, options).to_delta(
+            target, "sw-live", ckpt, facts, trigger={"availableNow": True}, bootstrap=True
+        )
+        q.awaitTermination()
+
+    finish = _writer(sqlserver, "sw_live", 100)
+    try:
+        run()  # the snapshot, then the old instance only
+        v2 = sqlserver.enable_cdc("sw_live", "dbo_sw_live_v2")
+        sqlserver.run(f"GRANT SELECT ON cdc.[{v2}_CT] TO sw_live_reader")
+        sqlserver.wait_for_changes(v2, 20)  # capture is past the new start
+        run()  # a batch across it, while the writer goes on
+    finally:
+        last = finish()
+    sqlserver.wait_for(f"SELECT COUNT(*) FROM cdc.[{v2}_CT] WHERE id = ?", (last,))
+    run()
+
+    s = sqlserver.start_lsn(v2)
+    bronze = delta_spark.read.format("delta").load(target)
+    changes = bronze.where("_operation != 0")
+    dups = changes.groupBy("_start_lsn", "_seqval", "_operation").count().where("count > 1")
+    assert dups.count() == 0
+    # below S from the old instance, from S on from the new one: every commit once
+    sides = {(r[0] >= s, r[1]) for r in changes.select("_start_lsn", "_capture_instance").collect()}
+    assert sides == {(False, ci), (True, v2)}
+    facts_df = delta_spark.read.format("delta").load(facts)
+    assert latest(bronze, "id", "v", facts_df) == _source(sqlserver, "sw_live")
+    [switch] = facts_df.where("event = 'capture_instance_switched'").collect()
+    assert (switch["detail"], switch["min_lsn"]) == (f"{ci} -> {v2}", s)
+
+
+def test_an_older_instance_dropped_before_the_stream_reached_the_newer_start_is_data_loss(
+    delta_spark, sqlserver, workdir, latest
+):
+    from mssql_cdc import stream
+
+    ci = sqlserver.cdc_table("sw_gone", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL")
+    sqlserver.run(f"INSERT INTO dbo.sw_gone SELECT n, 'old' FROM {_N}")
+    sqlserver.wait_for_changes(ci, 10)
+    options = {"connectionString": _reader(sqlserver, "sw_gone", ci), "captureInstance": ci}
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+
+    def run(on_data_loss="fail"):
+        q = stream(delta_spark, options).to_delta(
+            target,
+            "sw-gone",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            on_data_loss=on_data_loss,
+        )
+        q.awaitTermination()
+        return delta_spark.read.format("delta").load(target)
+
+    run()
+    sqlserver.run("DELETE FROM dbo.sw_gone WHERE id = 1")  # below the new start: only in v1
+    sqlserver.wait_for_changes(ci, 11)
+    v2 = sqlserver.enable_cdc("sw_gone", "dbo_sw_gone_v2")
+    sqlserver.run(f"GRANT SELECT ON cdc.[{v2}_CT] TO sw_gone_reader")
+    sqlserver.run("UPDATE dbo.sw_gone SET v = 'new' WHERE id = 2")
+    sqlserver.wait_for_changes(v2, 2)
+    sqlserver.run_enabling_cdc(
+        "EXEC sys.sp_cdc_disable_table @source_schema = N'dbo', @source_name = N'sw_gone', "
+        "@capture_instance = ?",
+        (ci,),
+    )
+    with pytest.raises(Exception, match=f"only in capture instance '{ci}', disabled before"):
+        run()
+    bronze = run("resnapshot")  # the configured instance is gone: it follows v2
+    facts_df = delta_spark.read.format("delta").load(facts)
+    assert latest(bronze, "id", "v", facts_df) == _source(sqlserver, "sw_gone")
+    [event] = facts_df.where("event = 'resnapshot'").collect()
+    assert event["app_id"] == "sw-gone.g1" and event["rows"] == 9
+
+
+def _first_batch(q, timeout: float = 120) -> None:
+    """Wait until the running query ``q`` has finished a batch."""
+    deadline = time.time() + timeout
+    while q.lastProgress is None:
+        if q.exception() or time.time() > deadline:
+            raise AssertionError(f"no batch finished: {q.exception()}")
+        time.sleep(0.5)
+
+
+def test_a_type_change_stops_the_running_query_before_its_batch_is_written(
+    delta_spark, sqlserver, workdir
+):
+    from mssql_cdc import stream
+
+    ci = sqlserver.cdc_table("ddl_type", "id INT NOT NULL PRIMARY KEY, amount DECIMAL(9,2)")
+    sqlserver.run("INSERT INTO dbo.ddl_type VALUES (1, 1.5)")
+    sqlserver.wait_for_changes(ci, 1)
+    options = {"connectionString": _reader(sqlserver, "ddl_type", ci), "captureInstance": ci}
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+
+    def start(**trigger):
+        return stream(delta_spark, options).to_delta(
+            target, "ddl-type", ckpt, facts, trigger=trigger
+        )
+
+    def bronze():
+        return delta_spark.read.format("delta").load(target)
+
+    q = start(processingTime="1 second")  # its schema has amount DECIMAL(9,2)
+    try:
+        _first_batch(q)
+        # one capture scan then records the three together, so one batch holds them all
+        sqlserver.capture_job(running=False)
+        try:
+            sqlserver.run("INSERT INTO dbo.ddl_type VALUES (2, 2.5)")
+            sqlserver.run("ALTER TABLE dbo.ddl_type ALTER COLUMN amount DECIMAL(18,4)")
+            sqlserver.run("INSERT INTO dbo.ddl_type VALUES (3, 123456789.1234)")  # no (9,2)
+        finally:
+            sqlserver.capture_job(running=True)
+        with pytest.raises(Exception, match=r"amount DECIMAL\(18,4\) \(read as decimal\(9,2\)\)"):
+            q.awaitTermination(120)
+    finally:
+        q.stop()
+    assert [r["id"] for r in bronze().collect()] == [1]  # nothing of the batch with the DDL
+
+    # the restart infers DECIMAL(18,4): Delta refuses it on bronze without type widening...
+    q = start(availableNow=True)
+    with pytest.raises(Exception, match="delta.enableTypeWidening"):
+        q.awaitTermination()
+    assert bronze().count() == 1
+    # ...and widens the column with it
+    delta_spark.sql(
+        f"ALTER TABLE delta.`{target}` SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true')"
+    )
+    start(availableNow=True).awaitTermination()
+    assert dict(bronze().dtypes)["amount"] == "decimal(18,4)"
+    assert sorted((r["id"], r["amount"]) for r in bronze().collect()) == [
+        (1, Decimal("1.5")),
+        (2, Decimal("2.5")),
+        (3, Decimal("123456789.1234")),
+    ]
+    facts_df = delta_spark.read.format("delta").load(facts)
+    [event] = facts_df.where("event = 'schema_change'").collect()
+    assert event["detail"].startswith("amount: ") and "ALTER COLUMN" in event["detail"]
+
+
+def test_after_a_dropped_column_bootstrap_and_resnapshot_read_it_as_null(
+    delta_spark, sqlserver, workdir, latest
+):
+    from mssql_cdc import stream
+
+    ci = sqlserver.cdc_table(
+        "ddl_drop", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL, extra VARCHAR(10)"
+    )
+    sqlserver.run(
+        "INSERT INTO dbo.ddl_drop VALUES (1, 'old', 'x'), (2, 'old', 'x'), (3, 'old', 'x')"
+    )
+    sqlserver.wait_for_changes(ci, 3)
+    options = {"connectionString": _reader(sqlserver, "ddl_drop", ci), "captureInstance": ci}
+
+    def run(name):
+        target, facts, ckpt = (os.path.join(workdir, name, n) for n in ("bronze", "facts", "ckpt"))
+        q = stream(delta_spark, options).to_delta(
+            target,
+            f"ddl-drop-{name}",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            on_data_loss="resnapshot",
+        )
+        q.awaitTermination()
+        read = delta_spark.read.format("delta").load
+        return read(target), read(facts)
+
+    run("a")  # its snapshot selects extra
+    sqlserver.run("ALTER TABLE dbo.ddl_drop DROP COLUMN extra")
+    sqlserver.run("INSERT INTO dbo.ddl_drop VALUES (4, 'new')")
+    sqlserver.wait_for_changes(ci, 4)
+    bronze, facts = run("a")  # the stream goes on past the DROP, with an event
+    assert [(r["id"], r["extra"]) for r in bronze.where("_operation = 2").collect()] == [(4, None)]
+    [event] = facts.where("event = 'schema_change'").collect()
+    assert event["detail"].startswith("extra: ") and "DROP COLUMN" in event["detail"]
+
+    bronze, _ = run("b")  # a bootstrap after the DROP: the column still captured reads NULL
+    assert sorted((r["id"], r["extra"]) for r in bronze.collect()) == [
+        (i, None) for i in (1, 2, 3, 4)
+    ]
+
+    sqlserver.run("UPDATE dbo.ddl_drop SET v = 'new' WHERE id = 1")
+    sqlserver.run("DELETE FROM dbo.ddl_drop WHERE id = 2")
+    sqlserver.wait_for_changes(ci, 7)
+    sqlserver.run(
+        "DECLARE @lw binary(10) = sys.fn_cdc_get_max_lsn(); "
+        "EXEC sys.sp_cdc_cleanup_change_table @capture_instance = ?, "
+        "@low_water_mark = @lw, @threshold = 5000",
+        (ci,),
+    )
+    bronze, facts = run("a")  # a purge: the re-snapshot reads NULL for extra too
+    assert latest(bronze, "id", "v", facts) == _source(sqlserver, "ddl_drop")
+    [event] = facts.where("event = 'resnapshot'").collect()
+    resnapshot = bronze.where(f"_operation = 0 AND _start_lsn = '{event['max_lsn']}'")
+    assert sorted((r["id"], r["extra"]) for r in resnapshot.collect()) == [
+        (1, None),
+        (3, None),
+        (4, None),
+    ]
+
+
+def test_a_column_added_reaches_bronze_through_a_new_instance_with_its_values(
+    delta_spark, sqlserver, workdir, latest
+):
+    from mssql_cdc import stream
+
+    ci = sqlserver.cdc_table("ddl_add", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL")
+    sqlserver.run("INSERT INTO dbo.ddl_add VALUES (1, 'old'), (2, 'old'), (3, 'old')")
+    sqlserver.wait_for_changes(ci, 3)
+    options = {"connectionString": _reader(sqlserver, "ddl_add", ci), "captureInstance": ci}
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+
+    def run():
+        q = stream(delta_spark, options).to_delta(
+            target,
+            "ddl-add",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot_on_switch=True,
+        )
+        q.awaitTermination()
+        read = delta_spark.read.format("delta").load
+        return read(target), read(facts)
+
+    run()
+    sqlserver.run("ALTER TABLE dbo.ddl_add ADD note VARCHAR(20) NULL")
+    sqlserver.run("UPDATE dbo.ddl_add SET note = 'before v2' WHERE id = 1")
+    sqlserver.run("UPDATE dbo.ddl_add SET v = 'new' WHERE id = 2")
+    sqlserver.wait_for_changes(ci, 5)
+    # the first instance does not capture note: the update of note alone wrote no change row
+    assert sqlserver.run(f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE id = 1")[0][0] == 1
+    bronze, facts_df = run()
+    [added] = facts_df.where("event = 'schema_change'").collect()
+    assert added["detail"].startswith("note: ") and " ADD " in added["detail"].upper()
+    assert "note" not in bronze.columns
+
+    v2 = sqlserver.enable_cdc("ddl_add", "dbo_ddl_add_v2")
+    sqlserver.run(f"GRANT SELECT ON cdc.[{v2}_CT] TO ddl_add_reader")
+    sqlserver.run("UPDATE dbo.ddl_add SET note = 'after v2' WHERE id = 3")
+    sqlserver.wait_for_changes(v2, 2)
+    bronze, facts_df = run()  # load() infers note from v2; the batch crosses its start
+    assert "note" in bronze.columns
+    [switched] = facts_df.where("event = 'capture_instance_switched'").collect()
+    assert switched["detail"] == f"{ci} -> {v2}"
+    # id 1 changed before v2 existed: only the snapshot after the switch has its note
+    source = _source(sqlserver, "ddl_add", "note")
+    assert source == [(1, "before v2"), (2, None), (3, "after v2")]
+    assert latest(bronze, "id", "note", facts_df) == source
+
+
+def test_a_new_instance_without_its_grant_names_its_change_table(spark, sqlserver, workdir):
+    ci = sqlserver.cdc_table("sw_grant", "id INT NOT NULL PRIMARY KEY")
+    sqlserver.run("INSERT INTO dbo.sw_grant VALUES (1)")
+    sqlserver.wait_for_changes(ci, 1)
+    conn = _reader(sqlserver, "sw_grant", ci)
+    _read(spark, sqlserver, ci, checkpoint=workdir, connectionString=conn)
+    v2 = sqlserver.enable_cdc("sw_grant", "dbo_sw_grant_v2")
+    sqlserver.run("INSERT INTO dbo.sw_grant VALUES (2)")
+    sqlserver.wait_for_changes(v2, 1)
+    with pytest.raises(Exception, match=r"PermissionError: .*cdc\.\[dbo_sw_grant_v2_CT\]"):
+        _read(spark, sqlserver, ci, checkpoint=workdir, connectionString=conn)
+    sqlserver.run(f"GRANT SELECT ON cdc.[{v2}_CT] TO sw_grant_reader")
+    df, _ = _read(spark, sqlserver, ci, checkpoint=workdir, connectionString=conn)
+    assert sorted((r["id"], r["_capture_instance"]) for r in df.collect()) == [(1, ci), (2, v2)]
+
+
+def test_a_transaction_open_during_the_enable_is_read_whole_from_one_instance(spark, sqlserver):
+    ci = sqlserver.cdc_table("sw_tx", "id INT NOT NULL PRIMARY KEY")
+    conn = _reader(sqlserver, "sw_tx", ci)
+    v2 = "dbo_sw_tx_v2"
+    wrote, late = sqlserver.connect(), sqlserver.connect()
+    try:
+        wrote.cursor().execute("BEGIN TRAN; INSERT INTO dbo.sw_tx VALUES (1), (2), (3)")
+        late_tx = late.cursor()
+        late_tx.execute("BEGIN TRAN")  # begins before the enable, writes after it
+        enable = threading.Thread(target=sqlserver.enable_cdc, args=("sw_tx", v2))
+        enable.start()
+        enable.join(3)
+        assert enable.is_alive()  # the enable waits for the open transaction that wrote the table
+        wrote.cursor().execute("COMMIT")
+        enable.join(120)
+        late_tx.execute("INSERT INTO dbo.sw_tx VALUES (11), (12), (13); COMMIT")
+    finally:
+        wrote.close()
+        late.close()
+    sqlserver.run(f"GRANT SELECT ON cdc.[{v2}_CT] TO sw_tx_reader")
+    sqlserver.wait_for_changes(v2, 3)
+    # the first transaction is only in the old instance, the second in both
+    counts = (
+        "SELECT (SELECT COUNT(*) FROM cdc.[{0}_CT] WHERE id < 10), "
+        "(SELECT COUNT(*) FROM cdc.[{0}_CT] WHERE id > 10)"
+    )
+    assert tuple(sqlserver.run(counts.format(ci))[0]) == (3, 3)
+    assert tuple(sqlserver.run(counts.format(v2))[0]) == (0, 3)
+
+    df, _ = _read(spark, sqlserver, ci, connectionString=conn)
+    rows = df.collect()
+    assert sorted(r["id"] for r in rows) == [1, 2, 3, 11, 12, 13]  # each change once
+    first, second = (
+        {(r["_capture_instance"], r["_start_lsn"]) for r in rows if (r["id"] > 10) == after}
+        for after in (False, True)
+    )
+    [(first_ci, first_lsn)], [(second_ci, second_lsn)] = first, second  # one commit each
+    assert (first_ci, second_ci) == (ci, v2)
+    assert first_lsn < sqlserver.start_lsn(v2) <= second_lsn

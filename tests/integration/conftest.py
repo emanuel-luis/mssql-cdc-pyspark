@@ -78,19 +78,58 @@ class SqlServer:
     def cdc_table(self, name: str, columns_ddl: str) -> str:
         """Create ``dbo.<name>`` with CDC on; returns the capture instance."""
         self.run(f"CREATE TABLE dbo.[{name}] ({columns_ddl})")
+        return self.enable_cdc(name)
+
+    def enable_cdc(self, table: str, capture_instance: str | None = None) -> str:
+        """A capture instance of ``dbo.<table>`` capturing every column, by default named
+        ``dbo_<table>``; a second one needs its own name. Returns the name."""
+        name = capture_instance or f"dbo_{table}"
         self.run_enabling_cdc(
             "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = ?, "
-            "@role_name = NULL, @supports_net_changes = 0",
-            (name,),
+            "@capture_instance = ?, @role_name = NULL, @supports_net_changes = 0",
+            (table, name),
         )
-        return f"dbo_{name}"
+        return name
+
+    def start_lsn(self, capture_instance: str) -> str:
+        """The instance's start LSN, as the reader sees it (``sp_cdc_help_change_data_capture``
+        reads ``cdc.change_tables``)."""
+        from mssql_cdc.lsn import normalize
+
+        [(lsn,)] = self.run(
+            "SELECT CONVERT(varchar(22), start_lsn, 1) FROM cdc.change_tables "
+            "WHERE capture_instance = ?",
+            (capture_instance,),
+        )
+        return normalize(lsn)
+
+    def wait_for(self, sql: str, params=(), timeout: float = 120) -> None:
+        """Poll until the first value ``sql`` returns is truthy."""
+        deadline = time.time() + timeout
+        while not self.run(sql, params)[0][0]:
+            if time.time() > deadline:
+                raise TimeoutError(f"Timed out waiting for: {sql} {params}")
+            time.sleep(1)
+
+    def capture_job(self, running: bool) -> None:
+        """Start or stop the database's CDC capture job; returns once it runs, or has stopped
+        (``sp_cdc_stop_job`` returns before)."""
+        self.run(f"EXEC sys.sp_cdc_{'start' if running else 'stop'}_job @job_type = N'capture'")
+        self.wait_for(
+            "SELECT CASE WHEN COUNT(*) = ? THEN 1 ELSE 0 END FROM msdb.dbo.sysjobactivity a "
+            "JOIN msdb.dbo.sysjobs j ON j.job_id = a.job_id "
+            "WHERE j.name = N'cdc.' + DB_NAME() + N'_capture' "
+            "AND a.session_id = (SELECT MAX(session_id) FROM msdb.dbo.syssessions) "
+            "AND a.start_execution_date IS NOT NULL AND a.stop_execution_date IS NULL",
+            (int(running),),
+        )
 
     def wait_for_changes(self, capture_instance: str, rows: int, timeout: float = 120) -> None:
-        deadline = time.time() + timeout
-        while self.run(f"SELECT COUNT(*) FROM cdc.[{capture_instance}_CT]")[0][0] < rows:
-            if time.time() > deadline:
-                raise TimeoutError(f"CDC capture did not reach {rows} rows in {capture_instance}")
-            time.sleep(1)
+        self.wait_for(
+            f"SELECT CASE WHEN COUNT(*) >= {int(rows)} THEN 1 ELSE 0 END "
+            f"FROM cdc.[{capture_instance}_CT]",
+            timeout=timeout,
+        )
 
 
 @pytest.fixture(scope="session")
