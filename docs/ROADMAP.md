@@ -30,8 +30,10 @@
       verdict on progress (check it does not block the listener bus).
 - [x] Retention headroom in the facts (`retention_watermark_ts`, `retention_headroom_hours`,
       ADR 0017).
-- [ ] **Operational metrics**: capture lag (`now - map_lsn_to_time(max_lsn)`), ingestion
-      lag (`max_lsn` vs end offset), via `reportLatestOffset` and the facts table.
+- [x] **Operational metrics**: capture lag (`now - map_lsn_to_time(max_lsn)`) and ingestion
+      lag (`max_lsn` vs the batch's last commit) in the facts table (`source_max_commit_ts`,
+      `capture_lag_seconds`, `ingestion_lag_seconds`, ADR 0020); `reportLatestOffset` shows
+      `max_lsn` in the query progress.
 - [ ] `arrow-odbc` backend covered in CI (install msodbcsql18 in the job).
 - [ ] Multiple capture instances per stream (same schema), or a documented fan-out
       pattern.

@@ -20,6 +20,7 @@
 | [0016](0016-bootstrap-snapshot-at-a-recorded-lsn.md) | Bootstrap with a snapshot stamped with an LSN recorded before the read | accepted | 2026-09-29T12:38:28-03:00 | 2026-09-30T11:02:01-03:00 |
 | [0017](0017-retention-headroom-in-facts.md) | Retention headroom in the ingestion facts | accepted | 2026-09-29T14:58:53-03:00 |  |
 | [0018](0018-automatic-resnapshot-after-data-loss.md) | Automatic re-snapshot after CDC data loss | accepted | 2026-09-29T17:46:41-03:00 |  |
+| [0020](0020-capture-and-ingestion-lag-in-facts.md) | Capture and ingestion lag in the ingestion facts | accepted | 2026-09-30T10:33:11-03:00 |  |
 | [0021](0021-compatibility-policy-for-0x.md) | Compatibility policy for 0.x: the state contract is stable | accepted | 2026-09-30T11:07:08-03:00 |  |
 | [0022](0022-defer-spark-changes-changelog.md) | Defer a Spark `CHANGES` changelog connector | accepted | 2026-09-30T11:07:08-03:00 |  |
 

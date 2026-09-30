@@ -29,6 +29,7 @@ import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from itertools import pairwise
 
 from pyspark.sql.datasource import (
@@ -285,6 +286,16 @@ class _BaseReader(_Common, DataSourceStreamReader):
                     watermark = client.lsn_to_time(min_lsn)
                 except Exception:  # noqa: BLE001 - a metric must never fail a read
                     watermark = None
+                try:  # how far capture had got, and how old that was when seen here (ADR 0020)
+                    source_max = client.lsn_to_time(client.max_lsn())
+                    seen = datetime.now(timezone.utc).replace(tzinfo=None)  # commit times are UTC
+                    capture_lag = (
+                        (seen - datetime.fromisoformat(source_max)).total_seconds()
+                        if source_max
+                        else None
+                    )
+                except Exception:  # noqa: BLE001 - a metric must never fail a read
+                    source_max = capture_lag = None
                 _write_metrics(
                     self.metrics_path,
                     partition,
@@ -300,6 +311,8 @@ class _BaseReader(_Common, DataSourceStreamReader):
                         ),
                         # what cleanup has deleted up to, as a commit time (ADR 0017)
                         "retention_watermark_ts": watermark,
+                        "source_max_commit_ts": source_max,
+                        "capture_lag_seconds": capture_lag,
                     },
                 )
         finally:

@@ -116,6 +116,46 @@ EVENT_COLUMNS = [
     ),
 ]
 
+# Migration 4 (2026-09-30): capture and ingestion lag (ADR 0020).
+LAG_COLUMNS = [
+    (
+        "source_max_commit_ts",
+        "TIMESTAMP_NTZ",
+        (
+            "How far CDC capture had got when the batch was read: the commit time (UTC) of "
+            "sys.fn_cdc_get_max_lsn, the latest seen by the batch's partitions after reading. The "
+            "stream can read nothing newer than this. NULL unless the source option metricsPath "
+            "and delta_sink(metrics_path=...) are set."
+        ),
+    ),
+    (
+        "capture_lag_seconds",
+        "DOUBLE",
+        (
+            "How stale CDC capture was: seconds from source_max_commit_ts to the moment a "
+            "partition read it (its own clock, UTC), the largest over the batch's partitions. "
+            "Seconds on a busy database; up to about 5 minutes on a quiet one, where capture "
+            "writes an idle entry that often, unless the heartbeat job runs. Growing beyond that "
+            "means capture is stuck or behind (capture job or SQL Server Agent stopped, a large "
+            "log backlog), whatever the stream does. Clock skew between the Spark nodes and SQL "
+            "Server shifts it. NULL under the same condition as source_max_commit_ts."
+        ),
+    ),
+    (
+        "ingestion_lag_seconds",
+        "DOUBLE",
+        (
+            "Seconds between max_commit_ts and source_max_commit_ts: how far the batch's last "
+            "change is behind what CDC capture had processed. Near 0 for a current stream; on a "
+            "table that changes less often than its database it also counts the time from the "
+            "table's last change to the database's newest commit. Growing means the stream is "
+            "falling behind, and as it grows retention_headroom_hours shrinks. Only moves while the "
+            "stream runs: also alert when facts stop arriving. NULL under the same condition as "
+            "source_max_commit_ts."
+        ),
+    ),
+]
+
 MIGRATIONS: list[Migration] = [
     Migration(
         "network and read metrics", lambda spark, table: add_columns(spark, table, NETWORK_COLUMNS)
@@ -124,4 +164,5 @@ MIGRATIONS: list[Migration] = [
         "retention headroom", lambda spark, table: add_columns(spark, table, RETENTION_COLUMNS)
     ),
     Migration("snapshot events", lambda spark, table: add_columns(spark, table, EVENT_COLUMNS)),
+    Migration("lag metrics", lambda spark, table: add_columns(spark, table, LAG_COLUMNS)),
 ]

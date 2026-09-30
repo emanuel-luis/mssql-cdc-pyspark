@@ -11,7 +11,8 @@
 * Optional network metrics: with ``metrics_path`` (the directory of the source option
   ``metricsPath``) the sink folds each partition's round trip, read time, MB and
   ``ASYNC_NETWORK_IO`` into the batch facts, with the retention watermark and headroom
-  (ADR 0017). The sink never connects to SQL Server itself.
+  (ADR 0017) and the capture and ingestion lag (ADR 0020). The sink never connects to SQL
+  Server itself.
   Metrics never fail a batch. ``mssql_cdc.stream()`` wires both ends from one set of
   options.
 * Snapshots are facts too: ``write_event()`` records the bootstrap and every re-snapshot
@@ -35,7 +36,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 from . import migrations
-from .migrations.facts import EVENT_COLUMNS, NETWORK_COLUMNS, RETENTION_COLUMNS
+from .migrations.facts import EVENT_COLUMNS, LAG_COLUMNS, NETWORK_COLUMNS, RETENTION_COLUMNS
 from .tables import is_path
 
 BRONZE_COMMENT = (
@@ -138,6 +139,7 @@ FACTS_COLUMNS = [
     *NETWORK_COLUMNS,
     *RETENTION_COLUMNS,
     *EVENT_COLUMNS,
+    *LAG_COLUMNS,
     ("target", "STRING", "Table name or path the batch was written to."),
     (
         "written_at",
@@ -195,8 +197,12 @@ def _fold_metrics(path: str, lo: str, hi: str) -> tuple[dict, list[str]]:
     waits = [m.get("network_wait_ms") for m in picked]
     rtts = [m["rtt_ms"] for m in picked if m.get("rtt_ms") is not None]
     marks = [m["retention_watermark_ts"] for m in picked if m.get("retention_watermark_ts")]
+    tops = [m["source_max_commit_ts"] for m in picked if m.get("source_max_commit_ts")]
+    lags = [m["capture_lag_seconds"] for m in picked if m.get("capture_lag_seconds") is not None]
     return {
         "retention_watermark_ts": datetime.fromisoformat(max(marks)) if marks else None,
+        "source_max_commit_ts": datetime.fromisoformat(max(tops)) if tops else None,
+        "capture_lag_seconds": round(max(lags), 3) if lags else None,
         "source_rtt_ms": round(statistics.median(rtts), 1) if rtts else None,
         "read_seconds": round(sum(m["seconds"] for m in picked), 3),
         "read_mb": round(sum(m["bytes"] for m in picked) / 1e6, 6),
@@ -211,6 +217,12 @@ def _headroom(watermark: datetime | None, max_commit_ts: datetime | None) -> dic
         else round((max_commit_ts - watermark).total_seconds() / 3600, 2)
     )
     return {"retention_watermark_ts": watermark, "retention_headroom_hours": hours}
+
+
+def _lag(source_max: datetime | None, max_commit_ts: datetime | None) -> float | None:
+    if source_max is None or max_commit_ts is None:
+        return None
+    return round((source_max - max_commit_ts).total_seconds(), 3)
 
 
 def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str | None = None):
@@ -270,6 +282,9 @@ def delta_sink(
                     started_at=started_at,
                     duration_ms=duration_ms,
                     **_headroom(folded.get("retention_watermark_ts"), facts["max_commit_ts"]),
+                    ingestion_lag_seconds=_lag(
+                        folded.get("source_max_commit_ts"), facts["max_commit_ts"]
+                    ),
                     target=target,
                     written_at=_utc_now(),
                 )

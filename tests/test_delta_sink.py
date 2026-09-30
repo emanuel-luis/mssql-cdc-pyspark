@@ -109,21 +109,26 @@ def test_tables_are_created_typed_and_commented(delta_spark, workdir):
         assert props["mssql_cdc.schema_version"] == str(migrations.current_version(kind))
 
 
-def test_facts_table_at_version_0_gains_the_network_retention_and_event_columns(
+def test_facts_table_at_version_0_gains_the_network_retention_event_and_lag_columns(
     delta_spark, workdir
 ):
     from mssql_cdc import migrations, tables
-    from mssql_cdc.migrations.facts import EVENT_COLUMNS, NETWORK_COLUMNS, RETENTION_COLUMNS
+    from mssql_cdc.migrations.facts import (
+        EVENT_COLUMNS,
+        LAG_COLUMNS,
+        NETWORK_COLUMNS,
+        RETENTION_COLUMNS,
+    )
     from mssql_cdc.sink import FACTS_COLUMNS
 
     spark = delta_spark
     old = os.path.join(workdir, "facts_v0")
-    added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS
+    added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS + LAG_COLUMNS
     v0 = [c for c in FACTS_COLUMNS if c not in added]  # the facts shape before migration 1
     tables.create_if_not_exists(
         spark, old, v0, properties={migrations.SCHEMA_VERSION_PROPERTY: "0"}
     )
-    assert migrations.migrate(spark, old, "facts") == 3
+    assert migrations.migrate(spark, old, "facts") == 4
     fields = {f.name: f for f in spark.read.format("delta").load(old).schema}
     assert all(name in fields and fields[name].metadata.get("comment") for name, _, _ in added)
 
@@ -161,6 +166,41 @@ def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
     assert row["retention_watermark_ts"] == T0 - timedelta(hours=70)
     assert row["retention_headroom_hours"] == 70.05  # the batch's last commit is T0 + 3 min
     assert not [f for f in os.listdir(metrics) if f.endswith(".json")]  # folded and removed
+
+
+def test_capture_and_ingestion_lag_reach_the_facts(delta_spark, workdir):
+    spark = delta_spark
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    for i in range(3):
+        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+    target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
+    metrics = os.path.join(workdir, "metrics")
+    q = (
+        spark.readStream.format("mssql_cdc")
+        .option("backend", "fake")
+        .option("fakePath", os.path.join(workdir, "src"))
+        .option("captureInstance", CI)
+        .option("columns", COLUMNS)
+        .option("maxCommitsPerBatch", "2")
+        .option("metricsPath", metrics)
+        .load()
+        .writeStream.foreachBatch(delta_sink(target, "lag-v1", facts, metrics_path=metrics))
+        .option("checkpointLocation", os.path.join(workdir, "ckpt"))
+        .trigger(availableNow=True)
+        .start()
+    )
+    q.awaitTermination()
+    first, second = spark.read.format("delta").load(facts).orderBy("batch_id").collect()
+    # capture had processed the last commit (T0 + 2 min) when either batch was read
+    assert (
+        first["source_max_commit_ts"] == second["source_max_commit_ts"] == T0 + timedelta(minutes=2)
+    )
+    # batch 0 holds the commits up to T0 + 1 min: one minute behind capture; batch 1 caught up
+    assert (first["ingestion_lag_seconds"], second["ingestion_lag_seconds"]) == (60.0, 0.0)
+    for row in (first, second):  # seen by a partition while the sink processed the batch
+        seen = row["source_max_commit_ts"] + timedelta(seconds=row["capture_lag_seconds"])
+        assert row["capture_lag_seconds"] >= 0
+        assert row["started_at"] - timedelta(milliseconds=1) <= seen <= row["written_at"]
 
 
 def test_stream_facade_declares_the_options_once(delta_spark, workdir):
@@ -577,7 +617,12 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
 
 def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
     from mssql_cdc import migrations, stream, tables
-    from mssql_cdc.migrations.facts import EVENT_COLUMNS, NETWORK_COLUMNS, RETENTION_COLUMNS
+    from mssql_cdc.migrations.facts import (
+        EVENT_COLUMNS,
+        LAG_COLUMNS,
+        NETWORK_COLUMNS,
+        RETENTION_COLUMNS,
+    )
     from mssql_cdc.sink import FACTS_COLUMNS
 
     spark = delta_spark
@@ -609,14 +654,14 @@ def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
         for name, kind in ((bronze, "bronze"), (facts, "facts"), (control, "control")):
             props = spark.sql(f"DESCRIBE DETAIL {name}").first()["properties"]
             assert props["mssql_cdc.schema_version"] == str(migrations.current_version(kind))
-        added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS
+        added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS + LAG_COLUMNS
         tables.create_if_not_exists(
             spark,
             old,
             [c for c in FACTS_COLUMNS if c not in added],
             properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
         )
-        assert migrations.migrate(spark, old, "facts") == 3  # add_columns through saveAsTable
+        assert migrations.migrate(spark, old, "facts") == 4  # add_columns through saveAsTable
         assert {name for name, _, _ in added} <= set(spark.table(old).columns)
     finally:
         for name in (bronze, facts, control, old):

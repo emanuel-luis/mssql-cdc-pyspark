@@ -101,6 +101,17 @@ re-snapshot, see below); with a URI checkpoint (`dbfs:/`, `abfss://`), add the
 in the facts is how far the stream is ahead of what CDC cleanup has deleted; alert when it
 falls, or when facts stop arriving ([ADR 0017](docs/decisions/0017-retention-headroom-in-facts.md)).
 
+They also carry two lags, each with its own alert
+([ADR 0020](docs/decisions/0020-capture-and-ingestion-lag-in-facts.md)).
+`capture_lag_seconds` is how old the newest commit CDC capture had processed
+(`sys.fn_cdc_get_max_lsn`, as `source_max_commit_ts`) was when a partition looked: when it
+is high, CDC capture is the problem (capture job or SQL Server Agent stopped, a log
+backlog), not the stream; on a quiet database without the
+[heartbeat](docs/decisions/0010-heartbeat-for-quiet-databases.md) it sits up to about 5
+minutes. `ingestion_lag_seconds` is how far the batch's last change (`max_commit_ts`) is
+behind that commit: when it is high, the stream is behind what CDC has captured. What it
+gains, `retention_headroom_hours` loses, so alert on the lag before the headroom runs out.
+
 `bootstrap=True` loads the whole table, not only what CDC retention still holds: the first
 run appends a snapshot of the source table to the target (operation 0, stamped with the
 `max_lsn` recorded before the read) and starts the checkpoint from that LSN. Later runs find
@@ -190,7 +201,7 @@ or a Volume; not a URI or `/dbfs/`); run one job per stream
 | `includeCommandId` | `true` | read `__$command_id` (ordering within a transaction) |
 | `arrowBatchSize` | `10000` | rows per Arrow batch fetched from the driver |
 | `snapshotLsn` | `max_lsn` before the read | `mssql_cdc_snapshot` only: the LSN stamped on the snapshot rows |
-| `metricsPath` | none (`stream()`: `_mssql_cdc_metrics` under the live generation's checkpoint for local/FUSE checkpoints, see [Generations](docs/ARCHITECTURE.md#generations-to_delta)) | directory (local, or FUSE such as a Volume) where each partition that read rows leaves its round trip, read time, MB and network wait for `delta_sink(metrics_path=...)` to fold into the facts |
+| `metricsPath` | none (`stream()`: `_mssql_cdc_metrics` under the live generation's checkpoint for local/FUSE checkpoints, see [Generations](docs/ARCHITECTURE.md#generations-to_delta)) | directory (local, or FUSE such as a Volume) where each partition that read rows leaves its round trip, read time, MB, network wait, retention watermark and capture lag for `delta_sink(metrics_path=...)` to fold into the facts |
 
 ### Output schema
 
