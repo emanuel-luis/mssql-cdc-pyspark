@@ -49,11 +49,17 @@ nothing fails when it is skipped.
     bronze had one.
 * Re-snapshot: the newest snapshot is the highest `_start_lsn` of the capture instance's
   operation-0 rows or `max_lsn` of the facts' event rows whose `target` is `bronze`,
-  whichever is higher (ADR 0018). When it is above `applied_lsn` (or there is no position
-  yet), silver is rebuilt: the latest image per key of the rows from that snapshot on, and
-  `whenNotMatchedBySourceDelete` removes every other key. `facts_table` is optional: the
-  operation-0 rows mark every snapshot with rows; only an emptied table's re-snapshot needs
-  its event.
+  whichever is higher (ADR 0018). When it is newer than `snapshot_lsn`, a second control
+  column (same migration) holding the snapshot silver was last rebuilt from, or there is no
+  position yet, silver is rebuilt: the latest image per key of the rows from that snapshot
+  on, and `whenNotMatchedBySourceDelete` removes every other key. `facts_table` is optional:
+  the operation-0 rows mark every snapshot with rows; only an emptied table's re-snapshot
+  needs its event.
+  - Not against `applied_lsn`: a bootstrap added to an existing checkpoint on a quiet
+    database is stamped with `max_lsn`, which can be exactly the `applied_lsn` of the changes
+    silver already has, and its rows would never be applied.
+  - The events carry no capture instance, so a bronze table holds one capture instance, as
+    its verdict already requires (one row per table in the control table).
 * Consistency: the bronze verdict and the facts are read first, then bronze at one pinned
   version (`VERSION AS OF`) for the snapshot check, the range and the MERGE. Bronze commits
   its rows before its verdict (ADR 0005) and a snapshot's rows before its event (ADR 0018),
@@ -69,8 +75,10 @@ nothing fails when it is skipped.
 * Consumers read silver and gate on `finalization.is_final(spark, control, target, end)`,
   like bronze. The bronze verdict must be advanced under the same name or path passed as
   `bronze`, and the facts `target` must match it too.
-* The control table gains `applied_lsn` (NULL for other tables) through its first migration;
-  silver needs a control table even when nobody reads its verdict.
+* The control table gains `applied_lsn` and `snapshot_lsn` (NULL for other tables) through
+  its first migration; silver needs a control table even when nobody reads its verdict.
+* Until the stream has written bronze (its first non-empty batch, or the bootstrap), a call
+  does nothing and silver does not exist yet.
 * Silver's schema is bronze's at creation; a new captured column needs a new capture
   instance anyway (roadmap: schema changes).
 * The MERGE joins against the whole silver table, and the rebuild check scans bronze for
@@ -78,5 +86,6 @@ nothing fails when it is skipped.
   snapshot's LSN in the control table if that scan shows up.
 * One call per silver table at a time, like one job per stream (ADR 0018).
 * `tests/test_silver.py` covers the ordering, reruns, a position left behind, the snapshot,
-  the rebuild after a re-snapshot (with and without rows) and the verdict;
+  the rebuild after a re-snapshot (with and without rows) or a bootstrap stamped at
+  `applied_lsn`, and the verdict with a bronze batch committed during the call;
   `tests/integration` checks a composite key read from SQL Server and a key update.

@@ -13,10 +13,12 @@ Run it after the stream, in the same job or another; one job per silver table.
   recorded after the MERGE. A crash in between leaves it behind, and applying from behind
   changes nothing: each key takes the latest image of a range that reaches the head of
   bronze, and a row only takes an image newer than its own ``_start_lsn``.
-* Re-snapshot: when bronze holds a snapshot above ``applied_lsn`` (the highest
-  ``_start_lsn`` of its operation-0 rows, or ``max_lsn`` of the facts' event rows for
-  ``bronze``: an emptied table's snapshot has only its event), silver is rebuilt from it,
-  so keys absent from the snapshot and the changes after it are deleted.
+* Re-snapshot: when bronze holds a snapshot newer than ``snapshot_lsn``, the one silver was
+  last rebuilt from (the highest ``_start_lsn`` of its operation-0 rows, or ``max_lsn`` of
+  the facts' event rows for ``bronze``: an emptied table's snapshot has only its event),
+  silver is rebuilt from it, so keys absent from the snapshot and the changes after it are
+  deleted. The events carry no capture instance, so ``bronze`` holds one capture instance,
+  as its verdict already requires.
 * Verdict: silver's ``finalized_until`` advances to the bronze verdict read before bronze
   itself. Bronze commits its rows before its verdict (ADR 0005), so the rows applied hold
   every commit up to it: silver never claims more than it has applied.
@@ -73,14 +75,17 @@ def _source_keys(capture_instance: str, options: dict | None) -> list[str]:
     return keys
 
 
-def _record(spark, control_table: str, target: str, lsn: str) -> None:
-    src = spark.createDataFrame([(target, lsn)], "table_name STRING, applied_lsn STRING")
+def _record(spark, control_table: str, target: str, lsn: str, snapshot: str | None) -> None:
+    src = spark.createDataFrame(
+        [(target, lsn, snapshot)], "table_name STRING, applied_lsn STRING, snapshot_lsn STRING"
+    )
+    values = {"applied_lsn": "s.applied_lsn", "snapshot_lsn": "s.snapshot_lsn"}
     (
         delta_table(spark, control_table)
         .alias("t")
         .merge(src.alias("s"), "t.table_name = s.table_name")
-        .whenMatchedUpdate(set={"applied_lsn": "s.applied_lsn"})
-        .whenNotMatchedInsert(values={"table_name": "s.table_name", "applied_lsn": "s.applied_lsn"})
+        .whenMatchedUpdate(set=values)
+        .whenNotMatchedInsert(values={"table_name": "s.table_name", **values})
         .execute()
     )
 
@@ -97,7 +102,8 @@ def apply_changes(
     options: dict | None = None,
     granularity: str = "hour",
 ) -> dict:
-    """Bring ``target`` up to the capture instance's changes in ``bronze``.
+    """Bring ``target`` up to the capture instance's changes in ``bronze``, a table fed by
+    that capture instance alone. Until the stream creates ``bronze``, it does nothing.
 
     ``keys``: the source's key columns; without them, read from the capture instance's
     unique index through ``options`` (the stream's). ``control_table`` keeps the position
@@ -116,7 +122,12 @@ def apply_changes(
     verdict = (
         control.where(F.col("table_name") == bronze).select("end_lsn", "end_commit_ts").first()
     )
-    applied = _one(control.where(F.col("table_name") == target).select("applied_lsn"))
+    row = control.where(F.col("table_name") == target).select(
+        "applied_lsn", "snapshot_lsn", "finalized_until"
+    )
+    applied, rebuilt_from, finalized = row.first() or (None, None, None)
+    if not exists(spark, bronze):  # the stream has written no batch yet
+        return {"rebuilt": False, "applied_lsn": applied, "finalized_until": finalized}
     points = []
     if facts_table and exists(spark, facts_table):
         facts = delta_table(spark, facts_table).toDF()
@@ -135,9 +146,13 @@ def apply_changes(
     # keep the newest snapshot LSN in the control table if it shows up.
     points.append(_one(changes.where(F.col("_operation") == 0).agg(F.max("_start_lsn"))))
     snapshot = max((p for p in points if p), default=None)
-    rebuild = applied is None or (snapshot is not None and snapshot > applied)
+    # against the snapshot last rebuilt from, not applied_lsn: a bootstrap added to a stream
+    # on a quiet database is stamped with the LSN silver has already applied
+    rebuild = applied is None or (
+        snapshot is not None and (rebuilt_from is None or snapshot > rebuilt_from)
+    )
     if not rebuild:
-        changes = changes.where(F.col("_start_lsn") > applied)
+        changes = changes.where(F.col("_start_lsn") > F.lit(applied))
     elif snapshot:
         changes = changes.where(F.col("_start_lsn") >= snapshot)
 
@@ -185,8 +200,9 @@ def apply_changes(
             merge = merge.whenNotMatchedBySourceDelete()
         merge.execute()
     position = max((p for p in (applied, snapshot, top) if p), default=None)
-    if position and position != applied:
-        _record(spark, control_table, target, position)
+    rebuilt = snapshot if rebuild else rebuilt_from
+    if position and (position, rebuilt) != (applied, rebuilt_from):
+        _record(spark, control_table, target, position, rebuilt)
     offset = (
         {
             "lsn": verdict["end_lsn"],

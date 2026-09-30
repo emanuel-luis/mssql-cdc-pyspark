@@ -21,8 +21,20 @@ APPLIED_COLUMNS = [
             "after it. NULL for other tables."
         ),
     ),
+    (
+        "snapshot_lsn",
+        "STRING",
+        (
+            "Tables built by mssql_cdc.apply_changes: the LSN of the bronze snapshot the table "
+            "was last rebuilt from; a newer snapshot rebuilds it. NULL for other tables and "
+            "before the first snapshot."
+        ),
+    ),
 ]
 
 MIGRATIONS: list[Migration] = [
-    Migration("add applied_lsn", lambda spark, table: add_columns(spark, table, APPLIED_COLUMNS)),
+    Migration(
+        "add applied_lsn and snapshot_lsn",
+        lambda spark, table: add_columns(spark, table, APPLIED_COLUMNS),
+    ),
 ]

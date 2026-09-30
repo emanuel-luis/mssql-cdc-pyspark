@@ -217,9 +217,11 @@ capture instance's unique index.
 
 The position is `applied_lsn` in the control table, written after the MERGE: a rerun, or a
 call after a crash, applies nothing twice and resurrects nothing. When bronze holds a newer
-snapshot than silver has applied (a bootstrap, or a re-snapshot after data loss), silver is
-rebuilt from it, so rows deleted during a purged gap disappear; pass `facts_table` so that
-the re-snapshot of an emptied table, which writes no rows, is seen too. Silver's
+snapshot than the one silver was last rebuilt from (`snapshot_lsn`; a bootstrap, or a
+re-snapshot after data loss), silver is rebuilt from it, so rows deleted during a purged gap
+disappear; pass `facts_table` so that the re-snapshot of an emptied table, which writes no
+rows, is seen too. The bronze table must hold one capture instance, as its verdict already
+does, and until the stream has created it a call does nothing. Silver's
 `finalized_until` is the bronze verdict read before the call read bronze, so it never claims
 more than was applied: gate consumers with
 `finalization.is_final(spark, "ops.table_finalization", "silver.orders", period_end)`.
