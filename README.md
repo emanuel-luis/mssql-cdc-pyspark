@@ -105,10 +105,14 @@ They also carry two lags, each with its own alert
 ([ADR 0020](docs/decisions/0020-capture-and-ingestion-lag-in-facts.md)).
 `capture_lag_seconds` is how old the newest commit CDC capture had processed
 (`sys.fn_cdc_get_max_lsn`, as `source_max_commit_ts`) was when a partition looked: when it
-is high, CDC capture is the problem (capture job or SQL Server Agent stopped, a log
-backlog), not the stream; on a quiet database without the
-[heartbeat](docs/decisions/0010-heartbeat-for-quiet-databases.md) it sits up to about 5
-minutes. `ingestion_lag_seconds` is how far the batch's last change (`max_commit_ts`) is
+is high, CDC capture is slow (a log backlog), not the stream; on a quiet database without
+the [heartbeat](docs/decisions/0010-heartbeat-for-quiet-databases.md) it sits up to about 5
+minutes. It cannot show a stopped capture (capture job or SQL Server Agent down):
+`max_lsn` freezes, no batch runs and no facts row is written, so the last value stays
+small and the only sign is facts no longer arriving, which a quiet table also causes. For a
+capture lag that updates on every trigger, use `now - latestOffset.commit_ts` from the
+source's `lastProgress` (`reportLatestOffset` reports `max_lsn` and its commit time).
+`ingestion_lag_seconds` is how far the batch's last change (`max_commit_ts`) is
 behind that commit: when it is high, the stream is behind what CDC has captured. What it
 gains, `retention_headroom_hours` loses, so alert on the lag before the headroom runs out.
 

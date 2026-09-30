@@ -352,7 +352,9 @@ def test_stream_facade_records_network_metrics_from_a_real_server(delta_spark, s
     )
     # capture's newest commit (fn_cdc_get_max_lsn, no extra grant) is at or after the batch's
     assert row["source_max_commit_ts"] >= row["max_commit_ts"]
-    assert row["capture_lag_seconds"] >= 0 and row["ingestion_lag_seconds"] >= 0
+    assert row["ingestion_lag_seconds"] >= 0  # both ends from the server clock
+    # Spark's clock minus the container's: allow a few seconds of skew (WSL2 VM drift)
+    assert row["capture_lag_seconds"] is not None and row["capture_lag_seconds"] > -5
 
 
 def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(

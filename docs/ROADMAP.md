@@ -33,7 +33,8 @@
 - [x] **Operational metrics**: capture lag (`now - map_lsn_to_time(max_lsn)`) and ingestion
       lag (`max_lsn` vs the batch's last commit) in the facts table (`source_max_commit_ts`,
       `capture_lag_seconds`, `ingestion_lag_seconds`, ADR 0020); `reportLatestOffset` shows
-      `max_lsn` in the query progress.
+      `max_lsn` and its commit time in the query progress on every trigger, the only lag
+      that catches a stopped capture.
 - [ ] `arrow-odbc` backend covered in CI (install msodbcsql18 in the job).
 - [ ] Multiple capture instances per stream (same schema), or a documented fan-out
       pattern.

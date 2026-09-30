@@ -136,9 +136,12 @@ LAG_COLUMNS = [
             "partition read it (its own clock, UTC), the largest over the batch's partitions. "
             "Seconds on a busy database; up to about 5 minutes on a quiet one, where capture "
             "writes an idle entry that often, unless the heartbeat job runs. Growing beyond that "
-            "means capture is stuck or behind (capture job or SQL Server Agent stopped, a large "
-            "log backlog), whatever the stream does. Clock skew between the Spark nodes and SQL "
-            "Server shifts it. NULL under the same condition as source_max_commit_ts."
+            "means capture is slow (a large log backlog), whatever the stream does. A stopped "
+            "capture (capture job or SQL Server Agent down) does not show here: max_lsn freezes, "
+            "no batch runs and the last value stays small; only facts stop arriving. For that, "
+            "use now minus latestOffset.commit_ts in the query progress. Clock skew between the "
+            "Spark nodes and SQL Server shifts it. NULL under the same condition as "
+            "source_max_commit_ts."
         ),
     ),
     (
