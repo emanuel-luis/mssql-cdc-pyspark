@@ -10,6 +10,7 @@ import os
 import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import ClassVar
 
 import pytest
 
@@ -192,11 +193,11 @@ def test_register_carries_the_session_cores_to_the_workers():
     import mssql_cdc
 
     class StubSpark:
-        class sparkContext:  # noqa: N801
+        class sparkContext:
             defaultParallelism = 7
 
-        class dataSource:  # noqa: N801
-            registered = []
+        class dataSource:
+            registered: ClassVar[list] = []
 
             @classmethod
             def register(cls, source):
@@ -209,6 +210,29 @@ def test_register_carries_the_session_cores_to_the_workers():
         assert issubclass(source, MssqlCdcDataSource)
         # the data source plans in a Python worker: the value must survive the pickling
         assert cloudpickle.loads(cloudpickle.dumps(source)).default_num_partitions == 7
+
+
+def test_register_on_spark_connect_leaves_the_cores_to_the_planning_node():
+    import mssql_cdc
+    from mssql_cdc.spark import available_cores
+
+    class StubConnect:  # Spark Connect: no sparkContext
+        @property
+        def sparkContext(self):
+            raise RuntimeError("sparkContext is not supported in Spark Connect")
+
+        class dataSource:
+            registered: ClassVar[list] = []
+
+            @classmethod
+            def register(cls, source):
+                cls.registered.append(source)
+
+    spark = StubConnect()
+    assert available_cores(spark) == 0
+    mssql_cdc.register(spark)
+    # not the CPU count of this process (a laptop on Databricks Connect)
+    assert [s.default_num_partitions for s in spark.dataSource.registered] == [None, None]
 
 
 def test_num_partitions_precedence():

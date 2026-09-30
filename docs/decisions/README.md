@@ -12,7 +12,7 @@
 | [0008](0008-detect-source-time-zone.md) | Detect the server time zone by name | accepted | 2026-09-28T17:05:54-03:00 | 2026-09-28T20:19:40-03:00, 2026-09-28T21:44:31-03:00 |
 | [0009](0009-read-change-tables-directly.md) | Read the change table directly, re-check retention after the read | accepted | 2026-09-28T17:39:20-03:00 | 2026-09-28T18:11:50-03:00 |
 | [0010](0010-heartbeat-for-quiet-databases.md) | Idle lag of ~5 minutes; an optional Agent heartbeat for less | accepted | 2026-09-28T19:03:23-03:00 |  |
-| [0011](0011-num-partitions-from-cores.md) | `numPartitions` defaults to the compute's cores | accepted | 2026-09-28T20:55:34-03:00 |  |
+| [0011](0011-num-partitions-from-cores.md) | `numPartitions` defaults to the compute's cores | accepted | 2026-09-28T20:55:34-03:00 | 2026-09-29T23:02:40-03:00 |
 | [0012](0012-delta-tables-through-the-deltatable-api.md) | Delta tables through the `DeltaTable` API, created typed and commented | accepted | 2026-09-28T21:09:56-03:00 | 2026-09-28T21:15:37-03:00, 2026-09-28T21:26:25-03:00 |
 | [0013](0013-schema-migrations-per-table-kind.md) | Schema migrations per table kind | accepted | 2026-09-28T21:26:25-03:00 |  |
 | [0014](0014-network-and-read-metrics-in-facts.md) | Network and read metrics in the ingestion facts | accepted | 2026-09-29T10:12:04-03:00 | 2026-09-29T10:48:30-03:00, 2026-09-29T22:15:55-03:00 |

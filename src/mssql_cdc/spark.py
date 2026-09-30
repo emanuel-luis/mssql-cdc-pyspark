@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import os
 
-
-def available_cores(spark=None) -> int:
-    """Cores the session's compute runs tasks on (``defaultParallelism``), else the local
-    CPU count; 0 when neither is known. Spark Connect sessions have no ``sparkContext``."""
-    if spark is not None:
-        try:
-            cores = int(spark.sparkContext.defaultParallelism)
-            if cores > 0:
-                return cores
-        except Exception:  # noqa: BLE001 - counting cores must never break a read
-            pass
-    return os.cpu_count() or 0
+def available_cores(spark) -> int:
+    """Cores the session's compute runs tasks on (``defaultParallelism``); 0 when unknown,
+    as on Spark Connect, which has no ``sparkContext``. ``numPartitions=auto`` then uses the
+    CPU count of the node that plans, not of the process that called ``register()``."""
+    try:
+        cores = int(spark.sparkContext.defaultParallelism)
+    except Exception:  # noqa: BLE001 - counting cores must never break a read
+        return 0
+    return max(0, cores)
 
 
 def get_spark(app_name: str = "mssql-cdc", master: str = "local[*]", delta: bool = True):
