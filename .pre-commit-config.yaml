@@ -20,3 +20,9 @@ repos:
         language: unsupported
         require_serial: true
         types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: unsupported
+        require_serial: true
+        types_or: [python, pyi, markdown]

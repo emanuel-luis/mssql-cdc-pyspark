@@ -133,10 +133,11 @@ uv run pytest -q -m sqlserver               # integration: SQL Server 2022 in Do
   one; the first run pulls the SQL Server image. The default `pytest` run leaves
   these tests out.
 
-## Lint and types
+## Lint, format, types
 
 ```bash
 uv run ruff check                  # lint; --fix applies the safe fixes
+uv run ruff format                 # format; CI runs it with --check
 uv run mypy                        # type-check src/
 ```
 
@@ -144,7 +145,7 @@ uv run mypy                        # type-check src/
 come from `uv.lock` and the config from `pyproject.toml`. A broad `except` needs a
 reason: `# noqa: BLE001 - <why>`.
 
-Optional git hooks run `ruff check --fix` on staged files, plus a few
+Optional git hooks run `ruff check --fix` and `ruff format` on staged files, plus a few
 file hygiene checks, from `.pre-commit-config.yaml`: `uvx prek install`, or
 `pre-commit install` with pre-commit 4.4 or later. CI does not depend on them.
 
@@ -156,7 +157,7 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
 
 `.github/workflows/ci.yml`:
 
-* `lint`: `ruff check` and `mypy`; the other jobs wait for it.
+* `lint`: `ruff check`, `ruff format --check` and `mypy`; the other jobs wait for it.
 * `unit`: pytest with Delta on Ubuntu, Java 17, Python 3.11.
 * `integration`: `pytest -m sqlserver` (testcontainers on the runner's Docker).
 * `lab`: a SQL Server 2022 service container with Agent, then workload, checks t2–t7 and

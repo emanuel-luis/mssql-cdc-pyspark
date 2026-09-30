@@ -22,6 +22,7 @@ switch ($Target) {
   "stream"    { Run "uv run python -m lab.workload stream --tps 5 --duration 600" }
   "lint"      {
     Run "uv run ruff check"
+    Run "uv run ruff format --check"
     Run "uv run mypy"
   }
   "test"      { Run "uv run pytest -q" }

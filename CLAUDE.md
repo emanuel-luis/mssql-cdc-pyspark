@@ -43,6 +43,7 @@ python -m lab.checks.t5_engine                      # t1..t8, see LAB.md
 python examples/local_pipeline.py
 
 uv run ruff check                                   # lint (add --fix for the safe fixes)
+uv run ruff format                                  # format (CI runs --check)
 uv run mypy                                         # type-check src/
 ```
 
@@ -156,7 +157,7 @@ about every 5 minutes (t1); `sql/heartbeat.sql` brings `max_lsn`'s lag to ~10 s
 ## Conventions
 
 * English in code, docs, commit messages. Python ≥ 3.10, type hints, small modules.
-* CI's `lint` job runs `ruff check` and `mypy` (config in
+* CI's `lint` job runs `ruff check`, `ruff format --check` and `mypy` (config in
   `pyproject.toml`) and gates every other job: run them before pushing. A broad `except`
   says why: `# noqa: BLE001 - <reason>`.
 * PySpark is an optional extra (`[spark]`): platforms ship their own. Do not add hard
