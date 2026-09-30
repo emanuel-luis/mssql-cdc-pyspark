@@ -17,7 +17,8 @@ compatibility" line.
 State compatibility: first release: offsets v1 contract
 ([ADR 0002](docs/decisions/0002-lsn-offsets-with-commit-time.md)), checkpoint generations
 ([ADR 0018](docs/decisions/0018-automatic-resnapshot-after-data-loss.md)), facts migrations
-1-3 ([ADR 0013](docs/decisions/0013-schema-migrations-per-table-kind.md)).
+1-5, control migration 1, and the silver table kind with no migrations yet
+([ADR 0013](docs/decisions/0013-schema-migrations-per-table-kind.md)).
 
 ### Added
 
@@ -43,16 +44,32 @@ State compatibility: first release: offsets v1 contract
   ([ADR 0011](docs/decisions/0011-num-partitions-from-cores.md)), with commit-aligned ranges
   balanced by the change table's rows
   ([ADR 0015](docs/decisions/0015-split-batches-by-change-rows.md)).
-- Drivers: `mssql-python` by default, fetching straight into Arrow, and `arrow-odbc`
-  (untested) ([ADR 0003](docs/decisions/0003-mssql-python-default-backend.md)); a
+- Drivers: `mssql-python` by default, installed with the package and fetching straight into
+  Arrow, and `arrow-odbc` (untested, the `[arrow-odbc]` extra)
+  ([ADR 0003](docs/decisions/0003-mssql-python-default-backend.md)); a
   file-backed fake (`backend=fake`) for engine tests
-  ([ADR 0006](docs/decisions/0006-file-backed-fake-for-engine-tests.md)).
+  ([ADR 0006](docs/decisions/0006-file-backed-fake-for-engine-tests.md)). `mssql-python` is
+  imported only when it opens a connection, so the other backends work without its system
+  libraries.
+- Capture instances match ignoring case, as SQL Server's default collation does: the exact
+  name first, and two names that differ only in case raise an error naming both.
+  `_capture_instance` keeps the name as the options give it
+  ([ADR 0016](docs/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md), amendment 2).
 - Delta sink `sink.delta_sink()`: idempotent appends (`txnAppId`/`txnVersion`) and per-batch
   facts (row counts, LSN and commit-time ranges, timings) in the commit's `userMetadata`
   and a facts table.
 - Network and read metrics per partition in the facts, folded from `metricsPath`
   ([ADR 0014](docs/decisions/0014-network-and-read-metrics-in-facts.md)), and the retention
   headroom ([ADR 0017](docs/decisions/0017-retention-headroom-in-facts.md)).
+- Capture lag and ingestion lag in the facts (`source_max_commit_ts`, `capture_lag_seconds`,
+  `ingestion_lag_seconds`), and `max_lsn` with its commit time in the query progress on
+  every trigger (`reportLatestOffset`)
+  ([ADR 0020](docs/decisions/0020-capture-and-ingestion-lag-in-facts.md)).
+- The batch's end offset in the facts (`end_lsn`, `end_commit_ts`, facts migration 5): the
+  retention headroom and the ingestion lag are measured from it, not from the batch's last
+  change. Every micro-batch writes a facts row, those that read no rows included
+  (`rows = 0`), so facts stop arriving only when the stream or CDC capture stops (ADR 0014
+  amendment 3, ADRs 0017 and 0020 amended).
 - Completeness signal `finalized_until` in a control table, advanced after the data and
   never backwards: `finalization.candidate()`, `advance()`, `is_final()`,
   `end_offset_from_progress()`
@@ -66,15 +83,24 @@ State compatibility: first release: offsets v1 contract
 - Bootstrap snapshot stamped with the `max_lsn` recorded before the read:
   `stream(...).snapshot(target)`, `to_delta(bootstrap=True)` and
   `format("mssql_cdc_snapshot")`
-  ([ADR 0016](docs/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)).
+  ([ADR 0016](docs/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)). Its partitions
+  are uniform ranges of a single integer key, else `NTILE` tiles of the rows by the whole
+  key, for composite and non-integer keys (ADR 0016 amendment).
 - Automatic re-snapshot after CDC data loss, `to_delta(on_data_loss="resnapshot")`, into a
   new checkpoint generation, with the loss recorded in the facts
   ([ADR 0018](docs/decisions/0018-automatic-resnapshot-after-data-loss.md)).
+- Silver helper `apply_changes`: keeps a current-state table equal to the source from the
+  bronze change log with MERGE, rebuilds it from a newer snapshot (bootstrap or
+  re-snapshot), keeps its position in the control table (`applied_lsn`, `snapshot_lsn`,
+  control migration 1) and propagates `finalized_until`
+  ([ADR 0019](docs/decisions/0019-silver-helper-applies-the-change-log.md)).
 - `sql/heartbeat.sql`, an optional Agent job that keeps `max_lsn` moving on a quiet
   database ([ADR 0010](docs/decisions/0010-heartbeat-for-quiet-databases.md)).
 - The lab: a Faker OLTP workload and checks t1-t8 against SQL Server 2022, Spark and Delta
   (`LAB.md`).
 - Inline type hints (`py.typed`).
+- `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
+  platform, which ships its own, or to install the `[spark]` extra.
 
 [Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/releases/tag/v0.1.0
