@@ -14,10 +14,7 @@
 
 # COMMAND ----------
 
-from mssql_cdc import finalization, register
-from mssql_cdc.sink import delta_sink
-
-register(spark)
+from mssql_cdc import finalization, stream
 
 SCHEMA = "lab.cdc"  # catalog.schema
 conn = (
@@ -26,18 +23,12 @@ conn = (
     "Encrypt=yes;TrustServerCertificate=no"
 )
 
-query = (
-    spark.readStream.format("mssql_cdc")
-    .option("connectionString", conn)
-    .option("captureInstance", "dbo_orders")
-    .option("maxCommitsPerBatch", "500")
-    .load()
-    .writeStream.foreachBatch(delta_sink(f"{SCHEMA}.bronze_orders", "orders-bronze-v1",
-                                         f"{SCHEMA}.ingestion_facts"))
-    .option("checkpointLocation", "/Volumes/lab/cdc/checkpoints/orders_bronze")
-    .trigger(availableNow=True)
-    .start()
-)
+options = {"connectionString": conn, "captureInstance": "dbo_orders", "maxCommitsPerBatch": "500"}
+# bootstrap: snapshot dbo.orders into bronze once, then stream the changes after it
+query = stream(spark, options).to_delta(f"{SCHEMA}.bronze_orders", "orders-bronze-v1",
+                                        checkpoint="/Volumes/lab/cdc/checkpoints/orders_bronze",
+                                        facts_table=f"{SCHEMA}.ingestion_facts",
+                                        trigger={"availableNow": True}, bootstrap=True)
 query.awaitTermination()
 
 # COMMAND ----------

@@ -12,8 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from mssql_cdc import finalization, register
-from mssql_cdc.sink import delta_sink
+from mssql_cdc import finalization, stream
 from mssql_cdc.spark import get_spark
 
 from lab.common import SOURCE_TZ, connection_string
@@ -27,20 +26,14 @@ FACTS = f"{WORK}/ingestion_facts"
 CONTROL = f"{WORK}/table_finalization"
 
 spark = get_spark("mssql-cdc-local")
-register(spark)
 
-query = (
-    spark.readStream.format("mssql_cdc")
-    .option("connectionString", connection_string())
-    .option("captureInstance", "dbo_orders")
-    .option("sourceTimeZone", SOURCE_TZ)
-    .option("maxCommitsPerBatch", "500")
-    .load()
-    .writeStream.foreachBatch(delta_sink(BRONZE, app_id="orders-bronze-v1", facts_table=FACTS))
-    .option("checkpointLocation", f"{WORK}/_checkpoints/orders_bronze")
-    .trigger(availableNow=True)
-    .start()
-)
+options = {"connectionString": connection_string(), "captureInstance": "dbo_orders",
+           "sourceTimeZone": SOURCE_TZ, "maxCommitsPerBatch": "500"}
+# bootstrap: snapshot dbo.orders into bronze once, then stream the changes after it
+query = stream(spark, options).to_delta(BRONZE, "orders-bronze-v1",
+                                        checkpoint=f"{WORK}/_checkpoints/orders_bronze",
+                                        facts_table=FACTS, trigger={"availableNow": True},
+                                        bootstrap=True)
 query.awaitTermination()
 
 # Data is committed; now (and only now) advance the verdict.
