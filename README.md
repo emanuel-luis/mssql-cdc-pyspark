@@ -207,7 +207,8 @@ The changes between the last offset read and the retention watermark are lost fo
 facts get a row with `event = 'resnapshot'` and the gap in `lost_from_ts` and `lost_to_ts`
 (`lost_from_ts` is NULL when the stream had committed nothing since an explicit
 `startingLsn`, which carries no commit time); downstream should then rebuild from the newest snapshot: the highest `_start_lsn` of the
-target's `_operation = 0` rows or of the facts' event rows (`max_lsn`), whichever is higher,
+target's `_operation = 0` rows or `max_lsn` of the facts' snapshot rows
+(`event IN ('bootstrap', 'resnapshot')`; other events are no snapshots), whichever is higher,
 because a snapshot of an empty table writes no rows. A purge during a run still fails that
 query, and the next run recovers. A second loss within `resnapshot_interval_days` (keep it
 above the retention) raises `DataLossError` instead: the stream cannot keep up, and a person
@@ -259,13 +260,77 @@ call after a crash, applies nothing twice and resurrects nothing. When bronze ho
 snapshot than the one silver was last rebuilt from (`snapshot_lsn`; a bootstrap, or a
 re-snapshot after data loss), silver is rebuilt from it, so rows deleted during a purged gap
 disappear; pass `facts_table` so that the re-snapshot of an emptied table, which writes no
-rows, is seen too. The bronze table must hold one capture instance, as its verdict already
-does, and until the stream has created it a call does nothing. Silver's
+rows, is seen too. The bronze table must hold one source table, as its verdict already does;
+after a switch to a newer capture instance it holds rows of both, and `options` tells silver
+the table's instances. Until the stream has created bronze, a call does nothing. Silver's
 `finalized_until` is the bronze verdict read before the call read bronze, so it never claims
 more than was applied: gate consumers with
 `finalization.is_final(spark, "ops.table_finalization", "silver.orders", period_end)`.
 One call per silver table at a time
 ([ADR 0019](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0019-silver-helper-applies-the-change-log.md)).
+
+### Schema changes
+
+A capture instance captures the columns it was enabled with. Each time the stream plans a
+batch it asks SQL Server for the DDL recorded on the table inside it
+(`sys.sp_cdc_get_ddl_history`) and reacts by kind
+([ADR 0023](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0023-schema-changes-and-capture-instance-switching.md)):
+
+| On the source table | What CDC does | What the stream does |
+|---|---|---|
+| `ADD` a column | Nothing: the capture instance keeps its columns, and an update of only the new column writes no change row | Goes on, logs a warning and writes a `schema_change` facts row. The column arrives with a new capture instance (below) |
+| `DROP COLUMN` | Keeps the column captured, NULL from then on | Goes on, with a `schema_change` row. Bronze keeps the column; snapshots read NULL for it |
+| `ALTER COLUMN` to a type the query's still holds (`varchar(10)` to `varchar(50)`) | Converts the change table | Goes on, with a `schema_change` row |
+| `ALTER COLUMN` to a type it does not hold (`decimal(9,2)` to `decimal(18,4)`, `int` to `bigint`) | Converts the change table | Fails the batch that holds the DDL before reading any of it, with `SchemaChangedError`. Restarted, the query infers the new type; bronze then needs type widening (below) |
+| Other DDL, such as a NOT NULL change | Records it | Goes on, with a `schema_change` row |
+| Renaming a captured column, `TRUNCATE`, altering the key column | Refuses them while CDC is on | |
+
+With `schemaChangePolicy=fail`, any DDL fails the batch instead; the replayed batch holds the
+same DDL, so restart once with `classify` to go past it.
+
+A new column needs a new capture instance, and SQL Server allows two per table. The DBA
+creates it and the stream moves to it on its own; the library never creates or drops capture
+instances. The procedure, step by step, is in
+[`sql/switch_capture_instance.sql`](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/sql/switch_capture_instance.sql):
+
+1. Enable the new instance with the new column list (`sys.sp_cdc_enable_table` with a new
+   `@capture_instance`).
+2. `GRANT SELECT ON cdc.[<new instance>_CT] TO <reader>`. Each capture instance has its own
+   change table and needs its own grant; without it the first batch that reaches the new
+   instance fails with a `PermissionError` naming it.
+3. Wait until every stream that reads the table has written a facts row with
+   `event = 'capture_instance_switched'` (detail `old -> new`), and one batch more.
+4. Disable the old instance. Disabled earlier, the changes below the new instance's start that
+   only the old one held are lost: the stream fails with a `DataLossError` that says so, and
+   `on_data_loss="resnapshot"` recovers with a snapshot.
+
+The stream reads the old instance below the new one's start LSN and the new one from it, both
+in one batch if need be: every commit once, with no change to offsets or checkpoints. Keep
+`captureInstance` set to the old name when it is the default one (`<schema>_<table>`): the
+stream follows the table's newest instance, also after the old one is disabled; with another
+name, set it to the new one once the old one is gone. A query already running when the new instance appears stops at
+its start with `SchemaChangedError` if its schema lacks a column the new instance captures;
+restarted, it infers the column and goes on. Bronze gains the column (every append uses
+`mergeSchema`) and older rows read NULL for it, as does the latest image of a row that has
+not changed since the switch. With `to_delta(..., snapshot_on_switch=True)` the sink appends
+a snapshot of the table after the batch that crossed the start, so the latest image of every
+row carries the new column; it reads the whole table (see
+[Tables too big to snapshot](#tables-too-big-to-snapshot)).
+
+The library never changes a table's properties. Before restarting after a type change that
+widens, enable Delta type widening on bronze, and on silver, which gains new columns but does
+not change types:
+
+```sql
+ALTER TABLE bronze.orders SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true');
+```
+
+Without it, or for a change Delta cannot widen, the append fails with a `SchemaChangedError`
+that says so: write to a new bronze table, or rewrite this one.
+
+The facts rows `schema_change` and `capture_instance_switched` carry the `batch_id` of the
+batch that read past them, `rows = 0` and the DDL or the switch in `detail`. Statistics over
+micro-batches filter `event IS NULL`; snapshots are `event IN ('bootstrap', 'resnapshot')`.
 
 ### Options
 
@@ -282,6 +347,7 @@ One call per silver table at a time
 | `sourceTimeZone` | `auto` | Windows time zone name of the server clock (e.g. `E. South America Standard Time`), used to convert commit times to UTC. `auto` reads `CURRENT_TIMEZONE_ID()` (SQL Server 2022+, Azure SQL); on older versions it applies the server's current UTC offset (`SYSDATETIMEOFFSET()`), exact for zones without daylight saving; elsewhere, set the zone name |
 | `failOnDataLoss` | `true` | raise when CDC cleanup purged the next range |
 | `includeCommandId` | `true` | read `__$command_id` (ordering within a transaction) |
+| `schemaChangePolicy` | `classify` | what DDL on the source table inside a batch does. `classify`: a captured column whose type the query's no longer holds fails the batch before it reads (`SchemaChangedError`; restart to infer the new type), other DDL goes on with a warning and a `schema_change` facts row. `fail`: any DDL fails the batch. See [Schema changes](#schema-changes) |
 | `arrowBatchSize` | `10000` | rows per Arrow batch fetched from the driver |
 | `snapshotLsn` | `max_lsn` before the read | `mssql_cdc_snapshot` only: the LSN stamped on the snapshot rows |
 | `metricsPath` | none (`stream()`: `_mssql_cdc_metrics` under the live generation's checkpoint for local/FUSE checkpoints, see [Generations](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/ARCHITECTURE.md#generations-to_delta)) | directory (local, or FUSE such as a Volume) where each partition leaves its round trip, read time, MB, network wait, retention watermark, capture lag and the commit time of its last LSN (the largest is the batch's end offset) for `delta_sink(metrics_path=...)` to fold into the facts; the sink removes the files after each batch. By hand, give `delta_sink` the same directory (nothing else removes the files) and use it for one stream only: the sink folds every file in it. `stream()` puts an explicit one's files under `<metricsPath>/<app_id>`, so its streams may share it |
@@ -292,15 +358,18 @@ Captured columns (inferred, or as given in `columns`), plus:
 
 | Column | Type | Source |
 |---|---|---|
-| `_capture_instance` | string | option |
+| `_capture_instance` | string | the capture instance the row was read from: from a newer instance's start LSN on, that one ([Schema changes](#schema-changes)); on snapshot rows, the one the snapshot was taken for |
 | `_start_lsn` | string | `__$start_lsn`, commit LSN as `0x` + 20 hex |
 | `_seqval` | string | `__$seqval` |
 | `_operation` | int | 1 delete, 2 insert, 3 update (before), 4 update (after); 0 snapshot row |
-| `_command_id` | int | `__$command_id` |
+| `_command_id` | int | `__$command_id`, numbered per capture instance |
 | `_commit_ts` | timestamp_ntz | `cdc.lsn_time_mapping.tran_end_time`, in UTC |
 
-Order changes with `(_start_lsn, _command_id, _seqval, _operation)`. Snapshot rows have
-`_seqval` and `_command_id` NULL and share one `_start_lsn`, below every change read after them.
+Order changes with `(_start_lsn, _command_id, _seqval, _operation)`. Two capture instances of
+a table number the same change differently in `_command_id`, but all the rows of a commit
+come from one of them, so the order holds; `(_start_lsn, _seqval, _operation)` identifies a
+change across instances. Snapshot rows have `_seqval` and `_command_id` NULL and share one
+`_start_lsn`, below every change read after them.
 
 ### Permissions
 
@@ -314,6 +383,9 @@ GRANT SELECT ON cdc.[dbo_orders_CT] TO cdc_reader;  -- the change table
 -- and, if the capture instance has a gating role:
 ALTER ROLE <gating_role> ADD MEMBER cdc_reader;
 ```
+
+A new capture instance of the table needs its own grant on its change table before the
+stream reaches it ([Schema changes](#schema-changes)).
 
 ### Completeness semantics
 

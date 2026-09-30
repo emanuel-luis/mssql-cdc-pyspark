@@ -1,7 +1,8 @@
 # 0023: Schema changes on the source, and switching to a newer capture instance
 
 **Status:** accepted  
-**Date:** 2026-09-30T18:40:00-03:00
+**Date:** 2026-09-30T18:40:00-03:00  
+**Amended:** 2026-09-30T20:09:44-03:00, run against SQL Server 2022 (`tests/integration`); a type bronze cannot take names `delta.enableTypeWidening`
 
 ## Context
 A capture instance captures a fixed column list, chosen when it is enabled. To capture a
@@ -164,7 +165,10 @@ Every bronze append, micro-batches and snapshots alike, uses `mergeSchema`: a co
 newer instance captures is added (older rows read NULL), and a column the batch lacks is
 NULL. A type change fails the append unless the bronze table has
 `delta.enableTypeWidening = true` and the change is a widening Delta supports; the library
-documents the property and never sets it. Considered: `overwriteSchema` (a rewrite of the
+documents the property and never sets it. The failed append raises `SchemaChangedError`
+naming the property and the `ALTER TABLE` that sets it (amendment): Delta's own error,
+`[DELTA_FAILED_TO_MERGE_FIELDS] Failed to merge fields 'amount' and 'amount'`, says neither.
+Considered: `overwriteSchema` (a rewrite of the
 table) and casting new types back to the old ones (silent truncation).
 
 ### D5. Rows unchanged since a switch keep NULL for a newly captured column
@@ -232,10 +236,19 @@ never (a column that stays NULL until each row changes).
   on 2026-07-15.
 * Unverified: all of it on SQL Server 2016; the `arrow-odbc` backend (ADR 0003); Databricks;
   a tie on `start_lsn` after cleanup (documented, not reproduced); `ddl_history` visibility
-  is measured (8 DDLs), not documented; `snapshot_on_switch` against SQL Server. An optional
-  lab check t9, also against the 2017 image, would cover the switch under a continuous writer.
+  is measured (8 DDLs), not documented. An optional lab check t9 against the 2017 image would
+  cover the switch there.
 * Tests: `tests/test_delta_sink.py` (event files folded once across a replay, `mergeSchema`,
   bronze migration 1, a switch adding a column with its events and no second bootstrap
   snapshot, following the new instance after the old is dropped, `snapshot_on_switch`, a
-  snapshot after a DROP COLUMN, a re-snapshot after the old instance was dropped too early)
-  and `tests/test_silver.py` (silver across a switch, with and without `options`).
+  snapshot after a DROP COLUMN, a re-snapshot after the old instance was dropped too early,
+  the type widening message) and `tests/test_silver.py` (silver across a switch, with and
+  without `options`). `tests/integration`, against SQL Server 2022 with a least-privilege
+  login (amendment): a new instance enabled under a continuous writer (every commit once,
+  below S from the old instance), the old one disabled too early (`DataLossError`, then
+  `on_data_loss="resnapshot"`), a type change stopping a running query before its batch is
+  written and widened on restart, bootstrap and re-snapshot after a DROP COLUMN, an ADD
+  COLUMN reaching bronze through a new instance with `snapshot_on_switch`, the missing grant
+  on the new change table, and a transaction open during the enable (only in the old
+  instance, below S). They also pinned that an update of only a column an instance does not
+  capture writes no change row there; the fake now does the same.

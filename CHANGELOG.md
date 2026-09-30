@@ -17,8 +17,9 @@ compatibility" line.
 State compatibility: first release: offsets v1 contract
 ([ADR 0002](docs/decisions/0002-lsn-offsets-with-commit-time.md)), checkpoint generations
 ([ADR 0018](docs/decisions/0018-automatic-resnapshot-after-data-loss.md)), facts migrations
-1-5, control migration 1, and the silver table kind with no migrations yet
-([ADR 0013](docs/decisions/0013-schema-migrations-per-table-kind.md)).
+1-6 (6: the `detail` column of the source's events), bronze migration 1 (the comments of
+`_capture_instance` and `_command_id`), control migration 1, and the silver table kind with no
+migrations yet ([ADR 0013](docs/decisions/0013-schema-migrations-per-table-kind.md)).
 
 ### Added
 
@@ -95,6 +96,20 @@ State compatibility: first release: offsets v1 contract
   re-snapshot), keeps its position in the control table (`applied_lsn`, `snapshot_lsn`,
   control migration 1) and propagates `finalized_until`
   ([ADR 0019](docs/decisions/0019-silver-helper-applies-the-change-log.md)).
+- Schema changes on the source and a second capture instance
+  ([ADR 0023](docs/decisions/0023-schema-changes-and-capture-instance-switching.md)): every
+  batch checks the DDL SQL Server recorded inside it (`sys.sp_cdc_get_ddl_history`); a
+  captured column whose new type the query's no longer holds fails the batch before it reads
+  (`SchemaChangedError`, exported), other DDL goes on with a `schema_change` facts row, and
+  `schemaChangePolicy=fail` fails on any DDL. The stream follows a newer capture instance of
+  its table at that instance's start LSN, within one batch, and writes a
+  `capture_instance_switched` facts row; the schema is the union of both instances' columns.
+  Bronze appends use `mergeSchema`, and a type bronze cannot take fails with a message about
+  `delta.enableTypeWidening`. `to_delta(snapshot_on_switch=True)` snapshots the table after
+  the switch. Snapshots read NULL for a dropped column and are found under any instance of
+  the table; a `DataLossError` caused by an old instance disabled too early says so, and a
+  `PermissionError` names the new change table's grant. `sql/switch_capture_instance.sql`
+  documents the DBA's procedure.
 - `sql/heartbeat.sql`, an optional Agent job that keeps `max_lsn` moving on a quiet
   database ([ADR 0010](docs/decisions/0010-heartbeat-for-quiet-databases.md)).
 - The lab: a Faker OLTP workload and checks t1-t8 against SQL Server 2022, Spark and Delta
