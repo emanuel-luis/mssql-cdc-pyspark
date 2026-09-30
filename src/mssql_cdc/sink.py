@@ -16,12 +16,13 @@
   ``ASYNC_NETWORK_IO`` into the batch facts, with the batch's end offset, the retention
   watermark and headroom (ADR 0017) and the capture and ingestion lag (ADR 0020), both
   measured from that end offset. The sink never connects to SQL Server itself.
-  Every file in ``metrics_path`` is the current batch's and is folded into it, then removed:
-  micro-batches run one at a time, the partitions are read inside ``foreachBatch``, and a
-  retried partition or batch rewrites its file under the same name (``<from>-<to>.json``).
-  Selecting files by the rows' LSNs would miss the partitions that read none, such as the
-  trailing one that ends at the end offset. Metrics never fail a batch.
-  ``mssql_cdc.stream()`` wires both ends from one set of options.
+  The directory belongs to one stream. The sink empties it before the batch is read (what is
+  left is a dead attempt's), then folds every file in it and removes them: micro-batches run
+  one at a time and the partitions are read inside ``foreachBatch``, so every file there is
+  the current batch's, and a retried task rewrites its file under the same name
+  (``<from>-<to>.json``). Selecting files by the rows' LSNs would miss the partitions that
+  read none, such as the trailing one that ends at the end offset. Metrics never fail a
+  batch. ``mssql_cdc.stream()`` wires both ends from one set of options.
 * Snapshots are facts too: ``write_event()`` records the bootstrap and every re-snapshot
   after data loss as one row with ``event`` set and no ``batch_id`` (ADR 0018), idempotent
   the same way.
@@ -207,18 +208,26 @@ def _json(facts: dict) -> str:
     )
 
 
-def _fold_metrics(path: str) -> tuple[dict, list[str]]:
-    """Fold every metrics file in ``path``: all are the current batch's (see the module doc).
-    Returns the folded metrics and the files, the unreadable ones too, to remove."""
-    picked, files = [], glob.glob(os.path.join(path, "*.json"))
-    for name in files:
+def _clear_metrics(path: str) -> None:
+    """Remove the metrics files in ``path``, the unreadable ones too."""
+    for name in glob.glob(os.path.join(path, "*.json")):
+        try:
+            os.remove(name)
+        except OSError:
+            pass
+
+
+def _fold_metrics(path: str) -> dict:
+    """Fold every metrics file in ``path``: all are the current batch's (see the module doc)."""
+    picked = []
+    for name in glob.glob(os.path.join(path, "*.json")):
         try:
             with open(name, encoding="utf-8") as fh:
                 picked.append(json.load(fh))
         except (OSError, ValueError):
             continue
     if not picked:
-        return {}, files
+        return {}
     end = max(picked, key=lambda m: m["to_lsn"])  # the partition that ends at the end offset
     waits = [m.get("network_wait_ms") for m in picked]
     rtts = [m["rtt_ms"] for m in picked if m.get("rtt_ms") is not None]
@@ -237,7 +246,7 @@ def _fold_metrics(path: str) -> tuple[dict, list[str]]:
         "read_seconds": round(sum(m["seconds"] for m in picked), 3),
         "read_mb": round(sum(m["bytes"] for m in picked) / 1e6, 6),
         "network_wait_ms": None if None in waits else sum(waits),
-    }, files
+    }
 
 
 def _headroom(watermark: datetime | None, position: datetime | None) -> dict:
@@ -280,8 +289,9 @@ def delta_sink(
     deleted, use a new ``app_id``; batch ids restart at 0 and would otherwise be
     ignored as duplicates.
 
-    ``metrics_path`` feeds the facts table (see the module doc); its files are removed after
-    each batch, with or without a facts table.
+    ``metrics_path`` feeds the facts table (see the module doc): the directory of the source
+    option ``metricsPath``, used by no other stream. Its files are removed after each batch,
+    with or without a facts table; without ``metrics_path`` nothing removes them.
     """
     created: set[str] = set()  # once per query run, not once per batch
 
@@ -294,6 +304,8 @@ def delta_sink(
         started_at, t0 = _utc_now(), time.monotonic()
         df = df.persist()
         try:
+            if metrics_path:  # the batch is not read yet: any file here is a dead attempt's
+                _clear_metrics(metrics_path)
             facts = batch_facts(df)  # reads the batch: its partitions write their metrics files
             facts.update({"batch_id": batch_id, "app_id": app_id})
             spark = df.sparkSession
@@ -302,7 +314,7 @@ def delta_sink(
                 ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
                 _write(out, target, app_id, batch_id, _json(facts))
             duration_ms = round((time.monotonic() - t0) * 1000)
-            folded, files = _fold_metrics(metrics_path) if metrics_path else ({}, [])
+            folded = _fold_metrics(metrics_path) if metrics_path else {}
             if facts_table:
                 # where the stream is: the end offset, not the batch's last change, which on a
                 # quiet table lags it (the batch's last change as a fallback, without metrics)
@@ -321,11 +333,8 @@ def delta_sink(
                     [tuple(facts.get(k) for k in _FACT_FIELDS)], FACTS_SCHEMA
                 )  # event columns stay NULL
                 _write(facts_df, facts_table, f"{app_id}#facts", batch_id)
-            for name in files:  # folded into this batch's facts; a replay rewrites them
-                try:
-                    os.remove(name)
-                except OSError:
-                    pass
+            if metrics_path:  # folded into this batch's facts; a replay rewrites them
+                _clear_metrics(metrics_path)
         finally:
             df.unpersist()
 

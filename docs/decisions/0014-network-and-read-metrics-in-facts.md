@@ -4,7 +4,8 @@
 **Date:** 2026-09-29T10:12:04-03:00  
 **Amended:** 2026-09-29T10:48:30-03:00, the round trip moved to the partitions; `stream()` declares the options once  
 **Amended:** 2026-09-29T22:15:55-03:00, a partition that read no rows leaves no file (see Amendment 2)  
-**Amended:** 2026-09-30T15:16:41-03:00, every partition leaves a file again, with the commit time of its last LSN; the sink folds every file present (see Amendment 3)
+**Amended:** 2026-09-30T15:16:41-03:00, every partition leaves a file again, with the commit time of its last LSN; the sink folds every file present (see Amendment 3)  
+**Amended:** 2026-09-30T17:47:32-03:00, one directory per stream, emptied before each batch is read (see Amendment 4)
 
 ## Context
 On a production source the reader was network-bound: round trips of 180–950 ms, and the
@@ -86,3 +87,26 @@ behind. A batch that plans no range (a new checkpoint's first batch when nothing
 has no files: its row has `rows = 0` and NULL metrics. Amendment 2's cost is gone:
 partitions without rows count in `read_seconds`, `network_wait_ms` and the `source_rtt_ms`
 median again.
+
+## Amendment 4: one directory per stream, emptied before each batch
+Folding every file present is right only when the directory holds nothing but the current
+batch's files. Two things broke that. Streams sharing one explicit `metricsPath` (a job
+looping over tables with one options dict, the natural setup with a URI checkpoint) folded
+and removed each other's files: one stream's `end_lsn`, headroom and lags came from
+another's position, maybe another database's. And files left by an attempt that died after
+some partitions wrote theirs were folded into a later batch: a new checkpoint's or
+generation's first batch with an explicit `metricsPath`, or a replay planned with another
+split, which `numPartitions=auto` produces without the user changing anything when the
+cluster restarts with other cores. A stale `to_lsn` put `end_lsn` ahead of or behind the
+real position, and the read metrics were counted twice.
+
+Now:
+* The sink empties the directory at the start of each batch, before the batch is read:
+  its partitions run only when the sink reads the batch, so anything there is a dead
+  attempt's. It removes the files after the facts write as before.
+* `stream()` puts an explicit `metricsPath`'s files under `<metricsPath>/<sink app_id>`
+  (`<app_id>.g<n>` in generation `n`), so its streams may share one `metricsPath`. The
+  default under the checkpoint is per stream already.
+* Wired by hand, `metricsPath` must belong to one stream, and `delta_sink` needs the same
+  directory as `metrics_path`: nothing else removes the files, and every partition of every
+  batch writes one, so without it they pile up.

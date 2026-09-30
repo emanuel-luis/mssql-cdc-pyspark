@@ -58,7 +58,8 @@ State compatibility: first release: offsets v1 contract
 - Delta sink `sink.delta_sink()`: idempotent appends (`txnAppId`/`txnVersion`) and per-batch
   facts (row counts, LSN and commit-time ranges, timings) in the commit's `userMetadata`
   and a facts table.
-- Network and read metrics per partition in the facts, folded from `metricsPath`
+- Network and read metrics per partition in the facts, folded from `metricsPath`, one
+  directory per stream (`stream()` puts an explicit one's files under `<metricsPath>/<app_id>`)
   ([ADR 0014](docs/decisions/0014-network-and-read-metrics-in-facts.md)), and the retention
   headroom ([ADR 0017](docs/decisions/0017-retention-headroom-in-facts.md)).
 - Capture lag and ingestion lag in the facts (`source_max_commit_ts`, `capture_lag_seconds`,

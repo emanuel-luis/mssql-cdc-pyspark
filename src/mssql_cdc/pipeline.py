@@ -10,7 +10,8 @@ The options go to ``readStream`` once, and the sink gets what it needs from them
 facts table, per-partition metrics default to ``<checkpoint>/_mssql_cdc_metrics`` (of the
 live generation, see below) when the
 checkpoint is a path Python can write on every node (local, or FUSE such as a Volume);
-with a URI checkpoint (``dbfs:/``, ``abfss://``...) set ``metricsPath`` yourself.
+with a URI checkpoint (``dbfs:/``, ``abfss://``...) set ``metricsPath`` yourself: the files
+then go to ``<metricsPath>/<sink app_id>``, so streams may share one ``metricsPath``.
 
 ``bootstrap=True`` first writes a snapshot of the tracked table into the target (once) and
 starts a new checkpoint from its LSN, so the target holds the whole table, not only what CDC
@@ -379,8 +380,13 @@ class CdcStream:
         elif bootstrap:
             options["startingLsn"] = self._bootstrap(target, app_id, facts_table)
         metrics = _opt(options, "metricsPath")
-        if facts_table and metrics is None and not _URI.match(checkpoint):
-            metrics = options["metricsPath"] = os.path.join(checkpoint, "_mssql_cdc_metrics")
+        if metrics:  # one directory per stream: the sink folds and removes every file in it
+            metrics = os.path.join(metrics, sink_id)
+        elif facts_table and metrics is None and not _URI.match(checkpoint):
+            metrics = os.path.join(checkpoint, "_mssql_cdc_metrics")
+        if metrics:
+            options = {k: v for k, v in options.items() if k.lower() != "metricspath"}
+            options["metricsPath"] = metrics
         writer = (
             self.spark.readStream.format("mssql_cdc")
             .options(**options)

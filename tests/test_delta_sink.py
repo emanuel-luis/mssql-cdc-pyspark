@@ -145,10 +145,13 @@ def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
     db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
     kept_from = db.idle(at=T0 - timedelta(hours=70))
     for i in range(4):
-        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+        last = db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
     db.cleanup(CI, kept_from)  # cleanup has deleted up to 70 h before the first commit
     target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
     metrics = os.path.join(workdir, "metrics")
+    os.makedirs(metrics)  # a dead attempt's file, from a split this batch does not plan
+    with open(os.path.join(metrics, "stale.json"), "w", encoding="utf-8") as fh:
+        json.dump({"from_lsn": last, "to_lsn": "0xFFFFFFFFFFFFFFFFFFFF", "bytes": 1e12}, fh)
     source = {
         "backend": "fake",
         "fakePath": os.path.join(workdir, "src"),
@@ -168,7 +171,8 @@ def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
     )
     q.awaitTermination()
     [row] = spark.read.format("delta").load(facts).collect()
-    assert row["read_seconds"] > 0 and row["read_mb"] > 0
+    assert row["read_seconds"] > 0 and 0 < row["read_mb"] < 1e6
+    assert row["end_lsn"] == last  # the stale file was removed before the batch was read
     assert row["network_wait_ms"] is None and row["source_rtt_ms"] is None  # the fake has no server
     assert row["retention_watermark_ts"] == T0 - timedelta(hours=70)
     assert row["retention_headroom_hours"] == 70.05  # the batch's last commit is T0 + 3 min
@@ -287,6 +291,13 @@ def test_stream_facade_declares_the_options_once(delta_spark, workdir):
     assert row["read_seconds"] > 0  # metrics defaulted under the (local) checkpoint
     assert os.path.isdir(os.path.join(ckpt, "_mssql_cdc_metrics"))
     assert "metricsPath" not in options  # the caller's dict is not changed
+    # an explicit metricsPath is shared by the streams of a job: each gets its own directory
+    shared = os.path.join(workdir, "metrics")
+    q = stream(spark, {**options, "metricspath": shared}).to_delta(
+        target + "2", "facade-v2", ckpt + "2", facts, trigger={"availableNow": True}
+    )
+    q.awaitTermination()
+    assert os.listdir(shared) == ["facade-v2"]
 
 
 def test_migrations_bring_an_older_table_up_once(delta_spark, workdir, monkeypatch):

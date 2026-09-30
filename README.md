@@ -174,6 +174,9 @@ end = finalization.end_offset_from_progress(query.lastProgress)
 finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 ```
 
+For the metrics by hand, set the `metricsPath` option and pass the same directory as
+`delta_sink(..., metrics_path=...)`, one directory per stream.
+
 ### Recovering from data loss
 
 CDC cleanup deletes changes by age, read or not. A stream stopped or behind for longer than
@@ -277,7 +280,7 @@ One call per silver table at a time
 | `includeCommandId` | `true` | read `__$command_id` (ordering within a transaction) |
 | `arrowBatchSize` | `10000` | rows per Arrow batch fetched from the driver |
 | `snapshotLsn` | `max_lsn` before the read | `mssql_cdc_snapshot` only: the LSN stamped on the snapshot rows |
-| `metricsPath` | none (`stream()`: `_mssql_cdc_metrics` under the live generation's checkpoint for local/FUSE checkpoints, see [Generations](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/ARCHITECTURE.md#generations-to_delta)) | directory (local, or FUSE such as a Volume) where each partition leaves its round trip, read time, MB, network wait, retention watermark, capture lag and the commit time of its last LSN (the largest is the batch's end offset) for `delta_sink(metrics_path=...)` to fold into the facts; the sink removes the files after each batch |
+| `metricsPath` | none (`stream()`: `_mssql_cdc_metrics` under the live generation's checkpoint for local/FUSE checkpoints, see [Generations](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/ARCHITECTURE.md#generations-to_delta)) | directory (local, or FUSE such as a Volume) where each partition leaves its round trip, read time, MB, network wait, retention watermark, capture lag and the commit time of its last LSN (the largest is the batch's end offset) for `delta_sink(metrics_path=...)` to fold into the facts; the sink removes the files after each batch. By hand, give `delta_sink` the same directory (nothing else removes the files) and use it for one stream only: the sink folds every file in it. `stream()` puts an explicit one's files under `<metricsPath>/<app_id>`, so its streams may share it |
 
 ### Output schema
 
