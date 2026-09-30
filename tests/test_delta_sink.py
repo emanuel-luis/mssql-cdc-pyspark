@@ -583,6 +583,22 @@ def test_resnapshot_recovers_changes_only_a_dropped_older_instance_held(
     assert latest(bronze, "order_id", "status") == [(1, "new"), (2, "new"), (5, "new")]
 
 
+def test_the_recovery_checks_the_capture_instance_the_source_reads_next(workdir):
+    from mssql_cdc.fake import FakeCdcClient
+    from mssql_cdc.pipeline import _lost
+
+    db, _ = _switching(workdir)
+    old = db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=3))
+    db.add_capture_instance(CI, COLUMNS)
+    s = db.commit(CI, [(2, {"order_id": 5, "status": "new"})], at=T0 + timedelta(minutes=4))
+    db.commit(CI, [(2, {"order_id": 6, "status": "new"})], at=T0 + timedelta(minutes=5))
+    last = db.commit(CI, [(2, {"order_id": 7, "status": "new"})], at=T0 + timedelta(minutes=6))
+    db.cleanup(CI, last)  # sp_cdc_cleanup_change_table on the older instance alone
+    client = FakeCdcClient(db.path)
+    assert _lost(client, CI, s) is None  # the newer instance holds everything after S
+    assert _lost(client, CI, old) == last  # before S the older one is read: cleanup passed it
+
+
 def _snapshots(df) -> int:
     return df.where("_operation = 0").select("_start_lsn").distinct().count()
 

@@ -89,12 +89,19 @@ def _instances(options: dict, ci: str) -> list[str]:
         return sorted({ci.lower(), *(i.name.lower() for i in client.capture_instances(ci))})
 
 
-def _min_lsn(client, ci: str) -> str:
-    """How far back the capture instances of ``ci``'s table still hold changes: the oldest
-    one's ``min_lsn``. After a switch the older instance holds what precedes the newer one's
-    start; once it is dropped, what only it held is gone too (ADR 0023)."""
+def _lost(client, ci: str, lsn: str) -> str | None:
+    """When CDC no longer holds the changes right after ``lsn``, the ``min_lsn`` of the
+    capture instance that should: the one the source reads them from (ADR 0023), the newest
+    instance of the table starting at or before them, else the oldest. Once an older instance
+    is dropped, what only it held is gone too. None when they are all there."""
+    nxt = client.increment_lsn(lsn)
     instances = client.capture_instances(ci)
-    return client.min_lsn(instances[0].name if instances else ci)
+    name = instances[0].name if instances else ci
+    for i in instances[1:]:
+        if i.start_lsn and i.start_lsn <= nxt:
+            name = i.name
+    low = client.min_lsn(name)
+    return low if nxt < low else None
 
 
 def _last_offset(checkpoint: str) -> dict | None:
@@ -278,19 +285,19 @@ class CdcStream:
             # the source's retention guard, which runs only when there is a range to read
             if (client.max_lsn() or ZERO_LSN) <= start["lsn"]:
                 return None
-            low = _min_lsn(client, ci)
-            if client.increment_lsn(start["lsn"]) >= low:
+            low = _lost(client, ci, start["lsn"])
+            if low is None:
                 return None
             lost_to = _ts(client.lsn_to_time(low))
             # newer than the checkpoint and not purged itself: a recovery that stopped
             # before writing its state
             done = self._last_snapshot(target, ci)
-            if done and (done["lsn"] <= start["lsn"] or client.increment_lsn(done["lsn"]) < low):
+            if done and (done["lsn"] <= start["lsn"] or _lost(client, ci, done["lsn"])):
                 done = None
         lost = (
             f"{ci}: CDC no longer holds the changes after {start['lsn']} that the stream has "
-            f"not read (min_lsn of the table's oldest capture instance is {low}): cleanup purged "
-            "them, or the capture instance that held them was dropped"
+            f"not read (min_lsn of the capture instance that held them is {low}): cleanup "
+            "purged them, or that capture instance was dropped"
         )
         last = state.get("failed_at") or (state.get("at") if n else None)
         now = datetime.now(timezone.utc)
@@ -304,7 +311,7 @@ class CdcStream:
         _write_state(checkpoint, {**state, "recovering": start})
         offset, timing = (done, {}) if done else self._take_snapshot(target, ci)
         with closing(make_client(self.options)) as client:
-            if client.increment_lsn(offset["lsn"]) < _min_lsn(client, ci):
+            if _lost(client, ci, offset["lsn"]):
                 _write_state(
                     checkpoint,
                     {**state, "recovering": start, "failed_at": now.isoformat(timespec="seconds")},

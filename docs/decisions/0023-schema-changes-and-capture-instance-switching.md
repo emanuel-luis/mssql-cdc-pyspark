@@ -87,16 +87,21 @@ time a batch is planned, replays included.
 ### D1. Detect DDL on the driver, every batch, and react by kind
 * When planning a batch, the reader asks `sys.sp_cdc_get_ddl_history(<ci>)` of each instance
   the batch reads for entries with `ddl_lsn` in `(start, end]` (`CdcClient.ddl_history`), and
-  compares the captured types (`sp_cdc_get_captured_columns`) with the query's schema, by
-  `column_id`, not by name alone.
-* A type change of a captured column (`required_column_update = 1`, or a captured type the
-  query's cannot hold) fails the planning of the batch that contains it, before any row is
-  read, with `SchemaChangedError` (a `RuntimeError`, exported): "restart the query to
-  re-infer the schema (and enable `delta.enableTypeWidening` on bronze for a widening)".
+  compares the captured types (`sp_cdc_get_captured_columns`) with the query's schema by name
+  (with `columns`, with the captured types at the run's first planning, since the declared
+  ones are the user's own conversions).
+* A type change of a captured column that the query's type can no longer hold fails the
+  planning of the batch that contains it, before any row is read, with `SchemaChangedError`
+  (a `RuntimeError`, exported): "restart the query to re-infer the schema (and enable
+  `delta.enableTypeWidening` on bronze for a widening)". `required_column_update = 1` alone
+  does not fail it: the batch replayed after the restart holds the same DDL, and would fail
+  forever; a change that still fits (`varchar(10)` to `(50)`, both STRING) is a
+  `schema_change` event.
 * ADD and DROP of columns and any other DDL: the stream continues, logs a warning, and
   leaves a `schema_change` event for the facts (below).
 * Option `schemaChangePolicy`: `classify` (the default, as above) or `fail` (any DDL in the
-  batch fails it).
+  batch fails it; the replayed batch fails again, so the message says to restart once with
+  `classify` to go past it).
 * Considered:
   - Diffing `sp_cdc_get_captured_columns` each batch alone: it sees type changes only; an ADD
     leaves the captured list as it was and a DROP stays listed.
@@ -109,8 +114,9 @@ time a batch is planned, replays included.
     never behind `max_lsn` in the measurements.
 
 ### D2. Follow a newer capture instance of the same table
-* The reader lists the table's instances with `sys.sp_cdc_help_change_data_capture
-  @source_schema, @source_name` (`CdcClient.capture_instances`, oldest first); newer means a
+* The reader lists the table's instances with one `sys.sp_cdc_help_change_data_capture`
+  call without arguments, the listing `source_table` already reads, which applies the same
+  permission check per table (`CdcClient.capture_instances`, oldest first); newer means a
   later `create_date` (a tie on `start_lsn` after cleanup is broken by it).
 * `partitions()` cuts `[from, to]` at S, the newer instance's `start_lsn`: the older instance
   for `[from, S - 1]` (clamped to the range), the newer for `[S, to]`, never an empty range
@@ -127,9 +133,10 @@ time a batch is planned, replays included.
   `(_start_lsn, _command_id, _seqval, _operation)` stays right for the same reason; the bronze
   column comment says so.
 * A newer instance that appears while a query runs: the query switches in place when its
-  schema holds every column the newer instance captures, and otherwise fails with
-  `SchemaChangedError` at the boundary, before reading past S, so that the next `load()`
-  infers the new columns.
+  schema holds every column the newer instance captures, with a type that fits, and otherwise
+  fails with `SchemaChangedError` at the boundary, before reading past S, so that the next
+  `load()` infers the new columns. With `columns` the declared list decides: the switch is in
+  place, with a warning naming captured columns it leaves out.
 * A configured instance that was dropped: `load()` and planning follow the newest instance of
   its table (found through its default name `<schema>_<table>`, or through the newest name
   the run has seen); otherwise the not-found error names the table's instances.
@@ -174,7 +181,8 @@ never (a column that stays NULL until each row changes).
   matched by `column_id` (`CdcClient.present_columns`), instead of failing.
 * Existing snapshots are looked up by the set of capture instances of the same source table,
   case-insensitive (`pipeline._instances`): `snapshot()`, `bootstrap=True` and the ADR 0018
-  recovery. The recovery's retention test uses the `min_lsn` of the table's oldest instance.
+  recovery. The recovery's retention test uses the `min_lsn` of the instance the source reads
+  the next changes from: the newest one starting at or before them, else the oldest.
 * Silver (ADR 0019) reads the rows of that set: with `options`, the table's instances come
   from SQL Server. A row in the range to apply of any other instance fails the call, naming
   it, instead of being skipped. A column bronze gained is added to silver.

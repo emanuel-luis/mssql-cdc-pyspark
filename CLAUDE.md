@@ -111,7 +111,7 @@ notes/             Local only, gitignored: research notes in Portuguese (context
    A third check, `to_delta(on_data_loss="resnapshot")`'s pre-flight, applies the driver's
    test before the query starts and re-snapshots into a new generation instead (ADR 0018).
    With two capture instances, `ci` is the instance the range reads; the pre-flight uses the
-   table's oldest (ADR 0023).
+   one the next changes are read from (ADR 0023).
 5. **Executors are stateless.** `read()` opens and closes its own connection; the
    reader drops `_client` in `__getstate__`. Nothing live gets pickled.
 6. **LSNs cross every boundary as hex strings.** Bound as `CONVERT(binary(10), ?, 1)`,
@@ -137,8 +137,9 @@ notes/             Local only, gitignored: research notes in Portuguese (context
 13. **SQL injection.** Anything inlined into T-SQL (capture instance, columns, timezone,
     integers) goes through the validators in `client.py`.
 14. **Schema changes are checked before the read.** DDL inside a batch's range is found on
-    the driver while planning; a changed captured type fails the batch before any row is
-    read (`SchemaChangedError`). Columns are compared by `column_id`, never by name alone.
+    the driver while planning; a captured type the query's no longer holds fails the batch
+    before any row is read (`SchemaChangedError`). A snapshot matches captured and source
+    columns by `column_id`, never by name alone (a column dropped and added back is another).
     `_command_id` is per capture instance: order across instances by
     `(_start_lsn, _seqval, _operation)`. Only `'bootstrap'` and `'resnapshot'` facts events
     are snapshots (ADR 0023).

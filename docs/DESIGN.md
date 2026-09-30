@@ -76,8 +76,8 @@ writes to the source.
   before the stream read it is data loss too, and the error says so (ADR 0023).
 * **Schema changes**: every planning reads the DDL the batch's instances recorded in
   `(start, end]` (`sys.sp_cdc_get_ddl_history`, readable by the least-privilege login and
-  never behind `max_lsn` in the measurements). A captured column whose type changed fails the
-  batch before it reads anything (`SchemaChangedError`: restart to re-infer the schema);
+  never behind `max_lsn` in the measurements). A captured type the query's no longer holds
+  fails the batch before it reads anything (`SchemaChangedError`: restart to re-infer it);
   other DDL is a warning and a facts event, or a failure with `schemaChangePolicy=fail`. A
   newer capture instance of the table is followed from its start LSN, in place when the
   query's schema holds its columns, otherwise with a `SchemaChangedError` at that boundary so

@@ -11,7 +11,8 @@ It reproduces the parts of CDC the data source relies on:
   which a snapshot reads (tiled like NTILE) and cleanup does not touch;
 * up to two capture instances per source table (ADR 0023): a newer one starts at the next
   commit, and from there every commit lands in both, each with only its own captured
-  columns and its own ``__$command_id``; DDL rows (``sys.sp_cdc_get_ddl_history``).
+  columns and its own ``__$command_id``; DDL rows (``sys.sp_cdc_get_ddl_history``), a DROP
+  COLUMN also removing the column from the source table, which a snapshot then cannot select.
 
 An instance's table is named after the first instance of it (the one the constructor
 declares). Captured columns (Spark DDL, per instance) are optional; without them the
@@ -38,6 +39,7 @@ _MAPPING = "lsn_time_mapping.jsonl"
 _MIN = "min_lsn.json"
 _KEYS = "keys.json"
 _INSTANCES = "instances.json"  # name -> {"table", "created", "columns": [[name, type]] | None}
+_DROPPED = "dropped.json"  # table -> lower names of the columns DROP COLUMN removed from it
 
 
 def _read_jsonl(path: str) -> list[dict]:
@@ -224,6 +226,15 @@ class FakeCdcClient(CdcClient):
             return super().captured_columns(capture_instance)  # no metadata: 'columns' required
         return ", ".join(f"`{c}` {t}" for c, t in cols)
 
+    def _dropped(self, table: str) -> set[str]:
+        return set(_read_json(os.path.join(self.path, _DROPPED)).get(table, []))
+
+    def present_columns(self, capture_instance, columns):
+        # ponytail: by name, so a column added back after its DROP counts as present; SQL
+        # Server matches by column_id (another column). Model column ids if a test needs it.
+        dropped = self._dropped(self.source_table(capture_instance).table)
+        return [c for c in columns if c.lower() not in dropped]
+
     def _table(self, table: str) -> list[dict]:
         return list(_read_json(os.path.join(self.path, "tables", f"{table}.json")).values())
 
@@ -252,6 +263,9 @@ class FakeCdcClient(CdcClient):
             k = _sort_key(row.get(c) for c in keys)
             return (lo is None or k >= _sort_key(lo)) and (hi is None or k < _sort_key(hi))
 
+        gone = [c for c in columns if c.lower() in self._dropped(table)]
+        if gone:  # as SQL Server refuses to select it
+            raise ValueError(f"Invalid column name {gone[0]!r}")
         rows = [r for r in self._table(table) if inside(r)]
         for i in range(0, len(rows), batch_size):
             chunk = rows[i : i + batch_size]
@@ -469,4 +483,18 @@ class FakeCdcDatabase:
                 if new_type and column and col[0].lower() == column.lower():
                     col[1] = new_type.upper()
         _write_json(os.path.join(self.path, _INSTANCES), known)
+        if column and re.search(r"\b(ADD|DROP\s+COLUMN)\b", command, re.IGNORECASE):
+            # the source table loses the column (a snapshot may no longer select it) or has it
+            table = self._same_table(capture_instance)[0][1]["table"]
+            dropped = _read_json(os.path.join(self.path, _DROPPED))
+            names = set(dropped.get(table, [])) - {column.lower()}
+            if re.search(r"\bDROP\s+COLUMN\b", command, re.IGNORECASE):
+                names.add(column.lower())
+                p = os.path.join(self.path, "tables", f"{table}.json")
+                rows = {
+                    k: {c: v for c, v in r.items() if c.lower() != column.lower()}
+                    for k, r in _read_json(p).items()
+                }
+                _write_json(p, rows)
+            _write_json(os.path.join(self.path, _DROPPED), {**dropped, table: sorted(names)})
         return lsn

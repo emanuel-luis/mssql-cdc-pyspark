@@ -35,7 +35,8 @@ GO
 -- 4. Wait for every stream that reads the table. Each one writes a facts row with
 --    event = 'capture_instance_switched' (detail 'dbo_orders -> dbo_orders_v2') once it has
 --    read past the new instance's start; without a facts table, look for the warning in the
---    stream's log. A stream whose schema lacks a column the new instance captures stops there
+--    stream's log. Spark commits that batch just after its facts row: to be sure, wait for the
+--    stream's next batch too (a row with a larger batch_id). A stream whose schema lacks a column the new instance captures stops there
 --    with SchemaChangedError instead: restart it, and it infers the new columns and goes on.
 --    In the lakehouse, for example:
 --      SELECT app_id, batch_id, detail, written_at FROM ops.ingestion_facts
