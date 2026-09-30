@@ -7,8 +7,8 @@ It reproduces the parts of CDC the data source relies on:
 * per-capture-instance change rows ordered by commit LSN;
 * a per-instance low watermark (``sys.fn_cdc_get_min_lsn``) that cleanup moves
   before it deletes the change rows below it;
-* for instances given a key column, the source table's current rows, which a snapshot
-  reads and cleanup does not touch.
+* for instances given a key (one column or several), the source table's current rows,
+  which a snapshot reads (tiled like NTILE) and cleanup does not touch.
 
 State lives in plain files so that the Spark driver and every executor process
 see the same data (Python workers are separate processes, even locally).
@@ -36,6 +36,16 @@ def _read_jsonl(path: str) -> list[dict]:
         return []
     with open(path, encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
+
+
+def _key_columns(key) -> list[str]:
+    """``keys`` maps an instance to one column or a list of them."""
+    return [key] if isinstance(key, str) else list(key or [])
+
+
+def _sort_key(values) -> tuple:
+    """A key tuple in SQL Server's ORDER BY order: column by column, NULL first."""
+    return tuple((v is not None, v) for v in values)
 
 
 class FakeCdcClient(CdcClient):
@@ -113,8 +123,8 @@ class FakeCdcClient(CdcClient):
 
     def source_table(self, capture_instance):
         start = self.min_lsn(capture_instance)  # not found -> ValueError, like the real one
-        key = self._keys().get(capture_instance)
-        return SourceTable("dbo", capture_instance, [key] if key else [], start)
+        keys = _key_columns(self._keys().get(capture_instance))
+        return SourceTable("dbo", capture_instance, keys, start)
 
     def _table(self, table: str) -> list[dict]:
         p = os.path.join(self.path, "tables", f"{table}.json")
@@ -127,12 +137,26 @@ class FakeCdcClient(CdcClient):
         keys = [r[key] for r in self._table(table) if r.get(key) is not None]
         return (min(keys), max(keys)) if keys else (None, None)
 
-    def iter_table(self, schema, table, columns, key, lo, hi, batch_size):
+    def key_types(self, capture_instance, keys):
+        return ["sql_variant"] * len(keys)  # the fake compares Python values; nothing to CAST
+
+    def key_tiles(self, schema, table, keys, n):
+        # NTILE(n): the first (rows % n) tiles hold one row more; bound = first row of a tile
+        rows = sorted((tuple(r.get(k) for k in keys) for r in self._table(table)), key=_sort_key)
+        n = min(int(n), len(rows))
+        if n <= 1:
+            return []
+        size, rem = divmod(len(rows), n)
+        starts, idx = [], 0
+        for i in range(n - 1):
+            idx += size + (1 if i < rem else 0)
+            starts.append(rows[idx])
+        return starts
+
+    def iter_table(self, schema, table, columns, keys, types, lo, hi, batch_size):
         def inside(row):
-            k = row.get(key) if key else None
-            if k is None:
-                return lo is None
-            return (lo is None or k >= lo) and (hi is None or k < hi)
+            k = _sort_key(row.get(c) for c in keys)
+            return (lo is None or k >= _sort_key(lo)) and (hi is None or k < _sort_key(hi))
 
         rows = [r for r in self._table(table) if inside(r)]
         for i in range(0, len(rows), batch_size):
@@ -172,10 +196,11 @@ class FakeCdcDatabase:
         path: str,
         capture_instances: Iterable[str],
         start_lsn: int = 0x2A_0000_0100_0001,
-        keys: dict[str, str] | None = None,
+        keys: dict[str, str | list[str]] | None = None,
     ):
-        """``keys``: capture instance -> key column. Instances with a key also keep the source
-        table's current rows (what a snapshot reads), updated by every commit."""
+        """``keys``: capture instance -> key column, or a list of them. Instances with a key
+        also keep the source table's current rows (what a snapshot reads), updated by every
+        commit."""
         self.path = path
         os.makedirs(os.path.join(path, "changes"), exist_ok=True)
         os.makedirs(os.path.join(path, "tables"), exist_ok=True)
@@ -225,18 +250,19 @@ class FakeCdcDatabase:
                 },
             )
         self._append(_MAPPING, {"start_lsn": start, "tran_end_time": self._ts(at)})
-        key = self._keys.get(capture_instance)
-        if key:  # the source table: after-images replace, deletes remove, before-images do nothing
+        keys = _key_columns(self._keys.get(capture_instance))
+        if keys:  # the source table: after-images replace, deletes remove, before-images do nothing
             p = os.path.join(self.path, "tables", f"{capture_instance}.json")
             table = {}
             if os.path.exists(p):
                 with open(p, encoding="utf-8") as fh:
                     table = json.load(fh)
             for op, row in changes:
+                ident = json.dumps([row[k] for k in keys])
                 if op in (2, 4):
-                    table[str(row[key])] = row
+                    table[ident] = row
                 elif op == 1:
-                    table.pop(str(row[key]), None)
+                    table.pop(ident, None)
             with open(p, "w", encoding="utf-8") as fh:
                 json.dump(table, fh)
         return start

@@ -347,7 +347,13 @@ def test_snapshot_reads_the_current_rows_in_key_ranges(spark, workdir):
         [StructField("order_id", IntegerType()), StructField("status", StringType())]
     )
     ranges = MssqlCdcSnapshotReader(opts, schema).partitions()
-    assert [(r.lo, r.hi) for r in ranges] == [(None, 2), (2, 5), (5, 7), (7, None)]  # keys 0..9
+    assert [(r.lo, r.hi) for r in ranges] == [
+        (None, (2,)),
+        ((2,), (5,)),
+        ((5,), (7,)),
+        ((7,), None),
+    ]
+    assert {r.types for r in ranges} == {None}  # keys 0..9: MIN..MAX, integer bounds
 
     rows = spark.read.format("mssql_cdc_snapshot").options(**opts).load().collect()
     assert sorted(((r["order_id"], r["status"]) for r in rows), key=str) == sorted(
@@ -454,22 +460,77 @@ def test_starting_lsn_is_exclusive(workdir):
     assert _order_ids(reader, ranges) == [2, 3, 4]
 
 
-def test_snapshot_of_a_non_integer_key_is_one_partition(workdir):
-    from pyspark.sql.types import StringType, StructField, StructType
-
+def _snapshot_partitions(src, schema, n):
+    """The snapshot reader's partitions, each with the key tuples it reads."""
     from mssql_cdc.source import MssqlCdcSnapshotReader
+
+    reader = MssqlCdcSnapshotReader(
+        {"backend": "fake", "fakePath": src, "captureInstance": CI, "numPartitions": str(n)},
+        schema,
+    )
+    keys = [f for f in schema.fieldNames() if f != "status"]
+    return [
+        (p, [tuple(r[k] for k in keys) for b in reader.read(p) for r in b.to_pylist()])
+        for p in reader.partitions()
+    ]
+
+
+def test_snapshot_of_a_string_key_is_tiled(workdir):
+    from pyspark.sql.types import StringType, StructField, StructType
 
     src = os.path.join(workdir, "src")
     db = FakeCdcDatabase(src, [CI], keys={CI: "code"})
     for i in range(5):
         db.commit(CI, [(2, {"code": f"C{i}", "status": "new"})], at=T0 + timedelta(minutes=i))
     schema = StructType([StructField("code", StringType()), StructField("status", StringType())])
-    reader = MssqlCdcSnapshotReader(
-        {"backend": "fake", "fakePath": src, "captureInstance": CI, "numPartitions": "4"}, schema
+    parts = _snapshot_partitions(src, schema, 4)
+    # NTILE(4) of 5 rows: 2, 1, 1, 1; each range starts at its tile's first key
+    assert [(p.lo, p.hi) for p, _ in parts] == [
+        (None, ("C2",)),
+        (("C2",), ("C3",)),
+        (("C3",), ("C4",)),
+        (("C4",), None),
+    ]
+    assert [rows for _, rows in parts] == [[("C0",), ("C1",)], [("C2",)], [("C3",)], [("C4",)]]
+    assert {tuple(p.types or ()) for p, _ in parts} == {("sql_variant",)}  # typed bounds
+
+
+def test_snapshot_of_a_composite_key_reads_every_row_once(spark, workdir):
+    from pyspark.sql.types import IntegerType, StringType, StructField, StructType
+
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: ["region", "id"]})
+    # NULL keys (the fake allows them, SQL Server's CDC index does not): first, in any column
+    keys = [(None, None), (None, "x"), (None, "y"), (1, None), (1, "a"), (1, "b"), (2, None)]
+    keys.append((2, "b"))
+    for a, b in keys:
+        db.commit(CI, [(2, {"region": a, "id": b, "status": "new"})])
+    schema = StructType(
+        [
+            StructField("region", IntegerType()),
+            StructField("id", StringType()),
+            StructField("status", StringType()),
+        ]
     )
-    [part] = reader.partitions()
-    assert (part.key, part.lo, part.hi) == (None, None, None)
-    assert sum(b.num_rows for b in reader.read(part)) == 5
+    parts = _snapshot_partitions(src, schema, 5)
+    # NTILE(5) of 8 rows: 2, 2, 2, 1, 1; bounds with a NULL leading or trailing column
+    assert [p.lo for p, _ in parts] == [None, (None, "y"), (1, "a"), (2, None), (2, "b")]
+    assert [len(rows) for _, rows in parts] == [2, 2, 2, 1, 1]
+    assert sorted((r for _, rows in parts for r in rows), key=str) == sorted(keys, key=str)
+    # more partitions than rows: one row each
+    many = _snapshot_partitions(src, schema, 20)
+    assert [len(rows) for _, rows in many] == [1] * 8
+    # through Spark: the tuple bounds pickle to the executors
+    opts = {
+        "backend": "fake",
+        "fakePath": src,
+        "captureInstance": CI,
+        "columns": "region INT, id STRING, status STRING",
+        "numPartitions": "5",
+    }
+    df = spark.read.format("mssql_cdc_snapshot").options(**opts).load()
+    assert df.rdd.getNumPartitions() == 5
+    assert sorted(((r["region"], r["id"]) for r in df.collect()), key=str) == sorted(keys, key=str)
 
 
 def test_include_command_id_false_drops_the_column(spark, workdir):

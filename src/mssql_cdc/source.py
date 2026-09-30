@@ -379,9 +379,10 @@ class KeyRange(InputPartition):
     commit_ts: str | None
     schema: str
     table: str
-    key: str | None  # None: the whole table in one partition
-    lo: int | None  # inclusive; None: open, plus the rows with a NULL key
-    hi: int | None  # exclusive; None: open
+    keys: list[str]  # []: the whole table in one partition
+    types: list[str] | None  # the keys' SQL types, bounds bound as CAST(? AS type); None: integers
+    lo: tuple | None  # inclusive, one value per key; None: open, plus the rows that sort first
+    hi: tuple | None  # exclusive; None: open
 
 
 class MssqlCdcSnapshotReader(_Common, DataSourceReader):
@@ -394,24 +395,30 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         lsn = normalize(given) if given else snapshot_lsn(client, source)
         commit_ts = client.lsn_to_time(lsn)
         schema, table, keys = source.schema, source.table, source.keys
-        # ponytail: uniform ranges over MIN..MAX of an integer leading key column (two seeks);
-        # sparse or skewed keys give uneven partitions. Tile with NTILE if that shows up.
-        key = keys[0] if keys and keys[0] in self.source_columns else None
-        lo, hi = (
-            client.key_range(schema, table, key)
-            if key and self.num_partitions > 1
-            else (None, None)
-        )
-        whole = [KeyRange(self.capture_instance, lsn, commit_ts, schema, table, None, None, None)]
-        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (lo, hi)) or hi == lo:
-            return whole
-        n = min(self.num_partitions, hi - lo + 1)
-        cuts = [lo + (hi - lo + 1) * i // n for i in range(1, n)]
-        bounds = [None, *cuts, None]
-        return [
-            KeyRange(self.capture_instance, lsn, commit_ts, schema, table, key, a, b)
-            for a, b in pairwise(bounds)
-        ]
+
+        def ranges(keys, types, bounds):
+            return [
+                KeyRange(self.capture_instance, lsn, commit_ts, schema, table, keys, types, a, b)
+                for a, b in pairwise([None, *bounds, None])
+            ]
+
+        if self.num_partitions <= 1 or not keys or not set(keys) <= set(self.source_columns):
+            return ranges([], None, [])
+        if len(keys) == 1:
+            # One integer key: uniform ranges over MIN..MAX, two seeks. NTILE would read and
+            # spool the whole key to count and tile it; sparse or skewed keys give uneven
+            # ranges instead. ponytail: a single non-integer key pays these two seeks too.
+            lo, hi = client.key_range(schema, table, keys[0])
+            if lo is None or lo == hi:  # empty, or one row
+                return ranges([], None, [])
+            if all(isinstance(v, int) and not isinstance(v, bool) for v in (lo, hi)):
+                n = min(self.num_partitions, hi - lo + 1)
+                return ranges(keys, None, [(lo + (hi - lo + 1) * i // n,) for i in range(1, n)])
+        # Composite or non-integer key: tiles of the rows by NTILE, bounds typed per column.
+        types = client.key_types(self.capture_instance, keys)
+        if None in types:
+            return ranges([], None, [])
+        return ranges(keys, types, client.key_tiles(schema, table, keys, self.num_partitions))
 
     def read(self, partition: KeyRange) -> Iterator:  # type: ignore[override]  # partitions() only plans KeyRange
         from datetime import datetime
@@ -435,7 +442,8 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
                 partition.schema,
                 partition.table,
                 self.source_columns,
-                partition.key,
+                partition.keys,
+                partition.types,
                 partition.lo,
                 partition.hi,
                 self.batch_size,

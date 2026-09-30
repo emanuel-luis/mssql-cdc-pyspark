@@ -17,7 +17,7 @@
 | [0013](0013-schema-migrations-per-table-kind.md) | Schema migrations per table kind | accepted | 2026-09-28T21:26:25-03:00 |  |
 | [0014](0014-network-and-read-metrics-in-facts.md) | Network and read metrics in the ingestion facts | accepted | 2026-09-29T10:12:04-03:00 | 2026-09-29T10:48:30-03:00, 2026-09-29T22:15:55-03:00 |
 | [0015](0015-split-batches-by-change-rows.md) | Split batches by the change table's rows | accepted | 2026-09-29T10:31:46-03:00 |  |
-| [0016](0016-bootstrap-snapshot-at-a-recorded-lsn.md) | Bootstrap with a snapshot stamped with an LSN recorded before the read | accepted | 2026-09-29T12:38:28-03:00 |  |
+| [0016](0016-bootstrap-snapshot-at-a-recorded-lsn.md) | Bootstrap with a snapshot stamped with an LSN recorded before the read | accepted | 2026-09-29T12:38:28-03:00 | 2026-09-30T11:02:01-03:00 |
 | [0017](0017-retention-headroom-in-facts.md) | Retention headroom in the ingestion facts | accepted | 2026-09-29T14:58:53-03:00 |  |
 | [0018](0018-automatic-resnapshot-after-data-loss.md) | Automatic re-snapshot after CDC data loss | accepted | 2026-09-29T17:46:41-03:00 |  |
 | [0021](0021-compatibility-policy-for-0x.md) | Compatibility policy for 0.x: the state contract is stable | accepted | 2026-09-30T11:07:08-03:00 |  |

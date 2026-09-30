@@ -455,3 +455,120 @@ def test_resnapshot_recovers_a_stream_whose_changes_were_purged(
     [event] = delta_spark.read.format("delta").load(facts).where("event = 'resnapshot'").collect()
     assert event["app_id"] == "resnap-v1.g1" and event["rows"] == 3
     assert event["lost_from_ts"] <= event["lost_to_ts"]
+
+
+_N = "(VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) t(n)"
+SNAPSHOT_TILES = {  # table: (columns, rows, the keys' types for the CASTs)
+    # a composite primary key led by a nvarchar, with a datetime2(7) whose bounds come back
+    # truncated to microseconds
+    "snap_comp": (
+        (
+            "region NVARCHAR(10) NOT NULL, at DATETIME2(7) NOT NULL, seq INT NOT NULL, v INT, "
+            "PRIMARY KEY (region, at, seq)"
+        ),
+        (
+            "SELECT IIF(n < 5, N'n', N'ş'), DATEADD(second, n, "
+            f"CAST('2026-09-28T10:00:00.1234567' AS datetime2(7))), n, n FROM {_N}"
+        ),
+        ["nvarchar(10)", "datetime2(7)", "int"],
+    ),
+    # one varchar key: an nvarchar parameter would convert the column
+    "snap_code": (
+        "code VARCHAR(12) NOT NULL PRIMARY KEY, v INT",
+        f"SELECT CONCAT('k', n), n FROM {_N}",
+        ["varchar(12)"],
+    ),
+}
+
+
+@pytest.mark.parametrize("name", SNAPSHOT_TILES)
+def test_snapshot_tiles_composite_and_string_keys(spark, sqlserver, name):
+    ddl, rows, types = SNAPSHOT_TILES[name]
+    ci = sqlserver.cdc_table(name, ddl)
+    sqlserver.run(f"INSERT INTO dbo.{name} {rows}")
+    client = make_client({"connectionString": sqlserver.connection_string})
+    try:  # lengths in characters, precisions as declared
+        assert client.key_types(ci, client.source_table(ci).keys) == types
+    finally:
+        client.close()
+    df = (
+        spark.read.format("mssql_cdc_snapshot")
+        .option("connectionString", sqlserver.connection_string)
+        .option("captureInstance", ci)
+        .option("numPartitions", "3")
+        .load()
+    )
+    assert df.rdd.glom().map(len).collect() == [4, 3, 3]  # NTILE(3) of 10 rows, each read once
+    assert sorted(r["v"] for r in df.collect()) == sorted(
+        r[0] for r in sqlserver.run(f"SELECT v FROM dbo.{name}")
+    )
+
+
+def _plan(sqlserver, sql, params=()):
+    """Rows and actual plan (STATISTICS XML) of one query."""
+    conn = sqlserver.connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SET STATISTICS XML ON")
+        cur.execute(sql, tuple(params))
+        rows = len(cur.fetchall())
+        cur.nextset()
+        return rows, cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _rows_read(plan):
+    return sum(int(n) for n in re.findall(r'ActualRowsRead="(\d+)"', plan))
+
+
+def test_snapshot_ranges_seek_while_ntile_scans_and_spools(sqlserver):
+    from mssql_cdc.client import _key_where
+
+    ci = sqlserver.cdc_table(
+        "snap_seek",
+        "region VARCHAR(10) NOT NULL, seq INT NOT NULL, v INT, PRIMARY KEY (region, seq)",
+    )
+    sqlserver.run(
+        "INSERT INTO dbo.snap_seek SELECT CONCAT('r', n % 20), n, n FROM (SELECT TOP 20000 "
+        "ROW_NUMBER() OVER (ORDER BY (SELECT 1)) n FROM sys.all_columns a CROSS JOIN sys.all_columns b) t"
+    )
+    client = make_client({"connectionString": sqlserver.connection_string})
+    try:
+        keys = client.source_table(ci).keys
+        types = client.key_types(ci, keys)
+        lo, hi = client.key_tiles("dbo", "snap_seek", keys, 4)[:2]
+    finally:
+        client.close()
+    where, params = _key_where(keys, types, lo, hi)
+    rows, plan = _plan(sqlserver, f"SELECT * FROM dbo.snap_seek WHERE {where}", params)
+    assert rows == 5000 and "CONVERT_IMPLICIT" not in plan  # varchar compared as varchar
+    assert _rows_read(plan) < 10000  # a seek of about the range
+    # the same range without the redundant leading bounds: a scan of the whole table
+    v, i = "CAST(? AS varchar(10))", "CAST(? AS int)"
+    bare = (
+        f"([region] > {v} OR ([region] = {v} AND [seq] >= {i})) AND (([region] < {v} OR "
+        f"[region] IS NULL) OR ([region] = {v} AND ([seq] < {i} OR [seq] IS NULL)))"
+    )
+    bare_params = [lo[0], lo[0], lo[1], hi[0], hi[0], hi[1]]
+    rows, plan = _plan(sqlserver, f"SELECT * FROM dbo.snap_seek WHERE {bare}", bare_params)
+    assert rows == 5000 and _rows_read(plan) == 20000
+    # a bare nvarchar parameter converts the varchar column instead
+    _, plan = _plan(sqlserver, "SELECT * FROM dbo.snap_seek WHERE region >= ?", ["r1é"])
+    assert "CONVERT_IMPLICIT(nvarchar(10)," in plan
+    # why one integer key keeps MIN..MAX (two seeks): NTILE reads the whole key and spools it
+    k = "[region], [seq]"
+    _, plan = _plan(sqlserver, f"SELECT {k}, NTILE(4) OVER (ORDER BY {k}) FROM dbo.snap_seek")
+    assert "Table Spool" in plan and _rows_read(plan) >= 20000
+
+
+def test_cdc_refuses_a_unique_index_over_nullable_columns(sqlserver):
+    # so a snapshot's key columns are never NULL on SQL Server: the NULL handling of the key
+    # ranges is defensive, and what the fake (whose keys can be NULL) does
+    sqlserver.run("CREATE TABLE dbo.snap_nulls (a INT NULL, b VARCHAR(5) NULL)")
+    sqlserver.run("CREATE UNIQUE INDEX ux_snap_nulls ON dbo.snap_nulls (a, b)")
+    with pytest.raises(Exception, match="must be defined as NOT NULL"):
+        sqlserver.run(
+            "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'snap_nulls', "
+            "@role_name = NULL, @index_name = N'ux_snap_nulls', @supports_net_changes = 0"
+        )

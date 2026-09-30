@@ -27,6 +27,7 @@ from . import lsn as _lsn
 
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _TZ_RE = re.compile(r"^[A-Za-z0-9 ._+\-/()]+$")
+_TYPE_RE = re.compile(r"^[a-z0-9]+(\((max|\d+(,\d+)?)\))?$")  # varchar(20), decimal(18,2), int
 
 
 class DataLossError(RuntimeError):
@@ -96,6 +97,69 @@ def _spark_type(sql_type: str, precision: int, scale: int) -> str:
     return _SPARK_TYPES[t]
 
 
+def _sql_type(col: dict) -> str | None:
+    """Declared type of a captured column (a ``sys.sp_cdc_get_captured_columns`` row), to CAST
+    a bound key value to. None when a bound cannot round-trip: ``time`` comes back as Arrow
+    time64[ns], which has no Python value, and a type without a Spark mapping is untested."""
+    t = (col["data_type"] or "").lower()
+    if t in ("decimal", "numeric"):
+        return f"{t}({int(col['numeric_precision'])},{int(col['numeric_scale'])})"
+    if t == "time" or t not in _SPARK_TYPES:
+        return None
+    if t in ("char", "varchar", "nchar", "nvarchar", "binary", "varbinary"):
+        n = int(col["character_maximum_length"])
+        return f"{t}({'max' if n == -1 else n})"
+    if t in ("datetime2", "datetimeoffset"):
+        return f"{t}({int(col['datetime_precision'])})"
+    return t
+
+
+def _check_type(sql_type: str) -> str:
+    if not isinstance(sql_type, str) or not _TYPE_RE.match(sql_type):
+        raise ValueError(f"Invalid SQL type: {sql_type!r}")
+    return sql_type
+
+
+def _key_where(keys: Sequence[str], types, lo, hi) -> tuple[str, list]:
+    """WHERE clause and parameters for ``lo <= (keys) < hi`` in the order ORDER BY sorts the
+    rows: column by column, NULL first. A None bound is open.
+
+    T-SQL has no row-value comparison, so ``(a, b) >= (x, y)`` becomes
+    ``a >= x AND (a > x OR (a = x AND b >= y))``. The leading ``a >= x`` is redundant but
+    sargable: without it SQL Server scans the table for every partition instead of seeking.
+    ``types`` None: integer bounds, inlined. Otherwise each bound is a parameter CAST to its
+    column's declared type, so a varchar key is never compared (and converted) as nvarchar.
+    """
+    ks = [f"[{_check_column(k)}]" for k in keys]
+    params: list = []
+
+    def cmp(i: int, op: str, v) -> str:  # one column against one bound value
+        k = ks[i]
+        if v is None:  # NULL sorts first: nothing is below it, everything is at or above it
+            return {"=": f"{k} IS NULL", ">": f"{k} IS NOT NULL", ">=": "1 = 1", "<": "1 = 0"}[op]
+        if types is None:
+            x = str(int(v))
+        else:
+            params.append(v)
+            x = f"CAST(? AS {_check_type(types[i])})"
+        return f"({k} {op} {x} OR {k} IS NULL)" if op in ("<", "<=") else f"{k} {op} {x}"
+
+    def row_cmp(bound, op: str) -> str:  # (keys) op bound, op ">=" or "<"
+        parts = []
+        if len(ks) > 1 and bound[0] is not None:
+            parts.append(cmp(0, op[0] + "=", bound[0]))  # the redundant, sargable one
+        terms = []
+        for i in range(len(ks)):  # built in text order: cmp() appends the parameters
+            ands = [cmp(j, "=", bound[j]) for j in range(i)]
+            ands.append(cmp(i, op if i == len(ks) - 1 else op[0], bound[i]))
+            terms.append(ands[0] if len(ands) == 1 else "(" + " AND ".join(ands) + ")")
+        parts.append(terms[0] if len(terms) == 1 else "(" + " OR ".join(terms) + ")")
+        return " AND ".join(parts)
+
+    where = [row_cmp(b, op) for b, op in ((lo, ">="), (hi, "<")) if b is not None]
+    return " AND ".join(where), params
+
+
 # --------------------------------------------------------------------------- #
 # Interface
 # --------------------------------------------------------------------------- #
@@ -149,18 +213,31 @@ class CdcClient(ABC):
         """(MIN, MAX) of ``key`` in the table; (None, None) when it is empty."""
 
     @abstractmethod
+    def key_types(self, capture_instance: str, keys: Sequence[str]) -> list[str | None]:
+        """Declared SQL type of each key column, to CAST bounds to; None where it cannot."""
+
+    @abstractmethod
+    def key_tiles(self, schema: str, table: str, keys: Sequence[str], n: int) -> list[tuple]:
+        """The first key of tiles 2..n of the table's rows ordered by ``keys``
+        (``NTILE(n)``, NULL first): the lower bounds that split it into ranges of about the
+        same number of rows. Fewer when the table has fewer than ``n`` rows."""
+
+    @abstractmethod
     def iter_table(
         self,
         schema: str,
         table: str,
         columns: Sequence[str],
-        key: str | None,
-        lo: int | None,
-        hi: int | None,
+        keys: Sequence[str],
+        types: Sequence[str] | None,
+        lo: tuple | None,
+        hi: tuple | None,
         batch_size: int,
     ) -> Iterator[pa.RecordBatch]:
-        """Current rows of the table (``columns`` only) with ``lo <= key < hi``. A None bound
-        is open; the range open below (``lo`` None) also holds the rows whose key is NULL."""
+        """Current rows of the table (``columns`` only) with ``lo <= (keys) < hi``, compared
+        column by column with NULL first, like ORDER BY. A None bound is open, so the range
+        open below also holds the rows whose leading key is NULL. ``types``: the key columns'
+        SQL types for the bounds (``key_types``); None for integer bounds."""
 
     def captured_columns(self, capture_instance: str) -> str:
         """Spark DDL of the captured columns, in capture order."""
@@ -438,10 +515,10 @@ class SqlCdcClient(CdcClient):
             return None
         return int(value or 0)
 
-    def captured_columns(self, capture_instance):
+    def _captured_rows(self, ci: str) -> list[dict]:
         # The documented API, not cdc.captured_columns: it needs only what the query
         # functions need (SELECT on the source columns, gating role if any).
-        ci = _check_ident(capture_instance, "capture instance")
+        ci = _check_ident(ci, "capture instance")
         not_found = (
             f"Capture instance {ci!r} not found, or the login lacks SELECT on its source "
             "columns (or membership in its gating role). Pass 'columns' explicitly."
@@ -458,13 +535,18 @@ class SqlCdcClient(CdcClient):
             raise ValueError(not_found) from exc
         if not rows:
             raise ValueError(not_found)
+        return sorted(rows, key=lambda r: r["column_ordinal"])
+
+    def captured_columns(self, capture_instance):
         ddl = []
-        for r in sorted(rows, key=lambda r: r["column_ordinal"]):
+        for r in self._captured_rows(capture_instance):
             name = _check_column(r["column_name"])
             try:
                 typ = _spark_type(r["data_type"], r["numeric_precision"], r["numeric_scale"])
             except ValueError as e:
-                raise ValueError(f"{ci}.{name}: {e}. Pass 'columns' explicitly.") from None
+                raise ValueError(
+                    f"{capture_instance}.{name}: {e}. Pass 'columns' explicitly."
+                ) from None
             ddl.append(f"`{name.replace('`', '``')}` {typ}")
         return ", ".join(ddl)
 
@@ -531,23 +613,35 @@ class SqlCdcClient(CdcClient):
                 return row["lo"], row["hi"]
         return None, None
 
-    def iter_table(self, schema, table, columns, key, lo, hi, batch_size):
+    def key_types(self, capture_instance, keys):
+        types = {r["column_name"]: _sql_type(r) for r in self._captured_rows(capture_instance)}
+        return [types.get(k) for k in keys]
+
+    def key_tiles(self, schema, table, keys, n):
+        # NTILE over the table's own rows, as split_points over the change table's (ADR 0015):
+        # one ordered pass over the key; only the first key of each later tile comes back.
+        t = f"[{_check_column(schema)}].[{_check_column(table)}]"
+        k = ", ".join(f"[{_check_column(c)}]" for c in keys)
+        sql = (
+            f"SELECT {k} FROM (SELECT {k}, g, LAG(g) OVER (ORDER BY {k}) AS p FROM ("
+            f"SELECT {k}, NTILE({int(n)}) OVER (ORDER BY {k}) AS g FROM {t}) a"
+            ") b WHERE g <> p ORDER BY g"
+        )
+        return [
+            tuple(row)
+            for batch in self._b.batches(sql, (), 1000)
+            for row in zip(*(c.to_pylist() for c in batch.columns))
+        ]
+
+    def iter_table(self, schema, table, columns, keys, types, lo, hi, batch_size):
         # READ COMMITTED, never NOLOCK: a dirty read can keep a row that a rollback then
         # removes, and no change row would ever correct it downstream.
         cols = ", ".join(f"[{_check_column(c)}]" for c in columns)
-        where = []
-        if key is not None:
-            k = f"[{_check_column(key)}]"
-            if lo is not None:
-                where.append(f"{k} >= {int(lo)}")
-            if hi is not None:
-                where.append(
-                    f"({k} < {int(hi)} OR {k} IS NULL)" if lo is None else f"{k} < {int(hi)}"
-                )
+        where, params = _key_where(keys, types, lo, hi)
         sql = f"SELECT {cols} FROM [{_check_column(schema)}].[{_check_column(table)}]" + (
-            " WHERE " + " AND ".join(where) if where else ""
+            f" WHERE {where}" if where else ""
         )
-        yield from self._b.batches(sql, (), batch_size)
+        yield from self._b.batches(sql, params, batch_size)
 
     def _change_table_batches(self, ci: str, sql: str, params, batch_size: int):
         """Batches of a query on cdc.[<ci>_CT]; a denied read names the grant it needs."""

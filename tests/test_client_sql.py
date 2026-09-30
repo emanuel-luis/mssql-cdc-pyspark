@@ -173,14 +173,16 @@ class Rows(Recorder):
         return iter([pa.RecordBatch.from_pylist(self.rows)] if self.rows else [])
 
 
-def _col(ordinal, name, data_type, precision=None, scale=None):
+def _col(ordinal, name, data_type, precision=None, scale=None, length=None, dt_precision=None):
     """One row of sys.sp_cdc_get_captured_columns (the columns the client reads)."""
     return {
         "column_ordinal": ordinal,
         "column_name": name,
         "data_type": data_type,
+        "character_maximum_length": length,
         "numeric_precision": precision,
         "numeric_scale": scale,
+        "datetime_precision": dt_precision,
     }
 
 
@@ -335,15 +337,94 @@ def test_snapshot_queries():
         "(SELECT MAX([order_id]) FROM [sales].[orders]) AS hi"
     )
 
-    def where(lo, hi, key="order_id"):
-        list(client.iter_table("sales", "orders", ["order_id", "status"], key, lo, hi, 100))
-        return rec.calls[-1][0].removeprefix("SELECT [order_id], [status] FROM [sales].[orders]")
+    def where(lo, hi, keys=("order_id",), types=None):
+        cols = ["order_id", "status"]
+        list(client.iter_table("sales", "orders", cols, keys, types, lo, hi, 100))
+        sql, params = rec.calls[-1]
+        return sql.removeprefix("SELECT [order_id], [status] FROM [sales].[orders]"), params
 
-    assert where(None, None) == "" and where(1, 2, key=None) == ""
-    assert where(None, 10) == " WHERE ([order_id] < 10 OR [order_id] IS NULL)"
-    assert where(10, 20) == " WHERE [order_id] >= 10 AND [order_id] < 20"
-    assert where(20, None) == " WHERE [order_id] >= 20"
+    # one integer key: inlined bounds, no parameters
+    assert where(None, None) == ("", ()) and where(None, None, keys=()) == ("", ())
+    assert where(None, (10,)) == (" WHERE ([order_id] < 10 OR [order_id] IS NULL)", ())
+    assert where((10,), (20,))[0] == (
+        " WHERE [order_id] >= 10 AND ([order_id] < 20 OR [order_id] IS NULL)"
+    )
+    assert where((20,), None) == (" WHERE [order_id] >= 20", ())
+    # a composite key: expanded row comparison, bounds bound and CAST to the declared types
+    keys, types = ("region", "id"), ("varchar(10)", "int")
+    v, i = "CAST(? AS varchar(10))", "CAST(? AS int)"
+    sql, params = where(("n", 5), ("s", 1), keys, types)
+    assert sql == (
+        f" WHERE [region] >= {v} AND ([region] > {v} OR ([region] = {v} AND [id] >= {i}))"
+        f" AND ([region] <= {v} OR [region] IS NULL)"
+        f" AND (([region] < {v} OR [region] IS NULL)"
+        f" OR ([region] = {v} AND ([id] < {i} OR [id] IS NULL)))"
+    )
+    assert params == ("n", "n", "n", 5, "s", "s", "s", 1)  # in the order of the ? marks
+    # NULL bounds (defensive: SQL Server refuses a CDC index over nullable columns), sorting
+    # first as in ORDER BY
+    assert where((None, 5), (None, 9), keys, types) == (
+        (
+            f" WHERE ([region] IS NOT NULL OR ([region] IS NULL AND [id] >= {i}))"
+            f" AND (1 = 0 OR ([region] IS NULL AND ([id] < {i} OR [id] IS NULL)))"
+        ),
+        (5, 9),
+    )
+    assert where(("n", None), None, keys, types)[0] == (
+        f" WHERE [region] >= {v} AND ([region] > {v} OR ([region] = {v} AND 1 = 1))"
+    )
     with pytest.raises(ValueError):
-        where("1; DROP TABLE x", None)
+        where(("1; DROP TABLE x",), None)
     with pytest.raises(ValueError):
-        where(None, None, key="a]; DROP TABLE x --")
+        where(None, None, keys=("a]; DROP TABLE x --",))
+    with pytest.raises(ValueError):
+        where(("n",), None, keys=("region",), types=("int) OR 1=1 --",))
+
+
+def test_key_tiles_and_types_for_composite_or_non_integer_keys():
+    rec = Rows([{"region": "n", "id": 3}, {"region": "s", "id": 1}])
+    client = SqlCdcClient(rec, source_timezone="UTC")
+    assert client.key_tiles("sales", "orders", ["region", "id"], 3) == [("n", 3), ("s", 1)]
+    sql, params = rec.calls[-1]
+    assert (
+        sql
+        == (
+            "SELECT [region], [id] FROM (SELECT [region], [id], g, "
+            "LAG(g) OVER (ORDER BY [region], [id]) AS p FROM (SELECT [region], [id], "
+            "NTILE(3) OVER (ORDER BY [region], [id]) AS g FROM [sales].[orders]) a"
+            ") b WHERE g <> p ORDER BY g"
+        )
+        and params == ()
+    )  # only the first key of tiles 2..n crosses the network
+    with pytest.raises(ValueError):
+        client.key_tiles("sales", "orders", ["id]) a; DROP TABLE x --"], 3)
+    with pytest.raises(ValueError):
+        client.key_tiles("sales", "orders", ["id"], "3; DROP TABLE x")
+
+    cols = SqlCdcClient(
+        Rows(
+            [
+                _col(1, "region", "varchar", length=10),
+                _col(2, "code", "nvarchar", length=20),
+                _col(3, "amount", "numeric", 18, 2),
+                _col(4, "at", "datetime2", dt_precision=7),
+                _col(5, "day", "date", dt_precision=0),
+                _col(6, "id", "bigint", 19, 0),
+                _col(7, "t", "time", dt_precision=7),
+                _col(8, "g", "geography"),
+            ]
+        )
+    )
+    assert cols.key_types(
+        "dbo_orders", ["region", "code", "amount", "at", "day", "id", "t", "g", "missing"]
+    ) == [
+        "varchar(10)",
+        "nvarchar(20)",
+        "numeric(18,2)",
+        "datetime2(7)",
+        "date",
+        "bigint",
+        None,  # time(7) comes back as time64[ns]: no Python value to bind
+        None,  # no Spark mapping
+        None,
+    ]

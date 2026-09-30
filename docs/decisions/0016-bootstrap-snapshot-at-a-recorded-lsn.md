@@ -1,7 +1,8 @@
 # 0016: Bootstrap with a snapshot stamped with an LSN recorded before the read
 
 **Status:** accepted  
-**Date:** 2026-09-29T12:38:28-03:00
+**Date:** 2026-09-29T12:38:28-03:00  
+**Amended:** 2026-09-30T11:02:01-03:00, NTILE tiles for composite and non-integer keys (see the Amendment)
 
 ## Context
 The stream starts from what CDC retention still holds (`startingLsn=earliest`), which is
@@ -52,3 +53,45 @@ stream at an exact point, without a gap and without a lock on the source.
   them). `tests/test_source_fake.py` checks the key ranges and the stamps;
   `tests/test_delta_sink.py` and `tests/integration` check that bootstrap runs once and the
   latest image per key equals the source table.
+
+## Amendment: tiles for composite and non-integer keys
+A table keyed by a composite or a string key was read in one partition, by one task on one
+connection: slow on a big table.
+
+* The key is every column of the capture instance's unique index, all in the stream's
+  schema. One integer column keeps the uniform ranges over MIN..MAX: two seeks, where NTILE
+  reads the whole key and spools it (a Table Spool in its plan, `tests/integration`). Sparse
+  or skewed integer keys still give uneven ranges.
+* Any other key, with `numPartitions` > 1: `NTILE(n) OVER (ORDER BY <every key column>)` on the
+  source table, server-side, like `split_points` on the change table (ADR 0015). Only the
+  first key tuple of tiles 2..n comes back; partition i reads `start(i) <= key < start(i+1)`,
+  the first one open below and the last open above. Fewer rows than `n`: one row per
+  partition. Empty table, or one row: one partition.
+* T-SQL has no row-value comparison: `(a, b) >= (x, y)` is written
+  `a >= x AND (a > x OR (a = x AND b >= y))`. The leading `a >= x` is redundant but
+  sargable: with it a range of a 20000-row table reads about its own rows through a seek;
+  without it the plan scans all 20000 (`tests/integration`).
+* The bounds come back typed through Arrow and are bound as parameters,
+  `CAST(? AS <declared type>)`, with the type built from `sys.sp_cdc_get_captured_columns`
+  (length, precision and scale; documented API, invariant 11) and validated before it is
+  inlined (invariant 13). A bare string parameter is nvarchar and converts a varchar key
+  column instead (`CONVERT_IMPLICIT` in the plan); the CAST keeps the column as it is. LSNs
+  still cross as hex strings (invariant 6). `KeyRange` holds only plain Python values, so it
+  pickles, and `read()` stays stateless (invariant 5).
+* A bound need not be exact, only monotonic: consecutive ranges use complementary
+  predicates, so every row lands in exactly one of them. datetime2(7) and datetimeoffset(7)
+  bounds come back truncated to microseconds, which only moves a boundary. A key with a
+  `time` column, or with a type that has no Spark mapping, stays one partition: `time` comes
+  back as Arrow time64[ns] (nine digits in `test_inferred_columns_round_trip_every_mapped_type`),
+  which has no Python value to bind.
+* NULL sorts first in every column, as in ORDER BY, so the first range would take rows with
+  a NULL leading key. That is defensive: SQL Server refuses a CDC index over nullable columns
+  (`tests/integration`). The fake allows NULL keys and follows the same order.
+* `FakeCdcDatabase(keys=...)` takes a column or a list of them, and the fake tiles like
+  NTILE. `tests/test_client_sql.py` pins the queries; `tests/test_source_fake.py` checks
+  that composite and string keys read every row exactly once, NULL keys and more partitions
+  than rows included; `tests/integration` reads a composite and a varchar primary key with
+  `numPartitions=3` in tiles of 4, 3 and 3 rows that together equal the table.
+* ponytail: the NTILE query reads and spools the whole key; a range would be cheaper with
+  `ROW_NUMBER` over the index and a separate `COUNT(*)`, if a large table shows it. Typed
+  bounds are untested on the `arrow-odbc` backend, like the rest of it (ADR 0003).

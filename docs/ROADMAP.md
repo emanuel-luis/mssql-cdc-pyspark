@@ -16,8 +16,10 @@
       same backend, start the stream at that LSN (ADR 0016).
 - [x] **Automatic re-snapshot after data loss**: `to_delta(on_data_loss="resnapshot")`,
       checkpoint generations, loss events in the facts, at most one per interval (ADR 0018).
-- [ ] Snapshot partitions for composite or non-integer keys, and NTILE tiles for sparse
-      ones (today: uniform ranges of an integer leading key, else one partition).
+- [x] Snapshot partitions for composite or non-integer keys: NTILE tiles of the rows,
+      bounds bound typed (ADR 0016 amendment).
+- [ ] NTILE tiles for sparse single integer keys, if uneven MIN..MAX ranges show up
+      (NTILE scans and spools the key, MIN..MAX is two seeks).
 - [ ] **Schema changes**: detect `cdc.ddl_history`; support switching to a second
       capture instance without losing changes.
 - [ ] **Silver helper**: apply changes to a target with MERGE, latest image per key by
