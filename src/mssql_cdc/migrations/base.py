@@ -73,3 +73,17 @@ def add_columns(spark, table: str, columns) -> None:
         .option("mergeSchema", "true")
     )
     writer.save(table) if is_path(table) else writer.saveAsTable(table)
+
+
+def set_comments(spark, table: str, columns: dict, table_comment: str | None = None) -> None:
+    """Replace the comments of existing columns ``{name: comment}``, and of the table when
+    ``table_comment`` is given: metadata-only commits, for columns whose meaning changed."""
+
+    def literal(text: str) -> str:
+        return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    ref = table_ref(table)
+    if table_comment is not None:
+        spark.sql(f"COMMENT ON TABLE {ref} IS {literal(table_comment)}")
+    for name, comment in columns.items():
+        spark.sql(f"ALTER TABLE {ref} ALTER COLUMN `{name}` COMMENT {literal(comment)}")

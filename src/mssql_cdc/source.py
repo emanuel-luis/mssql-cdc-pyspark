@@ -162,8 +162,8 @@ class _Common:
             else int(num_partitions)
         )
         self.batch_size = int(_opt(options, "arrowBatchSize", "10000"))
-        # optional: a directory (local or FUSE, e.g. /Volumes/...) where each partition that
-        # read rows leaves its metrics for delta_sink(metrics_path=...) to fold into the batch facts
+        # optional: a directory (local or FUSE, e.g. /Volumes/...) where each partition leaves
+        # its metrics for delta_sink(metrics_path=...) to fold into the batch facts
         self.metrics_path = _opt(options, "metricsPath")
         meta_names = {n for n, _ in METADATA_COLUMNS}
         self.field_names = list(schema.fieldNames())
@@ -278,9 +278,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
             # Cleanup may have run since partitions() checked. It moves min_lsn before it
             # deletes rows, so min_lsn past from_lsn now means rows may be missing.
             min_lsn = self._guard_retention(client, partition.from_lsn)
-            if (
-                self.metrics_path and rows
-            ):  # the sink never folds (or removes) an empty batch's file
+            if self.metrics_path:  # rows or not: a batch that read none writes its facts row too
                 wait_after = client.network_wait_ms()
                 try:
                     watermark = client.lsn_to_time(min_lsn)
@@ -296,6 +294,10 @@ class _BaseReader(_Common, DataSourceStreamReader):
                     )
                 except Exception:  # noqa: BLE001 - a metric must never fail a read
                     source_max = capture_lag = None
+                try:  # the batch's last partition ends at its end offset: where the stream is
+                    to_commit_ts = client.lsn_to_time(partition.to_lsn)
+                except Exception:  # noqa: BLE001 - a metric must never fail a read
+                    to_commit_ts = None
                 _write_metrics(
                     self.metrics_path,
                     partition,
@@ -313,6 +315,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
                         "retention_watermark_ts": watermark,
                         "source_max_commit_ts": source_max,
                         "capture_lag_seconds": capture_lag,
+                        "to_commit_ts": to_commit_ts,
                     },
                 )
         finally:

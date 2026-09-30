@@ -386,9 +386,7 @@ class CdcStream:
             .options(**options)
             .load()
             .writeStream.foreachBatch(
-                delta_sink(
-                    target, sink_id, facts_table, metrics_path=metrics if facts_table else None
-                )
+                delta_sink(target, sink_id, facts_table, metrics_path=metrics)  # removes its files
             )
             .option("checkpointLocation", checkpoint)
         )

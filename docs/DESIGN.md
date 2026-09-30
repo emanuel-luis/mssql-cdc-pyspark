@@ -53,8 +53,9 @@ writes to the source.
 
 ## Facts and verdict
 
-* **Facts** per micro-batch: row counts per operation, LSN and commit-time ranges.
-  Written into the Delta commit (`userMetadata`) and into a facts table, because
+* **Facts** per micro-batch, empty ones included: row counts per operation, LSN and
+  commit-time ranges, and (with metrics) the batch's end offset. Written into the Delta
+  commit (`userMetadata`, batches with rows) and into a facts table, because
   Delta checkpoints do not preserve `commitInfo`, which is lost with log cleanup.
 * **Verdict** per table: `finalized_until = truncate(end.commit_ts, granularity)`.
   Every period strictly before it is complete. Stored in a small control table,

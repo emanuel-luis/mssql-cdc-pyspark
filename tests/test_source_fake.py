@@ -412,7 +412,7 @@ def test_fail_on_data_loss_false_skips_to_min_lsn_without_inverted_ranges(workdi
     assert _order_ids(reader, planned) == [6, 7, 8, 9]
 
 
-def test_a_range_without_rows_leaves_no_metrics_file(workdir):
+def test_a_range_without_rows_leaves_its_metrics_file_with_its_end_commit_time(workdir):
     from pyspark.sql.streaming.datasource import ReadAllAvailable
 
     db = _db(workdir, n_tx=1)
@@ -422,9 +422,14 @@ def test_a_range_without_rows_leaves_no_metrics_file(workdir):
     busy = reader.latestOffset(start, ReadAllAvailable())
     db.idle(at=T0 + timedelta(hours=1))
     idle = reader.latestOffset(busy, ReadAllAvailable())
-    # the sink skips a batch without rows, so it would never fold (and remove) its file
+    # the sink writes a facts row for a batch without rows too, from its files (ADR 0014)
     _order_ids(reader, reader.partitions(start, busy) + reader.partitions(busy, idle))
-    assert len([f for f in os.listdir(metrics) if f.endswith(".json")]) == 1
+    files = {}
+    for name in os.listdir(metrics):
+        with open(os.path.join(metrics, name), encoding="utf-8") as fh:
+            m = json.load(fh)
+        files[m["to_lsn"]] = (m["rows"], m["to_commit_ts"])
+    assert files == {busy["lsn"]: (3, busy["commit_ts"]), idle["lsn"]: (0, idle["commit_ts"])}
 
 
 def test_snapshot_is_stamped_with_the_lsn_recorded_before_the_read(workdir):

@@ -8,13 +8,20 @@
 * The facts table also times each batch: ``started_at`` and ``duration_ms`` cover the
   read from SQL Server, the facts aggregation and the target write. Offset planning and
   the checkpoint commit run outside ``foreachBatch`` and are not included.
+* A micro-batch that read no change rows (the stream moved past idle entries or other
+  tables' commits) writes nothing to the target, but still writes its facts row (rows = 0),
+  so a current stream on a quiet table keeps writing facts.
 * Optional network metrics: with ``metrics_path`` (the directory of the source option
   ``metricsPath``) the sink folds each partition's round trip, read time, MB and
-  ``ASYNC_NETWORK_IO`` into the batch facts, with the retention watermark and headroom
-  (ADR 0017) and the capture and ingestion lag (ADR 0020). The sink never connects to SQL
-  Server itself.
-  Metrics never fail a batch. ``mssql_cdc.stream()`` wires both ends from one set of
-  options.
+  ``ASYNC_NETWORK_IO`` into the batch facts, with the batch's end offset, the retention
+  watermark and headroom (ADR 0017) and the capture and ingestion lag (ADR 0020), both
+  measured from that end offset. The sink never connects to SQL Server itself.
+  Every file in ``metrics_path`` is the current batch's and is folded into it, then removed:
+  micro-batches run one at a time, the partitions are read inside ``foreachBatch``, and a
+  retried partition or batch rewrites its file under the same name (``<from>-<to>.json``).
+  Selecting files by the rows' LSNs would miss the partitions that read none, such as the
+  trailing one that ends at the end offset. Metrics never fail a batch.
+  ``mssql_cdc.stream()`` wires both ends from one set of options.
 * Snapshots are facts too: ``write_event()`` records the bootstrap and every re-snapshot
   after data loss as one row with ``event`` set and no ``batch_id`` (ADR 0018), idempotent
   the same way.
@@ -36,7 +43,13 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 from . import migrations
-from .migrations.facts import EVENT_COLUMNS, LAG_COLUMNS, NETWORK_COLUMNS, RETENTION_COLUMNS
+from .migrations.facts import (
+    END_COLUMNS,
+    EVENT_COLUMNS,
+    LAG_COLUMNS,
+    NETWORK_COLUMNS,
+    RETENTION_COLUMNS,
+)
 from .tables import is_path
 
 BRONZE_COMMENT = (
@@ -81,9 +94,11 @@ def bronze_columns(df: DataFrame) -> list[tuple]:
 
 
 FACTS_COMMENT = (
-    "One row per non-empty micro-batch written by mssql-cdc-pyspark's delta_sink: what was "
-    "written (counts, LSN and commit-time ranges) and how long it took. The same facts are in "
-    "each target commit's userMetadata, which Delta log cleanup eventually drops. Each "
+    "One row per micro-batch written by mssql-cdc-pyspark's delta_sink, including batches that "
+    "read no change rows (rows = 0), so a current stream on a quiet table keeps writing rows: "
+    "what was written (counts, LSN and commit-time ranges), how far the stream had read "
+    "(end_lsn, end_commit_ts) and how long it took. The same facts are in each target commit's "
+    "userMetadata (batches with rows only), which Delta log cleanup eventually drops. Each "
     "snapshot stream().to_delta takes (bootstrap or re-snapshot) adds one row, with event set "
     "(see its comment)."
 )
@@ -104,7 +119,17 @@ FACTS_COLUMNS = [
             "batch is skipped, so it never appears twice."
         ),
     ),
-    ("rows", "BIGINT", "Change rows written to the target in this batch, all operations."),
+    (
+        "rows",
+        "BIGINT",
+        (
+            "Change rows written to the target in this batch, all operations. 0 when the batch "
+            "read none: its end offset moved only past idle entries or other tables' commits (or, "
+            "on a new checkpoint's first batch, not at all), so it wrote nothing to the target, "
+            "just this row (LSN and commit-time ranges NULL, counts 0). On event rows, the rows "
+            "of the snapshot."
+        ),
+    ),
     ("min_lsn", "STRING", "Smallest source commit LSN (__$start_lsn, 0x + 20 hex) in the batch."),
     ("max_lsn", "STRING", "Largest source commit LSN in the batch; hex strings sort in LSN order."),
     ("min_commit_ts", "TIMESTAMP_NTZ", "Earliest source commit time in the batch, UTC."),
@@ -140,6 +165,7 @@ FACTS_COLUMNS = [
     *RETENTION_COLUMNS,
     *EVENT_COLUMNS,
     *LAG_COLUMNS,
+    *END_COLUMNS,
     ("target", "STRING", "Table name or path the batch was written to."),
     (
         "written_at",
@@ -158,16 +184,17 @@ def _utc_now() -> datetime:
 
 
 def batch_facts(df: DataFrame) -> dict:
+    # counts, not sums: an empty batch has 0 of each, and NULL ranges
     row = df.agg(
         F.count(F.lit(1)).alias("rows"),
         F.min("_start_lsn").alias("min_lsn"),
         F.max("_start_lsn").alias("max_lsn"),
         F.min("_commit_ts").alias("min_commit_ts"),
         F.max("_commit_ts").alias("max_commit_ts"),
-        F.sum(F.when(F.col("_operation") == 1, 1).otherwise(0)).alias("deletes"),
-        F.sum(F.when(F.col("_operation") == 2, 1).otherwise(0)).alias("inserts"),
+        F.count(F.when(F.col("_operation") == 1, 1)).alias("deletes"),
+        F.count(F.when(F.col("_operation") == 2, 1)).alias("inserts"),
         # updates count after-images (operation 4); before-images (3) pair with them
-        F.sum(F.when(F.col("_operation") == 4, 1).otherwise(0)).alias("updates"),
+        F.count(F.when(F.col("_operation") == 4, 1)).alias("updates"),
     ).first()
     assert row is not None  # a global aggregate always returns one row
     return row.asDict()
@@ -180,26 +207,29 @@ def _json(facts: dict) -> str:
     )
 
 
-def _fold_metrics(path: str, lo: str, hi: str) -> tuple[dict, list[str]]:
-    """Sum the metrics files of the partitions overlapping the batch's LSNs [lo, hi]."""
-    picked, files = [], []
-    for name in glob.glob(os.path.join(path, "*.json")):
+def _fold_metrics(path: str) -> tuple[dict, list[str]]:
+    """Fold every metrics file in ``path``: all are the current batch's (see the module doc).
+    Returns the folded metrics and the files, the unreadable ones too, to remove."""
+    picked, files = [], glob.glob(os.path.join(path, "*.json"))
+    for name in files:
         try:
             with open(name, encoding="utf-8") as fh:
-                m = json.load(fh)
+                picked.append(json.load(fh))
         except (OSError, ValueError):
             continue
-        if m["to_lsn"] >= lo and m["from_lsn"] <= hi:
-            picked.append(m)
-            files.append(name)
     if not picked:
-        return {}, []
+        return {}, files
+    end = max(picked, key=lambda m: m["to_lsn"])  # the partition that ends at the end offset
     waits = [m.get("network_wait_ms") for m in picked]
     rtts = [m["rtt_ms"] for m in picked if m.get("rtt_ms") is not None]
     marks = [m["retention_watermark_ts"] for m in picked if m.get("retention_watermark_ts")]
     tops = [m["source_max_commit_ts"] for m in picked if m.get("source_max_commit_ts")]
     lags = [m["capture_lag_seconds"] for m in picked if m.get("capture_lag_seconds") is not None]
     return {
+        "end_lsn": end["to_lsn"],
+        "end_commit_ts": (
+            datetime.fromisoformat(end["to_commit_ts"]) if end.get("to_commit_ts") else None
+        ),
         "retention_watermark_ts": datetime.fromisoformat(max(marks)) if marks else None,
         "source_max_commit_ts": datetime.fromisoformat(max(tops)) if tops else None,
         "capture_lag_seconds": round(max(lags), 3) if lags else None,
@@ -210,19 +240,20 @@ def _fold_metrics(path: str, lo: str, hi: str) -> tuple[dict, list[str]]:
     }, files
 
 
-def _headroom(watermark: datetime | None, max_commit_ts: datetime | None) -> dict:
+def _headroom(watermark: datetime | None, position: datetime | None) -> dict:
+    """``position``: the commit time the stream has read up to (the batch's end offset)."""
     hours = (
         None
-        if watermark is None or max_commit_ts is None
-        else round((max_commit_ts - watermark).total_seconds() / 3600, 2)
+        if watermark is None or position is None
+        else round((position - watermark).total_seconds() / 3600, 2)
     )
     return {"retention_watermark_ts": watermark, "retention_headroom_hours": hours}
 
 
-def _lag(source_max: datetime | None, max_commit_ts: datetime | None) -> float | None:
-    if source_max is None or max_commit_ts is None:
+def _lag(source_max: datetime | None, position: datetime | None) -> float | None:
+    if source_max is None or position is None:
         return None
-    return round((source_max - max_commit_ts).total_seconds(), 3)
+    return round((source_max - position).total_seconds(), 3)
 
 
 def _write(df: DataFrame, target: str, app_id: str, version: int, metadata: str | None = None):
@@ -249,7 +280,8 @@ def delta_sink(
     deleted, use a new ``app_id``; batch ids restart at 0 and would otherwise be
     ignored as duplicates.
 
-    ``metrics_path`` only feeds the facts table (see the module doc).
+    ``metrics_path`` feeds the facts table (see the module doc); its files are removed after
+    each batch, with or without a facts table.
     """
     created: set[str] = set()  # once per query run, not once per batch
 
@@ -262,29 +294,25 @@ def delta_sink(
         started_at, t0 = _utc_now(), time.monotonic()
         df = df.persist()
         try:
-            facts = batch_facts(df)
-            if not facts["rows"]:
-                return
+            facts = batch_facts(df)  # reads the batch: its partitions write their metrics files
             facts.update({"batch_id": batch_id, "app_id": app_id})
             spark = df.sparkSession
-            out = df.withColumn("_batch_id", F.lit(batch_id).cast("int"))
-            ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
-            _write(out, target, app_id, batch_id, _json(facts))
+            if facts["rows"]:  # a batch that read none writes no target commit, only its facts
+                out = df.withColumn("_batch_id", F.lit(batch_id).cast("int"))
+                ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
+                _write(out, target, app_id, batch_id, _json(facts))
+            duration_ms = round((time.monotonic() - t0) * 1000)
+            folded, files = _fold_metrics(metrics_path) if metrics_path else ({}, [])
             if facts_table:
-                duration_ms = round((time.monotonic() - t0) * 1000)
-                folded, files = (
-                    _fold_metrics(metrics_path, facts["min_lsn"], facts["max_lsn"])
-                    if metrics_path
-                    else ({}, [])
-                )
+                # where the stream is: the end offset, not the batch's last change, which on a
+                # quiet table lags it (the batch's last change as a fallback, without metrics)
+                position = folded.get("end_commit_ts") or facts["max_commit_ts"]
                 facts.update(
                     folded,
                     started_at=started_at,
                     duration_ms=duration_ms,
-                    **_headroom(folded.get("retention_watermark_ts"), facts["max_commit_ts"]),
-                    ingestion_lag_seconds=_lag(
-                        folded.get("source_max_commit_ts"), facts["max_commit_ts"]
-                    ),
+                    **_headroom(folded.get("retention_watermark_ts"), position),
+                    ingestion_lag_seconds=_lag(folded.get("source_max_commit_ts"), position),
                     target=target,
                     written_at=_utc_now(),
                 )
@@ -293,11 +321,11 @@ def delta_sink(
                     [tuple(facts.get(k) for k in _FACT_FIELDS)], FACTS_SCHEMA
                 )  # event columns stay NULL
                 _write(facts_df, facts_table, f"{app_id}#facts", batch_id)
-                for name in files:  # folded into this batch's facts; a replay rewrites them
-                    try:
-                        os.remove(name)
-                    except OSError:
-                        pass
+            for name in files:  # folded into this batch's facts; a replay rewrites them
+                try:
+                    os.remove(name)
+                except OSError:
+                    pass
         finally:
             df.unpersist()
 
@@ -341,6 +369,8 @@ def write_event(
         "started_at": started_at,
         "duration_ms": duration_ms,
         **_headroom(lost_to_ts, ts),
+        "end_lsn": lsn,  # the offset the stream starts from
+        "end_commit_ts": ts,
         "event": event,
         "lost_from_ts": lost_from_ts,
         "lost_to_ts": lost_to_ts,

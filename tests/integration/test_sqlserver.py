@@ -346,12 +346,13 @@ def test_stream_facade_records_network_metrics_from_a_real_server(delta_spark, s
     [row] = delta_spark.read.format("delta").load(facts).collect()
     assert row["source_rtt_ms"] > 0 and row["read_mb"] > 0
     assert row["network_wait_ms"] is not None  # own session's ASYNC_NETWORK_IO, no extra grant
-    assert (
-        row["retention_watermark_ts"] <= row["max_commit_ts"]
-        and row["retention_headroom_hours"] >= 0
-    )
+    # the end offset: at or after the batch's last change, and what headroom and lag start from
+    assert row["end_lsn"] >= row["max_lsn"] and row["end_commit_ts"] >= row["max_commit_ts"]
+    assert row["retention_watermark_ts"] <= row["end_commit_ts"] and row[
+        "retention_headroom_hours"
+    ] == round((row["end_commit_ts"] - row["retention_watermark_ts"]).total_seconds() / 3600, 2)
     # capture's newest commit (fn_cdc_get_max_lsn, no extra grant) is at or after the batch's
-    assert row["source_max_commit_ts"] >= row["max_commit_ts"]
+    assert row["source_max_commit_ts"] >= row["end_commit_ts"]
     assert row["ingestion_lag_seconds"] >= 0  # both ends from the server clock
     # Spark's clock minus the container's: allow a few seconds of skew (WSL2 VM drift)
     assert row["capture_lag_seconds"] is not None and row["capture_lag_seconds"] > -5

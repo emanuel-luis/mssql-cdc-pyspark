@@ -29,12 +29,13 @@
 - [ ] **Continuous mode finalization**: `StreamingQueryListener` that advances the
       verdict on progress (check it does not block the listener bus).
 - [x] Retention headroom in the facts (`retention_watermark_ts`, `retention_headroom_hours`,
-      ADR 0017).
+      ADR 0017), measured from the batch's end offset (`end_lsn`, `end_commit_ts`).
 - [x] **Operational metrics**: capture lag (`now - map_lsn_to_time(max_lsn)`) and ingestion
-      lag (`max_lsn` vs the batch's last commit) in the facts table (`source_max_commit_ts`,
+      lag (`max_lsn` vs the batch's end offset) in the facts table (`source_max_commit_ts`,
       `capture_lag_seconds`, `ingestion_lag_seconds`, ADR 0020); `reportLatestOffset` shows
-      `max_lsn` and its commit time in the query progress on every trigger, the only lag
-      that catches a stopped capture.
+      `max_lsn` and its commit time in the query progress on every trigger. Batches that
+      read no rows write facts too, so facts that stop arriving mean the stream or capture
+      stopped.
 - [ ] `arrow-odbc` backend covered in CI (install msodbcsql18 in the job).
 - [ ] Multiple capture instances per stream (same schema), or a documented fan-out
       pattern.

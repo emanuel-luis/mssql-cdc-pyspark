@@ -8,7 +8,7 @@ Append only; see ``mssql_cdc.migrations``. For example::
     ]
 """
 
-from .base import Migration, add_columns
+from .base import Migration, add_columns, set_comments
 
 # Migration 1 (2026-09-29): network and read metrics. Frozen here as shipped; the sink's
 # creation columns reuse it so new tables are born with the same definitions. (Revised the
@@ -70,13 +70,16 @@ RETENTION_COLUMNS = [
         "retention_headroom_hours",
         "DOUBLE",
         (
-            "Hours between retention_watermark_ts and max_commit_ts: how far the stream is ahead of "
-            "what cleanup has deleted. A current stream sits near the retention period (3 days by "
-            "default); it shrinks as the stream falls behind, and at 0 the next changes to read are "
-            "being purged. Cleanup moves the watermark in steps (the default job runs daily), so "
-            "alert with more margin than that interval, and also when facts stop arriving: a "
-            "stopped stream keeps its last value while the real headroom keeps shrinking. NULL "
-            "under the same condition as retention_watermark_ts."
+            "Hours between retention_watermark_ts and end_commit_ts: how far the stream's position "
+            "(the batch's end offset) is ahead of what cleanup has deleted. A current stream sits "
+            "near the retention period (3 days by default), on a quiet table too, since a batch "
+            "that read no rows also writes its row; it shrinks as the stream falls behind, and at 0 "
+            "the next changes to read are being purged. Cleanup moves the watermark in steps (the "
+            "default job runs daily), so alert with more margin than that interval, and also when "
+            "facts stop arriving: the stream or CDC capture has stopped, and the real headroom "
+            "keeps shrinking from the last value. Rows written before end_commit_ts existed "
+            "measured from max_commit_ts, the batch's last change, which on a quiet table made a "
+            "current stream look behind. NULL under the same condition as retention_watermark_ts."
         ),
     ),
 ]
@@ -148,16 +151,58 @@ LAG_COLUMNS = [
         "ingestion_lag_seconds",
         "DOUBLE",
         (
-            "Seconds between max_commit_ts and source_max_commit_ts: how far the batch's last "
-            "change is behind what CDC capture had processed. Near 0 for a current stream; on a "
-            "table that changes less often than its database it also counts the time from the "
-            "table's last change to the database's newest commit. Growing means the stream is "
-            "falling behind, and as it grows retention_headroom_hours shrinks. Only moves while the "
-            "stream runs: also alert when facts stop arriving. NULL under the same condition as "
-            "source_max_commit_ts."
+            "Seconds between end_commit_ts and source_max_commit_ts: how far the stream's position "
+            "(the batch's end offset) is behind what CDC capture had processed. Near 0 for a "
+            "current stream, on a quiet table too, since a batch that read no rows also writes its "
+            "row. Growing means the stream is falling behind, and as it grows "
+            "retention_headroom_hours shrinks. Only moves while the stream runs: also alert when "
+            "facts stop arriving (the stream or CDC capture has stopped). Rows written before "
+            "end_commit_ts existed measured from max_commit_ts, which also counted the time from "
+            "the table's last change to the database's newest commit. NULL under the same "
+            "condition as source_max_commit_ts."
         ),
     ),
 ]
+
+# Migration 5 (2026-09-30): the batch's end offset. Headroom and ingestion lag are measured
+# from it, not from the batch's last change, and a batch that read no rows writes its row too
+# (ADR 0014 amendment 3, ADRs 0017 and 0020 amended). The migration also gives existing tables
+# the new comments of the columns whose meaning changed.
+END_COLUMNS = [
+    (
+        "end_lsn",
+        "STRING",
+        (
+            "The batch's end offset: the commit LSN (0x + 20 hex) the stream had processed up to "
+            "after this batch, the largest to_lsn of its partitions. At or after max_lsn: offsets "
+            "follow CDC capture (sys.fn_cdc_get_max_lsn), which moves with idle entries and with "
+            "other tables' commits, so on a quiet table it keeps moving while its batches read no "
+            "rows. On event rows, the snapshot's LSN. NULL unless the source option metricsPath "
+            "and delta_sink(metrics_path=...) are set, and on a batch that planned no range to "
+            "read (a new checkpoint's first batch when nothing is new)."
+        ),
+    ),
+    (
+        "end_commit_ts",
+        "TIMESTAMP_NTZ",
+        (
+            "Commit time (UTC) of end_lsn: how far through the source's commit history the stream "
+            "had read after this batch, whether the batch had rows or not. retention_headroom_hours "
+            "and ingestion_lag_seconds are measured from it. Later than max_commit_ts, the batch's "
+            "last change, when the table changed less recently than the database. On event rows, "
+            "the snapshot's commit time. NULL under the same condition as end_lsn."
+        ),
+    ),
+]
+
+
+def _end_offset(spark, table: str) -> None:
+    from ..sink import FACTS_COLUMNS, FACTS_COMMENT  # the comments new tables are created with
+
+    add_columns(spark, table, END_COLUMNS)
+    changed = ("rows", "retention_headroom_hours", "ingestion_lag_seconds")
+    set_comments(spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in changed}, FACTS_COMMENT)
+
 
 MIGRATIONS: list[Migration] = [
     Migration(
@@ -168,4 +213,5 @@ MIGRATIONS: list[Migration] = [
     ),
     Migration("snapshot events", lambda spark, table: add_columns(spark, table, EVENT_COLUMNS)),
     Migration("lag metrics", lambda spark, table: add_columns(spark, table, LAG_COLUMNS)),
+    Migration("end offset", _end_offset),
 ]

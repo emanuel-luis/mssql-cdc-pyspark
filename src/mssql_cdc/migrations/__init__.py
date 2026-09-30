@@ -11,12 +11,22 @@ To change a table kind:
    ``finalization.CONTROL_COLUMNS``, ``silver.SILVER_COLUMNS``), so new tables are born
    with the change;
 2. append a ``Migration`` to ``migrations/<kind>.py``, so existing tables get it. For a
-   new column, ``add_columns()`` (an empty append with ``mergeSchema``) is usually enough.
+   new column, ``add_columns()`` (an empty append with ``mergeSchema``) is usually enough;
+   for a column whose meaning changes, ``set_comments()`` gives existing tables its new
+   comment.
 
 Never edit, reorder or remove a migration that has shipped: its position is its version.
 """
 
-from .base import SCHEMA_VERSION_PROPERTY, Migration, add_columns, current_version, ensure, migrate
+from .base import (
+    SCHEMA_VERSION_PROPERTY,
+    Migration,
+    add_columns,
+    current_version,
+    ensure,
+    migrate,
+    set_comments,
+)
 
 __all__ = [
     "SCHEMA_VERSION_PROPERTY",
@@ -25,4 +35,5 @@ __all__ = [
     "current_version",
     "ensure",
     "migrate",
+    "set_comments",
 ]

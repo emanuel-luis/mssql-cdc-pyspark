@@ -109,28 +109,35 @@ def test_tables_are_created_typed_and_commented(delta_spark, workdir):
         assert props["mssql_cdc.schema_version"] == str(migrations.current_version(kind))
 
 
-def test_facts_table_at_version_0_gains_the_network_retention_event_and_lag_columns(
-    delta_spark, workdir
-):
+def test_facts_table_at_version_0_gains_every_column_and_the_current_comments(delta_spark, workdir):
     from mssql_cdc import migrations, tables
     from mssql_cdc.migrations.facts import (
+        END_COLUMNS,
         EVENT_COLUMNS,
         LAG_COLUMNS,
         NETWORK_COLUMNS,
         RETENTION_COLUMNS,
     )
-    from mssql_cdc.sink import FACTS_COLUMNS
+    from mssql_cdc.sink import FACTS_COLUMNS, FACTS_COMMENT
 
     spark = delta_spark
     old = os.path.join(workdir, "facts_v0")
-    added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS + LAG_COLUMNS
-    v0 = [c for c in FACTS_COLUMNS if c not in added]  # the facts shape before migration 1
+    added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS + LAG_COLUMNS + END_COLUMNS
+    # the facts shape before migration 1, with the comments it was created with
+    v0 = [(n, t, "old's") if n == "rows" else (n, t, c) for n, t, c in FACTS_COLUMNS]
     tables.create_if_not_exists(
-        spark, old, v0, properties={migrations.SCHEMA_VERSION_PROPERTY: "0"}
+        spark,
+        old,
+        [c for c in v0 if c not in added],
+        "one row per non-empty batch",
+        properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(spark, old, "facts") == 4
-    fields = {f.name: f for f in spark.read.format("delta").load(old).schema}
-    assert all(name in fields and fields[name].metadata.get("comment") for name, _, _ in added)
+    assert migrations.migrate(spark, old, "facts") == 5
+    cols, description = _comments(spark, old)
+    assert all(name in cols and cols[name][1] for name, _, _ in added)
+    # migration 5 rewrote the comments whose meaning changed: as a new table has them
+    assert {n: cols[n][1] for n, _, _ in FACTS_COLUMNS} == {n: c for n, _, c in FACTS_COLUMNS}
+    assert description == FACTS_COMMENT
 
 
 def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
@@ -201,6 +208,61 @@ def test_capture_and_ingestion_lag_reach_the_facts(delta_spark, workdir):
         seen = row["source_max_commit_ts"] + timedelta(seconds=row["capture_lag_seconds"])
         assert row["capture_lag_seconds"] >= 0
         assert row["started_at"] - timedelta(milliseconds=1) <= seen <= row["written_at"]
+
+
+def test_a_quiet_table_is_measured_from_the_end_offset_and_its_empty_batches_write_facts(
+    delta_spark, workdir
+):
+    spark = delta_spark
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI, "dbo_other"])
+    kept_from = db.idle(at=T0 - timedelta(hours=70))
+    db.commit(CI, [(2, {"order_id": 0, "status": "new"})], at=T0)
+    db.commit("dbo_other", [(2, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=10))
+    quiet = db.idle(at=T0 + timedelta(minutes=15))
+    db.commit(CI, [(2, {"order_id": 1, "status": "new"})], at=T0 + timedelta(minutes=20))
+    last = db.commit(
+        "dbo_other", [(2, {"order_id": 1, "status": "new"})], at=T0 + timedelta(minutes=30)
+    )
+    db.cleanup(CI, kept_from)  # cleanup has deleted up to 70 h before the first commit
+    target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
+    metrics = os.path.join(workdir, "metrics")
+    sink, left = delta_sink(target, "quiet-v1", facts, metrics_path=metrics), []
+
+    def write(df, batch_id):
+        sink(df, batch_id)
+        left.append(os.listdir(metrics))
+
+    q = (
+        spark.readStream.format("mssql_cdc")
+        .option("backend", "fake")
+        .option("fakePath", os.path.join(workdir, "src"))
+        .option("captureInstance", CI)
+        .option("columns", COLUMNS)
+        .option("numPartitions", "2")
+        .option("maxCommitsPerBatch", "2")  # lsn_time_mapping rows: idle entries and dbo_other's
+        .option("metricsPath", metrics)
+        .load()
+        .writeStream.foreachBatch(write)
+        .option("checkpointLocation", os.path.join(workdir, "ckpt"))
+        .trigger(availableNow=True)
+        .start()
+    )
+    q.awaitTermination()
+    rows = spark.read.format("delta").load(facts).orderBy("batch_id").collect()
+    assert [r["rows"] for r in rows] == [1, 0, 1]  # batch 1 read only dbo_other and an idle entry
+    assert spark.read.format("delta").load(target).count() == 2  # the empty batch wrote nothing
+    assert left == [[], [], []]  # every batch folded and removed its files
+    empty = rows[1]
+    assert (empty["min_lsn"], empty["max_lsn"], empty["max_commit_ts"]) == (None, None, None)
+    assert (empty["deletes"], empty["inserts"], empty["updates"], empty["read_mb"]) == (0, 0, 0, 0)
+    assert empty["end_lsn"] == quiet
+    # where the stream is (end_commit_ts), not the batch's last change: 15, 30 and 30 minutes
+    assert [r["end_commit_ts"] for r in rows] == [T0 + timedelta(minutes=m) for m in (0, 15, 30)]
+    assert rows[2]["end_lsn"] == last  # past the batch's last change (T0 + 20 min)
+    assert all(r["retention_watermark_ts"] == T0 - timedelta(hours=70) for r in rows)
+    assert [r["retention_headroom_hours"] for r in rows] == [70.0, 70.25, 70.5]
+    # capture had processed dbo_other's commit at T0 + 30 min when every batch was read
+    assert [r["ingestion_lag_seconds"] for r in rows] == [1800.0, 900.0, 0.0]
 
 
 def test_stream_facade_declares_the_options_once(delta_spark, workdir):
@@ -382,7 +444,8 @@ def test_data_loss_resnapshots_into_a_new_generation_once_per_interval(
         None,
         3,
     )
-    assert boot["min_lsn"] == boot["max_lsn"] and boot["lost_from_ts"] is None
+    assert boot["min_lsn"] == boot["max_lsn"] == boot["end_lsn"] and boot["lost_from_ts"] is None
+    assert boot["end_commit_ts"] == boot["max_commit_ts"]  # the offset the stream starts from
     db.commit(CI, [(2, {"order_id": 3, "status": "new"})], at=T0 + timedelta(minutes=3))
     run()  # the checkpoint's last processed commit is now T0 + 3 min
     db.commit(
@@ -618,6 +681,7 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
 def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
     from mssql_cdc import migrations, stream, tables
     from mssql_cdc.migrations.facts import (
+        END_COLUMNS,
         EVENT_COLUMNS,
         LAG_COLUMNS,
         NETWORK_COLUMNS,
@@ -645,23 +709,27 @@ def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
         db.commit(CI, [(2, {"order_id": 9, "status": "new"})], at=T0 + timedelta(hours=1))
         q = run()
         assert spark.table(bronze).count() == 4  # the snapshot of orders 0..2, then order 9
-        assert sorted(r["event"] or "batch" for r in spark.table(facts).collect()) == [
-            "batch",
-            "bootstrap",
+        # the first run's batch 0 plans no range (it starts at the snapshot LSN) but writes
+        # its facts row too
+        assert sorted((r["event"] or "batch", r["rows"]) for r in spark.table(facts).collect()) == [
+            ("batch", 0),
+            ("batch", 1),
+            ("bootstrap", 3),
         ]
         end = finalization.end_offset_from_progress(q.lastProgress)
         assert isinstance(finalization.advance(spark, control, "bronze_orders", end), datetime)
         for name, kind in ((bronze, "bronze"), (facts, "facts"), (control, "control")):
             props = spark.sql(f"DESCRIBE DETAIL {name}").first()["properties"]
             assert props["mssql_cdc.schema_version"] == str(migrations.current_version(kind))
-        added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS + LAG_COLUMNS
+        added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS + LAG_COLUMNS + END_COLUMNS
         tables.create_if_not_exists(
             spark,
             old,
             [c for c in FACTS_COLUMNS if c not in added],
             properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
         )
-        assert migrations.migrate(spark, old, "facts") == 4  # add_columns through saveAsTable
+        # add_columns through saveAsTable, set_comments on a table name
+        assert migrations.migrate(spark, old, "facts") == 5
         assert {name for name, _, _ in added} <= set(spark.table(old).columns)
     finally:
         for name in (bronze, facts, control, old):
