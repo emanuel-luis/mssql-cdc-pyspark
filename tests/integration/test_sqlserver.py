@@ -366,7 +366,7 @@ def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(
     # rows written before CDC was enabled exist only in the table: only a snapshot has them
     sqlserver.run("CREATE TABLE dbo.boot (id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL)")
     sqlserver.run("INSERT INTO dbo.boot SELECT n, 'old' FROM (VALUES (1),(2),(3),(4),(5),(6)) t(n)")
-    sqlserver.run(
+    sqlserver.run_enabling_cdc(
         "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'boot', "
         "@role_name = NULL, @supports_net_changes = 0"
     )
@@ -613,7 +613,7 @@ def test_cdc_refuses_a_unique_index_over_nullable_columns(sqlserver):
     sqlserver.run("CREATE TABLE dbo.snap_nulls (a INT NULL, b VARCHAR(5) NULL)")
     sqlserver.run("CREATE UNIQUE INDEX ux_snap_nulls ON dbo.snap_nulls (a, b)")
     with pytest.raises(Exception, match="must be defined as NOT NULL"):
-        sqlserver.run(
+        sqlserver.run_enabling_cdc(
             "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'snap_nulls', "
             "@role_name = NULL, @index_name = N'ux_snap_nulls', @supports_net_changes = 0"
         )

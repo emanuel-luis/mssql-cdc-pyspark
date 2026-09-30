@@ -52,6 +52,21 @@ class SqlServer:
         finally:
             cur.close()
 
+    def run_enabling_cdc(self, sql: str, params=()) -> list:
+        """``run`` for ``sp_cdc_enable_db``/``_table``, rerun when chosen as a deadlock victim.
+
+        Each rolls back whole on error 1205, and at startup the Agent still boots alongside
+        the fixture, so SQL Server's own advice holds: rerun the transaction.
+        """
+        for _ in range(4):
+            try:
+                return self.run(sql, params)
+            except Exception as exc:
+                if "deadlock victim" not in str(exc):
+                    raise
+                time.sleep(1)
+        return self.run(sql, params)
+
     def login(self, name: str, *grants: str) -> str:
         """A login whose database user has only ``grants``; returns its connection string."""
         self.run(f"CREATE LOGIN [{name}] WITH PASSWORD = '{PASSWORD}', CHECK_POLICY = OFF")
@@ -63,7 +78,7 @@ class SqlServer:
     def cdc_table(self, name: str, columns_ddl: str) -> str:
         """Create ``dbo.<name>`` with CDC on; returns the capture instance."""
         self.run(f"CREATE TABLE dbo.[{name}] ({columns_ddl})")
-        self.run(
+        self.run_enabling_cdc(
             "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = ?, "
             "@role_name = NULL, @supports_net_changes = 0",
             (name,),
@@ -115,5 +130,5 @@ def sqlserver():
         cur.execute(f"CREATE DATABASE [{DATABASE}]")
         cur.close()
         master.close()
-        server.run("EXEC sys.sp_cdc_enable_db")
+        server.run_enabling_cdc("EXEC sys.sp_cdc_enable_db")
         yield server
