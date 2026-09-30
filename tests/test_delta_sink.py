@@ -3,6 +3,7 @@
 import json
 import os
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
@@ -218,6 +219,8 @@ def test_bootstrap_snapshots_once_and_the_stream_continues_from_it(delta_spark, 
     db.commit(CI, [(2, {"order_id": 9, "status": "new"})], at=T0 + timedelta(minutes=10))
     second = run()  # a rerun: the same snapshot, then only the new changes
     assert second.where("_operation = 0").count() == 5 and second.count() == 8
+    assert stream(spark, options).snapshot(target)["lsn"] == second.where(
+        "_operation = 0").first()["_start_lsn"]  # the snapshot's LSN, not the newest change's
 
     # the latest image per key, as a MERGE downstream would apply it, is the source table now
     assert latest(second, "order_id", "status") == [
@@ -254,7 +257,7 @@ def test_data_loss_resnapshots_into_a_new_generation_once_per_interval(delta_spa
         return (spark.read.format("delta").load(facts).where("event IS NOT NULL")
                 .orderBy("written_at").collect())
 
-    run()
+    assert run().count() == 3  # the snapshot only; the commit at the snapshot LSN is not replayed
     [boot] = events()
     assert (boot["event"], boot["app_id"], boot["batch_id"], boot["rows"]) == ("bootstrap", "loss-v1", None, 3)
     assert boot["min_lsn"] == boot["max_lsn"] and boot["lost_from_ts"] is None
@@ -440,3 +443,41 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
             fh.write('v2\n{}\n{"lsn": "0x00000000000000000001"}\n')
     with pytest.raises(ValueError, match="offset log version 'v2'"):
         _last_offset(ckpt)
+
+
+def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
+    from mssql_cdc import migrations, stream, tables
+    from mssql_cdc.migrations.facts import EVENT_COLUMNS, NETWORK_COLUMNS, RETENTION_COLUMNS
+    from mssql_cdc.sink import FACTS_COLUMNS
+
+    spark = delta_spark
+    suffix = uuid4().hex[:8]
+    bronze, facts, control, old = (f"{n}_{suffix}" for n in ("bronze", "facts", "control", "facts_v0"))
+    db, options = _orders(workdir)
+    ckpt = os.path.join(workdir, "ckpt")
+
+    def run():
+        q = stream(spark, options).to_delta(bronze, "named-v1", ckpt, facts, bootstrap=True,
+                                            trigger={"availableNow": True})
+        q.awaitTermination()
+        return q
+
+    try:
+        run()
+        db.commit(CI, [(2, {"order_id": 9, "status": "new"})], at=T0 + timedelta(hours=1))
+        q = run()
+        assert spark.table(bronze).count() == 4  # the snapshot of orders 0..2, then order 9
+        assert sorted(r["event"] or "batch" for r in spark.table(facts).collect()) == ["batch", "bootstrap"]
+        end = finalization.end_offset_from_progress(q.lastProgress)
+        assert isinstance(finalization.advance(spark, control, "bronze_orders", end), datetime)
+        for name, kind in ((bronze, "bronze"), (facts, "facts"), (control, "control")):
+            props = spark.sql(f"DESCRIBE DETAIL {name}").first()["properties"]
+            assert props["mssql_cdc.schema_version"] == str(migrations.current_version(kind))
+        added = NETWORK_COLUMNS + RETENTION_COLUMNS + EVENT_COLUMNS
+        tables.create_if_not_exists(spark, old, [c for c in FACTS_COLUMNS if c not in added],
+                                    properties={migrations.SCHEMA_VERSION_PROPERTY: "0"})
+        assert migrations.migrate(spark, old, "facts") == 3  # add_columns through saveAsTable
+        assert {name for name, _, _ in added} <= set(spark.table(old).columns)
+    finally:
+        for name in (bronze, facts, control, old):
+            spark.sql(f"DROP TABLE IF EXISTS {name}")

@@ -14,13 +14,14 @@ def _builder(delta: bool):
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.ui.enabled", "false")
+        .config("spark.sql.warehouse.dir", tempfile.mkdtemp(prefix="mssql-cdc-wh-"))  # static conf
     )
     if delta:
         from delta import configure_spark_with_delta_pip
 
         b = b.config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension").config(
             "spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog"
-        )
+        ).config("spark.databricks.delta.snapshotPartitions", "1")  # tiny tables: not 50 tasks per read
         b = configure_spark_with_delta_pip(b)
     return b
 
