@@ -18,6 +18,9 @@
       checkpoint generations, loss events in the facts, at most one per interval (ADR 0018).
 - [x] Snapshot partitions for composite or non-integer keys: NTILE tiles of the rows,
       bounds bound typed (ADR 0016 amendment).
+- [ ] **Seeding from an existing copy**: a documented or helper-backed path for tables too
+      big to snapshot within the CDC retention (at 4-11k rows/s, billions of rows do not fit
+      in 3 days): seed the target from a copy, start at a recorded `startingLsn`.
 - [ ] NTILE tiles for sparse single integer keys, if uneven MIN..MAX ranges show up
       (NTILE scans and spools the key, MIN..MAX is two seeks).
 - [ ] **Schema changes**: detect `cdc.ddl_history`; support switching to a second

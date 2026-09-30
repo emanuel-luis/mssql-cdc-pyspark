@@ -168,4 +168,4 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
 ## Releasing (later)
 
 Not published to PyPI yet. Install from Git:
-`pip install "mssql-cdc-pyspark[mssql] @ git+https://github.com/emanuel-luis/mssql-cdc-pyspark.git"`.
+`pip install "mssql-cdc-pyspark @ git+https://github.com/emanuel-luis/mssql-cdc-pyspark.git"`.

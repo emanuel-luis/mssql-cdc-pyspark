@@ -40,7 +40,7 @@ What a version number may change is set by the 0.x policy
 
    ```bash
    python -m venv /tmp/try-mssql-cdc && . /tmp/try-mssql-cdc/bin/activate
-   pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "mssql-cdc-pyspark[mssql]"
+   pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ mssql-cdc-pyspark
    pip install "pyspark>=4.2"   # platforms ship their own; a plain venv needs it to import
    python -c "import mssql_cdc; print(mssql_cdc.__version__)"
    ```
@@ -82,5 +82,5 @@ pin.
 
 Switch the install in [`DATABRICKS.md`](DATABRICKS.md) from the requirements file with a
 git reference to the `pypi` library type, pinned to the release, for example
-`{"pypi": {"package": "mssql-cdc-pyspark[mssql]==0.1.0"}}`; confirm on a cluster that the
-extra installs before replacing the old instructions.
+`{"pypi": {"package": "mssql-cdc-pyspark==0.1.0"}}`; confirm on a cluster that it installs
+(with `mssql-python`) before replacing the old instructions.

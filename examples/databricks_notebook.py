@@ -10,7 +10,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install "mssql-cdc-pyspark[mssql] @ git+https://github.com/emanuel-luis/mssql-cdc-pyspark.git"
+# MAGIC %pip install "mssql-cdc-pyspark @ git+https://github.com/emanuel-luis/mssql-cdc-pyspark.git"
 
 # COMMAND ----------
 

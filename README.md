@@ -18,7 +18,7 @@ built on Spark's Python DataSource V2 API, plus a **completeness signal**
 > against a file-backed CDC simulator. SQL Server behaviour is covered by the
 > `lab/` checks, which run locally against Docker and in GitHub Actions against
 > SQL Server 2022; `tests/integration` runs the source against SQL Server 2022 in Docker
-> (testcontainers). See [LAB.md](LAB.md).
+> (testcontainers). See [LAB.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/LAB.md).
 
 ## Why
 
@@ -32,7 +32,7 @@ process writes changes in commit order, one consistent transaction per scan
 cycle, `sys.fn_cdc_get_max_lsn()` is the last LSN it processed, and during
 inactivity it writes "dummy" entries (about every 5 minutes on SQL Server 2022) so
 that LSN keeps advancing. This project
-carries that frontier through the pipeline. Details in [docs/DESIGN.md](docs/DESIGN.md).
+carries that frontier through the pipeline. Details in [docs/DESIGN.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/DESIGN.md).
 
 ```mermaid
 flowchart LR
@@ -51,6 +51,21 @@ flowchart LR
   SRC --> SINK --> FIN
   FIN --> C[downstream jobs gate on finalized_until]
 ```
+
+## Install
+
+On a Spark platform (Databricks, EMR, Dataproc, Fabric), which ships its own PySpark:
+
+```bash
+pip install mssql-cdc-pyspark
+# until the first PyPI release, from Git:
+pip install "mssql-cdc-pyspark @ git+https://github.com/emanuel-luis/mssql-cdc-pyspark.git"
+```
+
+Locally, with PySpark and Delta: `pip install "mssql-cdc-pyspark[spark]"`. The default
+driver, `mssql-python`, is installed with the package; on Linux it loads `libltdl7`,
+`libkrb5-3` and `libgssapi-krb5-2`, which pip does not install. Databricks needs a cluster
+init script for them: see [docs/DATABRICKS.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/DATABRICKS.md).
 
 ## Quick start (local)
 
@@ -98,22 +113,27 @@ through `delta_sink`. With a facts table and a checkpoint that is a local or FUS
 (`<checkpoint>/_mssql_cdc_metrics`, under the live generation's checkpoint after a
 re-snapshot, see below); with a URI checkpoint (`dbfs:/`, `abfss://`), add the
 `metricsPath` option. The same files carry the retention headroom: `retention_headroom_hours`
-in the facts is how far the stream is ahead of what CDC cleanup has deleted; alert when it
-falls, or when facts stop arriving ([ADR 0017](docs/decisions/0017-retention-headroom-in-facts.md)).
+in the facts is how far the stream's position, the batch's end offset (`end_commit_ts`), is
+ahead of what CDC cleanup has deleted; alert when it falls, or when facts stop arriving
+([ADR 0017](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0017-retention-headroom-in-facts.md)). Every micro-batch writes a
+facts row, those that read no rows included (`rows = 0`), so facts that stop arriving mean
+the stream or CDC capture stopped (ADRs 0017 and 0020, amended).
 
 They also carry two lags, each with its own alert
-([ADR 0020](docs/decisions/0020-capture-and-ingestion-lag-in-facts.md)).
+([ADR 0020](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0020-capture-and-ingestion-lag-in-facts.md)).
 `capture_lag_seconds` is how old the newest commit CDC capture had processed
 (`sys.fn_cdc_get_max_lsn`, as `source_max_commit_ts`) was when a partition looked: when it
 is high, CDC capture is slow (a log backlog), not the stream; on a quiet database without
-the [heartbeat](docs/decisions/0010-heartbeat-for-quiet-databases.md) it sits up to about 5
+the [heartbeat](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0010-heartbeat-for-quiet-databases.md) it sits up to about 5
 minutes. It cannot show a stopped capture (capture job or SQL Server Agent down):
 `max_lsn` freezes, no batch runs and no facts row is written, so the last value stays
-small and the only sign is facts no longer arriving, which a quiet table also causes. For a
+small and the only sign is facts no longer arriving (a quiet table does not cause that: its
+batches without rows write facts rows too). For a
 capture lag that updates on every trigger, use `now - latestOffset.commit_ts` from the
 source's `lastProgress` (`reportLatestOffset` reports `max_lsn` and its commit time).
-`ingestion_lag_seconds` is how far the batch's last change (`max_commit_ts`) is
-behind that commit: when it is high, the stream is behind what CDC has captured. What it
+`ingestion_lag_seconds` is how far the batch's end offset (`end_commit_ts`) is
+behind that commit: when it is high, the stream is behind what CDC has captured; a current
+stream on a quiet table shows about 0. What it
 gains, `retention_headroom_hours` loses, so alert on the lag before the headroom runs out.
 
 `bootstrap=True` loads the whole table, not only what CDC retention still holds: the first
@@ -121,7 +141,7 @@ run appends a snapshot of the source table to the target (operation 0, stamped w
 `max_lsn` recorded before the read) and starts the checkpoint from that LSN. Later runs find
 the snapshot and read nothing again. A MERGE downstream that keeps the latest image per key
 absorbs the overlap between snapshot and stream
-([ADR 0016](docs/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)). With a facts
+([ADR 0016](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)). With a facts
 table, the snapshot also gets a facts row with `event = 'bootstrap'` (micro-batch rows have
 `event` NULL).
 `stream(spark, options).snapshot(target)` does the snapshot alone and returns the offset;
@@ -177,8 +197,9 @@ query = stream(spark, options).to_delta(
 ```
 
 The changes between the last offset read and the retention watermark are lost for good. The
-facts get a row with `event = 'resnapshot'` and the gap in `lost_from_ts` and `lost_to_ts`;
-downstream should then rebuild from the newest snapshot: the highest `_start_lsn` of the
+facts get a row with `event = 'resnapshot'` and the gap in `lost_from_ts` and `lost_to_ts`
+(`lost_from_ts` is NULL when the stream had committed nothing since an explicit
+`startingLsn`, which carries no commit time); downstream should then rebuild from the newest snapshot: the highest `_start_lsn` of the
 target's `_operation = 0` rows or of the facts' event rows (`max_lsn`), whichever is higher,
 because a snapshot of an empty table writes no rows. A purge during a run still fails that
 query, and the next run recovers. A second loss within `resnapshot_interval_days` (keep it
@@ -186,7 +207,18 @@ above the retention) raises `DataLossError` instead: the stream cannot keep up, 
 has to decide; so does a re-snapshot whose own LSN was purged before the read ended. Needs a
 facts table and a checkpoint path that Python and Spark resolve to the same directory (local,
 or a Volume; not a URI or `/dbfs/`); run one job per stream
-([ADR 0018](docs/decisions/0018-automatic-resnapshot-after-data-loss.md)).
+([ADR 0018](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0018-automatic-resnapshot-after-data-loss.md)).
+
+### Tables too big to snapshot
+
+A snapshot has to finish within the CDC retention, or the changes after its LSN are purged
+before the stream reads them. At the 4-11k rows/s measured against a production source,
+three days (the default retention) hold roughly 1-3 billion rows, so a table of billions of
+rows cannot be snapshotted in time. Seed the target from an existing copy of the table
+instead, and start the stream at the LSN that copy is consistent with (`startingLsn`, for
+example `sys.fn_cdc_get_max_lsn()` recorded before the copy was taken); the retention guard
+raises `DataLossError` if cleanup has already passed it. Never use `bootstrap=True` or
+`on_data_loss="resnapshot"` on such a table: both snapshot it.
 
 ### Applying changes to a current-state table
 
@@ -226,13 +258,13 @@ does, and until the stream has created it a call does nothing. Silver's
 more than was applied: gate consumers with
 `finalization.is_final(spark, "ops.table_finalization", "silver.orders", period_end)`.
 One call per silver table at a time
-([ADR 0019](docs/decisions/0019-silver-helper-applies-the-change-log.md)).
+([ADR 0019](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0019-silver-helper-applies-the-change-log.md)).
 
 ### Options
 
 | Option | Default | Meaning |
 |---|---|---|
-| `captureInstance` | required | e.g. `dbo_orders` |
+| `captureInstance` | required | e.g. `dbo_orders`. Matched ignoring case, as SQL Server does (the exact name first) |
 | `columns` | inferred | DDL of the captured columns to read. Inferred with `sys.sp_cdc_get_captured_columns` when omitted; required for `backend=fake` |
 | `connectionString` | required | `mssql-python` / ODBC 18 connection string |
 | `backend` | `mssql-python` | `mssql-python`, `arrow-odbc`, or `fake` (tests; reads `fakePath`) |
@@ -245,7 +277,7 @@ One call per silver table at a time
 | `includeCommandId` | `true` | read `__$command_id` (ordering within a transaction) |
 | `arrowBatchSize` | `10000` | rows per Arrow batch fetched from the driver |
 | `snapshotLsn` | `max_lsn` before the read | `mssql_cdc_snapshot` only: the LSN stamped on the snapshot rows |
-| `metricsPath` | none (`stream()`: `_mssql_cdc_metrics` under the live generation's checkpoint for local/FUSE checkpoints, see [Generations](docs/ARCHITECTURE.md#generations-to_delta)) | directory (local, or FUSE such as a Volume) where each partition that read rows leaves its round trip, read time, MB, network wait, retention watermark and capture lag for `delta_sink(metrics_path=...)` to fold into the facts |
+| `metricsPath` | none (`stream()`: `_mssql_cdc_metrics` under the live generation's checkpoint for local/FUSE checkpoints, see [Generations](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/ARCHITECTURE.md#generations-to_delta)) | directory (local, or FUSE such as a Volume) where each partition leaves its round trip, read time, MB, network wait, retention watermark, capture lag and the commit time of its last LSN (the largest is the batch's end offset) for `delta_sink(metrics_path=...)` to fold into the facts; the sink removes the files after each batch |
 
 ### Output schema
 
@@ -267,7 +299,7 @@ Order changes with `(_start_lsn, _command_id, _seqval, _operation)`. Snapshot ro
 
 A `db_owner` needs nothing else. A least-privilege login needs what the CDC query
 functions need, plus one grant per capture instance, because the reader reads the change
-table directly (see [ADR 0009](docs/decisions/0009-read-change-tables-directly.md)):
+table directly (see [ADR 0009](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0009-read-change-tables-directly.md)):
 
 ```sql
 GRANT SELECT ON dbo.orders TO cdc_reader;           -- the captured source columns
@@ -285,22 +317,33 @@ time can still arrive. Use `finalization.is_final(spark, control, table, period_
 in consumers, or query the control table directly.
 
 On a quiet database the verdict trails real time by up to ~5 minutes, the interval of
-SQL Server's idle entries. [`sql/heartbeat.sql`](sql/heartbeat.sql) (a one-row
+SQL Server's idle entries. [`sql/heartbeat.sql`](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/sql/heartbeat.sql) (a one-row
 CDC-tracked table updated every 10 seconds by an Agent job) brings that down to about
-10 seconds; see [ADR 0010](docs/decisions/0010-heartbeat-for-quiet-databases.md).
+10 seconds; see [ADR 0010](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0010-heartbeat-for-quiet-databases.md).
 
 ## Drivers
 
-`mssql-python` (default) is pip-only and fetches natively into Arrow.
-`arrow-odbc` is supported where msodbcsql18 is already installed. The survey
-behind this choice is in [docs/CONNECTORS.md](docs/CONNECTORS.md).
+`mssql-python` (default) is pip-only, installed with the package, and fetches natively into
+Arrow. `arrow-odbc` (`pip install "mssql-cdc-pyspark[arrow-odbc]"`) is supported where
+msodbcsql18 is already installed. The survey
+behind this choice is in [docs/CONNECTORS.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/CONNECTORS.md).
 
 ## Platforms
 
 * **Local**: `mssql_cdc.spark.get_spark()` builds a session with Delta.
-* **Databricks classic**: see [docs/DATABRICKS.md](docs/DATABRICKS.md) and
-  [examples/databricks_notebook.py](examples/databricks_notebook.py).
+* **Databricks classic**: see [docs/DATABRICKS.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/DATABRICKS.md) and
+  [examples/databricks_notebook.py](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/examples/databricks_notebook.py).
 * **Others**: any Spark 4.2+ with Python workers and network access to SQL Server.
+
+## Compatibility
+
+Within 0.x, a minor release may break the Python API (each break listed under "Breaking" in
+[CHANGELOG.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md), with what to change) and a patch only fixes. The state a
+stream leaves behind never breaks without a migration path: the offsets in its checkpoints,
+the checkpoint layout, and the schemas of the tables it writes, which change only through
+migrations that run on their own. Every release's "State compatibility" line says what it
+does to that state. The public API is what this README documents; everything else may change
+in any release ([ADR 0021](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/decisions/0021-compatibility-policy-for-0x.md)).
 
 ## Development
 
@@ -309,10 +352,10 @@ uv sync
 uv run pytest -q                # engine tests, no SQL Server needed
 ```
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) (setup for Linux and Windows),
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ROADMAP.md](docs/ROADMAP.md),
-the decision records in [docs/decisions/](docs/decisions/), and
-[CONTRIBUTING.md](CONTRIBUTING.md).
+See [docs/DEVELOPMENT.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/DEVELOPMENT.md) (setup for Linux and Windows),
+[docs/ARCHITECTURE.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/ARCHITECTURE.md), [docs/ROADMAP.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/ROADMAP.md),
+the decision records in [docs/decisions/](https://github.com/emanuel-luis/mssql-cdc-pyspark/tree/main/docs/decisions), and
+[CONTRIBUTING.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CONTRIBUTING.md).
 
 ## License
 
