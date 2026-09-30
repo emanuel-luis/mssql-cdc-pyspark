@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Iterator, NamedTuple, Sequence
 
 import pyarrow as pa
@@ -373,7 +374,9 @@ class SqlCdcClient(CdcClient):
             + ", 126)",
             (lsn,),
         )
-        return value or None
+        # Style 126 drops ".000" on whole seconds; the offset contract always carries ms.
+        # Checkpoints written without them still resume: fromisoformat reads both forms.
+        return datetime.fromisoformat(value).isoformat(timespec="milliseconds") if value else None
 
     def nth_commit_after(self, lsn, n):
         n = int(n)

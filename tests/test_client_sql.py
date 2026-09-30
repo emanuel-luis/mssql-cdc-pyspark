@@ -70,7 +70,7 @@ def test_named_zone_converts_a_range_with_one_offset_by_dateadd():
 
 
 def test_timezone_auto_is_detected_once_per_client():
-    rec = Recorder(tz="E. South America Standard Time")
+    rec = Recorder("2026-09-28T16:50:00.123", tz="E. South America Standard Time")
     client = SqlCdcClient(rec)
     client.lsn_to_time("0x01")
     list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
@@ -89,13 +89,22 @@ def test_timezone_auto_falls_back_to_the_current_offset_before_2022():
                 return -180
             return super().scalar(sql, params)
 
-    rec = OldServer()
+    rec = OldServer("2026-09-28T16:50:00.123")
     client = SqlCdcClient(rec)
     client.lsn_to_time("0x01")
     list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
     assert client.timezone == "UTC-03:00"
     assert "CAST(DATEADD(minute, 180, m.tran_end_time) AS datetime2(3))" in rec.calls[-1][0]
     assert [sql for sql, _ in rec.calls].count("SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())") == 1
+
+
+def test_lsn_to_time_always_carries_milliseconds():
+    # style 126 drops ".000" on whole seconds; the offset contract keeps them (ADR 0002)
+    whole = SqlCdcClient(Recorder(scalar_value="2026-09-28T16:50:00"), source_timezone="UTC")
+    assert whole.lsn_to_time("0x01") == "2026-09-28T16:50:00.000"
+    ms = SqlCdcClient(Recorder(scalar_value="2026-09-28T16:50:00.123"), source_timezone="UTC")
+    assert ms.lsn_to_time("0x01") == "2026-09-28T16:50:00.123"
+    assert SqlCdcClient(Recorder(scalar_value=None), source_timezone="UTC").lsn_to_time("0x01") is None
 
 
 def test_timezone_detected_names_are_validated():
