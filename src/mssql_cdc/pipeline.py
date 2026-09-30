@@ -183,7 +183,8 @@ class CdcStream:
         from .sink import write_event
 
         ci = self._capture_instance()
-        offset, timing = self._last_snapshot(target, ci), {}
+        offset = self._last_snapshot(target, ci)
+        timing: dict = {}
         if offset is None:
             offset, timing = self._take_snapshot(target, ci)
         if facts_table:
@@ -291,12 +292,14 @@ class CdcStream:
             raise ValueError("bootstrap=True sets startingLsn itself; pass one or the other")
         state = _read_state(checkpoint)
         if on_data_loss == "resnapshot":
+            assert facts_table is not None  # checked above
             state = self._recover(target, app_id, checkpoint, facts_table, state,
                                   resnapshot_interval_days, bootstrap) or state
         n = state["generation"] if state else 0  # a gen-0 state only records a recovery
         checkpoint, sink_id = _generation(checkpoint, app_id, n)
         options = dict(self.options)
         if n:  # the generation starts at its snapshot, whatever startingLsn said
+            assert state is not None  # n comes from it
             options = {k: v for k, v in options.items() if k.lower() != "startinglsn"}
             options["startingLsn"] = state["snapshot_lsn"]
         elif bootstrap:

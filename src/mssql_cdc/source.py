@@ -27,10 +27,16 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
+from itertools import pairwise
 
-from pyspark.sql.datasource import DataSource, DataSourceReader, DataSourceStreamReader, InputPartition
+from pyspark.sql.datasource import (
+    DataSource,
+    DataSourceReader,
+    DataSourceStreamReader,
+    InputPartition,
+)
 
 try:  # Spark 4.2+ (and runtimes that backported SPARK-55304)
     from pyspark.sql.streaming.datasource import (
@@ -68,7 +74,7 @@ def _truthy(value) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "y")
 
 
-def _write_metrics(path: str, partition: "LsnRange", metrics: dict) -> None:
+def _write_metrics(path: str, partition: LsnRange, metrics: dict) -> None:
     """One JSON per partition; a task retry overwrites its file. Best effort: a metric
     must never fail a read."""
     import json
@@ -231,7 +237,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
         return min_lsn
 
     # -- data (runs on executors) ---------------------------------------------
-    def read(self, partition: LsnRange) -> Iterator:
+    def read(self, partition: LsnRange) -> Iterator:  # type: ignore[override]  # partitions() only plans LsnRange
         import pyarrow as pa
         from pyspark.sql.pandas.types import to_arrow_schema
 
@@ -321,7 +327,7 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
 class MssqlCdcLegacyStreamReader(_BaseReader):  # pragma: no cover - Spark < 4.2
     """Spark 4.0/4.1 without admission control: every batch reads up to max_lsn."""
 
-    def latestOffset(self) -> dict:
+    def latestOffset(self) -> dict:  # type: ignore[override]  # Spark < 4.2 signature; stubs are 4.2
         return self._offset(self.client.max_lsn())
 
 
@@ -380,9 +386,9 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         cuts = [lo + (hi - lo + 1) * i // n for i in range(1, n)]
         bounds = [None, *cuts, None]
         return [KeyRange(self.capture_instance, lsn, commit_ts, schema, table, key, a, b)
-                for a, b in zip(bounds, bounds[1:])]
+                for a, b in pairwise(bounds)]
 
-    def read(self, partition: KeyRange) -> Iterator:
+    def read(self, partition: KeyRange) -> Iterator:  # type: ignore[override]  # partitions() only plans KeyRange
         from datetime import datetime
 
         import pyarrow as pa

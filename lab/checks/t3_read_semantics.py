@@ -51,14 +51,14 @@ def main(argv=None) -> bool:
     try:
         changes = _changes(conn, start, end)
         checks.append(("__$command_id in the change table", True, "yes"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - the error is the check result
         checks.append(("__$command_id in the change table", False, str(exc)[:200]))
         return report("t3_read_semantics", checks, {})
     try:
         rows(conn, "SELECT TOP (1) __$command_id FROM cdc.fn_cdc_get_all_changes_dbo_orders("
                    "CONVERT(binary(10), ?, 1), CONVERT(binary(10), ?, 1), N'all update old')", (start, end))
         checks.append(("__$command_id from fn_cdc_get_all_changes", None, "yes"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - the error is the check result
         checks.append(("__$command_id from fn_cdc_get_all_changes", None, str(exc)[:200]))
 
     by_tx = {}

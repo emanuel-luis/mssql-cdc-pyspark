@@ -6,10 +6,10 @@ from .pipeline import stream
 from .source import HAS_ADMISSION_CONTROL, OPERATIONS, MssqlCdcDataSource
 
 __all__ = [
-    "DataLossError",
     "HAS_ADMISSION_CONTROL",
-    "MssqlCdcDataSource",
     "OPERATIONS",
+    "DataLossError",
+    "MssqlCdcDataSource",
     "make_client",
     "register",
     "stream",

@@ -115,7 +115,7 @@ def report(name: str, checks: list[tuple[str, bool | None, str]], extra: dict | 
         tag = "INFO" if passed is None else ("PASS" if passed else "FAIL")
         ok = ok and passed is not False
         print(f"[{tag}] {label}: {detail}")
-    path = save_result(name, {"checks": [dict(label=l, passed=p, detail=d) for l, p, d in checks],
+    path = save_result(name, {"checks": [{"label": l, "passed": p, "detail": d} for l, p, d in checks],
                               "extra": extra or {}})
     print(f"-> {'OK' if ok else 'FAILED'} (saved {path.relative_to(ROOT)})")
     return ok

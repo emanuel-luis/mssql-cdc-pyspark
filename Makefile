@@ -1,4 +1,4 @@
-.PHONY: install up down setup seed stream test lab-sql lab-spark lab
+.PHONY: install up down setup seed stream lint test lab-sql lab-spark lab
 
 install:        ## local dev install
 	uv sync
@@ -17,6 +17,10 @@ seed:
 
 stream:         ## background OLTP traffic (Ctrl+C to stop)
 	uv run python -m lab.workload stream --tps 5 --duration 600
+
+lint:           ## what CI's lint job runs
+	uv run ruff check
+	uv run mypy
 
 test:           ## unit tests (no SQL Server needed)
 	uv run pytest -q

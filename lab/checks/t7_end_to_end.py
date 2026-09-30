@@ -132,7 +132,7 @@ def main(argv=None) -> bool:
     checks.append(("finalized_until <= end commit time", fu is not None and fu.isoformat() <= end_ts,
                    f"{fu} vs {end_ts}"))
 
-    q2, prog2 = run()
+    _, prog2 = run()
     new = sum(x["numInputRows"] for x in prog2)
     checks.append(("rerun on same checkpoint reads nothing new", new == 0, f"{new} rows"))
 
@@ -169,7 +169,7 @@ def main(argv=None) -> bool:
         try:
             run()
             checks.append(("retention guard stops the stream", False, "stream ran; data loss was silent"))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - the error is the check result
             checks.append(("retention guard stops the stream", "re-snapshot" in str(exc),
                            str(exc).splitlines()[0][:200]))
 

@@ -31,7 +31,8 @@ import statistics
 import time
 from datetime import datetime, timezone
 
-from pyspark.sql import DataFrame, functions as F
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
 
 from . import migrations
 from .migrations.facts import EVENT_COLUMNS, NETWORK_COLUMNS, RETENTION_COLUMNS
@@ -130,6 +131,7 @@ def batch_facts(df: DataFrame) -> dict:
         # updates count after-images (operation 4); before-images (3) pair with them
         F.sum(F.when(F.col("_operation") == 4, 1).otherwise(0)).alias("updates"),
     ).first()
+    assert row is not None  # a global aggregate always returns one row
     return row.asDict()
 
 

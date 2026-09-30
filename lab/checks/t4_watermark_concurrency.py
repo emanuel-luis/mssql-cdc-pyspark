@@ -39,7 +39,7 @@ def main(argv=None) -> bool:
             time.sleep(a.long_seconds)
             c.commit()
             c.close()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - reported by the main thread
             errors.append(exc)
 
     def short_tx():
@@ -50,7 +50,7 @@ def main(argv=None) -> bool:
                                    "VALUES (?, 1, 'short_tx', 1)", (base + 1 + i,))
                 time.sleep(1)
             c.close()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - reported by the main thread
             errors.append(exc)
 
     def observer():

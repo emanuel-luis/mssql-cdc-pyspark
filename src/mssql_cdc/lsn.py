@@ -33,7 +33,7 @@ def normalize(value: str | bytes | bytearray) -> str:
 
 
 def to_int(lsn: str) -> int:
-    return int(normalize(lsn)[2:], 16)
+    return int(normalize(lsn), 16)
 
 
 def from_int(value: int) -> str:

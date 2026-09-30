@@ -69,16 +69,16 @@ CONTROL_COMMENT = (
     "Gate downstream work on finalized_until, e.g. with finalization.is_final()."
 )
 CONTROL_COLUMNS = [
-    ("table_name", "STRING", "The table this verdict is about: the name passed to "
-     "finalization.advance(), usually the target table. One row per table."),
-    ("finalized_until", "TIMESTAMP_NTZ", "The verdict, UTC. Every period that ends at or before "
+    ("table_name", "STRING", ("The table this verdict is about: the name passed to "
+     "finalization.advance(), usually the target table. One row per table.")),
+    ("finalized_until", "TIMESTAMP_NTZ", ("The verdict, UTC. Every period that ends at or before "
      "this instant is complete in the table: no source commit at or before it can still arrive. "
-     "It only moves forward. A consumer of the period [start, end) waits for finalized_until >= end."),
-    ("end_lsn", "STRING", "Source commit LSN (0x + 20 hex) of the batch end that last moved the "
-     "verdict: how far the source had been read and committed to the table."),
-    ("end_commit_ts", "TIMESTAMP_NTZ", "Commit time of end_lsn, UTC. finalized_until is this instant "
+     "It only moves forward. A consumer of the period [start, end) waits for finalized_until >= end.")),
+    ("end_lsn", "STRING", ("Source commit LSN (0x + 20 hex) of the batch end that last moved the "
+     "verdict: how far the source had been read and committed to the table.")),
+    ("end_commit_ts", "TIMESTAMP_NTZ", ("Commit time of end_lsn, UTC. finalized_until is this instant "
      "truncated to the period (an hour by default), because transactions sharing this exact "
-     "commit time may still be arriving."),
+     "commit time may still be arriving.")),
     ("updated_at", "TIMESTAMP_NTZ", "When the verdict last moved, UTC."),
 ]
 
@@ -96,6 +96,7 @@ def advance(spark, control_table: str, table_name: str, end_offset: dict | None,
     cand = candidate(end_offset, granularity)
     ensure_control_table(spark, control_table)
     if cand is not None:
+        assert end_offset is not None  # candidate() is None without it
         src = spark.createDataFrame(
             [(table_name, cand, end_offset["lsn"], datetime.fromisoformat(end_offset["commit_ts"]),
               datetime.now(timezone.utc).replace(tzinfo=None))],

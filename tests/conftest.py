@@ -70,7 +70,8 @@ def latest():
     in a bronze DataFrame, as a MERGE downstream applies it, rebuilt from the newest snapshot
     on: a re-snapshot leaves no delete row for the gap (ADR 0016). With ``facts``, a newer
     snapshot event counts too: an empty table's snapshot has no rows (ADR 0018)."""
-    from pyspark.sql import Window, functions as F
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
 
     def rebuild(df, key, value, facts=None):
         points = [df.where("_operation = 0").agg(F.max("_start_lsn")).first()[0]]

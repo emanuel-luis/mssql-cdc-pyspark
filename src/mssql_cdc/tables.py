@@ -3,7 +3,7 @@ and create one with typed, commented columns."""
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 
 def is_path(name_or_path: str) -> bool:

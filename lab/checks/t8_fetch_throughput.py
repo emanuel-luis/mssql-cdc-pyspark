@@ -98,7 +98,8 @@ def main(argv=None) -> bool:
     checks = [(label, None, f"{n} rows in {s:.1f}s = {rate:,.0f} rows/s") for label, n, s, rate in runs]
     return report("t8_fetch_throughput", checks, {
         "rows": a.rows, "server": scalar(conn, "SELECT @@VERSION").splitlines()[0],
-        "runs": [dict(label=l, rows=n, seconds=round(s, 2), rows_per_s=round(r)) for l, n, s, r in runs],
+        "runs": [{"label": l, "rows": n, "seconds": round(s, 2), "rows_per_s": round(r)}
+                 for l, n, s, r in runs],
     })
 
 

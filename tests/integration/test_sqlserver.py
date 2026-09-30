@@ -15,7 +15,6 @@ import pytest
 from mssql_cdc.client import make_client
 from mssql_cdc.finalization import end_offset_from_progress
 
-
 pytestmark = pytest.mark.sqlserver
 
 

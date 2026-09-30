@@ -12,12 +12,11 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from mssql_cdc import finalization, stream
-from mssql_cdc.spark import get_spark
+import tempfile
 
 from lab.common import SOURCE_TZ, connection_string
-
-import tempfile
+from mssql_cdc import finalization, stream
+from mssql_cdc.spark import get_spark
 
 # Delta tables and checkpoints live under MSSQL_CDC_WORK (default: system temp dir).
 WORK = os.environ.get("MSSQL_CDC_WORK", os.path.join(tempfile.gettempdir(), "mssql-cdc-work"))

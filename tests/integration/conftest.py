@@ -36,7 +36,7 @@ class SqlServer:
         while True:  # the "ready" log line can come before logins are accepted
             try:
                 return mssql_python.connect(self.base + f"Database={database};", autocommit=True)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 if time.time() > deadline:
                     raise
                 time.sleep(2)
@@ -79,7 +79,7 @@ def sqlserver():
     docker = pytest.importorskip("docker")
     try:
         docker.from_env().ping()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - any Docker error means skip
         pytest.skip(f"Docker daemon unavailable: {exc}")
 
     from testcontainers.core.container import DockerContainer

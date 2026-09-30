@@ -1,0 +1,22 @@
+# Optional local hooks. CI does not read this file: it runs the same tools through
+# `uv run` (see .github/workflows/ci.yml). Install with `uvx prek install`, or with
+# pre-commit >= 4.4 (`pre-commit install`).
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+
+  - repo: local
+    hooks:
+      # ruff from uv.lock, so the hook and CI never disagree on the version.
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix --force-exclude
+        language: unsupported
+        require_serial: true
+        types_or: [python, pyi]

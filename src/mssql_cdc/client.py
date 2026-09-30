@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Iterator, Sequence
 from datetime import datetime
-from typing import Iterator, NamedTuple, Sequence
+from typing import NamedTuple
 
 import pyarrow as pa
 
@@ -290,6 +291,7 @@ class SqlCdcClient(CdcClient):
                 self._offset_min = int(self._b.scalar("SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())"))
         if self._tz is not None:
             return self._tz
+        assert self._offset_min is not None  # the fallback above set it
         sign, minutes = ("+" if self._offset_min >= 0 else "-"), abs(self._offset_min)
         return f"UTC{sign}{minutes // 60:02d}:{minutes % 60:02d}"
 
@@ -443,7 +445,7 @@ class SqlCdcClient(CdcClient):
             rows = [r for batch in self._b.batches(
                 "EXEC sys.sp_cdc_get_captured_columns @capture_instance = ?", (ci,), 1000)
                 for r in batch.to_pylist()]
-        except Exception as exc:  # noqa: BLE001 - Error 22981, driver-specific type
+        except Exception as exc:  # Error 22981, driver-specific type
             raise ValueError(not_found) from exc
         if not rows:
             raise ValueError(not_found)

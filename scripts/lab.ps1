@@ -1,7 +1,7 @@
 <#
   PowerShell equivalent of the Makefile targets (Windows without make).
 
-  .\scripts\lab.ps1 install | up | down | setup | seed | stream | test | lab-sql | lab-spark | lab
+  .\scripts\lab.ps1 install | up | down | setup | seed | stream | lint | test | lab-sql | lab-spark | lab
 #>
 param([Parameter(Mandatory = $true)][string]$Target)
 $ErrorActionPreference = "Stop"
@@ -20,6 +20,10 @@ switch ($Target) {
   "setup"     { Run "uv run python -m lab.workload setup" }
   "seed"      { Run "uv run python -m lab.workload seed --customers 500 --orders 2000" }
   "stream"    { Run "uv run python -m lab.workload stream --tps 5 --duration 600" }
+  "lint"      {
+    Run "uv run ruff check"
+    Run "uv run mypy"
+  }
   "test"      { Run "uv run pytest -q" }
   "lab-sql"   {
     Run "uv run python -m lab.checks.t2_timezone"
