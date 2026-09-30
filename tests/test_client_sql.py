@@ -212,7 +212,7 @@ def test_fake_backend_still_requires_columns(tmp_path):
 def test_ping_and_network_wait():
     rec = Recorder(scalar_value=1234)
     client = SqlCdcClient(rec, source_timezone="UTC")
-    assert len(client.ping(3)) == 3 and all(t >= 0 for t in client.ping(2))
+    assert len(client.ping(3)) == 3 and rec.calls[-1] == ("SELECT 1", ())
     assert client.network_wait_ms() == 1234
     assert "sys.dm_exec_session_wait_stats WHERE session_id = @@SPID AND wait_type = 'ASYNC_NETWORK_IO'" in rec.calls[-1][0]
 

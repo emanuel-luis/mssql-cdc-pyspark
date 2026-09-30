@@ -137,7 +137,7 @@ def test_stream_resumes_from_checkpoint_with_transactions_in_order(spark, sqlser
                   "DELETE FROM dbo.orders WHERE order_id = 1; COMMIT")
     sqlserver.wait_for_changes(ci, 4)  # insert, update before/after, delete
 
-    first, _ = _read(spark, sqlserver, ci, checkpoint=workdir)
+    first, _ = _read(spark, sqlserver, ci, checkpoint=workdir, arrowBatchSize="3")
     rows = first.orderBy("_start_lsn", "_command_id", "_seqval", "_operation").collect()
     assert [r["_operation"] for r in rows] == [2, 3, 4, 1]
     ids = [r["_command_id"] for r in rows]
@@ -146,7 +146,7 @@ def test_stream_resumes_from_checkpoint_with_transactions_in_order(spark, sqlser
 
     sqlserver.run("INSERT INTO dbo.orders VALUES (2, 'new')")
     sqlserver.wait_for_changes(ci, 5)
-    after, _ = _read(spark, sqlserver, ci, checkpoint=workdir)
+    after, _ = _read(spark, sqlserver, ci, checkpoint=workdir, arrowBatchSize="3")
     after_rows = after.collect()  # same sink: first-run rows must not repeat
     new = [r for r in after_rows if r not in rows]
     assert len(after_rows) == 5 and [(r["order_id"], r["_operation"]) for r in new] == [(2, 2)]
@@ -164,6 +164,11 @@ def test_least_privilege_login_needs_one_grant_on_the_change_table(spark, sqlser
     sqlserver.run("GRANT SELECT ON cdc.dbo_priv_probe_CT TO cdc_reader")
     df, _ = _read(spark, sqlserver, ci, connectionString=conn)
     assert [(r["id"], r["v"]) for r in df.collect()] == [(1, "a")]
+    client = make_client({"connectionString": conn})
+    try:  # own session's wait stats: no VIEW SERVER STATE for this login either
+        assert isinstance(client.network_wait_ms(), int)
+    finally:
+        client.close()
 
 
 def test_purged_range_stops_the_stream(spark, sqlserver, workdir):
@@ -286,7 +291,7 @@ def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(
     # has never written to max_lsn is NULL too (run this test alone); the snapshot needs neither.
     conn = sqlserver.login("boot_reader", "GRANT SELECT ON dbo.boot TO boot_reader",
                            "GRANT SELECT ON cdc.dbo_boot_CT TO boot_reader")
-    options = {"connectionString": conn, "captureInstance": ci, "numPartitions": "3"}
+    options = {"connectionString": conn, "captureInstance": ci, "numPartitions": "3", "arrowBatchSize": "1"}
     client = make_client(options)
     try:  # the documented API names the table and its key for a least-privilege login
         source = client.source_table(ci)
