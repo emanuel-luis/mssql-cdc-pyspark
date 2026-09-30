@@ -8,6 +8,21 @@ Append only; see ``mssql_cdc.migrations``. For example::
     ]
 """
 
-from .base import Migration
+from .base import Migration, add_columns
 
-MIGRATIONS: list[Migration] = []
+# Migration 1 (2026-09-30): the position of tables built by silver.apply_changes (ADR 0019).
+APPLIED_COLUMNS = [
+    (
+        "applied_lsn",
+        "STRING",
+        (
+            "Tables built by mssql_cdc.apply_changes: the highest source commit LSN (0x + 20 "
+            "hex) of the bronze changes applied to the table; the next call reads the changes "
+            "after it. NULL for other tables."
+        ),
+    ),
+]
+
+MIGRATIONS: list[Migration] = [
+    Migration("add applied_lsn", lambda spark, table: add_columns(spark, table, APPLIED_COLUMNS)),
+]

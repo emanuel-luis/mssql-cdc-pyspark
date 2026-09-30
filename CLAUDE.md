@@ -67,8 +67,11 @@ src/mssql_cdc/
                    to_delta(on_data_loss="resnapshot"): re-snapshot into a new checkpoint
                    generation after CDC data loss (ADR 0018).
   finalization.py  finalized_until: candidate(), advance() (monotonic MERGE), is_final().
+  silver.py        apply_changes(): bronze -> current-state table by MERGE, position in the
+                   control table, rebuild after a re-snapshot, verdict propagated (ADR 0019).
   tables.py        DeltaTable API: open by name/path, create typed with column comments (ADR 0012).
-  migrations/      schema migrations per table kind: control.py, facts.py, bronze.py (ADR 0013).
+  migrations/      schema migrations per table kind: control.py, facts.py, bronze.py,
+                   silver.py (ADR 0013).
   spark.py         get_spark(): reuse the platform session or build a local one with Delta;
                    available_cores(): what register() uses for numPartitions=auto (ADR 0011).
 lab/
@@ -165,7 +168,7 @@ about every 5 minutes (t1); `sql/heartbeat.sql` brings `max_lsn`'s lag to ~10 s
   dependencies to `[project].dependencies` beyond `pyarrow`.
 * Keep the README options table and output schema in sync with the options read in
   `src/mssql_cdc/source.py` and `client.make_client`.
-* Changing the control, facts or bronze schema: update its creation columns *and* append a
+* Changing the control, facts, bronze or silver schema: update its creation columns *and* append a
   migration to `src/mssql_cdc/migrations/<kind>.py` (ADR 0013); never edit a shipped one.
 * Record design changes as a new ADR in `docs/decisions/`, with `**Date:**` (ISO-8601 with
   the UTC offset) and an `**Amended:**` line per later change (see `docs/decisions/README.md`).

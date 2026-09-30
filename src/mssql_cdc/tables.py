@@ -23,6 +23,14 @@ def delta_table(spark, name_or_path: str):
     return DeltaTable.forName(spark, name_or_path)
 
 
+def exists(spark, name_or_path: str) -> bool:
+    if is_path(name_or_path):
+        from delta.tables import DeltaTable
+
+        return DeltaTable.isDeltaTable(spark, name_or_path)
+    return spark.catalog.tableExists(name_or_path)
+
+
 def create_if_not_exists(
     spark,
     name_or_path: str,

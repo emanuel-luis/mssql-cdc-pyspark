@@ -8,7 +8,8 @@ it. The property is only written when a migration runs.
 To change a table kind:
 
 1. change its creation columns (``sink.FACTS_COLUMNS``, ``sink.BRONZE_COLUMN_COMMENTS``,
-   ``finalization.CONTROL_COLUMNS``), so new tables are born with the change;
+   ``finalization.CONTROL_COLUMNS``, ``silver.SILVER_COLUMNS``), so new tables are born
+   with the change;
 2. append a ``Migration`` to ``migrations/<kind>.py``, so existing tables get it. For a
    new column, ``add_columns()`` (an empty append with ``mergeSchema``) is usually enough.
 

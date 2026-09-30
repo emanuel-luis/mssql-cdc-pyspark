@@ -16,6 +16,7 @@ flowchart TB
     SK[sink.delta_sink<br/>foreachBatch]
     FN[finalization<br/>advance / is_final]
     PL[pipeline.CdcStream<br/>to_delta, snapshot, generations]
+    SV[silver.apply_changes<br/>MERGE, rebuild]
   end
   PL --> DS
   PL --> SK
@@ -26,6 +27,8 @@ flowchart TB
   RD -. micro-batches .-> SK
   SN -. snapshot rows .-> PL
   SK -. after commit .-> FN
+  SK -. bronze .-> SV
+  SV -. after MERGE .-> FN
 ```
 
 * **Source**: Spark Python DataSource V2 (`pyspark.sql.datasource`). One stream per
@@ -38,6 +41,9 @@ flowchart TB
 * **Sink**: an optional, Delta-specific `foreachBatch` writer. The source works with any
   sink.
 * **Finalization**: a control table with one row per target table.
+* **Silver**: `apply_changes` reads bronze (and the facts, for re-snapshots) and MERGEs the
+  latest image per key into a current-state table; its position and verdict are its row in
+  the control table ([ADR 0019](decisions/0019-silver-helper-applies-the-change-log.md)).
 
 ## Where code runs
 
@@ -149,16 +155,17 @@ Alias types map through their base type. Anything else (`sql_variant`, `geograph
 `geometry`, `hierarchyid`) fails at `load()` with a message to pass `columns`. The fake
 backend has no type metadata and always needs `columns`.
 
-## Tables written by the sink and finalization
+## Tables written by the sink, finalization and silver
 
 | Table | Grain | Written by | Notes |
 |---|---|---|---|
 | bronze (e.g. `bronze_orders`) | one row per change | `delta_sink` | append-only; `_batch_id` added; commit `userMetadata` holds the batch facts |
-| facts (optional) | one row per non-empty batch, and one per snapshot `to_delta` takes (bootstrap or re-snapshot) | `delta_sink`, `write_event` | snapshot rows have `event` `'bootstrap'` or `'resnapshot'` (NULL for batches), no `batch_id`, and on a re-snapshot the purged gap in `lost_from_ts`/`lost_to_ts` ([ADR 0018](decisions/0018-automatic-resnapshot-after-data-loss.md)); durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write), `written_at`, and optional network and read metrics (`source_rtt_ms`, `read_seconds`, `read_mb`, `network_wait_ms`; [ADR 0014](decisions/0014-network-and-read-metrics-in-facts.md)) and retention headroom (`retention_watermark_ts`, `retention_headroom_hours`; [ADR 0017](decisions/0017-retention-headroom-in-facts.md)) and lag (`source_max_commit_ts`, `capture_lag_seconds`, `ingestion_lag_seconds`; [ADR 0020](decisions/0020-capture-and-ingestion-lag-in-facts.md)) |
-| `table_finalization` | one row per target table | `finalization.advance` | `finalized_until`, `end_lsn`, `end_commit_ts`, `updated_at` |
+| facts (optional) | one row per non-empty batch, and one per snapshot `to_delta` takes (bootstrap or re-snapshot) | `delta_sink`, `write_event` | snapshot rows have `event` `'bootstrap'` or `'resnapshot'` (NULL for batches), no `batch_id`, and on a re-snapshot the purged gap in `lost_from_ts`/`lost_to_ts` ([ADR 0018](decisions/0018-automatic-resnapshot-after-data-loss.md)); durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write), `written_at`, and optional network and read metrics (`source_rtt_ms`, `read_seconds`, `read_mb`, `network_wait_ms`; [ADR 0014](decisions/0014-network-and-read-metrics-in-facts.md)) and retention headroom (`retention_watermark_ts`, `retention_headroom_hours`; [ADR 0017](decisions/0017-retention-headroom-in-facts.md)) |
+| `table_finalization` | one row per target table | `finalization.advance`, `apply_changes` | `finalized_until`, `end_lsn`, `end_commit_ts`, `updated_at`; `applied_lsn` for silver tables: how far bronze is applied |
+| silver (e.g. `silver_orders`) | one row per source key | `apply_changes` | current state: captured columns plus `_start_lsn` and `_commit_ts` of the row's image; deletes remove rows; rebuilt from the newest snapshot after a re-snapshot ([ADR 0019](decisions/0019-silver-helper-applies-the-change-log.md)) |
 
-All three are created on first use with `DeltaTable.createIfNotExists`: explicit types, and a
-comment on the table and on every control, facts and bronze metadata column
+All four are created on first use with `DeltaTable.createIfNotExists`: explicit types, and a
+comment on the table and on every control, facts, bronze and silver metadata column
 (`DESCRIBE TABLE` shows them), and stamped with the table property
 `mssql_cdc.schema_version`. Existing tables get the schema migrations of their kind that
 they have not had yet ([ADR 0012](decisions/0012-delta-tables-through-the-deltatable-api.md),

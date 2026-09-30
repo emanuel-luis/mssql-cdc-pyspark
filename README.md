@@ -188,6 +188,44 @@ facts table and a checkpoint path that Python and Spark resolve to the same dire
 or a Volume; not a URI or `/dbfs/`); run one job per stream
 ([ADR 0018](docs/decisions/0018-automatic-resnapshot-after-data-loss.md)).
 
+### Applying changes to a current-state table
+
+`apply_changes` keeps a silver table equal to the source table, one row per key, from the
+bronze change log. Run it after the stream, in the same job or another:
+
+```python
+from mssql_cdc import apply_changes
+
+result = apply_changes(
+    spark,
+    "bronze.orders",  # as passed to to_delta and advance
+    "silver.orders",
+    "dbo_orders",
+    ["order_id"],  # or omit and pass options=... to read the key
+    control_table="ops.table_finalization",
+    facts_table="ops.ingestion_facts",
+)
+# {"rebuilt": False, "applied_lsn": "0x...", "finalized_until": datetime(...)}
+```
+
+Each call applies what bronze holds beyond the last one: the latest image per key by
+`(_start_lsn, _command_id, _seqval, _operation)`, where operation 3 (the row before an
+update) is ignored, 1 deletes the row, and 0 (snapshot), 2 and 4 upsert it. Silver has the
+captured columns plus `_start_lsn` and `_commit_ts` of each row's current image; deleted
+rows are removed. Without `keys`, pass the stream's `options` and the key comes from the
+capture instance's unique index.
+
+The position is `applied_lsn` in the control table, written after the MERGE: a rerun, or a
+call after a crash, applies nothing twice and resurrects nothing. When bronze holds a newer
+snapshot than silver has applied (a bootstrap, or a re-snapshot after data loss), silver is
+rebuilt from it, so rows deleted during a purged gap disappear; pass `facts_table` so that
+the re-snapshot of an emptied table, which writes no rows, is seen too. Silver's
+`finalized_until` is the bronze verdict read before the call read bronze, so it never claims
+more than was applied: gate consumers with
+`finalization.is_final(spark, "ops.table_finalization", "silver.orders", period_end)`.
+One call per silver table at a time
+([ADR 0019](docs/decisions/0019-silver-helper-applies-the-change-log.md)).
+
 ### Options
 
 | Option | Default | Meaning |

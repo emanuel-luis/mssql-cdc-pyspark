@@ -26,6 +26,7 @@ import json
 from datetime import datetime, timezone
 
 from . import migrations
+from .migrations.control import APPLIED_COLUMNS
 from .tables import delta_table, table_ref  # noqa: F401 - table_ref re-exported
 
 _GRANULARITIES = ("minute", "hour", "day")
@@ -104,6 +105,7 @@ CONTROL_COLUMNS = [
         ),
     ),
     ("updated_at", "TIMESTAMP_NTZ", "When the verdict last moved, UTC."),
+    *APPLIED_COLUMNS,
 ]
 
 
@@ -144,9 +146,10 @@ def advance(
             delta_table(spark, control_table)
             .alias("t")
             .merge(src.alias("s"), "t.table_name = s.table_name")
+            # never backwards; NULL on a row apply_changes created before any verdict
             .whenMatchedUpdate(
-                condition="s.cand > t.finalized_until", set=changes
-            )  # never backwards
+                condition="t.finalized_until IS NULL OR s.cand > t.finalized_until", set=changes
+            )
             .whenNotMatchedInsert(values={"table_name": "s.table_name", **changes})
             .execute()
         )

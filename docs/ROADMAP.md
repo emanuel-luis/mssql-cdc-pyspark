@@ -22,10 +22,10 @@
       (NTILE scans and spools the key, MIN..MAX is two seeks).
 - [ ] **Schema changes**: detect `cdc.ddl_history`; support switching to a second
       capture instance without losing changes.
-- [ ] **Silver helper**: apply changes to a target with MERGE, latest image per key by
+- [x] **Silver helper**: apply changes to a target with MERGE, latest image per key by
       `(_start_lsn, _command_id, _seqval, _operation)`, deletes honoured, operation 0
       (snapshot) as an upsert, rebuild from the newest snapshot after a re-snapshot; propagate
-      `finalized_until`.
+      `finalized_until` (`apply_changes`, ADR 0019).
 - [ ] **Continuous mode finalization**: `StreamingQueryListener` that advances the
       verdict on progress (check it does not block the listener bus).
 - [x] Retention headroom in the facts (`retention_watermark_ts`, `retention_headroom_hours`,

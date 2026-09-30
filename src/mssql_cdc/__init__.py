@@ -5,6 +5,7 @@ import importlib.metadata
 
 from .client import DataLossError, make_client
 from .pipeline import stream
+from .silver import apply_changes
 from .source import HAS_ADMISSION_CONTROL, OPERATIONS, MssqlCdcDataSource
 
 __all__ = [
@@ -12,6 +13,7 @@ __all__ = [
     "OPERATIONS",
     "DataLossError",
     "MssqlCdcDataSource",
+    "apply_changes",
     "make_client",
     "register",
     "stream",

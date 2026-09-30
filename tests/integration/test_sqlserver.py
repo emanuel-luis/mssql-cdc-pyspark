@@ -616,3 +616,46 @@ def test_cdc_refuses_a_unique_index_over_nullable_columns(sqlserver):
             "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'snap_nulls', "
             "@role_name = NULL, @index_name = N'ux_snap_nulls', @supports_net_changes = 0"
         )
+
+
+def test_silver_reads_a_composite_key_and_converges_to_the_source_table(
+    delta_spark, sqlserver, workdir
+):
+    from mssql_cdc import apply_changes, stream
+
+    ci = sqlserver.cdc_table(
+        "silver",
+        "a INT NOT NULL, b VARCHAR(5) NOT NULL, v VARCHAR(10) NOT NULL, PRIMARY KEY (a, b)",
+    )
+    sqlserver.run("INSERT INTO dbo.silver VALUES (1, 'x', 'old'), (1, 'y', 'old'), (2, 'x', 'old')")
+    sqlserver.wait_for_changes(ci, 3)
+    options = {"connectionString": sqlserver.connection_string, "captureInstance": ci}
+    bronze, silver, control, ckpt = (
+        os.path.join(workdir, n) for n in ("bronze", "silver", "control", "ckpt")
+    )
+
+    def run():
+        q = stream(delta_spark, options).to_delta(
+            bronze, "silver-v1", ckpt, trigger={"availableNow": True}, bootstrap=True
+        )
+        q.awaitTermination()
+        # no keys given: read from the capture instance's unique index, the primary key
+        apply_changes(delta_spark, bronze, silver, ci, control_table=control, options=options)
+        rows = delta_spark.read.format("delta").load(silver).collect()
+        return sorted((r["a"], r["b"], r["v"]) for r in rows)
+
+    def source():
+        return sorted(tuple(r) for r in sqlserver.run("SELECT a, b, v FROM dbo.silver"))
+
+    assert run() == source()
+    sqlserver.run("UPDATE dbo.silver SET v = 'new' WHERE a = 1 AND b = 'y'")
+    sqlserver.run("DELETE FROM dbo.silver WHERE a = 2")
+    sqlserver.run("UPDATE dbo.silver SET b = 'z' WHERE a = 1 AND b = 'x'")  # the key changes
+    sqlserver.wait_for_changes(ci, 8)
+    after = run()
+    changes = delta_spark.read.format("delta").load(bronze).where("_operation != 0").collect()
+    ops = sorted((r["_operation"], r["b"]) for r in changes)
+    assert after == source() == [(1, "y", "new"), (1, "z", "old")], ops
+    # a primary-key update arrives as a delete of the old key and an insert of the new one,
+    # which is why the before-images (operation 3) can be ignored
+    assert {(1, "x"), (2, "z")} <= set(ops) and (3, "x") not in ops, ops
