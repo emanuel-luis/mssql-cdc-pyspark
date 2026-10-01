@@ -53,18 +53,20 @@ class SqlServer:
             cur.close()
 
     def run_enabling_cdc(self, sql: str, params=()) -> list:
-        """``run`` for ``sp_cdc_enable_db``/``_table``, rerun when chosen as a deadlock victim.
+        """``run`` for ``sp_cdc_enable_db``/``_table``, rerun when chosen as a deadlock victim
+        or while the Agent is still starting.
 
         Each rolls back whole on error 1205, and at startup the Agent still boots alongside
-        the fixture, so SQL Server's own advice holds: rerun the transaction.
+        the fixture, so SQL Server's own advice holds: rerun the transaction. The first table
+        enabled in a run of a single test can also meet error 14258 (Agent starting).
         """
-        for _ in range(4):
+        for _ in range(30):
             try:
                 return self.run(sql, params)
             except Exception as exc:
-                if "deadlock victim" not in str(exc):
+                if "deadlock victim" not in str(exc) and "Agent is starting" not in str(exc):
                     raise
-                time.sleep(1)
+                time.sleep(2)
         return self.run(sql, params)
 
     def login(self, name: str, *grants: str) -> str:
