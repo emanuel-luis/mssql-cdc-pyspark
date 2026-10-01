@@ -1,0 +1,134 @@
+# The documentation site, built by Zensical (ADR 0024):
+#   uv run --group docs zensical build --strict   # into site/
+#   uv run --group docs zensical serve            # preview on localhost:8000
+site_name: mssql-cdc-pyspark
+site_description: PySpark streaming source for SQL Server CDC, with a Delta sink and a completeness signal
+site_url: https://emanuel-luis.github.io/mssql-cdc-pyspark/
+repo_url: https://github.com/emanuel-luis/mssql-cdc-pyspark
+repo_name: emanuel-luis/mssql-cdc-pyspark
+edit_uri: edit/main/docs/
+copyright: "&copy; 2026 Emanuel Luis, MIT license"
+docs_dir: docs
+site_dir: site
+
+theme:
+  features:
+    - content.action.edit
+    - content.code.copy
+    - navigation.sections
+    - navigation.footer
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: lucide/sun-moon
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: lucide/sun
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: lucide/moon
+        name: Switch to system preference
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            allow_inspection: false # static analysis only: never imports pyspark
+            docstring_style: google
+            filters: public
+            heading_level: 3
+            members_order: source
+            separate_signature: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_signature_annotations: true
+            show_source: false
+            show_bases: false
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: [.]
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: pymdownx.superfences.fence_code_format  # Zensical resolves the name; keeps the YAML safe
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - getting-started/installation.md
+      - getting-started/quickstart.md
+  - Guides:
+      - guides/streaming.md
+      - guides/bootstrap.md
+      - guides/data-loss.md
+      - guides/silver.md
+      - guides/finalization.md
+      - guides/monitoring.md
+      - guides/permissions.md
+      - guides/schema-changes.md
+      - DATABRICKS.md
+  - Reference:
+      - reference/options.md
+      - reference/output-schema.md
+      - reference/tables.md
+      - reference/api.md
+  - Internals:
+      - ARCHITECTURE.md
+      - DESIGN.md
+      - CONNECTORS.md
+      - DEVELOPMENT.md
+      - RELEASING.md
+      - ROADMAP.md
+      - REFERENCES.md
+  - Decisions:
+      - decisions/README.md
+      - decisions/0001-python-datasource-v2.md
+      - decisions/0002-lsn-offsets-with-commit-time.md
+      - decisions/0003-mssql-python-default-backend.md
+      - decisions/0004-verdict-in-control-table.md
+      - decisions/0005-ordering-over-atomicity.md
+      - decisions/0006-file-backed-fake-for-engine-tests.md
+      - decisions/0007-infer-columns-from-cdc-metadata.md
+      - decisions/0008-detect-source-time-zone.md
+      - decisions/0009-read-change-tables-directly.md
+      - decisions/0010-heartbeat-for-quiet-databases.md
+      - decisions/0011-num-partitions-from-cores.md
+      - decisions/0012-delta-tables-through-the-deltatable-api.md
+      - decisions/0013-schema-migrations-per-table-kind.md
+      - decisions/0014-network-and-read-metrics-in-facts.md
+      - decisions/0015-split-batches-by-change-rows.md
+      - decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md
+      - decisions/0017-retention-headroom-in-facts.md
+      - decisions/0018-automatic-resnapshot-after-data-loss.md
+      - decisions/0019-silver-helper-applies-the-change-log.md
+      - decisions/0020-capture-and-ingestion-lag-in-facts.md
+      - decisions/0021-compatibility-policy-for-0x.md
+      - decisions/0022-defer-spark-changes-changelog.md
+      - decisions/0023-schema-changes-and-capture-instance-switching.md
+      - decisions/0024-documentation-site.md
+  - Changelog: changelog.md
+  - Contributing: contributing.md

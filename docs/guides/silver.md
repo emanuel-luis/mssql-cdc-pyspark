@@ -1,0 +1,131 @@
+# Silver tables
+
+Bronze is a change log: one row per change, an update as two rows, a snapshot that overlaps
+the stream. Most consumers want the source table as it is now, one row per key. Write it
+with `apply_changes`: it keeps a silver Delta table equal to the source table, from the
+bronze rows, with deletes applied and its own completeness verdict.
+
+## Smallest example
+
+Run it after the stream, in the same job or a separate one:
+
+```python
+from mssql_cdc import apply_changes, finalization, stream
+
+query = stream(spark, options).to_delta(
+    "bronze.orders",
+    app_id="orders-v1",
+    checkpoint="/data/checkpoints/orders",
+    facts_table="ops.ingestion_facts",
+    trigger={"availableNow": True},
+    bootstrap=True,
+)
+query.awaitTermination()
+end = finalization.end_offset_from_progress(query.lastProgress)
+finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
+
+result = apply_changes(
+    spark,
+    "bronze.orders",  # the same string passed to to_delta and advance
+    "silver.orders",
+    "dbo_orders",
+    ["order_id"],
+    control_table="ops.table_finalization",
+    facts_table="ops.ingestion_facts",
+)
+# {"rebuilt": False, "applied_lsn": "0x...", "finalized_until": datetime(...)}
+```
+
+The result says whether this call rebuilt silver from a snapshot (`rebuilt`), how far
+bronze is now applied (`applied_lsn`) and silver's verdict (`finalized_until`). The first
+call that finds bronze counts as a rebuild.
+
+To read the key from the capture instance's unique index instead of naming it, leave out
+`keys` and pass the stream's options:
+
+```python
+apply_changes(
+    spark,
+    "bronze.orders",
+    "silver.orders",
+    "dbo_orders",
+    control_table="ops.table_finalization",
+    facts_table="ops.ingestion_facts",
+    options=options,
+)
+```
+
+A capture instance without a unique index fails with `ValueError` and asks for `keys`.
+
+## How it behaves
+
+Each call reads the capture instance's bronze rows beyond the last call and applies them
+with one Delta MERGE ([ADR 0019](../decisions/0019-silver-helper-applies-the-change-log.md)):
+
+- Per key, the latest image by `(_start_lsn, _command_id, _seqval, _operation)`. Operation 3
+  (the row before an update) is ignored, 1 deletes the key, and 0 (snapshot), 2 and 4
+  upsert it. Keys match with null-safe equality, since a unique index admits one NULL.
+- Silver has the captured columns plus `_start_lsn` and `_commit_ts` of each row's current
+  image. Deletes remove the row; bronze keeps the history. The column comments are in
+  [Tables](../reference/tables.md).
+- The position is `applied_lsn` in the control table, written after the MERGE. A rerun, or
+  a call after a crash between the two, applies nothing twice and brings back no deleted
+  row: a row only takes an image newer than its own `_start_lsn`.
+- When bronze holds a snapshot newer than the one silver was last rebuilt from
+  (`snapshot_lsn` in the control table), silver is rebuilt from it: keys in neither the
+  snapshot nor the changes after it are deleted. That happens after `bootstrap=True` on an
+  existing stream and after a re-snapshot that followed data loss, where the deletes of the
+  purged gap never reached bronze ([Data loss](data-loss.md)).
+- Silver's `finalized_until` is the bronze verdict as it stood before the call read bronze,
+  truncated with `granularity` (`"hour"` by default). Bronze commits its rows before its
+  verdict, so silver never claims more than it has applied. Gate silver consumers on the
+  silver name, as in [Finalization](finalization.md).
+- Until the stream has created bronze, a call does nothing and returns the previous
+  position and verdict.
+
+Check how far bronze and silver are with one query on the control table:
+
+```sql
+SELECT table_name, finalized_until, end_lsn, applied_lsn, snapshot_lsn
+FROM ops.table_finalization
+WHERE table_name IN ('bronze.orders', 'silver.orders');
+```
+
+### After a switch to a new capture instance
+
+When the stream moves to a newer capture instance of the table, bronze holds rows of both
+([Schema changes](schema-changes.md)). Pass `options` so `apply_changes` asks SQL Server
+which instances belong to the table. Without it, a bronze row of another instance fails the
+call with `ValueError` instead of being skipped. A column that bronze gained is added to
+silver, and rows that have not changed since read NULL for it.
+
+## Pitfalls
+
+- **Use one name for bronze everywhere.** `apply_changes` finds the bronze verdict and the
+  snapshot events by the exact string passed as `bronze`: advance bronze's verdict under
+  that name, and write the stream to that same target, so the facts `target` matches.
+  `bronze.orders` and the table's storage path are two different keys.
+- One bronze table per source table. The snapshot events carry no capture instance, so a
+  bronze table shared by two source tables would rebuild one from the other's snapshot.
+- Pass `facts_table`. A re-snapshot of a table that was empty writes no bronze rows, only
+  its facts event; without the facts, silver keeps the rows that the table lost.
+- One call per silver table at a time, as with one job per stream.
+- `apply_changes` adds columns but never changes a column's type: its MERGE runs without
+  schema evolution, so `delta.enableTypeWidening` alone leaves silver at the old type. After
+  a type widening on the source, widen silver's column by hand
+  ([Schema changes](schema-changes.md#changing-a-column-type)). No test covers silver
+  through a widening yet, so compare silver's column types with bronze's after one.
+- After the old capture instance is dropped and `captureInstance` is renamed to the new
+  one, SQL Server no longer lists the old name, and a silver table built from scratch fails
+  on the old rows. Keep the old (default) name configured: the stream follows the table's
+  newest instance anyway.
+- The MERGE joins against the whole silver table, and each call scans bronze for snapshot
+  rows. Delta file statistics skip most of that scan, but it grows with bronze.
+
+## See also
+
+- [Bootstrap](bootstrap.md): the snapshot silver is first built from.
+- [Finalization](finalization.md): gating consumers on silver's verdict.
+- [API reference](../reference/api.md#mssql_cdc.apply_changes) for every parameter.
+- [ADR 0019](../decisions/0019-silver-helper-applies-the-change-log.md): why a batch call,
+  hard deletes and a position in the control table.

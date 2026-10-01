@@ -376,8 +376,8 @@ def delta_sink(
     deleted, use a new ``app_id``; batch ids restart at 0 and would otherwise be
     ignored as duplicates.
 
-    ``metrics_path`` feeds the facts table (see the module doc): the directory of the source
-    option ``metricsPath``, used by no other stream. Its files are removed after each batch,
+    ``metrics_path`` feeds the facts table with each partition's read and network metrics:
+    the directory of the source option ``metricsPath``, used by no other stream. Its files are removed after each batch,
     with or without a facts table; without ``metrics_path`` nothing removes them. It also
     carries the reader's schema change and capture instance switch events to the facts.
     """

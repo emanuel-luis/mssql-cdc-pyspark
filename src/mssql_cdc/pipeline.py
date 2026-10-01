@@ -359,8 +359,8 @@ class CdcStream:
         ``{"availableNow": True}``. ``bootstrap``: snapshot the table first (see
         ``snapshot``); a checkpoint that already has offsets ignores the starting LSN.
         ``on_data_loss``: ``"fail"`` (the query stops with ``DataLossError``) or
-        ``"resnapshot"`` (recover before starting, in a new generation; needs ``facts_table``:
-        see the module doc).
+        ``"resnapshot"`` (recover before starting, in a new generation; needs ``facts_table``
+        and a checkpoint that is a local or FUSE path, not a URI or ``/dbfs/``).
         ``resnapshot_interval_days`` must exceed the CDC retention: a second loss within it
         raises ``DataLossError`` instead of snapshotting again.
         ``snapshot_on_switch``: after the batch that first reads a newer capture instance of the

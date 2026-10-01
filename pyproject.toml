@@ -41,13 +41,18 @@ dev = [
     "ruff>=0.16",
     "mypy>=2.0",
 ]
+# The documentation site (ADR 0024): `uv run --group docs zensical build --strict`.
+docs = [
+    "zensical>=0.0.67",
+    "mkdocstrings-python>=2.0.9",
+]
 
 [project.urls]
 Homepage = "https://github.com/emanuel-luis/mssql-cdc-pyspark"
 Repository = "https://github.com/emanuel-luis/mssql-cdc-pyspark"
 Issues = "https://github.com/emanuel-luis/mssql-cdc-pyspark/issues"
 Changelog = "https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/emanuel-luis/mssql-cdc-pyspark#readme"
+Documentation = "https://emanuel-luis.github.io/mssql-cdc-pyspark/"
 
 [tool.setuptools.packages.find]
 where = ["src"]

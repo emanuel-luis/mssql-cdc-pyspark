@@ -3,7 +3,7 @@
 Two layers, in the spirit of Pinterest's partition finalization:
 
 * **Facts**, per micro-batch: what was written (row counts, LSN and commit-time
-  ranges). See :mod:`mssql_cdc.sink`.
+  ranges). See ``mssql_cdc.sink``.
 * **Verdict**, per table: ``finalized_until``. Every period strictly before it is
   complete in the target table and will not receive more source commits.
 
