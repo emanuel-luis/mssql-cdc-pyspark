@@ -29,8 +29,10 @@
       stream follows a second capture instance of the table from its start LSN without
       losing changes, bronze takes new columns (`mergeSchema`), optional snapshot at the
       switch (ADR 0023, `sql/switch_capture_instance.sql`).
-- [ ] Lab check t9 for the switch under a continuous writer, also against SQL Server 2017;
-      on production SQL Server 2016, check that the change tables have `__$command_id`.
+- [x] Lab check t9 for the switch under a continuous writer, also against SQL Server 2017
+      (passes on 2022 CU27 and 2017 CU31; in the CI lab job); on production SQL Server 2016,
+      check that the change tables have `__$command_id` (they do: SP3, read through the
+      library on 2026-09-30).
 - [x] **Silver helper**: apply changes to a target with MERGE, latest image per key by
       `(_start_lsn, _command_id, _seqval, _operation)`, deletes honoured, operation 0
       (snapshot) as an upsert, rebuild from the newest snapshot after a re-snapshot; propagate

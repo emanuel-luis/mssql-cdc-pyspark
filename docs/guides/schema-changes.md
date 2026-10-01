@@ -259,4 +259,5 @@ longer captured, read as NULL".
 * [Permissions](permissions.md), [Bootstrap](bootstrap.md), [Data loss](data-loss.md),
   [Silver](silver.md).
 * [ADR 0023](../decisions/0023-schema-changes-and-capture-instance-switching.md): the
-  measurements on SQL Server 2022 and 2017 behind these rules.
+  measurements on SQL Server 2022 and 2017 behind these rules. Lab check t9 (`LAB.md`) runs
+  the procedure above under a continuous writer on both.
