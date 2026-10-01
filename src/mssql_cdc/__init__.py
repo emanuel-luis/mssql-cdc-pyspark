@@ -6,6 +6,7 @@ import importlib.util
 
 try:
     from .client import DataLossError, SchemaChangedError, make_client
+    from .fanout import await_all, start_many, stop_all
     from .pipeline import stream
     from .silver import apply_changes
     from .source import HAS_ADMISSION_CONTROL, OPERATIONS, MssqlCdcDataSource
@@ -27,8 +28,11 @@ __all__ = [
     "MssqlCdcDataSource",
     "SchemaChangedError",
     "apply_changes",
+    "await_all",
     "make_client",
     "register",
+    "start_many",
+    "stop_all",
     "stream",
 ]
 try:

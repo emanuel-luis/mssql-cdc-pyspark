@@ -67,6 +67,8 @@ src/mssql_cdc/
                    .snapshot(target) / to_delta(bootstrap=True): initial load (ADR 0016);
                    to_delta(on_data_loss="resnapshot"): re-snapshot into a new checkpoint
                    generation after CDC data loss (ADR 0018).
+  fanout.py        start_many() / await_all() / stop_all(): one to_delta stream per capture
+                   instance, from templates with {ci}, sharing the facts table (ADR 0027).
   finalization.py  finalized_until: candidate(), advance() (monotonic MERGE), is_final().
   silver.py        apply_changes(): bronze -> current-state table by MERGE, position in the
                    control table, rebuild after a re-snapshot, verdict propagated (ADR 0019).
