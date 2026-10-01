@@ -54,7 +54,6 @@ class CaptureInstance(NamedTuple):
 
     name: str
     start_lsn: str | None  # its low endpoint, as sys.fn_cdc_get_min_lsn once capture reaches it
-    create_date: str | None  # ISO-8601 in the server's clock; orders the instances
     columns: list[str]  # captured columns, in capture order; [] when unknown (the fake)
     column_types: list[str | None]  # their default Spark types; None: no default mapping
 
@@ -64,24 +63,7 @@ class DdlChange(NamedTuple):
 
     lsn: str
     commit_ts: str | None  # commit time (UTC, ms) of the last commit at or before ``lsn``
-    column: str | None  # the column an ADD, ALTER COLUMN or DROP COLUMN names; None otherwise
-    required_column_update: bool  # a captured column's type changed
     command: str
-
-
-# ALTER TABLE t ADD c ..., ALTER COLUMN c ..., DROP COLUMN c: only the column's name
-_DDL_COLUMN_RE = re.compile(
-    r"\b(?:ADD|ALTER\s+COLUMN|DROP\s+COLUMN)\s+(\[(?:[^\]]|\]\])+\]|[^\s,(]+)", re.IGNORECASE
-)
-_NOT_A_COLUMN = {"CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "DEFAULT", "INDEX"}
-
-
-def _ddl_column(command: str) -> str | None:
-    m = _DDL_COLUMN_RE.search(command or "")
-    if not m or m[1].upper() in _NOT_A_COLUMN:
-        return None
-    name = m[1]
-    return name[1:-1].replace("]]", "]") if name.startswith("[") else name
 
 
 def _check_ident(name: str, what: str) -> str:
@@ -650,12 +632,10 @@ class SqlCdcClient(CdcClient):
                     )
                 except ValueError:
                     types.append(None)  # fine unless the query reads it; load() says so
-            created = r.get("create_date")
             out.append(
                 CaptureInstance(
                     r["capture_instance"],
                     self._hex(r["start_lsn"]),
-                    created.isoformat(timespec="milliseconds") if created else None,
                     [_check_column(c["column_name"]) for c in cols],
                     types,
                 )
@@ -678,15 +658,7 @@ class SqlCdcClient(CdcClient):
         for r in rows:
             lsn = _lsn.normalize(r["ddl_lsn"])
             if from_lsn < lsn <= to_lsn:
-                out.append(
-                    DdlChange(
-                        lsn,
-                        self._commit_time_at_or_before(lsn),
-                        _ddl_column(r["ddl_command"]),
-                        bool(r["required_column_update"]),
-                        r["ddl_command"],
-                    )
-                )
+                out.append(DdlChange(lsn, self._commit_time_at_or_before(lsn), r["ddl_command"]))
         return sorted(out)
 
     def _commit_time_at_or_before(self, lsn: str) -> str | None:
@@ -704,6 +676,7 @@ class SqlCdcClient(CdcClient):
     def present_columns(self, capture_instance, columns):
         # A dropped captured column stays in the capture instance; one added back under the
         # same name is another column (a new column_id), so match by column_id, not by name.
+        # A column no instance captures is not read either: its change rows could only be NULL.
         rows = self._resolve(capture_instance)[1]
         captured = {}
         for r in rows:  # oldest first: the newest instance capturing a column wins
@@ -721,9 +694,7 @@ class SqlCdcClient(CdcClient):
             for r in batch.to_pylist()
         }
         return [
-            c
-            for c in columns
-            if c.lower() in live and captured.get(c.lower(), live[c.lower()]) == live[c.lower()]
+            c for c in columns if c.lower() in live and captured.get(c.lower()) == live[c.lower()]
         ]
 
     # -- data -----------------------------------------------------------------

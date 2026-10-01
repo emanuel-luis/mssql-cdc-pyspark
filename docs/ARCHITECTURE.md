@@ -122,8 +122,11 @@ start                S - 1 | S                        end
 Offsets stay database-wide LSNs, so the checkpoint needs nothing new, and a replay cuts at
 the same place. Each range reads its own instance's columns, NULL for the ones it lacks;
 `load()` infers the union of both. The first batch that reads the newer instance leaves a
-`capture_instance_switched` event for the facts: from then on the DBA can disable the older
-one (`sql/switch_capture_instance.sql`). DDL inside a batch leaves a `schema_change` event;
+`capture_instance_switched` event for the facts. Its facts row is written before Spark
+commits that batch, and a replay still reads the older instance, so the DBA disables the
+older one only after the stream's next batch (`sql/switch_capture_instance.sql`). A
+declared column that no instance captures fails the first planning instead of reading NULL.
+DDL inside a batch leaves a `schema_change` event;
 a changed type fails the batch before it reads anything (`SchemaChangedError`).
 
 ### Generations (`to_delta`)

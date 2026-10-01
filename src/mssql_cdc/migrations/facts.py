@@ -98,7 +98,8 @@ EVENT_COLUMNS = [
             "table (rows = 0), which writes no target rows. Changes to the source (ADR 0023), with "
             "the batch_id of the batch that read past them and rows = 0: 'schema_change' for DDL "
             "on the source table, 'capture_instance_switched' when the stream first read a newer "
-            "capture instance of the table (the older one can be dropped from then on); min_lsn = "
+            "capture instance of the table (the older one can be dropped once the same app_id has "
+            "a row with a larger batch_id: Spark commits the batch after this row); min_lsn = "
             "max_lsn is the change's LSN, detail says what changed. Downstream rebuilds only from "
             "'bootstrap' and 'resnapshot' rows."
         ),
@@ -208,9 +209,9 @@ DETAIL_COLUMNS = [
         "detail",
         "STRING",
         (
-            "On 'schema_change' and 'capture_instance_switched' rows, what changed, as the reader "
-            "reported it: the columns the DDL touched, or 'old -> new' capture instance. NULL on "
-            "other rows."
+            "On 'schema_change' rows, the DDL statement; on 'capture_instance_switched' rows, "
+            "'old -> new' capture instance, plus the columns the query reads that the new one "
+            "does not capture (NULL from then on). NULL on other rows."
         ),
     ),
 ]

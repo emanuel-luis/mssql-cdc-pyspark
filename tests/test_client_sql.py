@@ -311,14 +311,12 @@ def test_capture_instances_lists_the_table_s_instances_oldest_first():
         CaptureInstance(
             "dbo_orders",
             V1,
-            "2026-09-01T10:00:00.000",
             ["id", "amount", "g"],
             ["INT", "DECIMAL(9,2)", None],  # geography: fine unless the query reads it
         ),
         CaptureInstance(
             "dbo_orders_v2",
             V2,
-            "2026-09-30T13:25:00.000",
             ["id", "amount", "note"],
             ["INT", "DECIMAL(18,4)", "STRING"],
         ),
@@ -381,10 +379,10 @@ def test_ddl_history_keeps_the_batch_range():
     )
     client = SqlCdcClient(rec)
     changes = client.ddl_history("dbo_orders", "0x0000002A000001000100", "0x0000002A000001000400")
-    assert [(c.lsn, c.column, c.required_column_update) for c in changes] == [
-        ("0x0000002A000001000200", "note", False),
-        ("0x0000002A000001000300", "amount", True),
-        ("0x0000002A000001000400", None, False),  # (from, to]: from out, to in
+    assert [c.lsn for c in changes] == [
+        "0x0000002A000001000200",
+        "0x0000002A000001000300",
+        "0x0000002A000001000400",  # (from, to]: from out, to in
     ]
     assert changes[0].command == "ALTER TABLE dbo.orders ADD note varchar(10) NULL"
     assert changes[0].commit_ts == "2026-09-30T13:25:00.000"  # the commit at or before it, UTC
@@ -408,7 +406,7 @@ def test_present_columns_match_the_source_table_by_column_id():
         "dbo_orders": [col(1, "id", 1), col(2, "b", 2), col(3, "c", 3)],
         "dbo_orders_v2": [col(1, "id", 1), col(2, "c", 3), col(3, "d", 5)],
     }
-    live = [  # b dropped and added again: another column_id; e never captured
+    live = [  # b dropped and added again: another column_id; e never captured, not read
         {"name": "id", "column_id": 1},
         {"name": "c", "column_id": 3},
         {"name": "d", "column_id": 5},
@@ -420,7 +418,6 @@ def test_present_columns_match_the_source_table_by_column_id():
         "ID",
         "c",
         "d",
-        "e",
     ]
     assert rec.calls[-1] == (
         (

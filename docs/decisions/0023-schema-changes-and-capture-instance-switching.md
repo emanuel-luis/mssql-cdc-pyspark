@@ -2,7 +2,8 @@
 
 **Status:** accepted  
 **Date:** 2026-09-30T18:40:00-03:00  
-**Amended:** 2026-09-30T20:09:44-03:00, run against SQL Server 2022 (`tests/integration`); a type bronze cannot take names `delta.enableTypeWidening`
+**Amended:** 2026-09-30T20:09:44-03:00, run against SQL Server 2022 (`tests/integration`); a type bronze cannot take names `delta.enableTypeWidening`  
+**Amended:** 2026-09-30T21:25:30-03:00, drop the older instance one batch after the switch event; schema checked at an instance's first read; uncaptured declared columns fail; `detail` is the DDL statement
 
 ## Context
 A capture instance captures a fixed column list, chosen when it is enabled. To capture a
@@ -141,11 +142,25 @@ time a batch is planned, replays included.
 * A configured instance that was dropped: `load()` and planning follow the newest instance of
   its table (found through its default name `<schema>_<table>`, or through the newest name
   the run has seen); otherwise the not-found error names the table's instances.
-* `DataLossError` says when the gap comes from an instance that starts later (the older one,
-  which held the range, was dropped before the stream read it) instead of blaming cleanup; a
-  `PermissionError` on the newer change table names its own grant.
-* The reader leaves a `capture_instance_switched` event (detail `old -> new`) when it plans
-  the first batch that reads the newer instance: from then on the older one can be dropped.
+* `DataLossError` names the dropped older instance beside cleanup when a gap is in the
+  table's oldest remaining instance and the run has seen an instance the table no longer has
+  (amendment: where the gap lies does not tell the two apart); a `PermissionError` on the
+  newer change table names its own grant.
+* The reader leaves a `capture_instance_switched` event (detail `old -> new`, plus the
+  columns the query reads that the newer instance no longer captures, NULL from S on) when it
+  plans the first batch that reads the newer instance. The older one can be dropped after the
+  stream's next batch, not before (amendment): the sink commits the event row inside
+  `foreachBatch`, before Spark commits the batch (and before the `snapshot_on_switch`
+  snapshot), and a replay of that batch reads the older instance below S again. Moving the
+  event a batch later would need state across runs to emit it once, and `snapshot_on_switch`
+  needs the batch that crosses S. A stream that starts at or past S (a bootstrap after the
+  enable, `startingLsn=latest`) never reads the older instance and leaves no event.
+* A query's schema is checked against an instance's columns the first time the run reads it
+  (amendment), not only at S: a stream that skips ahead into the newer instance
+  (`failOnDataLoss=false` after the older was dropped) fails the same way. A source column no
+  instance of the table captures (a typo in `columns`, a column outside
+  `@captured_column_list`) fails the run's first planning and the snapshot with a
+  `ValueError` instead of reading NULL in every change row.
 * Considered:
   - The user changes `captureInstance` by hand (the state before): it needs the stream to have
     read exactly up to S first, or it fails, and every consumer does it at its own moment.
@@ -157,8 +172,8 @@ time a batch is planned, replays included.
 ### D3. The DBA creates and drops instances; the library never does
 `sql/switch_capture_instance.sql` documents the procedure: enable the new instance with the
 new column list, `GRANT SELECT ON cdc.<new>_CT TO <reader>`, wait for every stream's
-`capture_instance_switched` event, then disable the old one. Considered: letting the library
-manage instances (Estuary): it needs `db_owner` and writes to the source, against invariant 11.
+`capture_instance_switched` event and one batch more, then disable the old one. Considered:
+letting the library manage instances (Estuary): it needs `db_owner` and writes to the source, against invariant 11.
 
 ### D4. Bronze takes new columns; type widening is the owner's choice
 Every bronze append, micro-batches and snapshots alike, uses `mergeSchema`: a column the
@@ -217,9 +232,17 @@ never (a column that stays NULL until each row changes).
   an incompatible change needs a new bronze table or a rewrite.
 * The newer instance's change table needs its own grant before the stream reaches S; the
   first read without it raises a `PermissionError` naming it.
-* The older instance can be dropped once every stream reading the table has its
-  `capture_instance_switched` event. Dropped earlier, the changes below S that only it held
-  are lost: `DataLossError` says so, and `on_data_loss="resnapshot"` recovers with a snapshot.
+* The older instance can be dropped once every stream reading the table has a batch after its
+  `capture_instance_switched` event (a facts row of the same `app_id` with a larger
+  `batch_id`); a stream already at or past S needs none. The event reaches the facts only
+  through `metricsPath`, which `to_delta` defaults only for a local or Volume checkpoint.
+  Dropped earlier, the changes below S that only it held are lost: `DataLossError` names
+  cleanup and the dropped instance as the two possible causes (where the gap lies does not
+  tell them apart), and `on_data_loss="resnapshot"` recovers with a snapshot.
+* With `columns`, the D1 type check compares with the captured types at the run's first
+  planning, so it catches a type change made while the query runs. One made while it is
+  stopped is not caught at planning: the read fails casting to the declared type, and
+  `columns` needs the new type.
 * Planning asks one `sp_cdc_help_change_data_capture` and, per instance read, one
   `sp_cdc_get_ddl_history` and one `sp_cdc_get_captured_columns` more per batch.
 * After the old instance is dropped and `captureInstance` renamed to the new one, SQL Server

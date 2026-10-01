@@ -792,7 +792,9 @@ def test_an_older_instance_dropped_before_the_stream_reached_the_newer_start_is_
         "@capture_instance = ?",
         (ci,),
     )
-    with pytest.raises(Exception, match=f"only in capture instance '{ci}', disabled before"):
+    with pytest.raises(
+        Exception, match=f"or held only by capture instance '{ci}', disabled before"
+    ):
         run()
     bronze = run("resnapshot")  # the configured instance is gone: it follows v2
     facts_df = delta_spark.read.format("delta").load(facts)
@@ -864,7 +866,7 @@ def test_a_type_change_stops_the_running_query_before_its_batch_is_written(
     ]
     facts_df = delta_spark.read.format("delta").load(facts)
     [event] = facts_df.where("event = 'schema_change'").collect()
-    assert event["detail"].startswith("amount: ") and "ALTER COLUMN" in event["detail"]
+    assert "ALTER COLUMN amount" in event["detail"]
 
 
 def test_after_a_dropped_column_bootstrap_and_resnapshot_read_it_as_null(
@@ -903,7 +905,7 @@ def test_after_a_dropped_column_bootstrap_and_resnapshot_read_it_as_null(
     bronze, facts = run("a")  # the stream goes on past the DROP, with an event
     assert [(r["id"], r["extra"]) for r in bronze.where("_operation = 2").collect()] == [(4, None)]
     [event] = facts.where("event = 'schema_change'").collect()
-    assert event["detail"].startswith("extra: ") and "DROP COLUMN" in event["detail"]
+    assert "DROP COLUMN extra" in event["detail"]
 
     bronze, _ = run("b")  # a bootstrap after the DROP: the column still captured reads NULL
     assert sorted((r["id"], r["extra"]) for r in bronze.collect()) == [
@@ -964,7 +966,7 @@ def test_a_column_added_reaches_bronze_through_a_new_instance_with_its_values(
     assert sqlserver.run(f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE id = 1")[0][0] == 1
     bronze, facts_df = run()
     [added] = facts_df.where("event = 'schema_change'").collect()
-    assert added["detail"].startswith("note: ") and " ADD " in added["detail"].upper()
+    assert " ADD note " in added["detail"]
     assert "note" not in bronze.columns
 
     v2 = sqlserver.enable_cdc("ddl_add", "dbo_ddl_add_v2")

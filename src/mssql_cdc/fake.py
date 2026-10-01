@@ -197,26 +197,14 @@ class FakeCdcClient(CdcClient):
         for name, meta in _resolve(self.path, capture_instance)[1]:
             cols = meta.get("columns") or []
             out.append(
-                CaptureInstance(
-                    name,
-                    mins.get(name),
-                    meta["created"],
-                    [c for c, _ in cols],
-                    [t for _, t in cols],
-                )
+                CaptureInstance(name, mins.get(name), [c for c, _ in cols], [t for _, t in cols])
             )
         return out
 
     def ddl_history(self, capture_instance, from_lsn, to_lsn):
         rows = _read_jsonl(os.path.join(self.path, "ddl", f"{self._name(capture_instance)}.jsonl"))
         return [
-            DdlChange(
-                r["lsn"],
-                self.lsn_to_time(r["lsn"]),
-                r["column"],
-                r["required_column_update"],
-                r["command"],
-            )
+            DdlChange(r["lsn"], self.lsn_to_time(r["lsn"]), r["command"])
             for r in rows
             if from_lsn < r["lsn"] <= to_lsn
         ]
@@ -472,25 +460,19 @@ class FakeCdcDatabase:
         self,
         capture_instance: str,
         column: str | None,
-        required_column_update: bool,
         command: str,
         new_type: str | None = None,
     ) -> str:
         """A DDL statement on the table, recorded by each of its instances at a new LSN
-        (after the last commit; the next commit's is larger). ``new_type``: a captured
-        column's new Spark type (ALTER COLUMN), which the instances then report. Returns the
-        LSN."""
+        (after the last commit; the next commit's is larger). ``column``: the column it adds,
+        alters or drops, if any. ``new_type``: a captured column's new Spark type (ALTER
+        COLUMN), which the instances then report. Returns the LSN."""
         lsn = self._new_lsn()
         known = _instances(self.path)
         for name, _ in self._same_table(capture_instance):
             self._append(
                 os.path.join("ddl", f"{name}.jsonl"),
-                {
-                    "lsn": lsn,
-                    "column": column,
-                    "required_column_update": required_column_update,
-                    "command": command,
-                },
+                {"lsn": lsn, "command": command},
             )
             for col in known.get(name, {}).get("columns") or []:
                 if new_type and column and col[0].lower() == column.lower():

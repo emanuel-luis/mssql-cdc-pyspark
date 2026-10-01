@@ -53,8 +53,9 @@ Nothing in `mssql_cdc` imports Databricks APIs; the same package runs on any Spa
 7. **Schema changes.** Type widening on a Unity Catalog bronze table is the same statement,
    `ALTER TABLE <catalog>.<schema>.<table> SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true')`;
    `to_delta(snapshot_on_switch=True)` needs `metricsPath` when the checkpoint is a URI
-   rather than a Volume. Neither has run on Databricks yet
-   ([README](../README.md#schema-changes)).
+   rather than a Volume, and so do the `schema_change` and `capture_instance_switched` facts
+   rows the DBA waits for before disabling an old capture instance. Neither has run on
+   Databricks yet ([README](../README.md#schema-changes)).
 8. **Consumers.** Gate downstream work on `table_finalization`:
    * Lakeflow Jobs: a table update trigger on the control table, then a task that
      reads `finalized_until` and an If/else condition (compare epoch numbers).

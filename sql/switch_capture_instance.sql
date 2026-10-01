@@ -34,10 +34,15 @@ GO
 
 -- 4. Wait for every stream that reads the table. Each one writes a facts row with
 --    event = 'capture_instance_switched' (detail 'dbo_orders -> dbo_orders_v2') once it has
---    read past the new instance's start; without a facts table, look for the warning in the
---    stream's log. Spark commits that batch just after its facts row: to be sure, wait for the
---    stream's next batch too (a row with a larger batch_id). A stream whose schema lacks a column the new instance captures stops there
---    with SchemaChangedError instead: restart it, and it infers the new columns and goes on.
+--    read past the new instance's start. Spark commits that batch after its facts row: wait
+--    for the stream's next batch too (a row of the same app_id with a larger batch_id). The
+--    event reaches the facts only through metricsPath, which to_delta sets on its own only for
+--    a local or Volume checkpoint; without it, look for the warning in the stream's log. A
+--    stream already at or past the new instance's start (started after the enable, e.g. with
+--    bootstrap=True: its facts end_lsn >= new_min_lsn) never reads the old instance, writes
+--    no event and needs no wait. A stream whose schema lacks a column the new instance
+--    captures stops there with SchemaChangedError instead: restart it, and it infers the new
+--    columns and goes on.
 --    In the lakehouse, for example:
 --      SELECT app_id, batch_id, detail, written_at FROM ops.ingestion_facts
 --      WHERE event = 'capture_instance_switched' AND target = 'bronze.orders';

@@ -260,9 +260,11 @@ class _Common:
         self.schema = schema
         self._client = None
         # driver side (ADR 0023): the capture instance names seen this run, gone ones first,
-        # then oldest to newest; and the type each source column is expected to have
+        # then oldest to newest; the type each source column is expected to have; and the
+        # instances whose columns the query's schema was checked against (None: not planned yet)
         self._names = [self.capture_instance]
         self._expected: dict[str, str] | None = None
+        self._checked: set[str] | None = None
 
     # A live DB connection must never be pickled to executors.
     def __getstate__(self):
@@ -302,6 +304,20 @@ class _Common:
         current = {i.name.lower() for i in instances}
         return [n for n in self._names if n.lower() not in current]
 
+    def _check_declared(self, instances) -> None:
+        """A source column no capture instance of the table captures would read NULL in every
+        change row: fail instead (a typo in 'columns', or a column CDC does not capture)."""
+        if any(not i.columns for i in instances):  # unknown (the fake without metadata)
+            return
+        captured = {c.lower() for i in instances for c in i.columns}
+        missing = [c for c in self.source_columns if c.lower() not in captured]
+        if missing:
+            raise ValueError(
+                f"No capture instance of the table ({', '.join(i.name for i in instances)}) "
+                f"captures {', '.join(missing)}: fix 'columns', or capture them with a new "
+                "capture instance (sql/switch_capture_instance.sql)."
+            )
+
 
 class _BaseReader(_Common, DataSourceStreamReader):
     # -- offsets --------------------------------------------------------------
@@ -328,16 +344,23 @@ class _BaseReader(_Common, DataSourceStreamReader):
             return []
         client = self.client
         instances = self._instances(client)
+        if self._checked is None:  # the run's first planning: load() took the schema from these
+            self._check_declared(instances)
+            self._checked = {instances[0].name.lower()}
         expected = self._expected_types(instances)
         from_lsn = client.increment_lsn(start["lsn"])
         to_lsn = end["lsn"]
         pieces = self._pieces(client, instances, from_lsn, to_lsn)
         # schema checks first: a batch that fails them reads nothing (ADR 0023)
         events = self._check_ddl(client, [i for i, _, _ in pieces], start["lsn"], to_lsn, expected)
+        wanted = {c.lower() for c in self.source_columns}
         for older, inst in pairwise(instances):
             if any(p[0] is inst and p[1] == inst.start_lsn for p in pieces):  # crosses its start
-                self._check_switch(older, inst)
                 detail = f"{older.name} -> {inst.name}"
+                kept = {c.lower() for c in inst.columns}
+                lost = [c for c in older.columns if kept and c.lower() in wanted - kept]
+                if lost:  # NULL from S on: the warning and the facts say so
+                    detail += f"; no longer captured, read as NULL: {', '.join(lost)}"
                 ts = client.lsn_to_time(inst.start_lsn)
                 events.append(("capture_instance_switched", inst.name, inst.start_lsn, ts, detail))
         ranges = []
@@ -347,6 +370,9 @@ class _BaseReader(_Common, DataSourceStreamReader):
             oldest = inst is instances[0]
             lo = max(lo, self._guard_retention(client, inst.name, lo, gone if oldest else []))
             if lo <= hi:  # invariant 3: cleanup may have left nothing up to hi
+                if inst.name.lower() not in self._checked:  # the run's first read of it (D2)
+                    self._check_switch(inst)
+                    self._checked.add(inst.name.lower())
                 ranges += self._split(client, inst, lo, hi)
         for kind, ci, lsn, ts, detail in events:
             _log.warning("mssql_cdc: %s on %s at %s: %s", kind, ci, lsn, detail)
@@ -455,20 +481,14 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 "enable delta.enableTypeWidening on bronze for a widening)."
             )
         return [
-            (
-                "schema_change",
-                inst.name,
-                d.lsn,
-                d.commit_ts,
-                (f"{d.column}: {d.command}" if d.column else d.command)[:500],
-            )
-            for inst, d in changes
+            ("schema_change", inst.name, d.lsn, d.commit_ts, d.command[:500]) for inst, d in changes
         ]
 
-    def _check_switch(self, older, newer) -> None:
-        """D2 of ADR 0023: follow ``newer`` from its start only when the query's schema holds
-        what it captures; otherwise fail at the boundary, before reading past it, so the next
-        load() infers the new columns. With 'columns' the declared list decides."""
+    def _check_switch(self, newer) -> None:
+        """D2 of ADR 0023: read a capture instance the query's schema was not checked against
+        (a newer one, at its start or skipped ahead to) only when the schema holds what it
+        captures; otherwise fail before reading it, so the next load() infers the new columns.
+        With 'columns' the declared list decides."""
         new = [
             c for c in newer.columns if c.lower() not in {s.lower() for s in self.source_columns}
         ]
@@ -495,10 +515,10 @@ class _BaseReader(_Common, DataSourceStreamReader):
             what.append(f"other type(s) {', '.join(changed)}")
         if what:
             raise SchemaChangedError(
-                f"Capture instance {newer.name!r} took over from {older.name!r} at "
-                f"{newer.start_lsn} with {'; '.join(what)}. Restart the query to re-infer the "
-                "schema (and "
-                "enable delta.enableTypeWidening on bronze for a widening); it resumes there."
+                f"The stream reaches capture instance {newer.name!r} of the table (from "
+                f"{newer.start_lsn}), with {'; '.join(what)}. Restart the query to re-infer the "
+                "schema (and enable delta.enableTypeWidening on bronze for a widening); it "
+                "resumes there."
             )
 
     def _guard_retention(self, client, capture_instance: str, from_lsn: str, gone=()) -> str:
@@ -508,16 +528,15 @@ class _BaseReader(_Common, DataSourceStreamReader):
         if from_lsn < min_lsn and self.fail_on_data_loss:
             from .client import DataLossError
 
-            why = (
-                f"it starts at {min_lsn} and the changes from {from_lsn} were only in "
-                f"capture instance {', '.join(map(repr, gone))}, disabled before the stream "
-                "read them (not CDC cleanup)"
-                if gone
-                else f"change data from {from_lsn} was purged by CDC cleanup (current min_lsn "
-                f"is {min_lsn})"
-            )
+            why = "purged by CDC cleanup"
+            if gone:  # where the gap lies does not tell the two apart
+                why += (
+                    f", or held only by capture instance {', '.join(map(repr, gone))}, disabled "
+                    "before the stream read them"
+                )
             raise DataLossError(
-                f"{capture_instance}: {why}. A re-snapshot is required. "
+                f"{capture_instance}: change data from {from_lsn} is gone (min_lsn is now "
+                f"{min_lsn}): {why}. A re-snapshot is required. "
                 "Set failOnDataLoss=false to skip ahead (loses changes)."
             )
         return min_lsn
@@ -692,6 +711,7 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
 
         # the configured instance, or the newest of its table once it is disabled (ADR 0023)
         instances = self._instances(client)
+        self._check_declared(instances)  # else the snapshot has values its change rows lack
         ci = self.capture_instance
         if ci.lower() not in {i.name.lower() for i in instances}:
             ci = instances[-1].name

@@ -683,7 +683,7 @@ def test_replays_across_the_newer_start_plan_and_read_the_same(spark, workdir):
 
 
 def test_the_schema_is_the_union_and_a_missing_column_reads_null(spark, workdir):
-    _switch(workdir, v2_columns=V2_COLUMNS)  # no updated_at, a note, a wider amount
+    _, v2, _, _ = _switch(workdir, v2_columns=V2_COLUMNS)  # no updated_at, a note, wider amount
     assert (
         MssqlCdcDataSource(_opts(workdir, columns=None))
         .schema()
@@ -692,11 +692,16 @@ def test_the_schema_is_the_union_and_a_missing_column_reads_null(spark, workdir)
             "`updated_at` TIMESTAMP_NTZ, `note` STRING"
         )
     )
-    _, out = _run(spark, workdir, columns=None, numPartitions=2)
+    metrics = os.path.join(workdir, "metrics")
+    _, out = _run(spark, workdir, columns=None, numPartitions=2, metricsPath=metrics)
     df = _read(spark, out)
     assert dict(df.dtypes)["amount"] == "decimal(20,4)"
     got = sorted((r["order_id"], r["updated_at"] is None, r["note"]) for r in df.collect())
     assert got == [(i, False, None) if i < 5 else (i, True, f"n{i}") for i in range(10)]
+    # the switch's warning and event say which column reads NULL from there on
+    assert [e["detail"] for e in _events(metrics).values()] == [
+        f"{CI} -> {v2}; no longer captured, read as NULL: updated_at"
+    ]
 
 
 def test_a_narrower_type_in_the_newer_instance_fails_at_load(workdir):
@@ -736,7 +741,7 @@ def test_a_type_change_fails_the_batch_before_it_reads(spark, workdir):
     c = [db.commit(CI, [(2, _order(i))], at=T0 + timedelta(minutes=i)) for i in range(3)]
     reader = _stream_reader(spark, workdir, columns=None)  # amount DECIMAL(18,2)
     command = "ALTER TABLE dbo.orders ALTER COLUMN amount decimal(20,4)"
-    ddl = db.ddl(CI, "amount", True, command, new_type="DECIMAL(20,4)")
+    ddl = db.ddl(CI, "amount", command, new_type="DECIMAL(20,4)")
     c += [db.commit(CI, [(2, _order(i, amount="1.2345"))]) for i in (3, 4)]
     assert [r["order_id"] for r in _rows(reader, _plan(reader, c[0], c[2]))] == [1, 2]
     with pytest.raises(SchemaChangedError, match=r"amount DECIMAL\(20,4\) \(read as decimal"):
@@ -766,7 +771,7 @@ def test_a_running_query_stops_at_a_type_change(spark, workdir):
     try:
         q.processAllAvailable()
         command = "ALTER TABLE dbo.orders ALTER COLUMN amount decimal(20,4)"
-        db.ddl(CI, "amount", True, command, new_type="DECIMAL(20,4)")
+        db.ddl(CI, "amount", command, new_type="DECIMAL(20,4)")
         db.commit(CI, [(2, _order(3, amount="1.2345"))])
         with pytest.raises(Exception, match="Restart the query to re-infer the schema"):
             q.processAllAvailable()
@@ -784,8 +789,8 @@ def test_add_and_drop_column_continue_with_an_event_file(spark, workdir):
     reader = _stream_reader(spark, workdir, columns=None, metricsPath=metrics)
     quiet = _stream_reader(spark, workdir, columns=None)
     strict = _stream_reader(spark, workdir, columns=None, schemaChangePolicy="fail")
-    add = db.ddl(CI, "note", False, "ALTER TABLE dbo.orders ADD note varchar(10) NULL")
-    drop = db.ddl(CI, "status", False, "ALTER TABLE dbo.orders DROP COLUMN status")
+    add = db.ddl(CI, "note", "ALTER TABLE dbo.orders ADD note varchar(10) NULL")
+    drop = db.ddl(CI, "status", "ALTER TABLE dbo.orders DROP COLUMN status")
     row = {k: v for k, v in _order(1).items() if k != "status"}  # captured after the drop
     c1 = db.commit(CI, [(2, row)], at=T0 + timedelta(minutes=1))
     assert [(r["order_id"], r["status"]) for r in _rows(reader, _plan(reader, c0, c1))] == [
@@ -800,8 +805,8 @@ def test_add_and_drop_column_continue_with_an_event_file(spark, workdir):
             "detail": detail,
         }
         for lsn, detail in [
-            (add, "note: ALTER TABLE dbo.orders ADD note varchar(10) NULL"),
-            (drop, "status: ALTER TABLE dbo.orders DROP COLUMN status"),
+            (add, "ALTER TABLE dbo.orders ADD note varchar(10) NULL"),
+            (drop, "ALTER TABLE dbo.orders DROP COLUMN status"),
         ]
     }
     assert _plan(quiet, c0, c1)  # without metricsPath: a warning in the log only
@@ -821,7 +826,7 @@ def test_a_newer_instance_with_new_columns_stops_at_its_start(spark, workdir):
     v2 = db.add_capture_instance(CI, f"{COLUMNS}, note STRING")
     c += [db.commit(CI, [(2, _noted(i))], at=T0 + timedelta(minutes=i)) for i in (3, 4)]
     assert [r["order_id"] for r in _rows(running, _plan(running, c[0], c[2]))] == [1, 2]
-    with pytest.raises(SchemaChangedError, match=f"'{v2}' took over from '{CI}' .* note"):
+    with pytest.raises(SchemaChangedError, match=f"reaches capture instance '{v2}' .* note"):
         _plan(running, c[2], c[4])  # before reading past S
     # the declared columns decide: followed in place, the new column not read
     assert [r["order_id"] for r in _rows(declared, _plan(declared, c[2], c[4]))] == [3, 4]
@@ -830,6 +835,36 @@ def test_a_newer_instance_with_new_columns_stops_at_its_start(spark, workdir):
     again = _stream_reader(spark, workdir, columns=None, metricsPath=metrics)
     assert [r["note"] for r in _rows(again, _plan(again, c[2], c[4]))] == ["n3", "n4"]
     assert [e["detail"] for e in _events(metrics).values()] == [f"{CI} -> {v2}"]
+
+
+def test_a_newer_instance_skipped_ahead_to_is_checked_like_one_reached(spark, workdir):
+    from mssql_cdc import SchemaChangedError
+
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI], columns={CI: COLUMNS})
+    c = [db.commit(CI, [(2, _noted(i))], at=T0 + timedelta(minutes=i)) for i in range(3)]
+    reader = _stream_reader(spark, workdir, columns=None, failOnDataLoss="false")
+    assert [r["order_id"] for r in _rows(reader, _plan(reader, c[0], c[1]))] == [1]
+    v2 = db.add_capture_instance(CI, f"{COLUMNS}, note STRING")
+    c += [db.commit(CI, [(2, _noted(i))], at=T0 + timedelta(minutes=i)) for i in (3, 4)]
+    db.drop_capture_instance(CI)  # too early: failOnDataLoss=false skips to v2's start
+    with pytest.raises(SchemaChangedError, match=f"reaches capture instance '{v2}' .* note"):
+        _plan(reader, c[1], c[4])
+
+
+def test_a_declared_column_no_instance_captures_fails_instead_of_reading_null(spark, workdir):
+    from mssql_cdc.source import MssqlCdcSnapshotReader
+
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI], columns={CI: COLUMNS})
+    c = [db.commit(CI, [(2, _order(i))], at=T0 + timedelta(minutes=i)) for i in range(2)]
+    typo = COLUMNS.replace("amount", "amout")
+    reader = _stream_reader(spark, workdir, columns=typo)
+    with pytest.raises(
+        ValueError, match=rf"No capture instance of the table \({CI}\) captures amout"
+    ):
+        _plan(reader, c[0], c[1])
+    snapshot = MssqlCdcSnapshotReader(_opts(workdir, columns=typo, numPartitions=1), reader.schema)
+    with pytest.raises(ValueError, match="captures amout"):
+        snapshot.partitions()
 
 
 def test_a_disabled_configured_instance_is_followed_to_the_newer_one(spark, workdir):
@@ -846,8 +881,12 @@ def test_a_disabled_configured_instance_is_followed_to_the_newer_one(spark, work
     }
     # a new stream from before S: those changes were only in the disabled instance
     reader = _stream_reader(spark, workdir, columns=None, startingLsn=c[1])
-    with pytest.raises(DataLossError, match=f"only in capture instance '{CI}', disabled before"):
+    with pytest.raises(DataLossError, match=f"or held only by capture instance '{CI}', disabled"):
         _plan(reader, c[1], c[9])
+    # cleanup on the newer instance past a stream that is past S: cleanup is named first
+    db.cleanup(v2, c[8])
+    with pytest.raises(DataLossError, match=f"{v2}: change data from .* purged by CDC cleanup"):
+        _plan(reader, c[6], c[9])
     snapshot = MssqlCdcSnapshotReader(_opts(workdir, numPartitions=1), reader.schema)
     assert {p.capture_instance for p in snapshot.partitions()} == {v2}
 
@@ -899,7 +938,7 @@ def test_foreach_batch_finds_the_event_files_of_its_batch(spark, workdir):
     )
     try:
         q.processAllAvailable()
-        add = db.ddl(CI, "note", False, "ALTER TABLE dbo.orders ADD note varchar(10) NULL")
+        add = db.ddl(CI, "note", "ALTER TABLE dbo.orders ADD note varchar(10) NULL")
         db.commit(CI, [(2, _order(1))], at=T0 + timedelta(minutes=1))
         q.processAllAvailable()
     finally:

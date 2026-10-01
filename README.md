@@ -299,9 +299,15 @@ instances. The procedure, step by step, is in
    change table and needs its own grant; without it the first batch that reaches the new
    instance fails with a `PermissionError` naming it.
 3. Wait until every stream that reads the table has written a facts row with
-   `event = 'capture_instance_switched'` (detail `old -> new`), and one batch more.
+   `event = 'capture_instance_switched'` (detail `old -> new`), and one batch more: Spark
+   commits the batch after its facts row. The event reaches the facts only through
+   `metricsPath`, which `to_delta` sets on its own only for a local or Volume checkpoint;
+   without it, look for the warning in the stream's log. A stream whose facts `end_lsn` was
+   already at or past the new instance's start LSN (started after the enable, for example
+   with `bootstrap=True`) never reads the old instance, writes no event and needs no wait.
 4. Disable the old instance. Disabled earlier, the changes below the new instance's start that
-   only the old one held are lost: the stream fails with a `DataLossError` that says so, and
+   only the old one held are lost: the stream fails with a `DataLossError` that names CDC
+   cleanup and the disabled instance as the possible causes, and
    `on_data_loss="resnapshot"` recovers with a snapshot.
 
 The stream reads the old instance below the new one's start LSN and the new one from it, both
@@ -310,7 +316,9 @@ in one batch if need be: every commit once, with no change to offsets or checkpo
 stream follows the table's newest instance, also after the old one is disabled; with another
 name, set it to the new one once the old one is gone. A query already running when the new instance appears stops at
 its start with `SchemaChangedError` if its schema lacks a column the new instance captures;
-restarted, it infers the column and goes on. Bronze gains the column (every append uses
+restarted, it infers the column and goes on. A column the query reads that the new instance
+does not capture reads NULL from its start; the warning and the event's `detail` name it.
+Bronze gains the column (every append uses
 `mergeSchema`) and older rows read NULL for it, as does the latest image of a row that has
 not changed since the switch. With `to_delta(..., snapshot_on_switch=True)` the sink appends
 a snapshot of the table after the batch that crossed the start, so the latest image of every
@@ -337,7 +345,7 @@ micro-batches filter `event IS NULL`; snapshots are `event IN ('bootstrap', 'res
 | Option | Default | Meaning |
 |---|---|---|
 | `captureInstance` | required | e.g. `dbo_orders`. Matched ignoring case, as SQL Server does (the exact name first) |
-| `columns` | inferred | DDL of the captured columns to read. Inferred with `sys.sp_cdc_get_captured_columns` when omitted; required for `backend=fake` |
+| `columns` | inferred | DDL of the captured columns to read. Inferred with `sys.sp_cdc_get_captured_columns` when omitted; required for `backend=fake`. A column no capture instance of the table captures fails the first batch and the snapshot with a `ValueError` |
 | `connectionString` | required | `mssql-python` / ODBC 18 connection string |
 | `backend` | `mssql-python` | `mssql-python`, `arrow-odbc`, or `fake` (tests; reads `fakePath`) |
 | `connectTimeout` | `30` | login timeout in seconds (mssql-python backend) |
@@ -347,7 +355,7 @@ micro-batches filter `event IS NULL`; snapshots are `event IN ('bootstrap', 'res
 | `sourceTimeZone` | `auto` | Windows time zone name of the server clock (e.g. `E. South America Standard Time`), used to convert commit times to UTC. `auto` reads `CURRENT_TIMEZONE_ID()` (SQL Server 2022+, Azure SQL); on older versions it applies the server's current UTC offset (`SYSDATETIMEOFFSET()`), exact for zones without daylight saving; elsewhere, set the zone name |
 | `failOnDataLoss` | `true` | raise when CDC cleanup purged the next range |
 | `includeCommandId` | `true` | read `__$command_id` (ordering within a transaction) |
-| `schemaChangePolicy` | `classify` | what DDL on the source table inside a batch does. `classify`: a captured column whose type the query's no longer holds fails the batch before it reads (`SchemaChangedError`; restart to infer the new type), other DDL goes on with a warning and a `schema_change` facts row. `fail`: any DDL fails the batch. See [Schema changes](#schema-changes) |
+| `schemaChangePolicy` | `classify` | what DDL on the source table inside a batch does. `classify`: a captured column whose type the query's no longer holds fails the batch before it reads (`SchemaChangedError`; restart to infer the new type), other DDL goes on with a warning and a `schema_change` facts row. `fail`: any DDL fails the batch. With `columns`, a type change is caught this way only while the query runs; one made while it is stopped fails the read's cast to the declared type: update `columns`. See [Schema changes](#schema-changes) |
 | `arrowBatchSize` | `10000` | rows per Arrow batch fetched from the driver |
 | `snapshotLsn` | `max_lsn` before the read | `mssql_cdc_snapshot` only: the LSN stamped on the snapshot rows |
 | `metricsPath` | none (`stream()`: `_mssql_cdc_metrics` under the live generation's checkpoint for local/FUSE checkpoints, see [Generations](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/ARCHITECTURE.md#generations-to_delta)) | directory (local, or FUSE such as a Volume) where each partition leaves its round trip, read time, MB, network wait, retention watermark, capture lag and the commit time of its last LSN (the largest is the batch's end offset) for `delta_sink(metrics_path=...)` to fold into the facts; the sink removes the files after each batch. By hand, give `delta_sink` the same directory (nothing else removes the files) and use it for one stream only: the sink folds every file in it. `stream()` puts an explicit one's files under `<metricsPath>/<app_id>`, so its streams may share it |

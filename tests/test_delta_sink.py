@@ -456,15 +456,15 @@ def test_a_switch_adds_the_new_column_and_its_events_and_a_rerun_takes_no_snapsh
     db, options = _switching(workdir)
     target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
 
-    def run():
-        q = stream(spark, options).to_delta(
+    def run(**changed):
+        q = stream(spark, {**options, **changed}).to_delta(
             target, "switch-v1", ckpt, facts, trigger={"availableNow": True}, bootstrap=True
         )
         q.awaitTermination()
         return spark.read.format("delta").load(target)
 
     run()  # the snapshot of orders 0..2
-    added = db.ddl(CI, "note", False, "ALTER TABLE [dbo].[orders] ADD [note] varchar(20) NULL")
+    added = db.ddl(CI, "note", "ALTER TABLE [dbo].[orders] ADD [note] varchar(20) NULL")
     db.commit(  # the old instance does not capture note
         CI,
         [(3, {"order_id": 1, "status": "new"}), (4, {"order_id": 1, "status": "paid"})],
@@ -490,7 +490,8 @@ def test_a_switch_adds_the_new_column_and_its_events_and_a_rerun_takes_no_snapsh
     switched = events["capture_instance_switched"]
     assert switched["detail"] == f"{CI} -> {v2}" and switched["min_lsn"] == start
 
-    assert _snapshots(run()) == 1  # the snapshot is found under the older instance's name
+    # the bootstrap snapshot is stamped with the older name: found by any name of the table
+    assert _snapshots(run(captureInstance=v2)) == 1
     db.drop_capture_instance(CI)  # the documented last step; the stream follows v2
     db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=7))
     bronze = run()
@@ -520,7 +521,7 @@ def test_snapshot_on_switch_fills_a_column_only_the_newer_instance_captures(
         return spark.read.format("delta").load(target)
 
     run()
-    db.ddl(CI, "note", False, "ALTER TABLE [dbo].[orders] ADD [note] varchar(20) NULL")
+    db.ddl(CI, "note", "ALTER TABLE [dbo].[orders] ADD [note] varchar(20) NULL")
     db.commit(  # captured without note: the old instance does not have it
         CI,
         [
@@ -550,7 +551,7 @@ def test_a_snapshot_after_a_dropped_column_reads_it_as_null(delta_spark, workdir
         target, "drop-v1", ckpt, facts, trigger={"availableNow": True}, bootstrap=True
     )
     q.awaitTermination()
-    dropped = db.ddl(CI, "status", False, "ALTER TABLE [dbo].[orders] DROP COLUMN [status]")
+    dropped = db.ddl(CI, "status", "ALTER TABLE [dbo].[orders] DROP COLUMN [status]")
     db.commit(CI, [(2, {"order_id": 3})], at=T0 + timedelta(minutes=5))  # CDC captures NULL now
     q = stream(spark, options).to_delta(
         target, "drop-v1", ckpt, facts, trigger={"availableNow": True}
