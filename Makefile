@@ -36,5 +36,6 @@ lab-spark:      ## Spark / Delta / end-to-end checks
 	uv run python -m lab.checks.t5_engine
 	uv run python -m lab.checks.t6_delta_semantics
 	uv run python -m lab.checks.t7_end_to_end --idle-minutes 6
+	uv run python -m lab.checks.t9_capture_instance_switch
 
 lab: setup seed lab-sql lab-spark

@@ -6,6 +6,7 @@
 --
 -- Replace the names first: the table dbo.orders, its current instance dbo_orders, the new
 -- one dbo_orders_v2, and cdc_reader, the database user the streams connect as.
+-- (Lab check t9 runs this file as written, with those names replaced and split at GO.)
 
 -- 1. Enable the new instance with the new column list. A table has at most two instances.
 --    The enable waits for open transactions that already wrote the table; they end up in the

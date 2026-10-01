@@ -116,6 +116,7 @@ jobs:
       - run: python -m lab.checks.t5_engine
       - run: python -m lab.checks.t6_delta_semantics
       - run: python -m lab.checks.t7_end_to_end --transactions 200 --max-commits 50
+      - run: python -m lab.checks.t9_capture_instance_switch
       - run: python examples/local_pipeline.py
       - name: t1 idle heartbeat (informational; measures the interval between idle entries)
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

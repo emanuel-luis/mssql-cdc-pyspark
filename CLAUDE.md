@@ -40,7 +40,7 @@ pytest tests/test_source_fake.py::test_idle_dummy_entries_advance_offset_and_fin
 cp .env.example .env && docker compose up -d        # SQL Server 2022 + Agent
 python -m lab.workload setup                        # db, tables, CDC
 python -m lab.workload seed | stream | bulk | long-tx
-python -m lab.checks.t5_engine                      # t1..t8, see LAB.md
+python -m lab.checks.t5_engine                      # t1..t9, see LAB.md
 python examples/local_pipeline.py
 
 uv run ruff check                                   # lint (add --fix for the safe fixes)
@@ -80,7 +80,7 @@ src/mssql_cdc/
 lab/
   workload.py      Faker OLTP workload (setup/seed/stream/bulk/long-tx).
   common.py        .env loading, connections, helpers, PASS/FAIL reporting to lab/results/.
-  checks/t1..t8    Hypothesis checks against SQL Server / Spark / Delta (see LAB.md).
+  checks/t1..t9    Hypothesis checks against SQL Server / Spark / Delta (see LAB.md).
 sql/00_setup.sql   Lab database, two CDC-tracked tables.
 sql/heartbeat.sql  Optional Agent job that keeps max_lsn moving on a quiet database (ADR 0010).
 sql/switch_capture_instance.sql  The DBA's steps to move a table to a new capture instance (ADR 0023).
