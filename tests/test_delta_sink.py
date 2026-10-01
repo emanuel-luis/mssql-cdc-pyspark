@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -681,6 +681,97 @@ def test_bootstrap_snapshots_once_and_the_stream_continues_from_it(delta_spark, 
         stream(spark, {**options, "startingLsn": "latest"}).to_delta(
             target, "x", ckpt, bootstrap=True
         )
+
+
+def test_seed_from_a_copy_then_the_stream_continues_from_its_lsn(delta_spark, workdir, latest):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: "order_id"})
+    lsns = [
+        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+        for i in range(5)
+    ]
+    db.cleanup(CI, lsns[3])  # retention no longer holds orders 0..2: only the copy has them
+    # the copy, started at T0 + 4 min 30 s, its columns spelled its own way
+    copy = spark.createDataFrame(
+        [(i, "new", "x") for i in range(5)], "ORDER_ID INT, Status STRING, extra STRING"
+    )
+    db.commit(
+        CI,
+        [(3, {"order_id": 1, "status": "new"}), (4, {"order_id": 1, "status": "paid"})],
+        at=T0 + timedelta(minutes=5),
+    )
+    db.commit(CI, [(1, {"order_id": 2, "status": "new"})], at=T0 + timedelta(minutes=6))
+    last = db.commit(CI, [(2, {"order_id": 9, "status": "new"})], at=T0 + timedelta(minutes=7))
+    options = {"backend": "fake", "fakePath": src, "captureInstance": CI, "columns": COLUMNS}
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    s = stream(spark, options)
+
+    as_of = datetime(2026, 9, 28, 10, 54, 30, tzinfo=timezone(timedelta(hours=-3)))  # T0 + 4.5 min
+    offset = s.seed(target, copy, as_of, app_id="seed-v1", facts_table=facts)
+    assert offset == {"lsn": lsns[4], "commit_ts": "2026-09-28T13:54:00.000"}
+    assert s.seed(target, copy, as_of) == offset  # a rerun writes nothing
+    with pytest.raises(ValueError, match="already holds a snapshot"):
+        s.seed(target, copy, lsns[3])  # never a second seed silently
+    q = s.to_delta(target, "seed-v1", ckpt, facts, trigger={"availableNow": True}, bootstrap=True)
+    q.awaitTermination()
+    bronze = spark.read.format("delta").load(target)
+    assert "extra" not in bronze.columns and bronze.count() == 5 + 4  # no second snapshot
+    snap = bronze.where("_operation = 0").collect()
+    assert {(r["_start_lsn"], r["_commit_ts"], r["_capture_instance"]) for r in snap} == {
+        (lsns[4], T0 + timedelta(minutes=4), CI)
+    }
+    assert {(r["_seqval"], r["_command_id"], r["_batch_id"]) for r in snap} == {(None, None, None)}
+    assert latest(bronze, "order_id", "status") == [
+        (0, "new"),
+        (1, "paid"),
+        (3, "new"),
+        (4, "new"),
+        (9, "new"),
+    ]
+    # the seed's event is the bootstrap's: to_delta's own is skipped
+    [event] = spark.read.format("delta").load(facts).where("event IS NOT NULL").collect()
+    assert (event["event"], event["app_id"], event["rows"], event["max_lsn"]) == (
+        "bootstrap",
+        "seed-v1",
+        5,
+        lsns[4],
+    )
+
+    # after a data loss: a newer copy, then a new checkpoint and app_id from it
+    with pytest.raises(ValueError, match="newer than it"):
+        s.seed(target, copy, lsns[3], reseed=True)
+    now = spark.createDataFrame([(k, v) for k, v in latest(bronze, "order_id", "status")], COLUMNS)
+    assert s.seed(target, now, last, reseed=True)["lsn"] == last
+    assert _snapshots(spark.read.format("delta").load(target)) == 2
+    assert s.snapshot(target)["lsn"] == last  # what to_delta(bootstrap=True) starts from
+
+
+def test_seed_refuses_a_point_cdc_does_not_hold_and_a_copy_missing_columns(delta_spark, workdir):
+    from mssql_cdc import DataLossError, stream
+
+    spark = delta_spark
+    db, options = _orders(workdir)  # commits at T0 .. T0 + 2 min
+    target = os.path.join(workdir, "bronze")
+    s = stream(spark, options)
+    copy = spark.createDataFrame([(0, "new")], COLUMNS)
+    with pytest.raises(DataLossError, match="no commit at or before"):
+        s.seed(target, copy, T0 - timedelta(minutes=1))  # before CDC was enabled
+    db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=3)))
+    with pytest.raises(DataLossError, match="older than the CDC retention"):
+        s.seed(target, copy, T0 + timedelta(minutes=2))
+    with pytest.raises(ValueError, match="after sys.fn_cdc_get_max_lsn"):
+        s.seed(target, copy, "0x" + "F" * 20)
+    with pytest.raises(ValueError, match="needs the stream's app_id"):
+        s.seed(target, copy, T0 + timedelta(minutes=3), facts_table=target + "_facts")
+    ids = copy.select("order_id")
+    with pytest.raises(ValueError, match=r"lacks captured columns \['status'\]"):
+        s.seed(target, ids, T0 + timedelta(minutes=3))
+    s.seed(target, ids, T0 + timedelta(minutes=3), allow_missing_columns=True)
+    [row] = spark.read.format("delta").load(target).collect()
+    assert (row["order_id"], row["status"], row["_operation"]) == (0, None, 0)
 
 
 def _orders(workdir, n=3):

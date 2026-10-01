@@ -115,6 +115,34 @@ def test_timezone_auto_falls_back_to_the_current_offset_before_2022():
     ) == 1
 
 
+def test_time_to_lsn_maps_utc_to_the_server_clock_to_the_second():
+    at = datetime(2026, 9, 28, 16, 50, 0, 999000)  # UTC; a later second would round up
+    named = Recorder("0x2a000001000001", tz="E. South America Standard Time")
+    assert SqlCdcClient(named).time_to_lsn(at) == "0x0000002A000001000001"
+    sql, params = named.calls[-1]
+    assert sql == (
+        "SELECT CONVERT(varchar(22), sys.fn_cdc_map_time_to_lsn(N'largest less than or equal', "
+        "CONVERT(datetime2(0), (CONVERT(datetime2(0), ?, 126) AT TIME ZONE 'UTC') "
+        "AT TIME ZONE N'E. South America Standard Time')), 1)"
+    )
+    assert params == ("2026-09-28T16:50:00",)
+    utc = Recorder()
+    SqlCdcClient(utc, source_timezone="UTC").time_to_lsn(at)
+    assert "'largest less than or equal', CONVERT(datetime2(0), ?, 126)), 1)" in utc.calls[-1][0]
+
+    class OldServer(Recorder):  # SQL Server 2016-2019: the current offset, UTC-3
+        def scalar(self, sql, params=()):
+            if "CURRENT_TIMEZONE_ID" in sql:
+                raise RuntimeError("'CURRENT_TIMEZONE_ID' is not a recognized function name.")
+            return -180 if "TZOFFSET" in sql else super().scalar(sql, params)
+
+    old = OldServer()
+    SqlCdcClient(old).time_to_lsn(at)
+    assert "DATEADD(minute, -180, CONVERT(datetime2(0), ?, 126))" in old.calls[-1][0]
+    for none in (None, "0x00000000000000000000"):  # no commit at or before it
+        assert SqlCdcClient(Recorder(none), source_timezone="UTC").time_to_lsn(at) is None
+
+
 def test_lsn_to_time_always_carries_milliseconds():
     # style 126 drops ".000" on whole seconds; the offset contract keeps them (ADR 0002)
     whole = SqlCdcClient(Recorder(scalar_value="2026-09-28T16:50:00"), source_timezone="UTC")

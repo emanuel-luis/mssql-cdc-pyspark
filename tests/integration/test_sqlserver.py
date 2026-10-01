@@ -416,6 +416,45 @@ def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(
     )
 
 
+def test_seed_from_a_copy_maps_its_utc_start_on_the_server_clock_and_continues(
+    delta_spark, sqlserver, workdir, latest
+):
+    from mssql_cdc import stream
+    from mssql_cdc.lsn import normalize
+
+    ci = sqlserver.cdc_table("seeded", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL")
+    sqlserver.run("INSERT INTO dbo.seeded SELECT n, 'old' FROM (VALUES (1),(2),(3),(4)) t(n)")
+    sqlserver.wait_for_changes(ci, 4)
+    [(inserted,)] = sqlserver.run(
+        f"SELECT CONVERT(varchar(22), MAX(__$start_lsn), 1) FROM cdc.{ci}_CT"
+    )
+    time.sleep(1.1)  # as_of counts to the second
+    as_of = sqlserver.run("SELECT SYSUTCDATETIME()")[0][0]  # UTC; the server clock is UTC-3
+    copy = delta_spark.createDataFrame(  # the copy, taken by SELECT before the changes below
+        [tuple(r) for r in sqlserver.run("SELECT id, v FROM dbo.seeded")], "ID INT, V STRING"
+    )
+    sqlserver.run("UPDATE dbo.seeded SET v = 'new' WHERE id = 2")
+    sqlserver.run("DELETE FROM dbo.seeded WHERE id = 3")
+    sqlserver.run("INSERT INTO dbo.seeded VALUES (5, 'new')")
+    sqlserver.wait_for_changes(ci, 8)
+    s = stream(
+        delta_spark, {"connectionString": sqlserver.connection_string, "captureInstance": ci}
+    )
+    target, ckpt = os.path.join(workdir, "bronze"), os.path.join(workdir, "ckpt")
+
+    offset = s.seed(target, copy, as_of)
+    # the last commit at or before as_of: the insert's or a later one of another table
+    assert offset["lsn"] >= normalize(inserted)
+    assert datetime.fromisoformat(offset["commit_ts"]) <= as_of
+    q = s.to_delta(target, "seed-v1", ckpt, trigger={"availableNow": True}, bootstrap=True)
+    q.awaitTermination()
+    bronze = delta_spark.read.format("delta").load(target)
+    assert bronze.where("_operation = 0").count() == 4  # the seed, and no snapshot after it
+    assert latest(bronze, "id", "v") == sorted(
+        (r[0], r[1]) for r in sqlserver.run("SELECT id, v FROM dbo.seeded")
+    )
+
+
 def test_resnapshot_recovers_a_stream_whose_changes_were_purged(
     delta_spark, sqlserver, workdir, latest
 ):

@@ -161,6 +161,12 @@ class FakeCdcClient(CdcClient):
                 break
         return best
 
+    def time_to_lsn(self, ts_utc):
+        at = ts_utc.isoformat(timespec="milliseconds")  # the mapping's times are UTC here
+        return max(
+            (r["start_lsn"] for r in self._mapping() if r["tran_end_time"] <= at), default=None
+        )
+
     def nth_commit_after(self, lsn, n):
         after = [r["start_lsn"] for r in self._mapping() if r["start_lsn"] > lsn]
         return after[: int(n)][-1] if after else None

@@ -236,6 +236,12 @@ class CdcClient(ABC):
         """Commit time of an LSN as ISO-8601 UTC string (millisecond precision)."""
 
     @abstractmethod
+    def time_to_lsn(self, ts_utc: datetime) -> str | None:
+        """The last LSN in cdc.lsn_time_mapping committed at or before ``ts_utc`` (naive,
+        UTC), as ``sys.fn_cdc_map_time_to_lsn('largest less than or equal', ...)``; None
+        when there is none."""
+
+    @abstractmethod
     def nth_commit_after(self, lsn: str, n: int) -> str | None:
         """The n-th commit LSN strictly after ``lsn`` in cdc.lsn_time_mapping."""
 
@@ -528,6 +534,24 @@ class SqlCdcClient(CdcClient):
         # Style 126 drops ".000" on whole seconds; the offset contract always carries ms.
         # Checkpoints written without them still resume: fromisoformat reads both forms.
         return datetime.fromisoformat(value).isoformat(timespec="milliseconds") if value else None
+
+    def time_to_lsn(self, ts_utc):
+        # tran_end_time is in the server's clock: convert UTC to it, the inverse of _utc.
+        # Whole seconds: the function takes datetime, which rounds milliseconds to 1/300 s,
+        # upwards too; a later LSN would skip a commit the copy lacks, an earlier one replays.
+        zone, at = self.timezone, "CONVERT(datetime2(0), ?, 126)"
+        if self._offset_min is not None:
+            at = f"DATEADD(minute, {int(self._offset_min)}, {at})"
+        elif zone.upper() != "UTC":
+            at = f"CONVERT(datetime2(0), ({at} AT TIME ZONE 'UTC') AT TIME ZONE N'{zone}')"
+        lsn = self._hex(
+            self._b.scalar(
+                "SELECT CONVERT(varchar(22), sys.fn_cdc_map_time_to_lsn("
+                f"N'largest less than or equal', {at}), 1)",
+                (ts_utc.replace(microsecond=0).isoformat(),),
+            )
+        )
+        return None if lsn == _lsn.ZERO_LSN else lsn
 
     def nth_commit_after(self, lsn, n):
         n = int(n)

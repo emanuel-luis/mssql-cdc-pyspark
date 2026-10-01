@@ -97,7 +97,7 @@ The kinds of row, and the Delta `txnAppId` and `txnVersion` that make each write
 | Row | `event` | `batch_id` | `rows` | `app_id` | Idempotency key |
 |---|---|---|---|---|---|
 | Micro-batch | NULL | the batch's | change rows, 0 when none | the sink's | `<app_id>#facts`, the batch id |
-| Initial snapshot | `bootstrap` | NULL | snapshot rows | as passed to `to_delta` | `<app_id>#events`, 0 |
+| Initial snapshot, or a seed from a copy | `bootstrap` | NULL | snapshot rows | as passed to `to_delta` or `seed` | `<app_id>#events`, 0 |
 | Re-snapshot after data loss | `resnapshot` | NULL | snapshot rows | the new generation's, `<app_id>.g<n>` | `<app_id>#events`, `n` |
 | DDL on the source | `schema_change` | the batch's | 0 | the sink's | in the batch's own commit |
 | Switch to a newer capture instance | `capture_instance_switched` | the batch's | 0 | the sink's | in the batch's own commit |

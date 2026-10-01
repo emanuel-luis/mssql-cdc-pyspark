@@ -15,7 +15,8 @@ then go to ``<metricsPath>/<sink app_id>``, so streams may share one ``metricsPa
 
 ``bootstrap=True`` first writes a snapshot of the tracked table into the target (once) and
 starts a new checkpoint from its LSN, so the target holds the whole table, not only what CDC
-retention still has (ADR 0016).
+retention still has (ADR 0016). For a table too big to snapshot within the CDC retention,
+``seed(target, df, as_of)`` writes a copy you already have as that snapshot (ADR 0025).
 
 ``on_data_loss="resnapshot"`` checks, before the query starts, whether CDC cleanup already
 deleted changes the checkpoint has not read. If so it snapshots the table into the target
@@ -158,16 +159,111 @@ class CdcStream:
                 return done
         return self._take_snapshot(target, ci)[0]
 
+    def seed(
+        self,
+        target: str,
+        df,
+        as_of: str | datetime,
+        *,
+        app_id: str | None = None,
+        facts_table: str | None = None,
+        allow_missing_columns: bool = False,
+        reseed: bool = False,
+    ) -> dict:
+        """Append ``df``, a copy of the tracked table you already have, to ``target`` as its
+        snapshot, and return the offset it is stamped with (ADR 0025). For a table too big to
+        snapshot within the CDC retention; ``to_delta(bootstrap=True)`` then starts from it.
+
+        ``as_of``: when the copy started being read, as a UTC ``datetime`` (an aware one is
+        converted), or an LSN (``"0x..."``) recorded before that. Every commit at or before it
+        must be in the copy; later ones may be, the stream replays them. A datetime maps to
+        the last commit at or before it, to the second, on the server's clock
+        (``sourceTimeZone``). An LSN CDC cleanup has passed raises ``DataLossError``.
+
+        ``df``'s columns match the captured ones by name, ignoring case; others are dropped.
+        A captured column ``df`` lacks raises ``ValueError``, or reads NULL with
+        ``allow_missing_columns=True``. With ``facts_table`` (and the stream's ``app_id``)
+        a ``'bootstrap'`` event row records the seed, the one ``to_delta`` would write.
+
+        A rerun with the same ``as_of`` returns the seed already written. Any other snapshot
+        of the table in ``target`` raises, unless ``reseed=True`` and ``as_of`` is newer:
+        after a ``DataLossError``, then start a new checkpoint and ``app_id`` from it.
+        """
+        from pyspark.sql import functions as F
+
+        from .client import DataLossError, make_client
+        from .lsn import ZERO_LSN, normalize
+        from .sink import _utc_now
+        from .source import METADATA_COLUMNS
+
+        if facts_table and not app_id:
+            raise ValueError("seed() with a facts_table needs the stream's app_id")
+        ci = self._capture_instance()
+        started_at, t0 = _utc_now(), time.monotonic()
+        schema = self.spark.read.format("mssql_cdc_snapshot").options(**self.options).load().schema
+        meta = {n for n, _ in METADATA_COLUMNS}
+        given = {c.lower(): c for c in df.columns}
+        missing = [f.name for f in schema if f.name not in meta and f.name.lower() not in given]
+        if missing and not allow_missing_columns:
+            raise ValueError(
+                f"The copy lacks captured columns {missing} of {ci}: pass "
+                "allow_missing_columns=True to seed them as NULL"
+            )
+        with closing(make_client(self.options)) as client:
+            if isinstance(as_of, datetime):
+                if as_of.tzinfo:
+                    as_of = as_of.astimezone(timezone.utc).replace(tzinfo=None)
+                lsn = client.time_to_lsn(as_of)
+                if lsn is None:
+                    raise DataLossError(
+                        f"{ci}: cdc.lsn_time_mapping holds no commit at or before {as_of} UTC: "
+                        "the copy is older than what CDC holds"
+                    )
+            else:
+                lsn = normalize(as_of)
+            done = self._last_snapshot(target, ci)
+            timing: dict | None = None
+            if done and done["lsn"] == lsn:  # a rerun: written already
+                offset, timing = done, {}
+            else:
+                if done and not (reseed and lsn > done["lsn"]):  # never a second seed silently
+                    raise ValueError(
+                        f"{target} already holds a snapshot of {ci} at {done['lsn']}: seed an "
+                        f"empty target, or with reseed=True a copy newer than it (not {lsn})"
+                    )
+                if lsn > (client.max_lsn() or ZERO_LSN):
+                    raise ValueError(f"{lsn} is after sys.fn_cdc_get_max_lsn(): not recorded yet")
+                low = _lost(client, ci, lsn)
+                if low:
+                    raise DataLossError(
+                        f"{ci}: CDC no longer holds the changes after {lsn} (min_lsn is {low}): "
+                        "the copy is older than the CDC retention. Seed from a newer copy"
+                    )
+                offset = {"lsn": lsn, "commit_ts": client.lsn_to_time(lsn) or ""}
+        if timing is None:
+            values = {"_capture_instance": ci, "_start_lsn": lsn, "_operation": 0}
+            values["_commit_ts"] = offset["commit_ts"] or None
+
+            def column(name: str):
+                if name in meta:
+                    return F.lit(values.get(name))
+                if name.lower() in given:
+                    return F.col("`" + given[name.lower()].replace("`", "``") + "`")
+                return F.lit(None)
+
+            rows = df.select(*(column(f.name).cast(f.dataType).alias(f.name) for f in schema))
+            timing = self._write_snapshot(target, rows, {"seed": ci, **offset}, started_at, t0)
+        if facts_table:
+            assert app_id is not None  # checked above
+            self._bootstrap_event(facts_table, app_id, target, offset, timing)
+        return offset
+
     def _take_snapshot(self, target: str, ci: str) -> tuple[dict, dict]:
         """Write a new snapshot into ``target``. Returns its offset and the ``rows``,
         ``started_at`` and ``duration_ms`` of its event row in the facts table."""
-        from pyspark.sql import functions as F
-
-        from . import migrations
         from .client import make_client
-        from .sink import BRONZE_COMMENT, _utc_now, _write, bronze_columns
+        from .sink import _utc_now
         from .source import snapshot_lsn
-        from .tables import delta_table
 
         started_at, t0 = _utc_now(), time.monotonic()
         with closing(make_client(self.options)) as client:
@@ -178,19 +274,32 @@ class CdcStream:
             .options(**self.options)
             .option("snapshotLsn", lsn)
             .load()
-            .withColumn("_batch_id", F.lit(None).cast("int"))
         )
+        return offset, self._write_snapshot(
+            target, rows, {"snapshot": ci, **offset}, started_at, t0
+        )
+
+    def _write_snapshot(self, target: str, rows, meta: dict, started_at, t0: float) -> dict:
+        """Append snapshot ``rows`` to ``target`` in one commit with userMetadata ``meta``.
+        Returns the ``rows``, ``started_at`` and ``duration_ms`` of its facts event row."""
+        from pyspark.sql import functions as F
+
+        from . import migrations
+        from .sink import BRONZE_COMMENT, _write, bronze_columns
+        from .tables import delta_table
+
+        rows = rows.withColumn("_batch_id", F.lit(None).cast("int"))
         migrations.ensure(self.spark, target, "bronze", bronze_columns(rows), BRONZE_COMMENT)
-        meta = json.dumps({"snapshot": ci, **offset})
-        _write(rows, target, None, None, meta, merge_schema=True)  # as the stream's (ADR 0023)
+        tag = json.dumps(meta)
+        _write(rows, target, None, None, tag, merge_schema=True)  # as the stream's (ADR 0023)
         duration_ms = round((time.monotonic() - t0) * 1000)
         # this snapshot's own commit (auto compaction may commit after it); an empty table
         # writes no commit at all
         commit = (
-            delta_table(self.spark, target).history(5).where(F.col("userMetadata") == meta).first()
+            delta_table(self.spark, target).history(5).where(F.col("userMetadata") == tag).first()
         )
         written = commit and (commit["operationMetrics"] or {}).get("numOutputRows")
-        return offset, {
+        return {
             "rows": int(written or 0),
             "started_at": started_at,
             "duration_ms": duration_ms,
@@ -220,29 +329,35 @@ class CdcStream:
         return {"lsn": row["lsn"], "commit_ts": ts}
 
     def _bootstrap(self, target: str, app_id: str, facts_table: str | None) -> str:
-        """``snapshot(target)``'s LSN, with its 'bootstrap' event (written once: Delta skips a
-        rerun's, so a crash between the snapshot and the event only delays it)."""
-        from .sink import write_event
-
+        """``snapshot(target)``'s LSN, with its 'bootstrap' event."""
         ci = self._capture_instance()
         offset = self._last_snapshot(target, ci)
         timing: dict = {}
         if offset is None:
             offset, timing = self._take_snapshot(target, ci)
         if facts_table:
-            write_event(
-                self.spark,
-                facts_table,
-                "bootstrap",
-                app_id=app_id,
-                txn_app_id=f"{app_id}#events",
-                version=0,
-                target=target,
-                lsn=offset["lsn"],
-                commit_ts=offset["commit_ts"],
-                **timing,
-            )
+            self._bootstrap_event(facts_table, app_id, target, offset, timing)
         return offset["lsn"]
+
+    def _bootstrap_event(
+        self, facts_table: str, app_id: str, target: str, offset: dict, timing: dict
+    ) -> None:
+        """The 'bootstrap' event of a snapshot or a seed, written once: Delta skips a rerun's,
+        so a crash between the snapshot and the event only delays it."""
+        from .sink import write_event
+
+        write_event(
+            self.spark,
+            facts_table,
+            "bootstrap",
+            app_id=app_id,
+            txn_app_id=f"{app_id}#events",
+            version=0,
+            target=target,
+            lsn=offset["lsn"],
+            commit_ts=offset["commit_ts"],
+            **timing,
+        )
 
     def _recover(
         self,

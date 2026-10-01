@@ -11,7 +11,7 @@ for its methods: it is what `stream()` returns, and only that call creates one.
 
 ::: mssql_cdc.pipeline.CdcStream
     options:
-      members: [to_delta, snapshot]
+      members: [to_delta, snapshot, seed]
 
 ::: mssql_cdc.register
 

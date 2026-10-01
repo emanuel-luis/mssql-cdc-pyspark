@@ -102,26 +102,63 @@ before the stream reads them and the stream stops with `DataLossError`. At the 4
 11,000 rows per second measured against a production source, the default three days hold
 roughly 1 to 3 billion rows: a table of billions of rows cannot be snapshotted in time.
 
-Seed the target from an existing copy of the table instead, and start the stream at the LSN
-that copy is consistent with. Record it on SQL Server before the copy starts, as the
-snapshot does:
-
-```sql
-SELECT CONVERT(varchar(22), sys.fn_cdc_get_max_lsn(), 1) AS lsn;  -- 0x0000002A000001F40003
-```
+Seed the target from a copy you already have instead, an existing lake table for instance,
+and let the stream start where the copy ends:
 
 ```python
-query = stream(spark, {**options, "startingLsn": "0x0000002A000001F40003"}).to_delta(
+from datetime import datetime, timezone
+
+from mssql_cdc import stream
+
+orders = stream(spark, options)
+orders.seed(
+    "bronze.orders",
+    spark.table("lake.orders"),
+    as_of=datetime(2026, 9, 30, 2, 0, tzinfo=timezone.utc),  # when the copy started
+    app_id="orders-v1",
+    facts_table="ops.ingestion_facts",
+)
+
+query = orders.to_delta(
     "bronze.orders",
     app_id="orders-v1",
     checkpoint="/checkpoints/orders",
     facts_table="ops.ingestion_facts",
+    bootstrap=True,  # finds the seed: never reads the table
 )
 ```
 
-If cleanup has already passed that LSN, the stream's retention guard raises
-`DataLossError` rather than skipping the gap. Never use `bootstrap=True` or
-`on_data_loss="resnapshot"` on such a table: both snapshot it.
+`as_of` says where the copy ends: every commit at or before it must be in the copy. Later
+commits may be in it too; the stream replays them, and keeping the latest image per key
+absorbs the overlap, as after a snapshot.
+
+- A `datetime` is the time the copy started being read, in UTC (an aware one is
+  converted). It maps to the last commit at or before it in `cdc.lsn_time_mapping`, on
+  SQL Server's clock (`sourceTimeZone`), to the second. Taken on another machine, subtract
+  the clock difference: earlier is always safe, it only replays more; later loses the
+  commits in between.
+- An LSN recorded on SQL Server before the copy started is exact:
+  `SELECT CONVERT(varchar(22), sys.fn_cdc_get_max_lsn(), 1)`.
+
+The copy is appended to the target in one Delta commit as snapshot rows: `_operation = 0`,
+`_start_lsn` the LSN of `as_of`, `_commit_ts` its commit time, `_capture_instance` the
+configured one. Its columns match the captured columns by name, ignoring case; other
+columns are dropped and each value is cast to the stream's type. A captured column the copy
+lacks is a `ValueError`; `allow_missing_columns=True` writes it as NULL instead. With a
+facts table and the stream's `app_id`, the seed writes the `bootstrap` facts row, with the
+copy's row count, and `to_delta(bootstrap=True)` writes no second one.
+
+Nothing is written when:
+
+- CDC no longer holds the changes right after `as_of` (cleanup passed it, or no commit is
+  that old): `DataLossError`, the copy is older than the retention. Seed a newer copy.
+- the target already holds a snapshot of the table at another LSN: `ValueError`. A rerun
+  with the same `as_of` returns the seed already there, so the call can stay in the job.
+
+Never use `on_data_loss="resnapshot"` on such a table: it snapshots it. After a
+`DataLossError`, seed a newer copy with `reseed=True`, then start a new checkpoint and
+`app_id` from it ([Data loss](data-loss.md#recovering-by-hand)). The reasoning is in
+[ADR 0025](../decisions/0025-seed-from-an-existing-copy.md).
 
 ## Pitfalls
 
@@ -136,5 +173,6 @@ If cleanup has already passed that LSN, the stream's retention guard raises
 - [Data loss and re-snapshots](data-loss.md): snapshots taken after CDC cleanup purged
   unread changes.
 - [Silver tables](silver.md): the current state from the snapshot and the changes.
-- [`CdcStream.snapshot`](../reference/api.md#mssql_cdc.pipeline.CdcStream.snapshot) in the
-  API reference.
+- [`CdcStream.snapshot`](../reference/api.md#mssql_cdc.pipeline.CdcStream.snapshot) and
+  [`CdcStream.seed`](../reference/api.md#mssql_cdc.pipeline.CdcStream.seed) in the API
+  reference.

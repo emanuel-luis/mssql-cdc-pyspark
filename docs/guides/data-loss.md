@@ -63,6 +63,10 @@ query = stream(spark, {**options, "startingLsn": offset["lsn"]}).to_delta(
 The new `app_id` matters: batch ids restart at 0 with a new checkpoint, and Delta would skip
 them under the old one ([Streaming](streaming.md#app_id)).
 
+For a table too big to snapshot, seed a newer copy instead,
+`stream(spark, options).seed("bronze.orders", copy, as_of, reseed=True)`, and start from the
+offset it returns the same way ([Bootstrap](bootstrap.md#tables-too-big-to-snapshot)).
+
 ## Recovering automatically
 
 `on_data_loss="resnapshot"` does all of that before the query starts:
