@@ -2,8 +2,9 @@
 
 Everything a stream takes: the source options, given once to
 [`stream()`](api.md#mssql_cdc.stream) or one by one to `spark.readStream.format("mssql_cdc")`,
-and the parameters of [`to_delta()`](api.md#mssql_cdc.pipeline.CdcStream.to_delta) and
-[`snapshot()`](api.md#mssql_cdc.pipeline.CdcStream.snapshot).
+and the parameters of [`to_delta()`](api.md#mssql_cdc.pipeline.CdcStream.to_delta),
+[`snapshot()`](api.md#mssql_cdc.pipeline.CdcStream.snapshot) and
+[`seed()`](api.md#mssql_cdc.pipeline.CdcStream.seed).
 
 ```python
 from mssql_cdc import stream
@@ -288,8 +289,9 @@ Passed to `DataStreamWriter.queryName`.
 `True` appends a snapshot of the source table to `target` before the first batch (once:
 later runs find it, under any capture instance of the table) and starts the checkpoint at
 its LSN, so the target holds the whole table, not only what CDC retention still has. With a
-`facts_table` it also writes a `bootstrap` facts row. Not with `startingLsn` (`ValueError`),
-and not on tables too big to snapshot: see [Bootstrap](../guides/bootstrap.md).
+`facts_table` it also writes a `bootstrap` facts row. Not with `startingLsn` (`ValueError`).
+On a table too big to snapshot, only after [seed](#seed-parameters): it then finds the seed
+and reads nothing ([Bootstrap](../guides/bootstrap.md#tables-too-big-to-snapshot)).
 
 ### on_data_loss
 
@@ -329,3 +331,29 @@ operation 0 and returns the offset they are stamped with, to start a stream from
 ([startingLsn](#startinglsn)). When `target` already holds a snapshot of the table, it returns
 that one's offset and reads nothing. `resnapshot=True` always takes a new one.
 `to_delta(bootstrap=True)` and `on_data_loss="resnapshot"` call it for you.
+
+## seed parameters
+
+```python
+offset = stream(spark, options).seed(
+    "bronze.orders", copy_df, as_of, app_id="orders-v1", facts_table="ops.ingestion_facts"
+)
+```
+
+`seed(target, df, as_of, *, app_id=None, facts_table=None, allow_missing_columns=False,
+reseed=False)` appends `df`, a copy of the table you already have, to `target` as its
+snapshot, for a table too big to snapshot within the CDC retention; `to_delta(bootstrap=True)`
+then starts from it.
+
+* `as_of`: when the copy started being read, as a UTC `datetime` (an aware one is converted),
+  or an LSN recorded before that. Every commit at or before it must be in the copy.
+* `app_id`, `facts_table`: with a facts table, the stream's `app_id`; the seed writes the
+  `bootstrap` facts row `to_delta` would.
+* `allow_missing_columns`: a captured column `df` lacks reads NULL instead of raising
+  `ValueError`.
+* `reseed`: append a copy newer than the snapshot already in `target`, after a
+  `DataLossError`; then start a new checkpoint and `app_id`.
+
+A rerun with the same `as_of` returns the seed already there. See
+[Bootstrap](../guides/bootstrap.md#tables-too-big-to-snapshot) and
+[`CdcStream.seed`](api.md#mssql_cdc.pipeline.CdcStream.seed).

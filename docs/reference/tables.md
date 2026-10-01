@@ -44,7 +44,9 @@ How it is written:
   JSON: `rows`, `min_lsn`, `max_lsn`, `min_commit_ts`, `max_commit_ts`, `deletes`,
   `inserts`, `updates`, `batch_id` and `app_id`. A batch that read no rows writes no commit.
 * A snapshot is one append whose `userMetadata` is `{"snapshot": <capture instance>, "lsn":
-  ..., "commit_ts": ...}`.
+  ..., "commit_ts": ...}`; a seed's, from a copy you already had, is `{"seed": <capture
+  instance>, "lsn": ..., "commit_ts": ...}`
+  ([Bootstrap](../guides/bootstrap.md#tables-too-big-to-snapshot)).
 * Every append uses `mergeSchema`. A changed column type fails it with `SchemaChangedError`
   unless the table has `delta.enableTypeWidening` and the change widens
   ([Schema changes](../guides/schema-changes.md#changing-a-column-type)).

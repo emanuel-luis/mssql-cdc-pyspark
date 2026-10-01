@@ -74,11 +74,13 @@ pip install "mssql-cdc-pyspark[arrow-odbc]"
 ```
 
 Then set the option `backend=arrow-odbc`; the connection string stays the same. CI runs the
-integration tests on both backends. Where they differ: a value longer than 64 KiB in a
-`(max)`, `text`, `ntext`, `xml` or `image` column fails the read with arrow-odbc, which has
-to size its buffers, while mssql-python reads any length
-([ADR 0003](../decisions/0003-mssql-python-default-backend.md)). The survey behind the
-choice is in [Drivers](../CONNECTORS.md).
+integration tests that read through the backend (14 of them) on both; the heartbeat, facts
+metrics, re-snapshot, silver, type changes and dropped columns run on mssql-python only.
+Where they differ: a value longer than 64 KiB in a `(max)`, `text`, `ntext`, `xml` or
+`image` column fails the read with arrow-odbc, which has to size its buffers, while
+mssql-python reads any length
+([ADR 0003](../decisions/0003-mssql-python-default-backend.md), Amendment 2). The survey
+behind the choice is in [Drivers](../CONNECTORS.md).
 
 ## Check the install
 

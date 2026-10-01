@@ -21,13 +21,14 @@ migration.
   have, for tables too big to snapshot within the CDC retention. `as_of` is an LSN or the
   UTC time the copy started, mapped on the server's clock (`sys.fn_cdc_map_time_to_lsn`,
   through the new `CdcClient.time_to_lsn`). The copy is written as snapshot rows with a
-  `bootstrap` facts event, and `to_delta(bootstrap=True)` starts from it. Options
-  `allow_missing_columns` and `reseed`
+  `bootstrap` facts event, and `to_delta(bootstrap=True)` starts from it; a rerun returns
+  it, also after cleanup passed `as_of`. Options `allow_missing_columns` and `reseed`
   ([ADR 0025](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0025-seed-from-an-existing-copy/)).
 - `finalization.track(spark, query, control_table, table_name)`: continuous-mode
   finalization. A `StreamingQueryListener` advances `finalized_until` after every batch of a
   running query (a `processingTime` trigger or the default), from a worker thread, off the
-  listener bus; `join()` waits for the last verdict after the query stops
+  listener bus, retrying a failed MERGE twice; `join()` waits for the last verdict after the
+  query stops
   ([ADR 0026](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0026-continuous-finalization-listener/)).
 - `start_many`, `await_all` and `stop_all` (`mssql_cdc.fanout`): one `to_delta` stream per
   capture instance from `{ci}` templates for target, `app_id` and checkpoint, with
@@ -35,8 +36,10 @@ migration.
   failures isolated per query; a "Many tables" guide covers sizing, one job versus one job
   per table, failure isolation and Databricks
   ([ADR 0027](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0027-fan-out-one-stream-per-table/)).
-- CI runs the integration tests a second time with `backend=arrow-odbc` (ODBC Driver 18
-  installed in the job): the `arrow-odbc` backend is now tested
+- CI runs the integration tests that read through the backend (14 of them) a second time
+  with `backend=arrow-odbc` (ODBC Driver 18 installed in the job): the `arrow-odbc` backend is
+  now tested, except for the heartbeat, facts metrics, re-snapshot, silver, type changes and
+  dropped columns
   ([ADR 0003](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0003-mssql-python-default-backend/) Amendment 2).
 - Lab check t9 (`lab/checks/t9_capture_instance_switch.py`): a table switched to a new
   capture instance with a new column under a continuous writer, running

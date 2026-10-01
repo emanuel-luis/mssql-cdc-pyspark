@@ -53,7 +53,8 @@ Nothing in `mssql_cdc` imports Databricks APIs; the same package runs on any Spa
 5. **Names and paths.** Unity Catalog managed tables for bronze, facts and control;
    checkpoints in a Volume.
 6. **Tables too big to snapshot.** A table of billions of rows cannot be snapshotted within
-   the CDC retention: seed it from a copy already in the lakehouse and start at `startingLsn`
+   the CDC retention: seed it from a copy already in the lakehouse with `seed()`, then
+   `to_delta(bootstrap=True)` starts from the seed without reading the table
    ([Bootstrap](guides/bootstrap.md#tables-too-big-to-snapshot)).
 7. **Schema changes.** Type widening on a Unity Catalog bronze table is the same statement,
    `ALTER TABLE <catalog>.<schema>.<table> SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true')`;

@@ -163,10 +163,11 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
 
 * `lint`: `ruff check`, `ruff format --check` and `mypy`; the other jobs wait for it.
 * `unit`: pytest with Delta on Ubuntu, Java 17, Python 3.11.
-* `integration`: `pytest -m sqlserver` (testcontainers on the runner's Docker), then again
-  with `MSSQL_CDC_TEST_BACKEND=arrow-odbc` after installing ODBC Driver 18.
-* `lab`: a SQL Server 2022 service container with Agent, then workload, checks t2–t7 and
-  `examples/local_pipeline.py`. t1 and the destructive t7 run only on the weekly schedule
+* `integration`: `pytest -m sqlserver` (testcontainers on the runner's Docker), then the
+  tests that take the `backend` fixture again with `MSSQL_CDC_TEST_BACKEND=arrow-odbc`, after
+  installing ODBC Driver 18.
+* `lab`: a SQL Server 2022 service container with Agent, then workload, checks t2–t7, t9
+  and `examples/local_pipeline.py`. t1 and the destructive t7 run only on the weekly schedule
   or a manual dispatch ("Run workflow"), and are `continue-on-error`. Results are uploaded
   as the `lab-results` artifact.
 
