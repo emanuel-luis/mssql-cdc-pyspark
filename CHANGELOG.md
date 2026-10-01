@@ -12,6 +12,60 @@ compatibility" line.
 
 ## [Unreleased]
 
+State compatibility: unchanged. No offset, checkpoint or table schema change, and no
+migration.
+
+### Added
+
+- `stream(...).seed(target, df, as_of)`: seed the target from a copy of the table you already
+  have, for tables too big to snapshot within the CDC retention. `as_of` is an LSN or the
+  UTC time the copy started, mapped on the server's clock (`sys.fn_cdc_map_time_to_lsn`,
+  through the new `CdcClient.time_to_lsn`). The copy is written as snapshot rows with a
+  `bootstrap` facts event, and `to_delta(bootstrap=True)` starts from it. Options
+  `allow_missing_columns` and `reseed`
+  ([ADR 0025](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0025-seed-from-an-existing-copy/)).
+- `finalization.track(spark, query, control_table, table_name)`: continuous-mode
+  finalization. A `StreamingQueryListener` advances `finalized_until` after every batch of a
+  running query (a `processingTime` trigger or the default), from a worker thread, off the
+  listener bus; `join()` waits for the last verdict after the query stops
+  ([ADR 0026](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0026-continuous-finalization-listener/)).
+- `start_many`, `await_all` and `stop_all` (`mssql_cdc.fanout`): one `to_delta` stream per
+  capture instance from `{ci}` templates for target, `app_id` and checkpoint, with
+  per-table option overrides, a shared facts table created before the first start, and
+  failures isolated per query; a "Many tables" guide covers sizing, one job versus one job
+  per table, failure isolation and Databricks
+  ([ADR 0027](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0027-fan-out-one-stream-per-table/)).
+- CI runs the integration tests a second time with `backend=arrow-odbc` (ODBC Driver 18
+  installed in the job): the `arrow-odbc` backend is now tested
+  ([ADR 0003](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0003-mssql-python-default-backend/) Amendment 2).
+- Lab check t9 (`lab/checks/t9_capture_instance_switch.py`): a table switched to a new
+  capture instance with a new column under a continuous writer, running
+  `sql/switch_capture_instance.sql` as written with a least-privilege login. Passes on SQL
+  Server 2022 CU27 and 2017 CU31; runs in the CI lab job
+  ([ADR 0023](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0023-schema-changes-and-capture-instance-switching/) amended, which also
+  records that the production SQL Server 2016 SP3 change tables have `__$command_id`).
+
+### Changed
+
+- Snapshot key bounds are bound as text and `CAST` server-side for both backends (binary as
+  hex): the same SQL shape and the same seeks
+  ([ADR 0016](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn/) amended).
+- `docker-compose.yml` takes `MSSQL_IMAGE` to run the lab on another SQL Server version
+  (e.g. `mcr.microsoft.com/mssql/server:2017-latest`).
+
+### Fixed
+
+- The `arrow-odbc` backend now reads what `mssql-python` reads:
+  - it adds the ODBC Driver 18 keyword when the connection string names no driver, and
+    honours `connectTimeout`;
+  - text is UTF-16 both ways;
+  - `(max)`/`text`/`xml`/`image` values up to 64 KiB (longer ones fail the read);
+  - `datetime2` is fetched in microseconds (no overflow past 2262);
+  - `datetimeoffset` is converted to its UTC instant;
+  - `close()` releases the connection.
+- The integration tests retry enabling CDC while the SQL Server Agent is still starting
+  (error 14258).
+
 ## [0.1.0] - 2026-10-01
 
 State compatibility: first release: offsets v1 contract

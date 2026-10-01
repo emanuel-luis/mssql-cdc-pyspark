@@ -120,7 +120,8 @@ The rest is in the documentation:
   [finalization](https://emanuel-luis.github.io/mssql-cdc-pyspark/guides/finalization/),
   [monitoring](https://emanuel-luis.github.io/mssql-cdc-pyspark/guides/monitoring/),
   [permissions](https://emanuel-luis.github.io/mssql-cdc-pyspark/guides/permissions/),
-  [schema changes](https://emanuel-luis.github.io/mssql-cdc-pyspark/guides/schema-changes/)
+  [schema changes](https://emanuel-luis.github.io/mssql-cdc-pyspark/guides/schema-changes/),
+  [many tables](https://emanuel-luis.github.io/mssql-cdc-pyspark/guides/many-tables/)
   and [Databricks](https://emanuel-luis.github.io/mssql-cdc-pyspark/DATABRICKS/).
 * Reference: [options](https://emanuel-luis.github.io/mssql-cdc-pyspark/reference/options/),
   [output schema](https://emanuel-luis.github.io/mssql-cdc-pyspark/reference/output-schema/),

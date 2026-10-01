@@ -5,7 +5,8 @@
 **Amended:** 2026-09-30T20:09:44-03:00, run against SQL Server 2022 (`tests/integration`); a type bronze cannot take names `delta.enableTypeWidening`  
 **Amended:** 2026-09-30T21:25:30-03:00, drop the older instance one batch after the switch event; schema checked at an instance's first read; uncaptured declared columns fail; `detail` is the DDL statement  
 **Amended:** 2026-10-01T15:55:00-03:00, type widening on silver is a manual `ALTER COLUMN ... TYPE`: `apply_changes` merges without schema evolution  
-**Amended:** 2026-10-01T17:25:27-03:00, lab check t9 runs the switch under a continuous writer on SQL Server 2022 and 2017; the production SQL Server 2016 SP3 change tables have `__$command_id`
+**Amended:** 2026-10-01T17:25:27-03:00, lab check t9 runs the switch under a continuous writer on SQL Server 2022 and 2017; the production SQL Server 2016 SP3 change tables have `__$command_id`  
+**Amended:** 2026-10-01T18:15:53-03:00, the switch tests run with the `arrow-odbc` backend too (ADR 0003 Amendment 2)
 
 ## Context
 A capture instance captures a fixed column list, chosen when it is enabled. To capture a
@@ -266,7 +267,7 @@ never (a column that stays NULL until each row changes).
   login, the running query stopped at S and restarted, the old instance dropped after the
   event and one batch more. Bronze held every change once, its latest image equalled the
   table, the stream kept running.
-* Unverified: the switch on SQL Server 2016; the `arrow-odbc` backend (ADR 0003); Databricks;
+* Unverified: the switch on SQL Server 2016; Databricks;
   a tie on `start_lsn` after cleanup (documented, not reproduced); `ddl_history` visibility
   is measured (8 DDLs), not documented.
 * Tests: `tests/test_delta_sink.py` (event files folded once across a replay, `mergeSchema`,

@@ -24,7 +24,7 @@
 | [0020](0020-capture-and-ingestion-lag-in-facts.md) | Capture and ingestion lag in the ingestion facts | accepted | 2026-09-30T10:33:11-03:00 | 2026-09-30T15:16:41-03:00 |
 | [0021](0021-compatibility-policy-for-0x.md) | Compatibility policy for 0.x: the state contract is stable | accepted | 2026-09-30T11:07:08-03:00 | 2026-10-01T15:55:00-03:00 |
 | [0022](0022-defer-spark-changes-changelog.md) | Defer a Spark `CHANGES` changelog connector | accepted | 2026-09-30T11:07:08-03:00 |  |
-| [0023](0023-schema-changes-and-capture-instance-switching.md) | Schema changes on the source, and switching to a newer capture instance | accepted | 2026-09-30T18:40:00-03:00 | 2026-09-30T20:09:44-03:00, 2026-09-30T21:25:30-03:00, 2026-10-01T15:55:00-03:00, 2026-10-01T17:25:27-03:00 |
+| [0023](0023-schema-changes-and-capture-instance-switching.md) | Schema changes on the source, and switching to a newer capture instance | accepted | 2026-09-30T18:40:00-03:00 | 2026-09-30T20:09:44-03:00, 2026-09-30T21:25:30-03:00, 2026-10-01T15:55:00-03:00, 2026-10-01T17:25:27-03:00, 2026-10-01T18:15:53-03:00 |
 | [0024](0024-documentation-site.md) | A documentation site built by Zensical, hosted on GitHub Pages | accepted | 2026-10-01T14:43:57-03:00 |  |
 | [0025](0025-seed-from-an-existing-copy.md) | Seed a target from an existing copy of the table | accepted | 2026-10-01T16:53:59-03:00 |  |
 | [0026](0026-continuous-finalization-listener.md) | Continuous-mode finalization through a streaming query listener | accepted | 2026-10-01T16:36:15-03:00 |  |

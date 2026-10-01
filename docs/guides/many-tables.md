@@ -98,7 +98,7 @@ alone; `start_many` adds no state of its own.
 For an always-on job, use a `processingTime` trigger and bound the run with a timeout:
 
 ```python
-from mssql_cdc import await_all, start_many, stop_all
+from mssql_cdc import await_all, finalization, start_many, stop_all
 
 tables = ["dbo_orders", "dbo_order_items", "dbo_customers"]
 common = {
@@ -109,8 +109,14 @@ common = {
     "trigger": {"processingTime": "1 minute"},
 }
 queries = start_many(spark, options, tables, **common)
+trackers = [
+    finalization.track(spark, q, "ops.table_finalization", f"bronze.{ci}")
+    for ci, q in queries.items()
+]
 failed = await_all(queries, timeout=4 * 3600)  # every table runs for four hours
 stop_all(queries)
+for tracker in trackers:
+    tracker.join()  # each table's last verdict is written
 if failed:
     raise RuntimeError(f"CDC streams failed: {sorted(failed)}")
 ```
