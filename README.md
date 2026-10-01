@@ -58,8 +58,8 @@ On a Spark platform (Databricks, EMR, Dataproc, Fabric), which ships its own PyS
 
 ```bash
 pip install mssql-cdc-pyspark
-# until the first PyPI release, from Git:
-pip install "mssql-cdc-pyspark @ git+https://github.com/emanuel-luis/mssql-cdc-pyspark.git"
+# an unreleased commit, from Git:
+pip install "mssql-cdc-pyspark @ git+https://github.com/emanuel-luis/mssql-cdc-pyspark.git@<commit>"
 ```
 
 Locally, with PySpark and Delta: `pip install "mssql-cdc-pyspark[spark]"`. The default

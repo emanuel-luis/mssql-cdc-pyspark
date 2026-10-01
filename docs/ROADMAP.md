@@ -50,14 +50,14 @@
 
 ## v0.3
 
-- [ ] **PyPI release** of 0.1.0 (the current main; steps in `docs/RELEASING.md`):
+- [x] **PyPI release** of 0.1.0 (2026-10-01; steps in `docs/RELEASING.md`):
   - [x] Package metadata, `py.typed`, an sdist without the tests.
   - [x] `release.yml`: a tag publishes to PyPI with Trusted Publishing behind a reviewed
         environment; a manual run publishes to TestPyPI.
   - [x] `CHANGELOG.md` and the 0.x compatibility policy (ADR 0021).
-  - [ ] Pending publishers on PyPI and TestPyPI, GitHub environments `pypi` and `testpypi`.
-  - [ ] TestPyPI dry run, then tag `v0.1.0`.
-  - [ ] `docs/DATABRICKS.md`: install with the `pypi` library type.
+  - [x] Pending publishers on PyPI and TestPyPI, GitHub environments `pypi` and `testpypi`.
+  - [x] TestPyPI dry run, then tag `v0.1.0`.
+  - [x] `docs/DATABRICKS.md`: install with the `pypi` library type (checked on DBR 18.2).
 
 ## Later
 

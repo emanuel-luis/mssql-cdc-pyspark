@@ -14,9 +14,17 @@ Nothing in `mssql_cdc` imports Databricks APIs; the same package runs on any Spa
    the next run fails with "does not support recovering from checkpoint location".
 2. **Access mode.** Use dedicated. Python streaming data sources on standard access
    mode are untested.
-3. **Install.** In a job, a `requirements` task library pointing to a
-   `requirements.txt` in the workspace or a Volume that holds a git reference (the
-   `pypi` library type takes only a name and version):
+3. **Install.** In a job, a `pypi` task library with the released version (checked on
+   DBR 18.2, dedicated, single node: installed with `mssql-python`, bootstrap and stream
+   ran):
+
+   ```json
+   "libraries": [{"pypi": {"package": "mssql-cdc-pyspark==0.1.0"}}]
+   ```
+
+   For an unreleased commit, a `requirements` task library pointing to a
+   `requirements.txt` in the workspace or a Volume that holds a git reference (the `pypi`
+   library type takes only a name and version):
 
    ```text
    mssql-cdc-pyspark @ git+https://github.com/emanuel-luis/mssql-cdc-pyspark.git@<commit>
@@ -26,7 +34,7 @@ Nothing in `mssql_cdc` imports Databricks APIs; the same package runs on any Spa
    "libraries": [{"requirements": "/Workspace/Users/<you>/requirements.txt"}]
    ```
 
-   In a notebook, `%pip install` with the same line works too. Leave out the `[spark]`
+   In a notebook, `%pip install mssql-cdc-pyspark==0.1.0` (or the git line) works too. Leave out the `[spark]`
    extra: PyPI `pyspark` conflicts with the runtime's own Spark. `mssql-python`, installed
    with the package, loads `libltdl7` (and the Kerberos libraries) on every node that
    opens a connection; add a
