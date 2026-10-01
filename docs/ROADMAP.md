@@ -47,8 +47,10 @@
       read no rows write facts too, so facts that stop arriving mean the stream or capture
       stopped.
 - [ ] `arrow-odbc` backend covered in CI (install msodbcsql18 in the job).
-- [ ] Multiple capture instances per stream (same schema), or a documented fan-out
-      pattern.
+- [x] **Many tables**: one stream per capture instance, started together by `start_many`
+      (`await_all`, `stop_all`), with its own checkpoint, `app_id` and bronze, sharing the
+      facts table; a stream over several capture instances was rejected (ADR 0027,
+      `docs/guides/many-tables.md`).
 
 ## v0.3
 

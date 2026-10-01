@@ -15,6 +15,14 @@ for its methods: it is what `stream()` returns, and only that call creates one.
 
 ::: mssql_cdc.register
 
+## Many tables
+
+::: mssql_cdc.start_many
+
+::: mssql_cdc.await_all
+
+::: mssql_cdc.stop_all
+
 ## Silver
 
 ::: mssql_cdc.apply_changes
