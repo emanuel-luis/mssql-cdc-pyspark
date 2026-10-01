@@ -406,7 +406,9 @@ def test_driver_guard_and_empty_ranges(workdir):
 
 
 def test_fail_on_data_loss_false_skips_to_min_lsn_without_inverted_ranges(workdir):
-    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    # another instance's low watermark keeps the cdc.lsn_time_mapping rows below CI's, so
+    # the first batches end below CI's min_lsn
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI, "dbo_customers"])
     lsns = [db.commit(CI, [(2, _order(i))], at=T0 + timedelta(minutes=i)) for i in range(10)]
     db.cleanup(CI, lsns[6])
     reader = _reader(workdir, failOnDataLoss="false", maxCommitsPerBatch=2)

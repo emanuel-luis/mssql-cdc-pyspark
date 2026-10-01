@@ -1,7 +1,8 @@
 # 0025: Seed a target from an existing copy of the table
 
 **Status:** accepted  
-**Date:** 2026-10-01T16:53:59-03:00
+**Date:** 2026-10-01T16:53:59-03:00  
+**Amended:** 2026-10-01T19:44:50-03:00, a rerun finds its seed after cleanup and under a newer snapshot; a fall-back hour maps earlier (see the Amendment)
 
 ## Context
 A snapshot has to finish within the CDC retention, or the changes after its LSN are purged
@@ -74,3 +75,21 @@ rebuild (ADR 0019) sees it as a snapshot.
 * ponytail: whether the target holds a snapshot is the same aggregate over its
   operation-0 rows `snapshot` runs, three columns of billions of seeded rows. Keep the
   newest snapshot LSN elsewhere if it shows up.
+
+## Amendment: reruns after cleanup, and the fall-back hour
+* Cleanup deletes the `cdc.lsn_time_mapping` rows below the lowest low watermark too
+  (`sys.sp_cdc_cleanup_change_table`, checked on SQL Server 2022), so once it passes a time
+  `as_of`, `time_to_lsn` returns nothing and the job's rerun raised `DataLossError` instead
+  of returning its seed. The rerun is now resolved first: with an `L`, the target's
+  operation-0 rows at `L`, not its newest snapshot, so a snapshot appended later (a switch's,
+  a reseed) does not turn the rerun into a `ValueError`; with no `L` for the time (and no
+  `reseed`), the newest snapshot of the table committed at or before `as_of` is taken as
+  that seed. Only with no such snapshot does the missing commit raise `DataLossError`. The
+  fake's `cleanup` deletes those mapping rows as well.
+* A fall-back repeats an hour of a named zone's clock. For an `as_of` in the first
+  occurrence of that hour, commits up to an hour later have earlier local times and larger
+  LSNs, so `'largest less than or equal'` picked one after `as_of` and the stream skipped the
+  commits in between. The time passed is now the earlier of `as_of`'s local time and the
+  local time an hour later less that hour: off a fall-back that is `as_of`'s own, and in it,
+  an hour earlier, which only replays. `tests/integration` checks the conversion on SQL
+  Server for `Eastern Standard Time` around the 2026 changes.

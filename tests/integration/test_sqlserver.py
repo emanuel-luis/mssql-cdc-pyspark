@@ -249,6 +249,54 @@ def test_purged_range_stops_the_stream(spark, sqlserver, workdir, backend):
         _read(spark, sqlserver, ci, checkpoint=workdir, backend=backend)
 
 
+def test_cleanup_deletes_the_time_mapping_below_every_instances_low_watermark(sqlserver):
+    """Why seed() resolves a rerun before mapping its time (ADR 0025): once cleanup has passed
+    a time, cdc.lsn_time_mapping no longer maps it. In a database of its own: the rows go only
+    below the lowest low watermark of the database's instances."""
+    import copy
+
+    sqlserver.run("CREATE DATABASE cdc_it_cleanup")
+    db = copy.copy(sqlserver)
+    db._conn = sqlserver.connect("cdc_it_cleanup")
+    db.run_enabling_cdc("EXEC sys.sp_cdc_enable_db")
+    a = db.cdc_table("a", "id INT NOT NULL PRIMARY KEY")
+    b = db.cdc_table("b", "id INT NOT NULL PRIMARY KEY")
+    for i in range(3):
+        db.run("INSERT INTO dbo.a VALUES (?)", (i,))
+    db.wait_for_changes(a, 3)
+    [(t,)] = db.run(
+        "SELECT tran_end_time FROM cdc.lsn_time_mapping "
+        f"WHERE start_lsn = (SELECT MAX(__$start_lsn) FROM cdc.[{a}_CT])"
+    )
+    db.run("INSERT INTO dbo.b VALUES (1)")
+    db.wait_for_changes(b, 1)
+    [(lw,)] = db.run("SELECT CONVERT(varchar(22), sys.fn_cdc_get_max_lsn(), 1)")
+
+    def below() -> int:
+        return db.run(
+            "SELECT COUNT(*) FROM cdc.lsn_time_mapping WHERE start_lsn < CONVERT(binary(10), ?, 1)",
+            (lw,),
+        )[0][0]
+
+    def cleanup(ci: str) -> None:
+        db.run(
+            "DECLARE @lw binary(10) = CONVERT(binary(10), ?, 1); "
+            "EXEC sys.sp_cdc_cleanup_change_table @capture_instance = ?, "
+            "@low_water_mark = @lw, @threshold = 5000",
+            (lw, ci),
+        )
+
+    try:
+        cleanup(a)
+        assert below() > 0  # b's low watermark still holds them
+        cleanup(b)
+        assert below() == 0
+        mapped = "SELECT sys.fn_cdc_map_time_to_lsn(N'largest less than or equal', ?)"
+        assert db.run(mapped, (t,))[0][0] is None
+    finally:
+        db._conn.close()
+
+
 def test_heartbeat_script_keeps_an_idle_stream_current(spark, sqlserver, workdir):
     ci = sqlserver.cdc_table("quiet", "id INT NOT NULL PRIMARY KEY")
     sqlserver.run("INSERT INTO dbo.quiet VALUES (1)")
@@ -294,6 +342,28 @@ def test_pre_2022_offset_fallback_matches_the_named_zone(sqlserver):
     finally:
         named.close()
         fallback.close()
+
+
+def test_time_to_lsn_maps_a_fall_back_hour_to_a_time_no_later_commit_reads_before(sqlserver):
+    from mssql_cdc.client import MssqlPythonBackend, SqlCdcClient
+
+    client = SqlCdcClient(
+        MssqlPythonBackend(sqlserver.connection_string), source_timezone="Eastern Standard Time"
+    )
+    at = client._server_clock("CONVERT(datetime2(0), ?, 126)")
+
+    def clock(utc: str) -> str:
+        sql = f"SELECT CONVERT(varchar(19), {at}, 126)"
+        return client._b.scalar(sql, (utc,) * at.count("?"))
+
+    try:  # 2026-11-01 06:00 UTC: 02:00 EDT becomes 01:00 EST, so 01:00-02:00 repeats
+        # 01:45 EDT: commits up to 06:45 UTC read 01:00-01:45 EST, so an hour earlier
+        assert clock("2026-11-01T05:45:00") == "2026-11-01T00:45:00"
+        assert clock("2026-11-01T06:30:00") == "2026-11-01T01:30:00"  # the second 01:30
+        assert clock("2026-03-08T06:30:00") == "2026-03-08T01:30:00"  # before spring forward
+        assert clock("2026-07-01T12:00:00") == "2026-07-01T08:00:00"
+    finally:
+        client.close()
 
 
 def test_round_trip_and_network_wait_on_a_real_server(sqlserver):

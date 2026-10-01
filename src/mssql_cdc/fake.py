@@ -415,15 +415,19 @@ class FakeCdcDatabase:
 
     def cleanup(self, capture_instance: str, low_water_mark: str) -> None:
         """Like sys.sp_cdc_cleanup_change_table: move the low watermark, then delete the
-        change rows below it."""
+        change rows below it, and the cdc.lsn_time_mapping rows below every instance's."""
         p = os.path.join(self.path, _MIN)
         mins = _read_json(p)
         mins[capture_instance] = low_water_mark
         _write_json(p, mins)
-        path = os.path.join(self.path, "changes", f"{capture_instance}.jsonl")
-        kept = [r for r in _read_jsonl(path) if r["start_lsn"] >= low_water_mark]
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.writelines(json.dumps(r) + "\n" for r in kept)
+        low = min(mins.values())
+        for path, lsn_from in (
+            (os.path.join(self.path, "changes", f"{capture_instance}.jsonl"), low_water_mark),
+            (os.path.join(self.path, _MAPPING), low),
+        ):
+            kept = [r for r in _read_jsonl(path) if r["start_lsn"] >= lsn_from]
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.writelines(json.dumps(r) + "\n" for r in kept)
 
     # -- schema changes (ADR 0023) ---------------------------------------------
     def add_capture_instance(

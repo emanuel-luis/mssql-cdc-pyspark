@@ -118,13 +118,15 @@ tracker.join()  # the last batch's verdict is written
   that arrives while an advance runs replaces the one still waiting, and an end offset that
   does not move the verdict is skipped, so the control table gets about one commit per
   period, not one per batch.
-- A failed `advance` is logged (logger `mssql_cdc.finalization`) and does not touch the
-  query; the next progress retries it. An idle query still reports progress about every
-  10 seconds (`spark.sql.streaming.noDataProgressEventInterval`). That covers a MERGE that
-  loses a write conflict to another stream advancing its row of the same control table.
+- A failed `advance` is tried twice more, 1 s and 2 s later, then logged (logger
+  `mssql_cdc.finalization`); it never touches the query. That covers a MERGE that loses a
+  write conflict to another stream advancing its row of the same control table, also after
+  the query has stopped. Otherwise the next progress tries again: an idle query still
+  reports progress about every 10 seconds (`spark.sql.streaming.noDataProgressEventInterval`).
 - When the query terminates, with or without an error, the worker applies what is left,
   stops and removes the listener. `join(timeout)` waits for that and returns `False` if the
-  timeout passes first. A restarted query is a new run: call `track` again.
+  timeout passes first; a verdict that failed three times is in the log, not in `join`'s
+  result. A restarted query is a new run: call `track` again.
 - `track` creates the control table before it returns, so a wrong name fails there.
   Called on a query that already finished, it applies the query's last progress and stops.
 
@@ -138,7 +140,10 @@ Where the listener runs:
 - Spark Connect (a PySpark 4.x client): PySpark 4.2.0's client keeps Python listeners on the
   client and receives the events over the connection
   (`pyspark/sql/connect/streaming/query.py`, `StreamingQueryListenerBus`), so the worker runs
-  on the client and runs `advance` through the client's session. Not tested.
+  on the client and runs `advance` through the client's session. There the listener stays
+  registered after its run: removing the client's last listener while another query posts
+  an event hangs PySpark 4.2.0's listener bus. It ignores every other run's events. Not
+  tested.
 - Databricks (classic compute, serverless, Databricks Connect): not tested.
 
 A separate job that reads the checkpoint's committed offsets and calls `advance` remains an

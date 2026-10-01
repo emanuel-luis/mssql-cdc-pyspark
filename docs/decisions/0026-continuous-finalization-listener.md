@@ -1,7 +1,8 @@
 # 0026: Continuous-mode finalization through a streaming query listener
 
 **Status:** accepted  
-**Date:** 2026-10-01T16:36:15-03:00
+**Date:** 2026-10-01T16:36:15-03:00  
+**Amended:** 2026-10-01T19:44:50-03:00, a failed advance is retried in place; on Spark Connect the listener is not removed (see the Amendment)
 
 ## Context
 `finalized_until` advanced only when the caller ran `finalization.advance` with the end offset
@@ -49,3 +50,23 @@ while it ran.
 * On Spark Connect, PySpark 4.2.0 keeps Python listeners on the client, so `track` works
   with the client's session there by construction; not tested. Databricks classic,
   serverless and Databricks Connect are not tested either.
+
+## Amendment: retry in place, and no removal on Spark Connect
+Two cases the next progress does not cover:
+
+* Trackers of several queries MERGE into one control table, and in OSS Delta two MERGEs that
+  each read the whole (small) table conflict even when they change different rows. Queries
+  that stop together each have one last progress, and no next one to retry it, so a lost
+  conflict left that table's verdict a run behind while `join()` returned `True`. The worker
+  now tries a failed `advance` twice more, 1 s and 2 s later, before it logs it.
+* On Spark Connect, PySpark 4.2.0's `StreamingQueryListenerBus.remove` holds the bus lock
+  while it asks the server to remove the client's last listener and joins the event thread,
+  which takes that lock for every event it posts. An event from another query of the session
+  in between hangs both threads, and every later `addListener`. The worker no longer removes
+  the listener on a Connect session (`pyspark.sql.connect`); left registered, it ignores
+  every other run's events. Classic sessions still remove it.
+
+`tests/test_finalization_logic.py` drives the worker without Spark: another run's progress
+and termination are ignored, an end offset in the same period writes nothing, and an advance
+that fails after the run terminated is retried. `tests/test_delta_sink.py` tracks a query
+that already terminated into a table with no verdict yet.

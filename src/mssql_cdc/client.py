@@ -590,19 +590,32 @@ class SqlCdcClient(CdcClient):
         # tran_end_time is in the server's clock: convert UTC to it, the inverse of _utc.
         # Whole seconds: the function takes datetime, which rounds milliseconds to 1/300 s,
         # upwards too; a later LSN would skip a commit the copy lacks, an earlier one replays.
-        zone, at = self.timezone, "CONVERT(datetime2(0), ?, 126)"
-        if self._offset_min is not None:
-            at = f"DATEADD(minute, {int(self._offset_min)}, {at})"
-        elif zone.upper() != "UTC":
-            at = f"CONVERT(datetime2(0), ({at} AT TIME ZONE 'UTC') AT TIME ZONE N'{zone}')"
+        at = self._server_clock("CONVERT(datetime2(0), ?, 126)")
         lsn = self._hex(
             self._b.scalar(
                 "SELECT CONVERT(varchar(22), sys.fn_cdc_map_time_to_lsn("
                 f"N'largest less than or equal', {at}), 1)",
-                (ts_utc.replace(microsecond=0).isoformat(),),
+                (ts_utc.replace(microsecond=0).isoformat(),) * at.count("?"),
             )
         )
         return None if lsn == _lsn.ZERO_LSN else lsn
+
+    def _server_clock(self, utc: str) -> str:
+        """The server-clock time no commit after ``utc`` (a datetime2 expression) reads at or
+        before. A fall-back repeats an hour of a named zone's clock, so a commit up to an hour
+        after ``utc`` can read earlier than it: take the earlier of ``utc``'s time and the next
+        hour's less that hour. Anywhere else that is ``utc``'s time."""
+        zone = self.timezone
+        if self._offset_min is not None:
+            return f"DATEADD(minute, {int(self._offset_min)}, {utc})"
+        if zone.upper() == "UTC":
+            return utc
+
+        def local(t: str) -> str:
+            return f"CONVERT(datetime2(0), ({t} AT TIME ZONE 'UTC') AT TIME ZONE N'{zone}')"
+
+        hour_after = f"DATEADD(hour, -1, {local(f'DATEADD(hour, 1, {utc})')})"
+        return f"(SELECT MIN(v) FROM (VALUES ({local(utc)}), ({hour_after})) x(v))"
 
     def nth_commit_after(self, lsn, n):
         n = int(n)

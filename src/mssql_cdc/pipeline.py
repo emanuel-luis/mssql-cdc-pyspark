@@ -185,9 +185,11 @@ class CdcStream:
         ``allow_missing_columns=True``. With ``facts_table`` (and the stream's ``app_id``)
         a ``'bootstrap'`` event row records the seed, the one ``to_delta`` would write.
 
-        A rerun with the same ``as_of`` returns the seed already written. Any other snapshot
-        of the table in ``target`` raises, unless ``reseed=True`` and ``as_of`` is newer:
-        after a ``DataLossError``, then start a new checkpoint and ``app_id`` from it.
+        A rerun with the same ``as_of`` returns the seed already written, also under a newer
+        snapshot; once cleanup has passed a time ``as_of`` (and its ``cdc.lsn_time_mapping``
+        row), the newest snapshot of the table at or before it. Any other snapshot of the
+        table in ``target`` raises, unless ``reseed=True`` and ``as_of`` is newer: after a
+        ``DataLossError``, then start a new checkpoint and ``app_id`` from it.
         """
         from pyspark.sql import functions as F
 
@@ -210,25 +212,34 @@ class CdcStream:
                 "allow_missing_columns=True to seed them as NULL"
             )
         with closing(make_client(self.options)) as client:
+            done = None
             if isinstance(as_of, datetime):
                 if as_of.tzinfo:
                     as_of = as_of.astimezone(timezone.utc).replace(tzinfo=None)
                 lsn = client.time_to_lsn(as_of)
-                if lsn is None:
+                if lsn is None and not reseed:
+                    # cleanup deletes cdc.lsn_time_mapping rows too: once it has passed
+                    # as_of, a rerun's seed is the newest snapshot at or before it
+                    at = F.lit(as_of.isoformat()).cast("timestamp_ntz")
+                    done = self._last_snapshot(target, ci, F.col("_commit_ts") <= at)
+                if lsn is None and not done:
                     raise DataLossError(
                         f"{ci}: cdc.lsn_time_mapping holds no commit at or before {as_of} UTC: "
                         "the copy is older than what CDC holds"
                     )
             else:
                 lsn = normalize(as_of)
-            done = self._last_snapshot(target, ci)
+            if lsn:  # a rerun's seed, even under a newer snapshot (a switch's, a reseed)
+                done = self._last_snapshot(target, ci, F.col("_start_lsn") == lsn)
             timing: dict | None = None
-            if done and done["lsn"] == lsn:  # a rerun: written already
+            if done:  # a rerun: written already
                 offset, timing = done, {}
             else:
-                if done and not (reseed and lsn > done["lsn"]):  # never a second seed silently
+                assert lsn is not None  # no seed found without it raised above
+                last = self._last_snapshot(target, ci)
+                if last and not (reseed and lsn > last["lsn"]):  # never a second seed silently
                     raise ValueError(
-                        f"{target} already holds a snapshot of {ci} at {done['lsn']}: seed an "
+                        f"{target} already holds a snapshot of {ci} at {last['lsn']}: seed an "
                         f"empty target, or with reseed=True a copy newer than it (not {lsn})"
                     )
                 if lsn > (client.max_lsn() or ZERO_LSN):
@@ -305,7 +316,8 @@ class CdcStream:
             "duration_ms": duration_ms,
         }
 
-    def _last_snapshot(self, target: str, ci: str) -> dict | None:
+    def _last_snapshot(self, target: str, ci: str, where=None) -> dict | None:
+        """The newest snapshot of the table in ``target``, of those ``where`` (a Column) keeps."""
         from pyspark.sql import functions as F
 
         from .tables import delta_table, exists
@@ -313,13 +325,13 @@ class CdcStream:
         if not exists(self.spark, target):
             return None
         # ignoring case, as SQL Server resolves the name: a rerun may spell it differently
+        cond = (F.col("_operation") == 0) & F.lower("_capture_instance").isin(
+            _instances(self.options, ci)
+        )
         row = (
             delta_table(self.spark, target)
             .toDF()
-            .where(
-                (F.col("_operation") == 0)
-                & F.lower("_capture_instance").isin(_instances(self.options, ci))
-            )
+            .where(cond if where is None else cond & where)
             .agg(F.max("_start_lsn").alias("lsn"), F.max("_commit_ts").alias("ts"))
             .first()
         )

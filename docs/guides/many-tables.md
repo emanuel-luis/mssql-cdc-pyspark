@@ -116,7 +116,7 @@ trackers = [
 failed = await_all(queries, timeout=4 * 3600)  # every table runs for four hours
 stop_all(queries)
 for tracker in trackers:
-    tracker.join()  # each table's last verdict is written
+    tracker.join()  # each table's last verdict is written, or its failure logged
 if failed:
     raise RuntimeError(f"CDC streams failed: {sorted(failed)}")
 ```

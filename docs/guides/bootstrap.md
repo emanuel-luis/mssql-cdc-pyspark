@@ -134,9 +134,10 @@ absorbs the overlap, as after a snapshot.
 
 - A `datetime` is the time the copy started being read, in UTC (an aware one is
   converted). It maps to the last commit at or before it in `cdc.lsn_time_mapping`, on
-  SQL Server's clock (`sourceTimeZone`), to the second. Taken on another machine, subtract
-  the clock difference: earlier is always safe, it only replays more; later loses the
-  commits in between.
+  SQL Server's clock (`sourceTimeZone`), to the second; in the hour before a daylight-saving
+  fall-back, an hour earlier, since that hour's local times repeat. Taken on another
+  machine, subtract the clock difference: earlier is always safe, it only replays more;
+  later loses the commits in between.
 - An LSN recorded on SQL Server before the copy started is exact:
   `SELECT CONVERT(varchar(22), sys.fn_cdc_get_max_lsn(), 1)`.
 
@@ -153,7 +154,9 @@ Nothing is written when:
 - CDC no longer holds the changes right after `as_of` (cleanup passed it, or no commit is
   that old): `DataLossError`, the copy is older than the retention. Seed a newer copy.
 - the target already holds a snapshot of the table at another LSN: `ValueError`. A rerun
-  with the same `as_of` returns the seed already there, so the call can stay in the job.
+  with the same `as_of` returns the seed already there, so the call can stay in the job:
+  also under a snapshot appended later, and once cleanup has passed a time `as_of`, when
+  the newest snapshot of the table at or before it is taken as the seed.
 
 Never use `on_data_loss="resnapshot"` on such a table: it snapshots it. After a
 `DataLossError`, seed a newer copy with `reseed=True`, then start a new checkpoint and

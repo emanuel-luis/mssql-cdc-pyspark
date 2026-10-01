@@ -121,12 +121,17 @@ def test_time_to_lsn_maps_utc_to_the_server_clock_to_the_second():
     named = Recorder("0x2a000001000001", tz="E. South America Standard Time")
     assert SqlCdcClient(named).time_to_lsn(at) == "0x0000002A000001000001"
     sql, params = named.calls[-1]
-    assert sql == (
-        "SELECT CONVERT(varchar(22), sys.fn_cdc_map_time_to_lsn(N'largest less than or equal', "
-        "CONVERT(datetime2(0), (CONVERT(datetime2(0), ?, 126) AT TIME ZONE 'UTC') "
-        "AT TIME ZONE N'E. South America Standard Time')), 1)"
+    local = (
+        "CONVERT(datetime2(0), ({} AT TIME ZONE 'UTC') "
+        "AT TIME ZONE N'E. South America Standard Time')"
     )
-    assert params == ("2026-09-28T16:50:00",)
+    utc_at = "CONVERT(datetime2(0), ?, 126)"
+    assert sql == (  # the earlier of as_of's local time and the next hour's less the hour
+        "SELECT CONVERT(varchar(22), sys.fn_cdc_map_time_to_lsn(N'largest less than or equal', "
+        f"(SELECT MIN(v) FROM (VALUES ({local.format(utc_at)}), "
+        f"(DATEADD(hour, -1, {local.format(f'DATEADD(hour, 1, {utc_at})')}))) x(v))), 1)"
+    )
+    assert params == ("2026-09-28T16:50:00",) * 2
     utc = Recorder()
     SqlCdcClient(utc, source_timezone="UTC").time_to_lsn(at)
     assert "'largest less than or equal', CONVERT(datetime2(0), ?, 126)), 1)" in utc.calls[-1][0]

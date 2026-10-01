@@ -117,8 +117,11 @@ def test_track_advances_the_verdict_while_the_query_runs(delta_spark, workdir):
     assert tracker.join(timeout=60)  # the worker stopped on termination
     assert len(spark.streams._jsqm.listListeners()) == listeners  # and removed the listener
     # a query that already terminated: its last progress is applied and the worker stops
-    assert finalization.track(spark, q, control, "bronze_orders").join(timeout=60)
-    assert verdict() == datetime(2026, 9, 28, 16)
+    assert finalization.finalized_until(spark, control, "bronze_orders_late") is None
+    assert finalization.track(spark, q, control, "bronze_orders_late").join(timeout=60)
+    assert finalization.finalized_until(spark, control, "bronze_orders_late") == datetime(
+        2026, 9, 28, 16
+    )
 
 
 def test_a_failing_advance_does_not_stop_the_query(delta_spark, workdir, monkeypatch, caplog):
@@ -840,6 +843,12 @@ def test_seed_from_a_copy_then_the_stream_continues_from_its_lsn(delta_spark, wo
     assert s.seed(target, now, last, reseed=True)["lsn"] == last
     assert _snapshots(spark.read.format("delta").load(target)) == 2
     assert s.snapshot(target)["lsn"] == last  # what to_delta(bootstrap=True) starts from
+    # the first seed's job rerun, under the newer snapshot, then once cleanup has deleted
+    # the cdc.lsn_time_mapping rows up to as_of: still that seed, nothing written
+    assert s.seed(target, copy, as_of) == offset
+    db.cleanup(CI, last)
+    assert s.seed(target, copy, as_of) == offset
+    assert _snapshots(spark.read.format("delta").load(target)) == 2
 
 
 def test_seed_refuses_a_point_cdc_does_not_hold_and_a_copy_missing_columns(delta_spark, workdir):
@@ -852,8 +861,11 @@ def test_seed_refuses_a_point_cdc_does_not_hold_and_a_copy_missing_columns(delta
     copy = spark.createDataFrame([(0, "new")], COLUMNS)
     with pytest.raises(DataLossError, match="no commit at or before"):
         s.seed(target, copy, T0 - timedelta(minutes=1))  # before CDC was enabled
+    purged = db.idle(at=T0 + timedelta(minutes=2, seconds=30))
     db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=3)))
     with pytest.raises(DataLossError, match="older than the CDC retention"):
+        s.seed(target, copy, purged)
+    with pytest.raises(DataLossError, match="no commit at or before"):  # its mapping row too
         s.seed(target, copy, T0 + timedelta(minutes=2))
     with pytest.raises(ValueError, match="after sys.fn_cdc_get_max_lsn"):
         s.seed(target, copy, "0x" + "F" * 20)

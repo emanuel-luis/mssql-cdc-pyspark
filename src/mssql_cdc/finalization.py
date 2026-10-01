@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 _GRANULARITIES = ("minute", "hour", "day")
+_ATTEMPTS = 3  # per progress, 1 s then 2 s apart
 
 
 def truncate(ts: datetime, granularity: str = "hour") -> datetime:
@@ -191,8 +193,10 @@ class FinalizationListener(StreamingQueryListener):
     thread, which calls ``advance``. A progress that arrives while an advance runs replaces
     the one still waiting: the newest end offset implies the older ones. The worker skips
     an end offset that does not move the verdict, so the control table gets a commit per
-    period, not per batch. A failed advance is logged; the next progress retries it.
-    When the run terminates, the worker applies what is left, stops and removes the listener.
+    period, not per batch. A failed advance is tried twice more, 1 s and 2 s later (a MERGE
+    of another tracker on the same control table conflicts with it), then logged; the next
+    progress tries again. When the run terminates, the worker applies what is left, stops
+    and removes the listener (on Spark Connect it leaves it registered: see ``_run``).
     """
 
     def __init__(
@@ -239,26 +243,39 @@ class FinalizationListener(StreamingQueryListener):
                 progress, self._progress = self._progress, None
             if progress is None:  # stopped, nothing left to apply
                 break
-            try:
-                end = end_offset_from_progress(progress)
-                cand = candidate(end, self._granularity)
-                if cand is not None and (last is None or cand > last):
-                    advance(self._session, self._control, self._table, end, self._granularity)
-                    last = cand
-            except Exception:  # noqa: BLE001 - the worker must survive; the next progress retries
-                _log.warning(
-                    "finalized_until of %s not advanced; the next progress retries",
-                    self._table,
-                    exc_info=True,
-                )
+            # a MERGE of another tracker on the same control table can conflict with this one;
+            # after the run terminates no next progress would retry it
+            for attempt in range(1, _ATTEMPTS + 1):
+                try:
+                    end = end_offset_from_progress(progress)
+                    cand = candidate(end, self._granularity)
+                    if cand is not None and (last is None or cand > last):
+                        advance(self._session, self._control, self._table, end, self._granularity)
+                        last = cand
+                    break
+                except Exception:  # noqa: BLE001 - the worker must survive
+                    _log.warning(
+                        "finalized_until of %s not advanced (attempt %d of %d)",
+                        self._table,
+                        attempt,
+                        _ATTEMPTS,
+                        exc_info=True,
+                    )
+                    if attempt < _ATTEMPTS:
+                        time.sleep(attempt)
+        if type(self._session).__module__.startswith("pyspark.sql.connect"):
+            # PySpark 4.2.0's Connect client removes its last listener under the lock its
+            # event thread posts under, then joins that thread: an event in between hangs
+            # both. Left registered, the listener ignores every other run's events.
+            return
         try:
             self._session.streams.removeListener(self)
         except Exception:  # noqa: BLE001 - a stopped session has no listeners left to remove
             _log.warning("could not remove the finalization listener of %s", self._table)
 
     def join(self, timeout: float | None = None) -> bool:
-        """Wait until the query has terminated and its last verdict is written (or failed,
-        and logged). False when ``timeout`` seconds pass first."""
+        """Wait until the query has terminated and its last verdict is written (or failed
+        three times, and logged). False when ``timeout`` seconds pass first."""
         self._worker.join(timeout)
         return not self._worker.is_alive()
 
