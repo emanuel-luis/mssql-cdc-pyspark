@@ -35,8 +35,9 @@
       `(_start_lsn, _command_id, _seqval, _operation)`, deletes honoured, operation 0
       (snapshot) as an upsert, rebuild from the newest snapshot after a re-snapshot; propagate
       `finalized_until` (`apply_changes`, ADR 0019).
-- [ ] **Continuous mode finalization**: `StreamingQueryListener` that advances the
-      verdict on progress (check it does not block the listener bus).
+- [x] **Continuous mode finalization**: `finalization.track` registers a
+      `StreamingQueryListener` that advances the verdict on progress from a worker thread,
+      off the listener bus (ADR 0026).
 - [x] Retention headroom in the facts (`retention_watermark_ts`, `retention_headroom_hours`,
       ADR 0017), measured from the batch's end offset (`end_lsn`, `end_commit_ts`).
 - [x] **Operational metrics**: capture lag (`now - map_lsn_to_time(max_lsn)`) and ingestion

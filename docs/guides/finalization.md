@@ -86,14 +86,63 @@ commit up to that LSN's commit time is too ([Design notes](../DESIGN.md)).
 - `apply_changes` advances the silver table's own row, capped at the bronze verdict it read
   before applying ([Silver tables](silver.md)). Gate silver consumers on the silver name.
 
-### A stream that keeps running
+## Continuous mode
 
 `end_offset_from_progress(query.lastProgress)` after `awaitTermination()` fits jobs that run
-with `availableNow` on a schedule. For a stream that keeps running (a `processingTime`
-trigger or the default), the library has no built-in hook yet ([Roadmap](../ROADMAP.md)):
-call `advance` from a `StreamingQueryListener`,
-or from a separate job that reads the checkpoint's committed offsets
-([Extension points](../ARCHITECTURE.md#extension-points)).
+with `availableNow` on a schedule. A stream that keeps running (a `processingTime` trigger,
+or the default) has no end to wait for: `track` advances the verdict after each batch,
+while the query runs.
+
+```python
+from mssql_cdc import finalization, stream
+
+query = stream(spark, options).to_delta(
+    "bronze.orders",
+    app_id="orders-v1",
+    checkpoint="/data/checkpoints/orders",
+    facts_table="ops.ingestion_facts",
+    trigger={"processingTime": "1 minute"},
+)
+tracker = finalization.track(spark, query, "ops.table_finalization", "bronze.orders")
+query.awaitTermination()
+tracker.join()  # the last batch's verdict is written
+```
+
+`track` registers a `StreamingQueryListener` for this run of the query
+([ADR 0026](../decisions/0026-continuous-finalization-listener.md)):
+
+- Spark posts a batch's progress event after the batch's data and its checkpoint commit, so
+  the verdict still follows the data.
+- The listener does no Spark work on the listener bus, which every listener of the session
+  shares. It hands the newest progress to one worker thread that calls `advance`. Progress
+  that arrives while an advance runs replaces the one still waiting, and an end offset that
+  does not move the verdict is skipped, so the control table gets about one commit per
+  period, not one per batch.
+- A failed `advance` is logged (logger `mssql_cdc.finalization`) and does not touch the
+  query; the next progress retries it. An idle query still reports progress about every
+  10 seconds (`spark.sql.streaming.noDataProgressEventInterval`). That covers a MERGE that
+  loses a write conflict to another stream advancing its row of the same control table.
+- When the query terminates, with or without an error, the worker applies what is left,
+  stops and removes the listener. `join(timeout)` waits for that and returns `False` if the
+  timeout passes first. A restarted query is a new run: call `track` again.
+- `track` creates the control table before it returns, so a wrong name fails there.
+  Called on a query that already finished, it applies the query's last progress and stops.
+
+`to_delta` does not take a control table: `track` is the one line that returns the handle
+`join` needs. `track` also works with `availableNow`: `awaitTermination()`, then `join()`.
+
+Where the listener runs:
+
+- Classic PySpark (local, a cluster's driver): the JVM calls the Python listener through
+  Py4J; tested with PySpark 4.2.0 in local mode.
+- Spark Connect (a PySpark 4.x client): PySpark 4.2.0's client keeps Python listeners on the
+  client and receives the events over the connection
+  (`pyspark/sql/connect/streaming/query.py`, `StreamingQueryListenerBus`), so the worker runs
+  on the client and runs `advance` through the client's session. Not tested.
+- Databricks (classic compute, serverless, Databricks Connect): not tested.
+
+A separate job that reads the checkpoint's committed offsets and calls `advance` remains an
+option where a listener cannot run ([Extension points](../ARCHITECTURE.md#extension-points)).
 
 ## Pitfalls
 
@@ -112,7 +161,7 @@ or from a separate job that reads the checkpoint's committed offsets
 ## See also
 
 - [Monitoring](monitoring.md): the per-batch facts behind the verdict.
-- [API reference](../reference/api.md#mssql_cdc.finalization.advance): `advance`,
+- [API reference](../reference/api.md#mssql_cdc.finalization.advance): `advance`, `track`,
   `is_final`, `candidate`, `end_offset_from_progress`.
 - [Design notes](../DESIGN.md): why SQL Server CDC can give a stronger signal than event
   times.

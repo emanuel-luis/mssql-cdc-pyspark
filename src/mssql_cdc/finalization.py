@@ -23,12 +23,25 @@ lags (consumers wait a little longer); it can never run ahead of the data.
 from __future__ import annotations
 
 import json
+import logging
+import threading
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
+
+from pyspark.sql.streaming import StreamingQueryListener
 
 from . import migrations
 from .migrations.control import APPLIED_COLUMNS
 from .tables import delta_table, table_ref  # noqa: F401 - table_ref re-exported
 
+if TYPE_CHECKING:
+    from pyspark.sql.streaming.listener import (
+        QueryProgressEvent,
+        QueryStartedEvent,
+        QueryTerminatedEvent,
+    )
+
+_log = logging.getLogger(__name__)
 _GRANULARITIES = ("minute", "hour", "day")
 
 
@@ -166,3 +179,107 @@ def is_final(spark, control_table: str, table_name: str, period_end: datetime) -
     """True when the period ending at ``period_end`` (exclusive) is complete."""
     fu = finalized_until(spark, control_table, table_name)
     return fu is not None and period_end <= fu
+
+
+class FinalizationListener(StreamingQueryListener):
+    """Advances ``finalized_until`` after the batches of one query run. Create it with
+    ``track``, which registers it and returns it.
+
+    Spark posts a progress event after the batch's data and checkpoint commits, so the verdict
+    still follows the data (ADR 0005). The listener bus calls back on a thread every listener
+    of the session shares, so the callbacks only hand the newest progress to one worker
+    thread, which calls ``advance``. A progress that arrives while an advance runs replaces
+    the one still waiting: the newest end offset implies the older ones. The worker skips
+    an end offset that does not move the verdict, so the control table gets a commit per
+    period, not per batch. A failed advance is logged; the next progress retries it.
+    When the run terminates, the worker applies what is left, stops and removes the listener.
+    """
+
+    def __init__(
+        self, spark, run_id: str, control_table: str, table_name: str, granularity: str = "hour"
+    ):
+        if granularity.lower() not in _GRANULARITIES:
+            raise ValueError(f"granularity must be one of {_GRANULARITIES}")
+        self._session, self._run_id = spark, str(run_id)
+        self._control, self._table, self._granularity = control_table, table_name, granularity
+        self._cond = threading.Condition()
+        self._progress: Any = None  # the newest progress not yet applied
+        self._stopped = False
+        self._worker = threading.Thread(
+            target=self._run, name=f"mssql-cdc-finalization {table_name}", daemon=True
+        )
+
+    def onQueryStarted(self, event: QueryStartedEvent) -> None:
+        pass
+
+    def onQueryProgress(self, event: QueryProgressEvent) -> None:
+        if str(event.progress.runId) == self._run_id:
+            self._offer(event.progress)
+
+    def onQueryTerminated(self, event: QueryTerminatedEvent) -> None:
+        if str(event.runId) == self._run_id:
+            self._stop()
+
+    def _offer(self, progress) -> None:
+        if progress is not None:
+            with self._cond:
+                self._progress = progress
+                self._cond.notify()
+
+    def _stop(self) -> None:
+        with self._cond:
+            self._stopped = True
+            self._cond.notify()
+
+    def _run(self) -> None:
+        last = None  # the verdict this worker last wrote
+        while True:
+            with self._cond:
+                self._cond.wait_for(lambda: self._progress is not None or self._stopped)
+                progress, self._progress = self._progress, None
+            if progress is None:  # stopped, nothing left to apply
+                break
+            try:
+                end = end_offset_from_progress(progress)
+                cand = candidate(end, self._granularity)
+                if cand is not None and (last is None or cand > last):
+                    advance(self._session, self._control, self._table, end, self._granularity)
+                    last = cand
+            except Exception:  # noqa: BLE001 - the worker must survive; the next progress retries
+                _log.warning(
+                    "finalized_until of %s not advanced; the next progress retries",
+                    self._table,
+                    exc_info=True,
+                )
+        try:
+            self._session.streams.removeListener(self)
+        except Exception:  # noqa: BLE001 - a stopped session has no listeners left to remove
+            _log.warning("could not remove the finalization listener of %s", self._table)
+
+    def join(self, timeout: float | None = None) -> bool:
+        """Wait until the query has terminated and its last verdict is written (or failed,
+        and logged). False when ``timeout`` seconds pass first."""
+        self._worker.join(timeout)
+        return not self._worker.is_alive()
+
+
+def track(
+    spark, query, control_table: str, table_name: str, granularity: str = "hour"
+) -> FinalizationListener:
+    """Advance ``finalized_until`` of ``table_name`` after every batch of ``query``, a started
+    StreamingQuery that writes it, until the query terminates; returns the listener.
+
+    For a stream that keeps running (a ``processingTime`` trigger, or the default). Call it
+    right after starting the query; ``join()`` waits for the last verdict once the query
+    stops. With ``availableNow``, ``query.awaitTermination()`` then ``join()``. The control
+    table is created here, so a wrong name fails now rather than in the worker's log.
+    """
+    listener = FinalizationListener(spark, query.runId, control_table, table_name, granularity)
+    ensure_control_table(spark, control_table)
+    spark.streams.addListener(listener)
+    # progress posted before the listener was added is missed: the latest one implies it
+    listener._offer(query.lastProgress)
+    if not query.isActive:  # terminated before the listener could hear it
+        listener._stop()
+    listener._worker.start()
+    return listener

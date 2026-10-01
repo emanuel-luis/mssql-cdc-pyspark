@@ -24,7 +24,10 @@ for its methods: it is what `stream()` returns, and only that call creates one.
 ::: mssql_cdc.finalization
     options:
       show_root_toc_entry: false
-      members: [advance, is_final, candidate, end_offset_from_progress]
+      members: [advance, track, FinalizationListener, is_final, candidate, end_offset_from_progress]
+
+`FinalizationListener` is listed for its `join`. Create it with `track`, which also
+registers it and starts its worker.
 
 ## Sink
 

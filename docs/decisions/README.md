@@ -27,6 +27,7 @@
 | [0023](0023-schema-changes-and-capture-instance-switching.md) | Schema changes on the source, and switching to a newer capture instance | accepted | 2026-09-30T18:40:00-03:00 | 2026-09-30T20:09:44-03:00, 2026-09-30T21:25:30-03:00, 2026-10-01T15:55:00-03:00 |
 | [0024](0024-documentation-site.md) | A documentation site built by Zensical, hosted on GitHub Pages | accepted | 2026-10-01T14:43:57-03:00 |  |
 | [0025](0025-seed-from-an-existing-copy.md) | Seed a target from an existing copy of the table | accepted | 2026-10-01T16:53:59-03:00 |  |
+| [0026](0026-continuous-finalization-listener.md) | Continuous-mode finalization through a streaming query listener | accepted | 2026-10-01T16:36:15-03:00 |  |
 
 New ADRs: copy the format, next number, one decision per file. Put the time the
 decision is recorded in `**Date:**` (ISO-8601 with the UTC offset, e.g.

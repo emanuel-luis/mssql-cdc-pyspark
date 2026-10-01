@@ -131,5 +131,6 @@ nav:
       - decisions/0023-schema-changes-and-capture-instance-switching.md
       - decisions/0024-documentation-site.md
       - decisions/0025-seed-from-an-existing-copy.md
+      - decisions/0026-continuous-finalization-listener.md
   - Changelog: changelog.md
   - Contributing: contributing.md

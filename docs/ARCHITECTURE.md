@@ -185,5 +185,6 @@ they have not had yet ([ADR 0012](decisions/0012-delta-tables-through-the-deltat
   it to `make_client`.
 * **Other sinks**: the source is sink-agnostic; any `writeStream` target works.
   Idempotency and facts are then the sink's job.
-* **Continuous mode**: call `finalization.advance` from a `StreamingQueryListener`
-  (roadmap), or from a separate job reading the checkpoint's committed offsets.
+* **Continuous mode**: `finalization.track` advances the verdict from a
+  `StreamingQueryListener` (ADR 0026); where a listener cannot run, call
+  `finalization.advance` from a separate job reading the checkpoint's committed offsets.

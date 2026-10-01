@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -61,6 +62,98 @@ def test_sink_facts_and_monotonic_finalization(delta_spark, workdir):
     assert finalization.advance(spark, control, "bronze_orders", older) == fu
     assert finalization.is_final(spark, control, "bronze_orders", datetime(2026, 9, 28, 15))
     assert not finalization.is_final(spark, control, "bronze_orders", datetime(2026, 9, 28, 16))
+
+
+def _running(spark, workdir, app_id):
+    """A ``processingTime`` stream into bronze, one commit per batch."""
+    from mssql_cdc import stream
+
+    options = {
+        "backend": "fake",
+        "fakePath": os.path.join(workdir, "src"),
+        "captureInstance": CI,
+        "columns": COLUMNS,
+        "maxCommitsPerBatch": "1",
+    }
+    return stream(spark, options).to_delta(
+        os.path.join(workdir, "bronze"),
+        app_id,
+        os.path.join(workdir, "ckpt"),
+        trigger={"processingTime": "1 second"},
+    )
+
+
+def _eventually(check, timeout=120):
+    """Progress events reach listeners asynchronously: poll."""
+    deadline = time.monotonic() + timeout
+    while not check():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.5)
+
+
+def test_track_advances_the_verdict_while_the_query_runs(delta_spark, workdir):
+    spark = delta_spark
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    for i in range(3):  # 13:50, 14:50, 15:50
+        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(hours=i))
+    control = os.path.join(workdir, "control")
+    listeners = len(spark.streams._jsqm.listListeners())
+
+    def verdict():
+        return finalization.finalized_until(spark, control, "bronze_orders")
+
+    q = _running(spark, workdir, "track-v1")
+    try:
+        tracker = finalization.track(spark, q, control, "bronze_orders")
+        q.processAllAvailable()  # three batches
+        _eventually(lambda: verdict() == datetime(2026, 9, 28, 15))  # nobody called advance
+        assert q.isActive
+        db.commit(CI, [(2, {"order_id": 3, "status": "new"})], at=T0 + timedelta(hours=3))
+        q.processAllAvailable()
+        _eventually(lambda: verdict() == datetime(2026, 9, 28, 16))
+        assert q.isActive
+    finally:
+        q.stop()
+    assert tracker.join(timeout=60)  # the worker stopped on termination
+    assert len(spark.streams._jsqm.listListeners()) == listeners  # and removed the listener
+    # a query that already terminated: its last progress is applied and the worker stops
+    assert finalization.track(spark, q, control, "bronze_orders").join(timeout=60)
+    assert verdict() == datetime(2026, 9, 28, 16)
+
+
+def test_a_failing_advance_does_not_stop_the_query(delta_spark, workdir, monkeypatch, caplog):
+    spark = delta_spark
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    db.commit(CI, [(2, {"order_id": 0, "status": "new"})], at=T0)
+    control = os.path.join(workdir, "control")
+    advance, calls = finalization.advance, []
+
+    def flaky(*args, **kwargs):
+        calls.append(args[3])
+        if len(calls) == 1:
+            raise RuntimeError("control table unavailable")
+        return advance(*args, **kwargs)
+
+    monkeypatch.setattr(finalization, "advance", flaky)
+    q = _running(spark, workdir, "flaky-v1")
+    try:
+        tracker = finalization.track(spark, q, control, "bronze_orders")
+        q.processAllAvailable()
+        _eventually(lambda: calls)
+        assert q.isActive
+        db.commit(CI, [(2, {"order_id": 1, "status": "new"})], at=T0 + timedelta(hours=1))
+        q.processAllAvailable()  # the next batch's progress retries
+        _eventually(
+            lambda: (
+                finalization.finalized_until(spark, control, "bronze_orders")
+                == datetime(2026, 9, 28, 14)
+            )
+        )
+        assert q.isActive and q.exception() is None
+    finally:
+        q.stop()
+    assert tracker.join(timeout=60)
+    assert "control table unavailable" in caplog.text
 
 
 def _comments(spark, path):

@@ -97,7 +97,8 @@ end = finalization.end_offset_from_progress(query.lastProgress)
 finalization.advance(spark, "ops.table_finalization", "bronze.orders", end)
 ```
 
-For a query that keeps running, see [Finalization](finalization.md).
+For a query that keeps running, `finalization.track` advances it after every batch
+([Continuous mode](finalization.md#continuous-mode)).
 
 ## Checkpoints
 
