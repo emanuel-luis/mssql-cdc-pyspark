@@ -38,7 +38,8 @@ query.awaitTermination()
 # COMMAND ----------
 
 end = finalization.end_offset_from_progress(query.lastProgress)
-fu = finalization.advance(spark, f"{SCHEMA}.table_finalization", "bronze_orders", end)
+# keyed by the stream's target, the name apply_changes and consumers look the verdict up by
+fu = finalization.advance(spark, f"{SCHEMA}.table_finalization", f"{SCHEMA}.bronze_orders", end)
 print("finalized_until:", fu)
 # Expose it to downstream tasks (If/else condition task compares numbers):
 dbutils.jobs.taskValues.set("finalized_until_epoch", int(fu.timestamp()) if fu else 0)

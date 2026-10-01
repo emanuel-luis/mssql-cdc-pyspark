@@ -4,7 +4,8 @@ Guidance for Claude Code when working in this repository.
 
 `mssql-cdc-pyspark` is a platform-agnostic **PySpark DataSource V2 streaming source
 for SQL Server CDC**, plus a Delta sink and a **completeness signal**
-(`finalized_until`) for downstream consumers. See `README.md` for the product,
+(`finalized_until`) for downstream consumers. See `README.md` for the product, the
+documentation site (`docs/`, built by Zensical from `mkdocs.yml`, ADR 0024) for usage,
 `docs/ARCHITECTURE.md` for how it works, `docs/DESIGN.md` for why.
 
 ## Status (read first)
@@ -84,8 +85,11 @@ sql/switch_capture_instance.sql  The DBA's steps to move a table to a new captur
 tests/             pytest suite (fake backend runs the real Spark engine).
   integration/     the source against SQL Server 2022 in Docker (testcontainers), -m sqlserver.
 examples/          local_pipeline.py, databricks_notebook.py.
-docs/              ARCHITECTURE, DESIGN, DEVELOPMENT, CONNECTORS, DATABRICKS, ROADMAP,
-                   REFERENCES, RELEASING (PyPI via release.yml), decisions/ (ADRs).
+docs/              the documentation site (mkdocs.yml; GitHub Pages via docs.yml, ADR 0024):
+                   index, getting-started/, guides/, reference/ (options, output schema,
+                   tables, API); and ARCHITECTURE, DESIGN, DEVELOPMENT, CONNECTORS,
+                   DATABRICKS, ROADMAP, REFERENCES, RELEASING (PyPI via release.yml),
+                   decisions/ (ADRs).
 CHANGELOG.md       Keep a Changelog; each release states its state compatibility (ADR 0021).
 notes/             Local only, gitignored: research notes in Portuguese (context, not spec).
 ```
@@ -187,8 +191,11 @@ about every 5 minutes (t1); `sql/heartbeat.sql` brings `max_lsn`'s lag to ~10 s
   conflicts with the platform's Spark (DBR 18.2 is Spark 4.1). Do not add hard dependencies
   to `[project].dependencies` beyond `pyarrow` and `mssql-python` (the default backend,
   ADR 0003).
-* Keep the README options table and output schema in sync with the options read in
-  `src/mssql_cdc/source.py` and `client.make_client`.
+* Usage is documented once, on the site: keep `docs/reference/options.md` and
+  `docs/reference/output-schema.md` in sync with the options read in `src/mssql_cdc/source.py`,
+  `client.make_client` and `pipeline.to_delta`; `docs/reference/tables.md` copies the table
+  comments, which `tests/test_docs_tables.py` checks. A new page needs a line in
+  `mkdocs.yml`'s nav; `uv run --group docs zensical build --strict` must pass (CI `docs` job).
 * Changing the control, facts, bronze or silver schema: update its creation columns *and* append a
   migration to `src/mssql_cdc/migrations/<kind>.py` (ADR 0013); never edit a shipped one.
 * Record design changes as a new ADR in `docs/decisions/`, with `**Date:**` (ISO-8601 with

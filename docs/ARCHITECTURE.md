@@ -154,37 +154,14 @@ automatic re-snapshot, or failed one, per `resnapshot_interval_days`
 
 ## Output schema
 
-Metadata columns `_capture_instance, _start_lsn, _seqval, _operation, _command_id,
-_commit_ts`, then the captured columns. The ordering key for applying changes is
-`(_start_lsn, _command_id, _seqval, _operation)`. `_command_id` is numbered per capture
-instance, but all rows of one `_start_lsn` come from one instance, so the key holds across a
-switch; `(_start_lsn, _seqval, _operation)` identifies a change across instances.
-`_capture_instance` is the instance the row was read from. Snapshot rows have
-`_operation = 0`, the snapshot's LSN as `_start_lsn` and NULL `_seqval` and `_command_id`.
-
-Captured columns come from the `columns` option (DDL) or, when it is omitted, from CDC
-metadata at `load()` time on the driver: `sys.sp_cdc_get_captured_columns`, sorted by
-`column_ordinal` (`SqlCdcClient.captured_columns`), for every capture instance of the table,
-joined by name, older instance first. It needs only the permissions of the CDC query
-functions. Default type mapping:
-
-| SQL Server | Spark |
-|---|---|
-| `bit` | `BOOLEAN` |
-| `tinyint`, `smallint` | `SMALLINT` |
-| `int` / `bigint` | `INT` / `BIGINT` |
-| `real` / `float` | `FLOAT` / `DOUBLE` |
-| `decimal(p,s)`, `numeric(p,s)` | `DECIMAL(p,s)` |
-| `money` / `smallmoney` | `DECIMAL(19,4)` / `DECIMAL(10,4)` |
-| `date` | `DATE` |
-| `datetime`, `datetime2`, `smalldatetime` | `TIMESTAMP_NTZ` |
-| `datetimeoffset` | `TIMESTAMP` |
-| `char`, `varchar`, `nchar`, `nvarchar`, `text`, `ntext`, `xml`, `uniqueidentifier`, `time` | `STRING` |
-| `binary`, `varbinary`, `image`, `rowversion` | `BINARY` |
-
-Alias types map through their base type. Anything else (`sql_variant`, `geography`,
-`geometry`, `hierarchyid`) fails at `load()` with a message to pass `columns`. The fake
-backend has no type metadata and always needs `columns`.
+Six metadata columns, then the captured columns; every column, the ordering key and the
+default type mapping are in [Output schema](reference/output-schema.md). Captured columns
+come from the `columns` option (DDL) or, when it is omitted, from CDC metadata at `load()`
+time on the driver: `sys.sp_cdc_get_captured_columns`, sorted by `column_ordinal`
+(`SqlCdcClient.captured_columns`), for every capture instance of the table, joined by name,
+older instance first. It needs only the permissions of the CDC query functions. The fake
+infers them too when its capture instances record their columns
+(`FakeCdcDatabase(columns=...)`), and needs `columns` otherwise.
 
 ## Tables written by the sink, finalization and silver
 

@@ -46,5 +46,6 @@ query.awaitTermination()
 # Data is committed; now (and only now) advance the verdict.
 end = finalization.end_offset_from_progress(query.lastProgress)
 print("end offset:", end)
-print("finalized_until:", finalization.advance(spark, CONTROL, "bronze_orders", end))
+# Keyed by the stream's target, the name apply_changes and consumers look the verdict up by.
+print("finalized_until:", finalization.advance(spark, CONTROL, BRONZE, end))
 spark.read.format("delta").load(BRONZE).groupBy("_operation").count().show()

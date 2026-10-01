@@ -1,7 +1,8 @@
 # 0021: Compatibility policy for 0.x
 
 **Status:** accepted  
-**Date:** 2026-09-30T11:07:08-03:00
+**Date:** 2026-09-30T11:07:08-03:00  
+**Amended:** 2026-10-01T15:55:00-03:00, the public surface is the documentation site's reference (API, options, output schema), not the README
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -28,19 +29,22 @@ The Python API, on the other hand, is young and will change.
   own (as appended table migrations do), or the release notes give the exact steps.
 * Every release entry in `CHANGELOG.md` has a "State compatibility" line: what it does to
   offsets, checkpoint layout and table migrations, with ADR links.
-* The public surface is what the README documents: `stream()`, `.to_delta()` and
-  `.snapshot()`, `register()`, the formats `mssql_cdc` and `mssql_cdc_snapshot`, the options
-  table and the output schema, `finalization.advance()`, `is_final()`, `candidate()` and
-  `end_offset_from_progress()`, `sink.delta_sink()`, `DataLossError`, and
-  `spark.get_spark()` for local sessions. Everything else is internal and may change in any
-  release, including names exported from `mssql_cdc` that the README does not document
-  (`make_client`, `MssqlCdcDataSource`, `HAS_ADMISSION_CONTROL`, `OPERATIONS`) and the
-  `fake` backend.
+* The public surface is what the documentation site's reference documents (amendment, ADR
+  0024): the objects listed in `docs/reference/api.md` (`stream()`, the `.to_delta()` and
+  `.snapshot()` methods of what it returns, `register()`, `apply_changes()`,
+  `finalization.advance()`, `is_final()`, `candidate()` and `end_offset_from_progress()`,
+  `sink.delta_sink()`, `DataLossError`, `SchemaChangedError`, and `spark.get_spark()` for
+  local sessions), the formats `mssql_cdc` and `mssql_cdc_snapshot`, the options in
+  `docs/reference/options.md` and the output schema in `docs/reference/output-schema.md`.
+  `CdcStream` is public only as what `stream()` returns, not its name or constructor.
+  Everything else is internal and may change in any release, including names exported from
+  `mssql_cdc` that the API reference does not list (`make_client`, `MssqlCdcDataSource`,
+  `HAS_ADMISSION_CONTROL`, `OPERATIONS`) and the `fake` backend with its `fakePath` option.
 
 ## Consequences
 * Upgrading within 0.x never costs a re-snapshot or a new checkpoint unless an ADR and the
   CHANGELOG say so, with the steps.
 * Changing the state is expensive on purpose: reading the old format stays in the code.
-* Documenting something in the README makes it public; keep internals out of it or accept
-  the contract.
+* Documenting something in the reference pages makes it public; keep internals out of them
+  or accept the contract. The guides and the README may show public things only.
 * 1.0 will freeze the Python API as well; nothing here decides when.

@@ -7,7 +7,8 @@
 3. Behaviour changes in the source need a test in `tests/test_source_fake.py`; T-SQL
    changes need `tests/test_client_sql.py` updates and a lab check run.
 4. Design changes need an ADR in `docs/decisions/`.
-5. Keep the README options table and output schema in sync with the options read in
-   `src/mssql_cdc/source.py` and `client.make_client`.
+5. Keep `docs/reference/options.md` and `docs/reference/output-schema.md` in sync with the
+   options read in `src/mssql_cdc/source.py` and `client.make_client`; usage is documented
+   once, on the site (`docs/`), and the README links to it.
 6. User-visible changes get an entry under `## [Unreleased]` in `CHANGELOG.md`; breaking
    ones follow ADR 0021. Releases: `docs/RELEASING.md`.

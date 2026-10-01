@@ -11,7 +11,7 @@ anywhere:
 
 What a version number may change is set by the 0.x policy
 ([ADR 0021](decisions/0021-compatibility-policy-for-0x.md)); every release is recorded in
-[`CHANGELOG.md`](../CHANGELOG.md).
+[`CHANGELOG.md`](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md).
 
 ## One-time setup
 

@@ -52,23 +52,20 @@ Nothing in `mssql_cdc` imports Databricks APIs; the same package runs on any Spa
    their own connections in `read()`).
 5. **Names and paths.** Unity Catalog managed tables for bronze, facts and control;
    checkpoints in a Volume.
-6. **Tables too big to snapshot.** A snapshot must finish within the CDC retention (3 days by
-   default); at the 4-11k rows/s measured against a production source, a table of billions
-   of rows cannot. Seed the target from an existing copy of the table (for example one
-   already in the lakehouse) and start the stream at the LSN that copy is consistent with
-   (`startingLsn`). Never use `bootstrap=True` or `on_data_loss="resnapshot"` on it: both
-   snapshot the table ([README](../README.md#tables-too-big-to-snapshot)).
+6. **Tables too big to snapshot.** A table of billions of rows cannot be snapshotted within
+   the CDC retention: seed it from a copy already in the lakehouse and start at `startingLsn`
+   ([Bootstrap](guides/bootstrap.md#tables-too-big-to-snapshot)).
 7. **Schema changes.** Type widening on a Unity Catalog bronze table is the same statement,
    `ALTER TABLE <catalog>.<schema>.<table> SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true')`;
    `to_delta(snapshot_on_switch=True)` needs `metricsPath` when the checkpoint is a URI
    rather than a Volume, and so do the `schema_change` and `capture_instance_switched` facts
    rows the DBA waits for before disabling an old capture instance. Neither has run on
-   Databricks yet ([README](../README.md#schema-changes)).
+   Databricks yet ([Schema changes](guides/schema-changes.md)).
 8. **Consumers.** Gate downstream work on `table_finalization`:
    * Lakeflow Jobs: a table update trigger on the control table, then a task that
      reads `finalized_until` and an If/else condition (compare epoch numbers).
    * Airflow: `DatabricksSqlSensor` with
-     `SELECT 1 FROM lab.cdc.table_finalization WHERE table_name = 'bronze_orders' AND finalized_until >= '{{ data_interval_end }}'`.
+     `SELECT 1 FROM lab.cdc.table_finalization WHERE table_name = 'lab.cdc.bronze_orders' AND finalized_until >= '{{ data_interval_end }}'`.
 
 Checks to re-run on Databricks: `t5_engine`, `t6_delta_semantics --schema <catalog.schema>`,
 `t7_end_to_end --schema <catalog.schema> --checkpoint /Volumes/...`.

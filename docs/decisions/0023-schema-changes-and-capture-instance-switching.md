@@ -3,7 +3,8 @@
 **Status:** accepted  
 **Date:** 2026-09-30T18:40:00-03:00  
 **Amended:** 2026-09-30T20:09:44-03:00, run against SQL Server 2022 (`tests/integration`); a type bronze cannot take names `delta.enableTypeWidening`  
-**Amended:** 2026-09-30T21:25:30-03:00, drop the older instance one batch after the switch event; schema checked at an instance's first read; uncaptured declared columns fail; `detail` is the DDL statement
+**Amended:** 2026-09-30T21:25:30-03:00, drop the older instance one batch after the switch event; schema checked at an instance's first read; uncaptured declared columns fail; `detail` is the DDL statement  
+**Amended:** 2026-10-01T15:55:00-03:00, type widening on silver is a manual `ALTER COLUMN ... TYPE`: `apply_changes` merges without schema evolution
 
 ## Context
 A capture instance captures a fixed column list, chosen when it is enabled. To capture a
@@ -192,7 +193,8 @@ instance captures. `to_delta(..., snapshot_on_switch=False)`: with `True`, after
 that first reads the newer instance (the `capture_instance_switched` event), the sink appends
 a snapshot (ADR 0016's machinery, stamped with `max_lsn` recorded before its read), so the
 latest image carries the new column's values. Considered: always snapshotting at a switch (a
-full read, too slow for large tables, see the README on tables too big to snapshot) and
+full read, too slow for large tables, see
+[tables too big to snapshot](../guides/bootstrap.md#tables-too-big-to-snapshot)) and
 never (a column that stays NULL until each row changes).
 
 ### Needed whichever option
@@ -227,9 +229,11 @@ never (a column that stays NULL until each row changes).
   `schema_change` and `capture_instance_switched` rows carry `rows = 0` and a `batch_id`.
   Statistics over micro-batches still filter `event IS NULL`. Silver and the tests' helpers
   do.
-* A type change needs a restart; a widening also needs `delta.enableTypeWidening` on bronze,
-  and on silver (`apply_changes` adds new columns but does not change types). A narrowing or
-  an incompatible change needs a new bronze table or a rewrite.
+* A type change needs a restart; a widening also needs `delta.enableTypeWidening` on bronze.
+  Silver needs more (amendment 3): `apply_changes` adds new columns but does not change types,
+  and its MERGE runs without schema evolution, so the property alone leaves silver's column at
+  the old type; its owner widens it with `ALTER TABLE ... ALTER COLUMN ... TYPE`. A narrowing
+  or an incompatible change needs a new bronze table or a rewrite.
 * The newer instance's change table needs its own grant before the stream reaches S; the
   first read without it raises a `PermissionError` naming it.
 * The older instance can be dropped once every stream reading the table has a batch after its
