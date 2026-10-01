@@ -8,8 +8,9 @@ query and return Apache Arrow record batches. Two backends ship:
   the ODBC driver and fetches natively into Arrow via ``cursor.arrow_batch()``.
 * ``arrow-odbc``: needs unixODBC and msodbcsql18 on every worker.
 
-All LSNs cross the driver boundary as hex strings and are converted server-side
-with ``CONVERT(binary(10), ?, 1)``, so both backends bind parameters the same way.
+Every parameter is text, all arrow-odbc binds, so both backends bind the same way: LSNs
+cross the driver boundary as hex strings converted server-side with
+``CONVERT(binary(10), ?, 1)``, snapshot key bounds are CAST to their column's type.
 Changes are read from the change table ``cdc.<capture_instance>_CT`` (ADR 0009).
 """
 
@@ -19,6 +20,7 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sequence
 from datetime import datetime
+from decimal import Decimal
 from typing import NamedTuple
 
 import pyarrow as pa
@@ -143,6 +145,17 @@ def _check_type(sql_type: str) -> str:
     return sql_type
 
 
+def _text(v, sql_type: str) -> str:
+    """A key bound as text that ``CAST(? AS sql_type)`` reads back as ``v``. ISO 8601 reads the
+    same under any DATEFORMAT and language; ``datetime`` takes at most 3 fractional digits."""
+    if isinstance(v, datetime):
+        ms = sql_type in ("datetime", "smalldatetime")  # 1/300 s ticks: ms is within half one
+        return v.isoformat(timespec="milliseconds" if ms else "microseconds")
+    if isinstance(v, Decimal):
+        return format(v, "f")  # str() writes 0E-10
+    return str(v)  # str, int, bool (CAST reads 'True'), float, date, UUID
+
+
 def _key_select(select: str, keys: Sequence[str], types, lo, hi) -> tuple[str, list]:
     """``select`` (no WHERE) over the rows with ``lo <= (keys) < hi`` in the order ORDER BY
     sorts them: column by column, NULL first. A None bound is open. Returns the query and
@@ -160,6 +173,7 @@ def _key_select(select: str, keys: Sequence[str], types, lo, hi) -> tuple[str, l
 
     ``types`` None: integer bounds, inlined. Otherwise each bound is a parameter CAST to its
     column's declared type (and collation), so a varchar key is never compared as nvarchar.
+    Bound as text with either backend (arrow-odbc binds nothing else, ADR 0003): ``_text``.
     """
     ks = [f"[{_check_column(k)}]" for k in keys]
     n = len(ks)
@@ -173,7 +187,10 @@ def _key_select(select: str, keys: Sequence[str], types, lo, hi) -> tuple[str, l
             x, params = str(int(v)), []
         else:
             t, _, coll = _check_type(types[i]).partition(" COLLATE ")
-            x, params = f"CAST(? {f'COLLATE {coll} ' if coll else ''}AS {t})", [v]
+            if isinstance(v, (bytes, bytearray)):  # hex, as LSNs are (invariant 6)
+                x, params = f"CONVERT({t}, ?, 1)", ["0x" + bytes(v).hex()]
+            else:
+                x, params = f"CAST(? {f'COLLATE {coll} ' if coll else ''}AS {t})", [_text(v, t)]
         return (f"({k} {op} {x} OR {k} IS NULL)" if op == "<" else f"{k} {op} {x}"), params
 
     def conj(parts, wrap=False) -> tuple[str, list]:
@@ -385,26 +402,60 @@ class MssqlPythonBackend(Backend):
         self._conn.close()
 
 
-class ArrowOdbcBackend(Backend):
-    """``arrow-odbc``. Requires unixODBC + Microsoft ODBC Driver 18 on the worker."""
+def _timestamps_in_us(schema: pa.Schema) -> pa.Schema:
+    """arrow-odbc reads ``datetime2(7)`` as nanoseconds, which end in 2262 (a 9999-12-31
+    sentinel fails) and which Spark truncates anyway: fetch microseconds, like mssql-python."""
+    return pa.schema(
+        [f.with_type(pa.timestamp("us")) if pa.types.is_timestamp(f.type) else f for f in schema]
+    )
 
-    def __init__(self, connection_string: str, max_bytes_per_batch: int = 64 * 1024 * 1024):
+
+class ArrowOdbcBackend(Backend):
+    """``arrow-odbc``. Requires unixODBC + Microsoft ODBC Driver 18 on the worker.
+
+    It binds every parameter as text, which the T-SQL here already does (ADR 0003).
+    """
+
+    # ponytail: one bound for every (max) column, in characters or bytes; a longer value fails
+    # the read (arrow-odbc refuses to truncate). An option when a table needs more.
+    MAX_VALUE_SIZE = 64 * 1024
+
+    def __init__(
+        self,
+        connection_string: str,
+        timeout: int = 30,
+        max_bytes_per_batch: int = 64 * 1024 * 1024,
+    ):
         import arrow_odbc
 
-        self._conn = arrow_odbc.connect(connection_string)
+        # The same connection string as mssql-python's, which names no driver.
+        if not re.search(r"(^|;)\s*driver\s*=", connection_string, re.IGNORECASE):
+            connection_string = "Driver={ODBC Driver 18 for SQL Server};" + connection_string
+        self._conn = arrow_odbc.connect(connection_string, login_timeout_sec=timeout)
         self._max_bytes = max_bytes_per_batch
 
     def batches(self, sql, params, batch_size):
+        from arrow_odbc import TextEncoding
+
         reader = self._conn.read_arrow_batches(
             sql,
             batch_size=batch_size,
             parameters=list(params),
             max_bytes_per_batch=self._max_bytes,
+            max_text_size=self.MAX_VALUE_SIZE,
+            max_binary_size=self.MAX_VALUE_SIZE,
+            map_schema=_timestamps_in_us,
             fetch_concurrently=False,
+            # UTF-16 both ways: parameters bind as nvarchar, as mssql-python's do (narrow ones
+            # are varchar in the database's code page), and text does not depend on the locale
+            payload_text_encoding=TextEncoding.UTF16,
         )
         for batch in reader:
             if batch.num_rows:
                 yield batch
+
+    def close(self):
+        self._conn = None  # arrow_odbc.Connection has no close(): its __del__ disconnects
 
 
 # --------------------------------------------------------------------------- #
@@ -924,8 +975,9 @@ def make_client(options) -> CdcClient:
     conn = opts.get("connectionstring")
     if not conn:
         raise ValueError("Option 'connectionString' is required")
+    timeout = int(opts.get("connecttimeout", "30"))
     if backend == "mssql-python":
-        return SqlCdcClient(MssqlPythonBackend(conn, int(opts.get("connecttimeout", "30"))), tz)
+        return SqlCdcClient(MssqlPythonBackend(conn, timeout), tz)
     if backend == "arrow-odbc":
-        return SqlCdcClient(ArrowOdbcBackend(conn), tz)
+        return SqlCdcClient(ArrowOdbcBackend(conn, timeout), tz)
     raise ValueError(f"Unknown backend {backend!r} (use mssql-python, arrow-odbc or fake)")

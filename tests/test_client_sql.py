@@ -1,6 +1,7 @@
 """SqlCdcClient builds T-SQL; check the generated statements without a server."""
 
 from datetime import datetime
+from decimal import Decimal
 
 import pyarrow as pa
 import pytest
@@ -613,16 +614,29 @@ def test_snapshot_queries():
         " WHERE [order_id] >= 10 AND ([order_id] < 20 OR [order_id] IS NULL)"
     )
     assert where((20,), None) == (" WHERE [order_id] >= 20", ())
-    # a composite key: bounds bound and CAST to the declared types and collations, the range
-    # cut into seekable pieces (an equality prefix and one range each) joined by UNION ALL
+    # a composite key: bounds bound as text and CAST to the declared types and collations, the
+    # range cut into seekable pieces (an equality prefix and one range each) joined by UNION ALL
     s = " UNION ALL SELECT [order_id], [status] FROM [sales].[orders]"
     keys, types = ("region", "id"), ("varchar(10) COLLATE Greek_CI_AS", "int")
     v, i = "CAST(? COLLATE Greek_CI_AS AS varchar(10))", "CAST(? AS int)"
     # inside one leading value: one piece, one seek
     assert where(("n", 5), ("n", 9), keys, types) == (
         f" WHERE [region] = {v} AND [id] >= {i} AND ([id] < {i} OR [id] IS NULL)",
-        ("n", 5, 9),
+        ("n", "5", "9"),
     )
+    # text CAST reads back exactly (arrow-odbc binds nothing else): datetime takes 3 digits,
+    # a zero decimal is no '0E-10', binary goes as hex like an LSN
+    sql, params = where(
+        (datetime(2026, 9, 28, 10, 0, 0, 6667), Decimal("0E-10"), b"\n\x0b"),
+        None,
+        ("t", "m", "b"),
+        ("datetime", "decimal(18,10)", "varbinary(4)"),
+    )
+    assert sql.startswith(
+        " WHERE [t] = CAST(? AS datetime) AND [m] = CAST(? AS decimal(18,10)) "
+        "AND [b] >= CONVERT(varbinary(4), ?, 1)"
+    )
+    assert params[:3] == ("2026-09-28T10:00:00.006", "0.0000000000", "0x0a0b")
     # across leading values: the rest of 'n', what lies between, the start of 's'. The first
     # also checks < ('s', 1) and the last > 'n': both hold unless 'n' = 's' in SQL (a
     # case-insensitive 'n' and 'N'), and then the first piece alone reads the range
@@ -636,18 +650,18 @@ def test_snapshot_queries():
             f"{s} WHERE [region] > {v} AND ([region] < {v} OR [region] IS NULL)"
             f"{s} WHERE [region] = {v} AND ([id] < {i} OR [id] IS NULL) AND [region] > {v}"
         ),
-        ("n", 5, "s", "s", 1, "n", "s", "s", 1, "n"),  # in the order of the ? marks
+        ("n", "5", "s", "s", "1", "n", "s", "s", "1", "n"),  # in the order of the ? marks
     )
     assert where(None, ("s", 1), keys, types) == (
         (
             f" WHERE ([region] < {v} OR [region] IS NULL)"
             f"{s} WHERE [region] = {v} AND ([id] < {i} OR [id] IS NULL)"
         ),
-        ("s", "s", 1),
+        ("s", "s", "1"),
     )
     assert where(("n", 5), None, keys, types) == (
         f" WHERE [region] = {v} AND [id] >= {i}{s} WHERE [region] > {v}",
-        ("n", 5, "n"),
+        ("n", "5", "n"),
     )
     # three columns: the deepest piece first, integers inlined
     sql, _ = where((1, 2, 3), (4, 5, 6), ("a", "b", "c"))
@@ -662,7 +676,7 @@ def test_snapshot_queries():
     # first as in ORDER BY
     assert where((None, 5), (None, 9), keys, types) == (
         f" WHERE [region] IS NULL AND [id] >= {i} AND ([id] < {i} OR [id] IS NULL)",
-        (5, 9),
+        ("5", "9"),
     )
     assert where(("n", None), None, keys, types) == (
         f" WHERE [region] = {v} AND 1 = 1{s} WHERE [region] > {v}",

@@ -168,6 +168,31 @@ def _write_event(path: str, kind: str, ci: str, lsn: str, commit_ts, detail: str
         _log.warning("mssql_cdc: could not write the %s event file in %s: %s", kind, path, exc)
 
 
+_DTO = re.compile(r"(.{19})(?:\.(\d{1,7}))? ([+-]\d\d:\d\d)")
+
+
+def _to_schema(table, target):
+    """Invariant 7: ``table`` cast to the Spark schema. arrow-odbc reads a ``datetimeoffset``
+    as text, ``2026-09-28 13:50:01.1234567 -03:00``, which pyarrow does not parse: a TIMESTAMP
+    column whose text is all in that form becomes its UTC instant first. Other text (a varchar
+    the ``columns`` option reads as TIMESTAMP) is left to the cast."""
+    import pyarrow as pa
+
+    for i, field in enumerate(target):
+        col = table.column(i)
+        if pa.types.is_timestamp(field.type) and field.type.tz and pa.types.is_string(col.type):
+            # ponytail: a Python loop over the column; vectorise if a profile shows it
+            texts = col.to_pylist()
+            found = [None if v is None else _DTO.fullmatch(v) for v in texts]
+            if all(m or v is None for m, v in zip(found, texts)):
+                values = [
+                    m and datetime.fromisoformat(f"{m[1]}.{(m[2] or '').ljust(6, '0')[:6]}{m[3]}")
+                    for m in found
+                ]
+                table = table.set_column(i, field.name, pa.array(values, field.type))
+    return table.cast(target)
+
+
 @dataclass
 class LsnRange(InputPartition):
     capture_instance: str  # the instance this range reads: batches can span two (ADR 0023)
@@ -574,7 +599,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
                     table = table.append_column(
                         name, pa.nulls(table.num_rows, target.field(name).type)
                     )
-                table = table.select(self.field_names).cast(target)
+                table = _to_schema(table.select(self.field_names), target)
                 rows, nbytes = rows + table.num_rows, nbytes + table.nbytes
                 yield from table.to_batches()
             # Cleanup may have run since partitions() checked. It moves min_lsn before it
@@ -788,7 +813,7 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
                         table = table.append_column(
                             name, pa.nulls(table.num_rows, target.field(name).type)
                         )
-                yield from table.select(self.field_names).cast(target).to_batches()
+                yield from _to_schema(table.select(self.field_names), target).to_batches()
         finally:
             client.close()
             self._client = None

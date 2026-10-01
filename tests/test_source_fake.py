@@ -944,3 +944,22 @@ def test_foreach_batch_finds_the_event_files_of_its_batch(spark, workdir):
     finally:
         q.stop()
     assert seen[0] == (0, []) and seen[-1][1] == [f"event-schema_change-{add}.json"]
+
+
+def test_a_datetimeoffset_read_as_text_becomes_its_utc_instant():
+    # arrow-odbc reads datetimeoffset as SQL Server's text form; Spark's TIMESTAMP is UTC
+    import pyarrow as pa
+
+    from mssql_cdc.source import _to_schema
+
+    text = ["2026-09-28 13:50:01.1234567 -03:00", None, "2026-09-28 01:00:00 +05:30"]
+    target = pa.schema([("o", pa.timestamp("us", "UTC"))])
+    out = _to_schema(pa.table({"o": text}), target).column(0).to_pylist()
+    assert [v and v.replace(tzinfo=None) for v in out] == [
+        datetime(2026, 9, 28, 16, 50, 1, 123456),
+        None,
+        datetime(2026, 9, 27, 19, 30),
+    ]
+    # other text, a varchar the columns option reads as TIMESTAMP, is pyarrow's to parse
+    other = _to_schema(pa.table({"o": ["2026-09-28T13:50:01Z"]}), target).column(0)
+    assert other.to_pylist()[0].replace(tzinfo=None) == datetime(2026, 9, 28, 13, 50, 1)

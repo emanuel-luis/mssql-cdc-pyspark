@@ -92,9 +92,7 @@ def main(argv=None) -> bool:
         wl.transaction(mix, 4)
     _wait_stable(conn, "dbo_orders")
 
-    conn_str = connection_string()
-    if a.backend == "arrow-odbc":
-        conn_str = "Driver={ODBC Driver 18 for SQL Server};" + conn_str
+    conn_str = connection_string()  # either backend: arrow-odbc adds the Driver keyword
 
     def source():  # no "columns": inferred from CDC metadata
         return (
