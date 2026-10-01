@@ -54,13 +54,13 @@ def test_time_zone_is_detected_by_name(sqlserver):
         client.close()
 
 
-def test_commit_times_are_utc_on_a_non_utc_server(spark, sqlserver):
+def test_commit_times_are_utc_on_a_non_utc_server(spark, sqlserver, backend):
     ci = sqlserver.cdc_table("tz_probe", "id INT NOT NULL PRIMARY KEY")
     sqlserver.run("INSERT INTO dbo.tz_probe VALUES (1)")
     utc_now = sqlserver.run("SELECT SYSUTCDATETIME()")[0][0]
     sqlserver.wait_for_changes(ci, 1)
 
-    df, q = _read(spark, sqlserver, ci)
+    df, q = _read(spark, sqlserver, ci, backend=backend)
     commit_ts = df.first()["_commit_ts"]  # TIMESTAMP_NTZ: collect() does no zone shift
     assert abs(commit_ts - utc_now) < timedelta(minutes=1)
     offset_ts = datetime.fromisoformat(end_offset_from_progress(q.lastProgress)["commit_ts"])
@@ -114,7 +114,7 @@ EXPECTED_TYPES = [
 ]
 
 
-def test_inferred_columns_round_trip_every_mapped_type(spark, sqlserver):
+def test_inferred_columns_round_trip_every_mapped_type(spark, sqlserver, backend):
     ci = sqlserver.cdc_table("types_probe", TYPES_DDL)
     sqlserver.run("""
         INSERT dbo.types_probe (id, c_bit, c_tiny, c_small, c_big, c_real, c_float, c_dec,
@@ -128,7 +128,7 @@ def test_inferred_columns_round_trip_every_mapped_type(spark, sqlserver):
           '6F9619FF-8B86-D011-B42D-00C04FC964FF', 0x01020304, 0x0A0B, 0x0C, N'alias')""")
     sqlserver.wait_for_changes(ci, 1)
 
-    df, _ = _read(spark, sqlserver, ci)  # no "columns" option
+    df, _ = _read(spark, sqlserver, ci, backend=backend)  # no "columns" option
     assert [(n, t) for n, t in df.dtypes if not n.startswith("_")] == EXPECTED_TYPES
 
     row = df.first().asDict()
@@ -183,7 +183,9 @@ def test_unsupported_type_fails_at_load_with_a_pointer_to_columns(spark, sqlserv
         _read(spark, sqlserver, ci)
 
 
-def test_stream_resumes_from_checkpoint_with_transactions_in_order(spark, sqlserver, workdir):
+def test_stream_resumes_from_checkpoint_with_transactions_in_order(
+    spark, sqlserver, workdir, backend
+):
     ci = sqlserver.cdc_table(
         "orders", "order_id INT NOT NULL PRIMARY KEY, status VARCHAR(20) NOT NULL"
     )
@@ -194,7 +196,7 @@ def test_stream_resumes_from_checkpoint_with_transactions_in_order(spark, sqlser
     )
     sqlserver.wait_for_changes(ci, 4)  # insert, update before/after, delete
 
-    first, _ = _read(spark, sqlserver, ci, checkpoint=workdir, arrowBatchSize="3")
+    first, _ = _read(spark, sqlserver, ci, checkpoint=workdir, arrowBatchSize="3", backend=backend)
     rows = first.orderBy("_start_lsn", "_command_id", "_seqval", "_operation").collect()
     assert [r["_operation"] for r in rows] == [2, 3, 4, 1]
     ids = [r["_command_id"] for r in rows]
@@ -203,36 +205,36 @@ def test_stream_resumes_from_checkpoint_with_transactions_in_order(spark, sqlser
 
     sqlserver.run("INSERT INTO dbo.orders VALUES (2, 'new')")
     sqlserver.wait_for_changes(ci, 5)
-    after, _ = _read(spark, sqlserver, ci, checkpoint=workdir, arrowBatchSize="3")
+    after, _ = _read(spark, sqlserver, ci, checkpoint=workdir, arrowBatchSize="3", backend=backend)
     after_rows = after.collect()  # same sink: first-run rows must not repeat
     new = [r for r in after_rows if r not in rows]
     assert len(after_rows) == 5 and [(r["order_id"], r["_operation"]) for r in new] == [(2, 2)]
 
 
-def test_least_privilege_login_needs_one_grant_on_the_change_table(spark, sqlserver):
+def test_least_privilege_login_needs_one_grant_on_the_change_table(spark, sqlserver, backend):
     ci = sqlserver.cdc_table("priv_probe", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10)")
     sqlserver.run("INSERT INTO dbo.priv_probe VALUES (1, 'a')")
     sqlserver.wait_for_changes(ci, 1)
     # what the CDC query functions need: enough to plan and to infer the schema...
     conn = sqlserver.login("cdc_reader", "GRANT SELECT ON dbo.priv_probe TO cdc_reader")
     with pytest.raises(Exception, match=r"GRANT SELECT ON cdc\.\[dbo_priv_probe_CT\]"):
-        _read(spark, sqlserver, ci, connectionString=conn)
+        _read(spark, sqlserver, ci, connectionString=conn, backend=backend)
     # ...plus SELECT on this one change table to read it
     sqlserver.run("GRANT SELECT ON cdc.dbo_priv_probe_CT TO cdc_reader")
-    df, _ = _read(spark, sqlserver, ci, connectionString=conn)
+    df, _ = _read(spark, sqlserver, ci, connectionString=conn, backend=backend)
     assert [(r["id"], r["v"]) for r in df.collect()] == [(1, "a")]
-    client = make_client({"connectionString": conn})
+    client = make_client({"connectionString": conn, "backend": backend})
     try:  # own session's wait stats: no VIEW SERVER STATE for this login either
         assert isinstance(client.network_wait_ms(), int)
     finally:
         client.close()
 
 
-def test_purged_range_stops_the_stream(spark, sqlserver, workdir):
+def test_purged_range_stops_the_stream(spark, sqlserver, workdir, backend):
     ci = sqlserver.cdc_table("purge_probe", "id INT NOT NULL PRIMARY KEY")
     sqlserver.run("INSERT INTO dbo.purge_probe VALUES (1)")
     sqlserver.wait_for_changes(ci, 1)
-    _read(spark, sqlserver, ci, checkpoint=workdir)  # checkpoint now at the first commit
+    _read(spark, sqlserver, ci, checkpoint=workdir, backend=backend)  # at the first commit
     sqlserver.run("INSERT INTO dbo.purge_probe VALUES (2)")
     sqlserver.run("INSERT INTO dbo.purge_probe VALUES (3)")
     sqlserver.wait_for_changes(ci, 3)
@@ -244,7 +246,7 @@ def test_purged_range_stops_the_stream(spark, sqlserver, workdir):
         (ci,),
     )
     with pytest.raises(Exception, match="re-snapshot is required"):
-        _read(spark, sqlserver, ci, checkpoint=workdir)
+        _read(spark, sqlserver, ci, checkpoint=workdir, backend=backend)
 
 
 def test_heartbeat_script_keeps_an_idle_stream_current(spark, sqlserver, workdir):
@@ -304,7 +306,7 @@ def test_round_trip_and_network_wait_on_a_real_server(sqlserver):
         client.close()
 
 
-def test_split_points_balance_rows_across_uneven_commits(sqlserver):
+def test_split_points_balance_rows_across_uneven_commits(sqlserver, backend):
     ci = sqlserver.cdc_table("skewed", "id INT NOT NULL PRIMARY KEY")
     for i in range(8):
         sqlserver.run("INSERT INTO dbo.skewed VALUES (?)", (i,))
@@ -312,7 +314,7 @@ def test_split_points_balance_rows_across_uneven_commits(sqlserver):
         "INSERT INTO dbo.skewed SELECT 100 + n FROM (VALUES (0),(1),(2),(3),(4),(5),(6),(7)) v(n)"
     )
     sqlserver.wait_for_changes(ci, 16)
-    client = make_client({"connectionString": sqlserver.connection_string})
+    client = make_client({"connectionString": sqlserver.connection_string, "backend": backend})
     try:
         lo, hi = client.min_lsn(ci), client.max_lsn()
         bounds = client.split_points(ci, lo, hi, 2)
@@ -360,7 +362,7 @@ def test_stream_facade_records_network_metrics_from_a_real_server(delta_spark, s
 
 
 def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(
-    delta_spark, sqlserver, workdir, latest
+    delta_spark, sqlserver, workdir, latest, backend
 ):
     from mssql_cdc import stream
 
@@ -382,6 +384,7 @@ def test_bootstrap_snapshots_rows_older_than_cdc_with_a_least_privilege_login(
     )
     options = {
         "connectionString": conn,
+        "backend": backend,
         "captureInstance": ci,
         "numPartitions": "3",
         "arrowBatchSize": "1",
@@ -541,15 +544,39 @@ SNAPSHOT_TILES = {  # table: (columns, rows, the keys' types for the CASTs)
         f"SELECT IIF(n % 2 = 0, 'n', 'N'), n, n FROM {_N}",
         [f"varchar(5) COLLATE {_CP1252}", "int"],
     ),
+    # every other kind of bound, as text CAST back: equal leading values that only an exact
+    # round trip matches (a datetime between ms, a zero decimal, binary, a GUID), the last
+    # column a datetimeoffset range
+    "snap_kinds": (
+        (
+            "d DATE NOT NULL, t DATETIME NOT NULL, m DECIMAL(18,10) NOT NULL, "
+            "b VARBINARY(4) NOT NULL, f BIT NOT NULL, g UNIQUEIDENTIFIER NOT NULL, "
+            "o DATETIMEOFFSET(3) NOT NULL, v INT, PRIMARY KEY (d, t, m, b, f, g, o)"
+        ),
+        (
+            "SELECT '2026-09-28', '2026-09-28T10:00:00.007', 0, 0x0A0B, 1, "
+            "'6F9619FF-8B86-D011-B42D-00C04FC964FF', DATEADD(second, n, "
+            f"CAST('2026-09-28T10:00:00.123-03:00' AS datetimeoffset(3))), n FROM {_N}"
+        ),
+        [
+            "date",
+            "datetime",
+            "decimal(18,10)",
+            "varbinary(4)",
+            "bit",
+            "uniqueidentifier",
+            "datetimeoffset(3)",
+        ],
+    ),
 }
 
 
 @pytest.mark.parametrize("name", SNAPSHOT_TILES)
-def test_snapshot_tiles_composite_and_string_keys(spark, sqlserver, name):
+def test_snapshot_tiles_composite_and_string_keys(spark, sqlserver, name, backend):
     ddl, rows, types = SNAPSHOT_TILES[name]
     ci = sqlserver.cdc_table(name, ddl)
     sqlserver.run(f"INSERT INTO dbo.{name} {rows}")
-    client = make_client({"connectionString": sqlserver.connection_string})
+    client = make_client({"connectionString": sqlserver.connection_string, "backend": backend})
     try:  # lengths in characters, precisions as declared
         assert client.key_types(ci, client.source_table(ci).keys) == types
     finally:
@@ -558,6 +585,7 @@ def test_snapshot_tiles_composite_and_string_keys(spark, sqlserver, name):
         spark.read.format("mssql_cdc_snapshot")
         .option("connectionString", sqlserver.connection_string)
         .option("captureInstance", ci)
+        .option("backend", backend)
         .option("numPartitions", "3")
         .load()
     )
@@ -972,14 +1000,18 @@ def test_after_a_dropped_column_bootstrap_and_resnapshot_read_it_as_null(
 
 
 def test_a_column_added_reaches_bronze_through_a_new_instance_with_its_values(
-    delta_spark, sqlserver, workdir, latest
+    delta_spark, sqlserver, workdir, latest, backend
 ):
     from mssql_cdc import stream
 
     ci = sqlserver.cdc_table("ddl_add", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL")
     sqlserver.run("INSERT INTO dbo.ddl_add VALUES (1, 'old'), (2, 'old'), (3, 'old')")
     sqlserver.wait_for_changes(ci, 3)
-    options = {"connectionString": _reader(sqlserver, "ddl_add", ci), "captureInstance": ci}
+    options = {
+        "connectionString": _reader(sqlserver, "ddl_add", ci),
+        "captureInstance": ci,
+        "backend": backend,
+    }
     target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
 
     def run():
@@ -1022,19 +1054,21 @@ def test_a_column_added_reaches_bronze_through_a_new_instance_with_its_values(
     assert latest(bronze, "id", "note", facts_df) == source
 
 
-def test_a_new_instance_without_its_grant_names_its_change_table(spark, sqlserver, workdir):
+def test_a_new_instance_without_its_grant_names_its_change_table(
+    spark, sqlserver, workdir, backend
+):
     ci = sqlserver.cdc_table("sw_grant", "id INT NOT NULL PRIMARY KEY")
     sqlserver.run("INSERT INTO dbo.sw_grant VALUES (1)")
     sqlserver.wait_for_changes(ci, 1)
     conn = _reader(sqlserver, "sw_grant", ci)
-    _read(spark, sqlserver, ci, checkpoint=workdir, connectionString=conn)
+    _read(spark, sqlserver, ci, checkpoint=workdir, connectionString=conn, backend=backend)
     v2 = sqlserver.enable_cdc("sw_grant", "dbo_sw_grant_v2")
     sqlserver.run("INSERT INTO dbo.sw_grant VALUES (2)")
     sqlserver.wait_for_changes(v2, 1)
     with pytest.raises(Exception, match=r"PermissionError: .*cdc\.\[dbo_sw_grant_v2_CT\]"):
-        _read(spark, sqlserver, ci, checkpoint=workdir, connectionString=conn)
+        _read(spark, sqlserver, ci, checkpoint=workdir, connectionString=conn, backend=backend)
     sqlserver.run(f"GRANT SELECT ON cdc.[{v2}_CT] TO sw_grant_reader")
-    df, _ = _read(spark, sqlserver, ci, checkpoint=workdir, connectionString=conn)
+    df, _ = _read(spark, sqlserver, ci, checkpoint=workdir, connectionString=conn, backend=backend)
     assert sorted((r["id"], r["_capture_instance"]) for r in df.collect()) == [(1, ci), (2, v2)]
 
 

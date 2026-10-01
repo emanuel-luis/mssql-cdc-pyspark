@@ -59,10 +59,22 @@ jobs:
         with: { distribution: temurin, java-version: "17" }
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with: { python-version: "3.11", activate-environment: true }
-      - name: System libraries for mssql-python
-        run: sudo apt-get update && sudo apt-get install -y libltdl7 libkrb5-3 libgssapi-krb5-2
-      - run: uv sync --locked
+      - name: System libraries for mssql-python; unixODBC and ODBC Driver 18 for arrow-odbc
+        # Microsoft's repository as its docs set it up, unless the runner image has it already
+        run: |
+          sudo apt-get update
+          if ! apt-cache show msodbcsql18 > /dev/null 2>&1; then
+            curl -sSfL -o /tmp/packages-microsoft-prod.deb \
+              "https://packages.microsoft.com/config/ubuntu/$(. /etc/os-release && echo "$VERSION_ID")/packages-microsoft-prod.deb"
+            sudo dpkg -i /tmp/packages-microsoft-prod.deb
+            sudo apt-get update
+          fi
+          sudo ACCEPT_EULA=Y apt-get install -y libltdl7 libkrb5-3 libgssapi-krb5-2 msodbcsql18 unixodbc
+      - run: uv sync --locked --extra arrow-odbc
       - run: pytest -q -m sqlserver -rxs
+      - name: The tests that take the backend fixture, again with arrow-odbc
+        run: pytest -q -m sqlserver -rxs
+        env: { MSSQL_CDC_TEST_BACKEND: arrow-odbc }
 
   lab:
     name: lab (SQL Server 2022 CDC, end to end)

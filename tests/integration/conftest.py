@@ -3,14 +3,19 @@
 Needs Docker. The default ``pytest`` run deselects these; run them with
 ``uv run pytest -m sqlserver``. Without a reachable Docker daemon they skip; once the
 daemon answers, any container or setup failure fails the run.
+
+``MSSQL_CDC_TEST_BACKEND=arrow-odbc`` runs only the tests that take the ``backend`` fixture,
+reading with that backend (it needs the ``arrow-odbc`` extra, unixODBC and ODBC Driver 18).
 """
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
 
+BACKEND = os.environ.get("MSSQL_CDC_TEST_BACKEND", "mssql-python")
 IMAGE = "mcr.microsoft.com/mssql/server:2022-latest"
 PASSWORD = "It_Str0ng_Passw0rd!"  # throwaway container on a random port
 DATABASE = "cdc_it"
@@ -132,6 +137,25 @@ class SqlServer:
             f"FROM cdc.[{capture_instance}_CT]",
             timeout=timeout,
         )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Another backend runs the tests that read with ``backend`` alone: the rest would only
+    repeat with mssql-python."""
+    if BACKEND == "mssql-python":
+        return
+    other = [
+        i for i in items if i.get_closest_marker("sqlserver") and "backend" not in i.fixturenames
+    ]
+    if other:
+        config.hook.pytest_deselected(items=other)
+        items[:] = [i for i in items if i not in other]
+
+
+@pytest.fixture(scope="session")
+def backend():
+    """The backend the stream and the client read with; setup always uses mssql-python."""
+    return BACKEND
 
 
 @pytest.fixture(scope="session")
