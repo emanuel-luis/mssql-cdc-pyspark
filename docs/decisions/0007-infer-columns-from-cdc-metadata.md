@@ -3,7 +3,8 @@
 **Status:** accepted  
 **Date:** 2026-09-28T17:03:21-03:00  
 **Amended:** 2026-09-28T18:11:50-03:00, metadata from `sys.sp_cdc_get_captured_columns`
-(see Consequences)
+(see Consequences)  
+**Amended:** 2026-10-01T17:55:59-03:00, the mapped types also round-trip through `arrow-odbc`
 
 ## Context
 The source required a `columns` option: a hand-written DDL of the captured columns. It
@@ -29,4 +30,4 @@ has no type metadata and still requires `columns`.
 * Types without a sensible default (`sql_variant`, CLR types) fail loudly at `load()`
   instead of guessing; the error points to `columns`.
 * Every mapped type round-trips through `mssql-python` on SQL Server 2022
-  (`tests/integration`); `arrow-odbc` is unverified.
+  (`tests/integration`), and through `arrow-odbc` since ADR 0003's Amendment 2.

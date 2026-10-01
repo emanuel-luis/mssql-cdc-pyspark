@@ -25,5 +25,8 @@ Design choices that make the two backends interchangeable:
   (`large_string` -> `string`, etc.).
 
 Known caveats: `(max)` columns slow mssql-python's Arrow fetch by about a quarter (lab t8),
-not by the order of magnitude a row-by-row fallback would; arrow-odbc maps `datetime2(7)` to nanoseconds, which overflows
-after year 2262 (sentinel dates like 9999-12-31).
+not by the order of magnitude a row-by-row fallback would. arrow-odbc maps `datetime2(7)` to
+nanoseconds, which overflow after year 2262 (sentinel dates like 9999-12-31), so the backend
+asks for microseconds; it needs an upper bound for `(max)` values (64 KiB here) and returns
+`datetimeoffset` as text. What the backend does about each:
+[ADR 0003](decisions/0003-mssql-python-default-backend.md), Amendment 2.

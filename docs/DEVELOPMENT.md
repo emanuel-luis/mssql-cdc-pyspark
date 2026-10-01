@@ -120,7 +120,11 @@ uv run pytest -q                            # everything; Delta tests skip if ja
 MSSQL_CDC_TEST_DELTA=0 uv run pytest -q     # don't even try Delta
 uv run pytest -q -k idle                    # one topic
 uv run pytest -q -m sqlserver               # integration: SQL Server 2022 in Docker
+MSSQL_CDC_TEST_BACKEND=arrow-odbc uv run --extra arrow-odbc pytest -q -m sqlserver
 ```
+
+The last line runs the integration tests that take the `backend` fixture with `arrow-odbc`;
+it needs unixODBC and ODBC Driver 18 ([Installation](getting-started/installation.md#arrow-odbc)).
 
 * `tests/test_source_fake.py` is the main safety net: real Spark streaming,
   simulated SQL Server.
@@ -159,7 +163,8 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
 
 * `lint`: `ruff check`, `ruff format --check` and `mypy`; the other jobs wait for it.
 * `unit`: pytest with Delta on Ubuntu, Java 17, Python 3.11.
-* `integration`: `pytest -m sqlserver` (testcontainers on the runner's Docker).
+* `integration`: `pytest -m sqlserver` (testcontainers on the runner's Docker), then again
+  with `MSSQL_CDC_TEST_BACKEND=arrow-odbc` after installing ODBC Driver 18.
 * `lab`: a SQL Server 2022 service container with Agent, then workload, checks t2–t7 and
   `examples/local_pipeline.py`. t1 and the destructive t7 run only on the weekly schedule
   or a manual dispatch ("Run workflow"), and are `continue-on-error`. Results are uploaded

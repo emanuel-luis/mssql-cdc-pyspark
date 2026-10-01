@@ -46,7 +46,8 @@
       `max_lsn` and its commit time in the query progress on every trigger. Batches that
       read no rows write facts too, so facts that stop arriving mean the stream or capture
       stopped.
-- [ ] `arrow-odbc` backend covered in CI (install msodbcsql18 in the job).
+- [x] `arrow-odbc` backend covered in CI: msodbcsql18 in the `integration` job, which runs the
+      tests that take the `backend` fixture a second time with it (ADR 0003 Amendment 2).
 - [x] **Many tables**: one stream per capture instance, started together by `start_many`
       (`await_all`, `stop_all`), with its own checkpoint, `app_id` and bronze, sharing the
       facts table; a stream over several capture instances was rejected (ADR 0027,

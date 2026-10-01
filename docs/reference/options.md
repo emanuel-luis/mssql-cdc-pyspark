@@ -62,7 +62,8 @@ configured name that was disabled still resolves when it is the table's default 
 ### connectionString
 
 Connection string for `mssql-python` or ODBC Driver 18, for example
-`Server=host,1433;Database=db;UID=u;PWD=p;Encrypt=yes`. Not needed with `backend=fake`.
+`Server=host,1433;Database=db;UID=u;PWD=p;Encrypt=yes`; `backend=arrow-odbc` adds
+`Driver={ODBC Driver 18 for SQL Server}` when it names no driver. Not needed with `backend=fake`.
 The driver plans with it and every executor task opens its own connection with it, so the
 server must be reachable from every worker. The login needs the grants in
 [Permissions](../guides/permissions.md).
@@ -72,7 +73,7 @@ server must be reachable from every worker. The login needs the grants in
 | Value | What it is |
 |---|---|
 | `mssql-python` | Microsoft's driver, installed with the package; fetches straight into Arrow |
-| `arrow-odbc` | needs unixODBC and msodbcsql18 on every worker, and `pip install "mssql-cdc-pyspark[arrow-odbc]"`; untested |
+| `arrow-odbc` | needs unixODBC and msodbcsql18 on every worker, and `pip install "mssql-cdc-pyspark[arrow-odbc]"` ([Installation](../getting-started/installation.md#the-driver)); the same connection string. A value over 64 KiB in a `(max)`, `text`, `xml` or `image` column fails the read |
 | `fake` | the file-backed CDC simulator in `mssql_cdc.fake`, for the library's own tests; reads [fakePath](#fakepath). Internal: it may change in any release |
 
 Anything else fails with `ValueError: Unknown backend`. Why `mssql-python` is the default:
@@ -80,8 +81,8 @@ Anything else fails with `ValueError: Unknown backend`. Why `mssql-python` is th
 
 ### connectTimeout
 
-Login timeout in seconds, passed to `mssql_python.connect`. Read by the `mssql-python`
-backend only.
+Login timeout in seconds, passed to `mssql_python.connect`, or to `arrow_odbc.connect` with
+`backend=arrow-odbc`.
 
 ### sourceTimeZone
 

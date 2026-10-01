@@ -60,10 +60,25 @@ The connection string uses ODBC keywords, for example
 `TrustServerCertificate=yes` only for a server with a self-signed certificate, such as a
 local container.
 
-`arrow-odbc` is the alternative where Microsoft's ODBC Driver 18 is already installed:
-`pip install "mssql-cdc-pyspark[arrow-odbc]"` and the option `backend=arrow-odbc`. The test
-suite does not exercise it yet ([ADR 0003](../decisions/0003-mssql-python-default-backend.md));
-the survey behind the choice is in [Drivers](../CONNECTORS.md).
+### arrow-odbc
+
+`arrow-odbc` is the alternative where Microsoft's ODBC Driver 18 for SQL Server is installed
+already, or can be. Every node that runs tasks needs unixODBC and the driver. On Ubuntu,
+after adding Microsoft's package repository as its
+[install guide](https://learn.microsoft.com/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server)
+shows:
+
+```bash
+sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc
+pip install "mssql-cdc-pyspark[arrow-odbc]"
+```
+
+Then set the option `backend=arrow-odbc`; the connection string stays the same. CI runs the
+integration tests on both backends. Where they differ: a value longer than 64 KiB in a
+`(max)`, `text`, `ntext`, `xml` or `image` column fails the read with arrow-odbc, which has
+to size its buffers, while mssql-python reads any length
+([ADR 0003](../decisions/0003-mssql-python-default-backend.md)). The survey behind the
+choice is in [Drivers](../CONNECTORS.md).
 
 ## Check the install
 

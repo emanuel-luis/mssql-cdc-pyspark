@@ -3,7 +3,8 @@
 **Status:** accepted  
 **Date:** 2026-09-29T12:38:28-03:00  
 **Amended:** 2026-09-30T11:02:01-03:00, NTILE tiles for composite and non-integer keys (see the Amendment)  
-**Amended:** 2026-09-30T15:21:04-03:00, the capture instance matches ignoring case (see Amendment 2)
+**Amended:** 2026-09-30T15:21:04-03:00, the capture instance matches ignoring case (see Amendment 2)  
+**Amended:** 2026-10-01T17:55:59-03:00, key bounds bound as text for either backend (ADR 0003 Amendment 2)
 
 ## Context
 The stream starts from what CDC retention still holds (`startingLsn=earliest`), which is
@@ -82,7 +83,8 @@ connection: slow on a big table.
   case-insensitive collation. The first piece then also checks
   `(a, b) < (u, v)` and the last `a > x`, which empties it, so the first piece alone reads
   the range and every row still comes once (`tests/integration`, table `snap_case`).
-* The bounds come back typed through Arrow and are bound as parameters,
+* The bounds come back typed through Arrow and are bound as text parameters (arrow-odbc binds
+  nothing else; binary as hex through `CONVERT(<type>, ?, 1)`, ADR 0003 Amendment 2),
   `CAST(? AS <declared type>)`, with the type built from `sys.sp_cdc_get_captured_columns`
   (length, precision and scale; documented API, invariant 11) and validated before it is
   inlined (invariant 13). A bare string parameter is nvarchar and converts a varchar key
@@ -116,8 +118,8 @@ connection: slow on a big table.
   non-default collation and mixed case included) with `numPartitions=3` in tiles of 4, 3
   and 3 rows that together equal the table.
 * ponytail: the NTILE query reads and spools the whole key; a range would be cheaper with
-  `ROW_NUMBER` over the index and a separate `COUNT(*)`, if a large table shows it. Typed
-  bounds are untested on the `arrow-odbc` backend, like the rest of it (ADR 0003).
+  `ROW_NUMBER` over the index and a separate `COUNT(*)`, if a large table shows it. The
+  tiles run on both backends, with a `snap_kinds` table for the other bound types (ADR 0003).
 
 ## Amendment 2: the capture instance matches ignoring case
 A production SQL Server 2016 stores `dbo_ORDER_ITEMS` and the config says
