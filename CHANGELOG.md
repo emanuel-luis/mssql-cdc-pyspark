@@ -12,7 +12,7 @@ compatibility" line.
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-10-01
 
 State compatibility: first release: offsets v1 contract
 ([ADR 0002](docs/decisions/0002-lsn-offsets-with-commit-time.md)), checkpoint generations
