@@ -27,6 +27,13 @@ NOLOCK).
   IN_FLIGHT: check it again later. Equal counts are a MATCH even then. A change the stream has
   not read yet cannot be seen: run it while the stream keeps up; a MISMATCH that causes
   clears on the next run.
+* Chunks, with ``facts_table``: bronze's newest chunked snapshot (ADR 0028) is checked
+  against its 'snapshot_chunk' facts rows, without reading SQL Server. CHUNK_TILING: the
+  chunks leave a gap or overlap (each starts where the one before ended, the first open
+  below and, once complete, the last open above); CHUNK_ROWS: a chunk's facts row counts
+  other rows than bronze holds of it; CHUNK_STAMP: a chunk stamped below the snapshot's LSN
+  S. The facts are read before bronze, which commits a wave's rows before its facts rows,
+  so a wave still being written is no failure.
 
 Returns ``{"run_id", "silver_version", "silver_lsn", "source_lsn", "buckets", "match",
 "in_flight", "mismatch", "hashed", "failures": {failure_type: rows}, "report"}``, ``report``
@@ -71,7 +78,8 @@ REPORT_COLUMNS = [
         "STRING",
         (
             "sys.fn_cdc_get_max_lsn() read just before the source was read: the source held "
-            "every commit up to it. Bucket rows: before the counts; key rows: before the rows."
+            "every commit up to it. Bucket rows: before the counts; key rows: before the rows; "
+            "NULL on chunk rows."
         ),
     ),
     (
@@ -79,10 +87,15 @@ REPORT_COLUMNS = [
         "STRING",
         (
             "First key of the bucket, inclusive, as JSON: a value for a one-column key, a list "
-            "for a composite one. NULL: open (both NULL: the whole table, counted as one)."
+            "for a composite one. NULL: open (both NULL: the whole table, counted as one). "
+            "Chunk rows: the chunk's first key."
         ),
     ),
-    ("bucket_hi", "STRING", "Key the bucket ends before, exclusive, as JSON. NULL: open."),
+    (
+        "bucket_hi",
+        "STRING",
+        "Key the bucket ends before, exclusive, as JSON. NULL: open. Chunk rows: the chunk's.",
+    ),
     ("source_rows", "BIGINT", "Bucket rows: the bucket's rows in the source table."),
     (
         "source_key_sum",
@@ -100,7 +113,7 @@ REPORT_COLUMNS = [
         (
             "Bucket rows: MATCH (rows and key sums equal), IN_FLIGHT (they differ, and bronze "
             "holds a change to the bucket newer than what one side read: check again later) or "
-            "MISMATCH (they differ). NULL on key rows."
+            "MISMATCH (they differ). NULL on key and chunk rows."
         ),
     ),
     (
@@ -114,7 +127,10 @@ REPORT_COLUMNS = [
     (
         "key",
         "STRING",
-        "Key rows: the key of a row that differs, as a JSON object. NULL on bucket rows.",
+        (
+            "Key rows: the key of a row that differs, as a JSON object. NULL on bucket and "
+            "chunk rows."
+        ),
     ),
     (
         "failure_type",
@@ -124,7 +140,12 @@ REPORT_COLUMNS = [
             "MISSING_SOURCE (in silver, not in the source: a delete not applied, or a stale "
             "key), RECORD_DIFF (in both with other values: an update not applied) or IN_FLIGHT "
             "(differs, and bronze holds a change to the key newer than what one side read: "
-            "check again later)."
+            "check again later). Chunk rows (with facts_table, for the newest chunked snapshot "
+            "of bronze): CHUNK_TILING (its chunks leave a gap or overlap: an index missing or "
+            "twice, the first not open below, one not starting where the one before ended, the "
+            "last of a complete snapshot not open above), CHUNK_ROWS (a chunk's "
+            "'snapshot_chunk' facts row counts other rows than bronze holds of it) or "
+            "CHUNK_STAMP (a chunk stamped below the snapshot's LSN)."
         ),
     ),
     (
@@ -132,7 +153,8 @@ REPORT_COLUMNS = [
         "STRING",
         (
             "Key rows: JSON with the silver row's _start_lsn (silver_start_lsn) and, when both "
-            "sides have the row, the columns that differ (columns)."
+            "sides have the row, the columns that differ (columns). Chunk rows: JSON with the "
+            "snapshot's LSN (snapshot), the chunk and what was found."
         ),
     ),
 ]
@@ -225,6 +247,7 @@ def reconcile(
     keys: Sequence[str] | None = None,
     *,
     bronze: str,
+    facts_table: str | None = None,
     bucket_rows: int = 1_000_000,
     sample: float = 0.01,
     report_table: str | None = None,
@@ -235,7 +258,8 @@ def reconcile(
 
     ``keys``: the source's key columns; without them, the capture instance's unique index.
     ``bronze``: the table silver is applied from; its newer changes make a difference
-    IN_FLIGHT. ``bucket_rows``: rows per bucket. ``sample``: the fraction of the MATCH buckets
+    IN_FLIGHT. ``facts_table``: the stream's, to check the chunks of bronze's newest chunked
+    snapshot. ``bucket_rows``: rows per bucket. ``sample``: the fraction of the MATCH buckets
     also compared row by row (0: none, 1: all). ``seed``: of that sample.
     """
     from pyspark.sql import functions as F
@@ -353,8 +377,12 @@ def reconcile(
             "hashed": i in chosen if kind else bool(chosen),
         }
         rows_out.append(tuple(row.get(n) for n, _, _ in REPORT_COLUMNS))
+    chunks = _chunk_checks(spark, bronze, facts_table) if facts_table else []
+    rows_out += [tuple((common | c).get(n) for n, _, _ in REPORT_COLUMNS) for c in chunks]
     report = spark.createDataFrame(rows_out, _SCHEMA)
     counts: dict = {}
+    for c in chunks:
+        counts[c["failure_type"]] = counts.get(c["failure_type"], 0) + 1
     if failures is not None:
         values = {k: F.lit(v) for k, v in common.items()} | {"source_lsn": F.lit(read_lsn)}
         values["run_at"] = F.lit(run_at.isoformat())  # cast to NTZ: no session time zone
@@ -363,7 +391,7 @@ def reconcile(
             for n, t, _ in REPORT_COLUMNS
         ]
         failures = failures.select(*typed)
-        counts = dict(failures.groupBy("failure_type").count().collect())
+        counts |= dict(failures.groupBy("failure_type").count().collect())
         report = report.unionByName(failures)
     if report_table:
         migrations.ensure(spark, report_table, "reconcile", REPORT_COLUMNS, REPORT_COMMENT)
@@ -439,3 +467,83 @@ def _differences(ours, theirs, keys, columns, how, changes, lower):
         F.when(F.col("_rc_moved"), "IN_FLIGHT").otherwise(F.col("_rc_type")).alias("failure_type"),
         "detail",
     )
+
+
+def _chunk_checks(spark, bronze: str, facts_table: str) -> list[dict]:
+    """The chunk rows of the report for bronze's newest chunked snapshot (see the module
+    docstring): ``bucket_lo``, ``bucket_hi``, ``failure_type`` and ``detail``, one per failure."""
+    from collections import Counter
+
+    from pyspark.sql import functions as F
+
+    from .tables import exists
+
+    if not exists(spark, facts_table):
+        return []
+    kinds = ("snapshot_open", "snapshot_chunk", "bootstrap", "resnapshot")
+    facts = delta_table(spark, facts_table).toDF()
+    rows = (
+        facts.where((F.col("target") == bronze) & F.col("event").isin(*kinds))
+        .select("event", "rows", "min_lsn", "max_lsn", "detail")
+        .collect()
+    )
+    opens = [r["max_lsn"] for r in rows if r["event"] == "snapshot_open"]
+    if not opens:
+        return []
+    s = max(opens)  # a newer open abandons an older one
+    complete = any(r["event"] in ("bootstrap", "resnapshot") and r["max_lsn"] == s for r in rows)
+    found = [
+        d | {"rows": r["rows"], "lsn": r["min_lsn"]}
+        for r in rows
+        if r["event"] == "snapshot_chunk" and (d := json.loads(r["detail"]))["snapshot"] == s
+    ]
+    # bronze after the facts: it holds every wave they announce, whose rows commit first
+    held: dict = {}
+    pinned = _latest(spark, bronze)[1] if exists(spark, bronze) else None
+    if pinned is not None and "_chunk" in pinned.columns:
+        snap = pinned.where((F.col("_operation") == 0) & (F.col("_snapshot") == s))
+        held = {
+            i: (n, low)
+            for i, n, low in snap.groupBy("_chunk")
+            .agg(F.count(F.lit(1)), F.min("_start_lsn"))
+            .collect()
+        }
+    out: list[dict] = []
+
+    def fail(kind: str, i: int, chunk: dict | None, **what) -> None:
+        lo, hi = (chunk["lo"], chunk["hi"]) if chunk else (None, None)
+        out.append(
+            {
+                "bucket_lo": None if lo is None else json.dumps(lo),
+                "bucket_hi": None if hi is None else json.dumps(hi),
+                "failure_type": kind,
+                "detail": json.dumps({"snapshot": s, "chunk": i, **what}),
+            }
+        )
+
+    times = Counter(c["chunk"] for c in found)
+    chunks = {c["chunk"]: c for c in sorted(found, key=lambda c: c["chunk"])}
+    for i in range(max(chunks, default=-1) + 1):
+        c = chunks.get(i)
+        if c is None:
+            fail("CHUNK_TILING", i, None, problem="no 'snapshot_chunk' facts row")
+            continue
+        if times[i] > 1:
+            fail("CHUNK_TILING", i, c, problem=f"{times[i]} 'snapshot_chunk' facts rows")
+        before = chunks.get(i - 1)
+        if i == 0 and c["lo"] is not None:
+            fail("CHUNK_TILING", i, c, problem="the first chunk is not open below")
+        elif before and (before["hi"] is None or c["lo"] != before["hi"]):
+            fail("CHUNK_TILING", i, c, problem="it does not start where the one before ended")
+        n, low = held.get(i, (0, None))
+        if c["rows"] != n:
+            fail("CHUNK_ROWS", i, c, facts_rows=c["rows"], bronze_rows=n)
+        stamp = min((x for x in (c["lsn"], low) if x), default=s)
+        if stamp < s:
+            fail("CHUNK_STAMP", i, c, lsn=stamp)
+    if complete and chunks and chunks[max(chunks)]["hi"] is not None:
+        last = max(chunks)
+        fail("CHUNK_TILING", last, chunks[last], problem="the last chunk is not open above")
+    for i in sorted(set(held) - set(chunks)) if complete else []:
+        fail("CHUNK_ROWS", i, None, facts_rows=None, bronze_rows=held[i][0])
+    return out

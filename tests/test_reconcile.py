@@ -238,3 +238,74 @@ def test_a_chunked_bootstrap_applied_by_wave_reconciles_through_snapshot_chunks(
     result = o.reconcile(sample=1.0)
     assert (result["mismatch"], result["failures"]) == (0, {})
     assert result["hashed"] == result["buckets"] == result["match"] > 0
+
+
+def test_chunk_checks_report_gaps_overlaps_counts_and_stamps_bronze_and_facts_disagree_on(
+    delta_spark, workdir
+):
+    from delta.tables import DeltaTable
+
+    o = Orders(delta_spark, workdir)
+    o.options["numPartitions"] = "2"
+    o.commit(*[(2, {"order_id": i, "status": "new"}) for i in range(12)])
+    facts = os.path.join(workdir, "facts")
+    cdc = stream(delta_spark, o.options)
+    cdc.to_delta(
+        o.bronze,
+        "orders-v1",
+        o.ckpt,
+        facts,
+        trigger={"availableNow": True},
+        bootstrap=True,
+        snapshot="chunked",
+    ).awaitTermination()
+    status = cdc.backfill(o.bronze, app_id="orders-v1", facts_table=facts, chunk_rows=3)
+    assert status["done"] and status["chunks_done"] == 4  # [-, 3) [3, 6) [6, 9) [9, -)
+    apply_changes(
+        delta_spark, o.bronze, o.silver, CI, [o.key], control_table=o.control, facts_table=facts
+    )
+
+    def chunk_rows(result):
+        found = result["report"].where("failure_type LIKE 'CHUNK%'").collect()
+        return {(r["failure_type"], json.loads(r["detail"])["chunk"]): r for r in found}
+
+    clean = o.reconcile(sample=0.0, facts_table=facts)
+    assert clean["failures"] == {} and chunk_rows(clean) == {}
+    table = DeltaTable.forPath(delta_spark, facts)
+
+    def chunk(i):
+        return f"event = 'snapshot_chunk' AND get_json_object(detail, '$.chunk') = {i}"
+
+    table.update(chunk(0), {"min_lsn": "'0x00000000000000000000'"})  # stamped below S
+    table.delete(chunk(1))  # a gap: and bronze holds rows of a chunk with no facts row
+    table.update(chunk(2), {"rows": "rows + 1"})  # a count bronze does not hold
+    table.update(chunk(3), {"detail": "replace(detail, '\"lo\": 9', '\"lo\": 8')"})  # overlap
+    found = o.reconcile(sample=0.0, facts_table=facts)
+    rows = chunk_rows(found)
+    assert set(rows) == {
+        ("CHUNK_STAMP", 0),
+        ("CHUNK_TILING", 1),
+        ("CHUNK_ROWS", 1),
+        ("CHUNK_ROWS", 2),
+        ("CHUNK_TILING", 3),
+    }
+    assert found["failures"] == {"CHUNK_STAMP": 1, "CHUNK_TILING": 2, "CHUNK_ROWS": 2}
+    overlap = rows[("CHUNK_TILING", 3)]
+    assert (overlap["bucket_lo"], overlap["bucket_hi"], overlap["key"], overlap["status"]) == (
+        "8",
+        None,
+        None,
+        None,
+    )
+    assert json.loads(rows[("CHUNK_ROWS", 2)]["detail"]) | {"snapshot": None} == {
+        "snapshot": None,
+        "chunk": 2,
+        "facts_rows": 4,
+        "bronze_rows": 3,
+    }
+    assert json.loads(rows[("CHUNK_ROWS", 1)]["detail"])["facts_rows"] is None
+    assert found["match"] == found["buckets"]  # silver itself still equals the table
+    written = delta_spark.read.format("delta").load(o.report)
+    assert (
+        written.where(f"run_id = '{found['run_id']}' AND failure_type LIKE 'CHUNK%'").count() == 5
+    )
