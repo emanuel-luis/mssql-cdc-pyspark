@@ -745,6 +745,34 @@ def test_one_where_row_comparison_reads_the_whole_leading_value(sqlserver):
     assert "Table Spool" in plan and _rows_read(plan) >= 10000
 
 
+def test_key_buckets_floor_negative_keys_and_number_dates_from_1970(sqlserver):
+    """reconcile()'s Tier 1: the server's buckets are the ones Spark computes with pmod."""
+    sqlserver.run("CREATE TABLE dbo.rc_keys (id INT NOT NULL PRIMARY KEY, day DATE NOT NULL)")
+    sqlserver.run(
+        f"INSERT INTO dbo.rc_keys SELECT n - 26, DATEADD(day, n, '19691201') FROM {_ROWS} "
+        "WHERE n <= 50"
+    )
+    client = make_client({"connectionString": sqlserver.connection_string})
+    try:
+        ints = client.key_buckets("dbo", "rc_keys", "id", "int", 10)
+        days = client.key_buckets("dbo", "rc_keys", "day", "date", 7)
+        whole = client.key_buckets("dbo", "rc_keys", None, None, 1)
+    finally:
+        client.close()
+
+    def floored(values, width):
+        out: dict = {}
+        for v in values:
+            n, s = out.get(v // width, (0, 0))
+            out[v // width] = (n + 1, s + v)
+        return [(b, n, Decimal(s)) for b, (n, s) in sorted(out.items())]
+
+    assert sorted(ints) == floored(range(-25, 25), 10)  # -25..-21 in bucket -3, not -2
+    first = (date(1969, 12, 2) - date(1970, 1, 1)).days
+    assert sorted(days) == floored(range(first, first + 50), 7)
+    assert whole == [(0, 50, None)]
+
+
 def test_cdc_refuses_a_unique_index_over_nullable_columns(sqlserver):
     # so a snapshot's key columns are never NULL on SQL Server: the NULL handling of the key
     # ranges is defensive, and what the fake (whose keys can be NULL) does

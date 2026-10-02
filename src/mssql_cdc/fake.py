@@ -34,6 +34,7 @@ import re
 import uuid
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pyarrow as pa
 
@@ -295,6 +296,17 @@ class FakeCdcClient(CdcClient):
             at = datetime.fromisoformat(tx["at"]) if tx["at"] else None
             db.commit(tx["capture_instance"], [(op, row) for op, row in tx["changes"]], at)
         os.remove(claimed)
+
+    def key_buckets(self, schema, table, key, kind, width):
+        # ponytail: integer keys only; the table's JSON rows keep no date type
+        rows = self._table(table)
+        if key is None:
+            return [(0, len(rows), None)]
+        out = {}  # bucket -> (rows, key sum)
+        for o in (r[key] for r in rows if r.get(key) is not None):
+            n, s = out.get(o // int(width), (0, 0))
+            out[o // int(width)] = (n + 1, s + o)
+        return [(b, n, Decimal(s)) for b, (n, s) in sorted(out.items())]
 
     def iter_table(self, schema, table, columns, keys, types, lo, hi, batch_size, isolation=None):
         def inside(row):

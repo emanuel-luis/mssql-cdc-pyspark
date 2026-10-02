@@ -17,9 +17,10 @@ class Migration:
 
 
 def _migrations(kind: str) -> list[Migration]:
-    from . import bronze, control, facts, silver
+    from . import bronze, control, facts, reconcile, silver
 
-    return {"bronze": bronze, "control": control, "facts": facts, "silver": silver}[kind].MIGRATIONS
+    kinds = {"bronze": bronze, "control": control, "facts": facts, "reconcile": reconcile}
+    return {**kinds, "silver": silver}[kind].MIGRATIONS
 
 
 def current_version(kind: str) -> int:

@@ -8,6 +8,7 @@ try:
     from .client import DataLossError, SchemaChangedError, make_client
     from .fanout import await_all, start_many, stop_all
     from .pipeline import stream
+    from .reconcile import reconcile
     from .silver import apply_changes
     from .source import HAS_ADMISSION_CONTROL, OPERATIONS, MssqlCdcDataSource
 except ModuleNotFoundError as e:
@@ -30,6 +31,7 @@ __all__ = [
     "apply_changes",
     "await_all",
     "make_client",
+    "reconcile",
     "register",
     "start_many",
     "stop_all",

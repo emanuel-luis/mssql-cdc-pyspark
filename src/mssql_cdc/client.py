@@ -398,6 +398,15 @@ class CdcClient(ABC):
         same number of rows. Fewer when the table has fewer than ``n`` rows."""
 
     @abstractmethod
+    def key_buckets(
+        self, schema: str, table: str, key: str | None, kind: str | None, width: int
+    ) -> list[tuple]:
+        """``(bucket, rows, key_sum)`` of the table's rows grouped by ``floor(o / width)``,
+        ``o`` the key's ordinal: an integer key itself (``kind`` "int"), a date its day number
+        from 1970-01-01 ("date"); ``key_sum`` sums ``o``. A NULL key is in no bucket. ``key``
+        None: ``[(0, rows, None)]``, the whole table. Tier 1 of ``reconcile()``."""
+
+    @abstractmethod
     def iter_table(
         self,
         schema: str,
@@ -1061,6 +1070,35 @@ class SqlCdcClient(CdcClient):
             f"SELECT {k}, NTILE({int(n)}) OVER (ORDER BY {k}) AS [__$tile] FROM {t}) a"
             ") b WHERE [__$tile] <> [__$prev] ORDER BY [__$tile]"
         )
+        return [
+            tuple(row)
+            for batch in self._b.batches(sql, (), 1000)
+            for row in zip(*(c.to_pylist() for c in batch.columns))
+        ]
+
+    def key_buckets(self, schema, table, key, kind, width):
+        # One scan, aggregated on the server: one row per bucket crosses the network. T-SQL's
+        # integer division truncates toward zero; the CASE floors a negative ordinal, so a
+        # bucket is the same range Spark computes. The __$ names cannot be a column's.
+        t = f"[{_check_column(schema)}].[{_check_column(table)}]"
+        if key is None:
+            sql = (
+                "SELECT CAST(0 AS bigint) AS b, COUNT_BIG(*) AS n, "
+                f"CAST(NULL AS decimal(38,0)) AS s FROM {t}"
+            )
+        else:
+            k = f"[{_check_column(key)}]"
+            o = {
+                "int": f"CAST({k} AS bigint)",
+                "date": f"CAST(DATEDIFF(day, CAST('19700101' AS date), {k}) AS bigint)",
+            }[kind]
+            w = f"CAST({int(width)} AS bigint)"
+            sql = (
+                "SELECT [__$b] AS b, COUNT_BIG(*) AS n, SUM(CAST([__$o] AS decimal(38,0))) AS s "
+                f"FROM (SELECT {o} AS [__$o], CASE WHEN {o} >= 0 THEN {o} / {w} "
+                f"ELSE ({o} + 1) / {w} - 1 END AS [__$b] FROM {t} WHERE {k} IS NOT NULL) x "
+                "GROUP BY [__$b]"
+            )
         return [
             tuple(row)
             for batch in self._b.batches(sql, (), 1000)

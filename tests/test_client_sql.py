@@ -841,3 +841,35 @@ def test_chunk_bounds_cross_json_as_text_cast_reads_back():
     # binary arrives as its hex text and is converted, not CAST from the characters
     sql, params = _key_select("SELECT 1", ["b"], ["varbinary(4)"], ("0x0a0b",), None)
     assert sql == "SELECT 1 WHERE [b] >= CONVERT(varbinary(4), ?, 1)" and params == ["0x0a0b"]
+
+
+def test_key_buckets_count_and_sum_the_key_per_floored_bucket_in_one_query():
+    rec = Rows([{"b": -1, "n": 3, "s": Decimal(-6)}, {"b": 0, "n": 2, "s": Decimal(15)}])
+    client = SqlCdcClient(rec, source_timezone="UTC")
+    assert client.key_buckets("sales", "orders", "id", "int", 10) == [
+        (-1, 3, Decimal(-6)),
+        (0, 2, Decimal(15)),
+    ]
+    sql, params = rec.calls[-1]
+    o, w = "CAST([id] AS bigint)", "CAST(10 AS bigint)"
+    assert (
+        sql
+        == (
+            "SELECT [__$b] AS b, COUNT_BIG(*) AS n, SUM(CAST([__$o] AS decimal(38,0))) AS s "
+            f"FROM (SELECT {o} AS [__$o], CASE WHEN {o} >= 0 THEN {o} / {w} "
+            f"ELSE ({o} + 1) / {w} - 1 END AS [__$b] FROM [sales].[orders] WHERE [id] IS NOT NULL) x "
+            "GROUP BY [__$b]"
+        )
+        and params == ()
+    )  # floored, as Spark's pmod: -1 is in bucket -1, not 0
+    client.key_buckets("sales", "orders", "day", "date", 7)
+    assert "CAST(DATEDIFF(day, CAST('19700101' AS date), [day]) AS bigint)" in rec.calls[-1][0]
+    client.key_buckets("sales", "orders", None, None, 1)
+    assert rec.calls[-1][0] == (
+        "SELECT CAST(0 AS bigint) AS b, COUNT_BIG(*) AS n, CAST(NULL AS decimal(38,0)) AS s "
+        "FROM [sales].[orders]"
+    )
+    with pytest.raises(ValueError):
+        client.key_buckets("sales", "orders", "id]; DROP TABLE x --", "int", 10)
+    with pytest.raises(ValueError):
+        client.key_buckets("sales", "orders", "id", "int", "10; DROP TABLE x")
