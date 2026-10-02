@@ -8,7 +8,10 @@ It reproduces the parts of CDC the data source relies on:
 * a per-instance low watermark (``sys.fn_cdc_get_min_lsn``) that cleanup moves
   before it deletes the change rows below it;
 * for instances given a key (one column or several), the source table's current rows,
-  which a snapshot reads (tiled like NTILE) and cleanup does not touch;
+  which a snapshot reads (tiled like NTILE, or in a chunked snapshot's chunks: an exact row
+  estimate, key bounds) and cleanup does not touch; ``commit_before_read`` queues a
+  transaction the next read commits just before it reads them, as a writer does between a
+  chunk's stamp and its SELECT (ADR 0028);
 * up to two capture instances per source table (ADR 0023): a newer one starts at the next
   commit, and from there every commit lands in both, each with only its own captured
   columns and its own ``__$command_id`` (an update that changes none of an instance's
@@ -28,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 
@@ -41,6 +45,7 @@ _MIN = "min_lsn.json"
 _KEYS = "keys.json"
 _INSTANCES = "instances.json"  # name -> {"table", "created", "columns": [[name, type]] | None}
 _DROPPED = "dropped.json"  # table -> lower names of the columns DROP COLUMN removed from it
+_QUEUED = "before_read.jsonl"  # transactions the next table read commits first (tests)
 
 
 def _read_jsonl(path: str) -> list[dict]:
@@ -58,8 +63,10 @@ def _read_json(path: str) -> dict:
 
 
 def _write_json(path: str, value) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
+    # whole or not at all: another process may read it meanwhile (commit_before_read)
+    with open(path + ".tmp", "w", encoding="utf-8") as fh:
         json.dump(value, fh)
+    os.replace(path + ".tmp", path)
 
 
 def _key_columns(key) -> list[str]:
@@ -253,14 +260,53 @@ class FakeCdcClient(CdcClient):
             starts.append(rows[idx])
         return starts
 
-    def iter_table(self, schema, table, columns, keys, types, lo, hi, batch_size):
+    def _keys_in(self, table, keys, lo, hi) -> list[tuple]:
+        """The table's keys with ``lo <= key < hi``, in ORDER BY's order."""
+        found = sorted((tuple(r.get(k) for k in keys) for r in self._table(table)), key=_sort_key)
+        return [
+            k
+            for k in found
+            if (lo is None or _sort_key(k) >= _sort_key(lo))
+            and (hi is None or _sort_key(k) < _sort_key(hi))
+        ]
+
+    def row_estimate(self, schema, table):
+        return len(self._table(table))
+
+    def key_max(self, schema, table, keys):
+        found = self._keys_in(table, keys, None, None)
+        return found[-1] if found else None
+
+    def key_bound(self, schema, table, keys, types, lo, hi, n):
+        found = self._keys_in(table, keys, lo, hi)
+        return found[int(n)] if len(found) > int(n) else None
+
+    def _commit_queued(self) -> None:
+        """Commit what ``FakeCdcDatabase.commit_before_read`` queued; the read that renames the
+        queue first takes it, so one of a snapshot's parallel reads commits it."""
+        path = os.path.join(self.path, _QUEUED)
+        claimed = f"{path}.{os.getpid()}.{uuid.uuid4().hex}"
+        try:
+            os.replace(path, claimed)
+        except FileNotFoundError:
+            return
+        db = FakeCdcDatabase(self.path, [])
+        for tx in _read_jsonl(claimed):
+            at = datetime.fromisoformat(tx["at"]) if tx["at"] else None
+            db.commit(tx["capture_instance"], [(op, row) for op, row in tx["changes"]], at)
+        os.remove(claimed)
+
+    def iter_table(self, schema, table, columns, keys, types, lo, hi, batch_size, isolation=None):
         def inside(row):
             k = _sort_key(row.get(c) for c in keys)
             return (lo is None or k >= _sort_key(lo)) and (hi is None or k < _sort_key(hi))
 
+        if isolation not in (None, "snapshot"):
+            raise ValueError(f"isolation must be None or 'snapshot', not {isolation!r}")
         gone = [c for c in columns if c.lower() in self._dropped(table)]
         if gone:  # as SQL Server refuses to select it
             raise ValueError(f"Invalid column name {gone[0]!r}")
+        self._commit_queued()  # after the snapshot's stamp, before its read (tests)
         rows = [r for r in self._table(table) if inside(r)]
         for i in range(0, len(rows), batch_size):
             chunk = rows[i : i + batch_size]
@@ -339,6 +385,10 @@ class FakeCdcDatabase:
             fh.write(json.dumps(row) + "\n")
 
     def _new_lsn(self) -> str:
+        # after any commit another writer made (commit_before_read's, in a Python worker)
+        mapping = _read_jsonl(os.path.join(self.path, _MAPPING))
+        if mapping:
+            self._next = max(self._next, _lsn.to_int(mapping[-1]["start_lsn"]) + 16)
         value = _lsn.from_int(self._next)
         self._next += 16  # leave gaps, like real LSNs
         return value
@@ -406,6 +456,15 @@ class FakeCdcDatabase:
                     rows.pop(ident, None)
             _write_json(p, rows)
         return start
+
+    def commit_before_read(
+        self, capture_instance: str, changes: Sequence[tuple[int, dict]], at: datetime | None = None
+    ) -> None:
+        """Queue ``commit(capture_instance, changes, at)`` for the next snapshot read to make
+        just before it reads the table: after its stamp (a chunk's L), before its SELECT."""
+        at_text = at.isoformat() if at else None
+        tx = {"capture_instance": capture_instance, "changes": list(changes), "at": at_text}
+        self._append(_QUEUED, tx)
 
     def idle(self, at: datetime | None = None) -> str:
         """A dummy lsn_time_mapping entry with no change rows."""

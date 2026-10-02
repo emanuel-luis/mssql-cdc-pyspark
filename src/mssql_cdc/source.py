@@ -137,16 +137,16 @@ def union_columns(instances) -> str:
     return ", ".join(f"`{n.replace('`', '``')}` {t}" for n, t, _ in cols.values())
 
 
-def _write_metrics(path: str, partition: LsnRange, metrics: dict) -> None:
-    """One JSON per partition; a task retry overwrites its file. Best effort: a metric
-    must never fail a read."""
+def _write_metrics(path: str, name: str, metrics: dict) -> None:
+    """One JSON per partition, ``<name>.json``; a task retry overwrites its file. Best
+    effort: a metric must never fail a read."""
     import json
 
     try:
         os.makedirs(path, exist_ok=True)
-        name = os.path.join(path, f"{partition.from_lsn}-{partition.to_lsn}.json")
+        name = os.path.join(path, f"{name}.json")
         with open(name + ".tmp", "w", encoding="utf-8") as fh:
-            json.dump({"from_lsn": partition.from_lsn, "to_lsn": partition.to_lsn, **metrics}, fh)
+            json.dump(metrics, fh)
         os.replace(name + ".tmp", name)
     except OSError:
         pass
@@ -242,11 +242,21 @@ class MssqlCdcDataSource(DataSource):
 class MssqlCdcSnapshotDataSource(MssqlCdcDataSource):
     """``spark.read.format("mssql_cdc_snapshot")``: the tracked table's current rows in the
     stream's schema, as operation 0 at one LSN (ADR 0016). ``CdcStream.snapshot`` writes
-    them to Delta and returns the offset the stream starts from."""
+    them to Delta and returns the offset the stream starts from.
+
+    With ``snapshotChunks``, a JSON list of ``[chunk, lo, hi]`` (key bounds as
+    ``client.next_chunks`` plans them), only those chunks, one partition each, stamped with
+    ``snapshotLsn`` and numbered in an extra ``_chunk INT`` column; with ``metricsPath``,
+    each leaves ``chunk-<chunk>.json`` there (ADR 0028). ``isolationLevel=snapshot`` reads
+    under SNAPSHOT isolation instead of READ COMMITTED, where the DBA allows it."""
 
     @classmethod
     def name(cls) -> str:
         return "mssql_cdc_snapshot"
+
+    def schema(self) -> str:
+        chunked = _opt(self.options, "snapshotChunks")
+        return super().schema() + (", _chunk INT" if chunked else "")
 
     def reader(self, schema):
         return MssqlCdcSnapshotReader(dict(self.options), schema, self.default_num_partitions)
@@ -627,8 +637,10 @@ class _BaseReader(_Common, DataSourceStreamReader):
                     to_commit_ts = None
                 _write_metrics(
                     self.metrics_path,
-                    partition,
+                    f"{partition.from_lsn}-{partition.to_lsn}",
                     {
+                        "from_lsn": partition.from_lsn,
+                        "to_lsn": partition.to_lsn,
                         "rows": rows,
                         "bytes": nbytes,
                         "seconds": time.perf_counter() - started,
@@ -727,9 +739,26 @@ class KeyRange(InputPartition):
     lo: tuple | None  # inclusive, one value per key; None: open, plus the rows that sort first
     hi: tuple | None  # exclusive; None: open
     columns: list[str] | None = None  # the source columns the table still has; None: all
+    chunk: int | None = None  # its chunk of a chunked snapshot (snapshotChunks), for _chunk
+
+
+ISOLATION_LEVELS = {"readcommitted": None, "snapshot": "snapshot"}  # never READ UNCOMMITTED
 
 
 class MssqlCdcSnapshotReader(_Common, DataSourceReader):
+    def __init__(self, options: dict, schema, default_num_partitions: int | None = None):
+        super().__init__(options, schema, default_num_partitions)
+        self.chunks = _opt(options, "snapshotChunks")
+        if self.chunks:  # the chunk number, not a source column
+            self.source_columns = [c for c in self.source_columns if c != "_chunk"]
+        level = str(_opt(options, "isolationLevel", "readCommitted")).strip().lower()
+        if level not in ISOLATION_LEVELS:
+            raise ValueError(
+                f"isolationLevel must be 'readCommitted' or 'snapshot', not {level!r}: a "
+                "snapshot never reads uncommitted rows (NOLOCK)"
+            )
+        self.isolation = ISOLATION_LEVELS[level]
+
     def partitions(self):
         client = self.client
         from .lsn import normalize
@@ -755,6 +784,28 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
                 for a, b in pairwise([None, *bounds, None])
             ]
 
+        if self.chunks:
+            import json
+
+            from .client import _key_tuple
+
+            plan = json.loads(self.chunks)
+            values = [
+                v for _, *ends in plan for b in ends for v in _key_tuple(b) or () if v is not None
+            ]
+            types = None  # integer bounds are inlined, as the plan's arithmetic chunks are
+            if not all(isinstance(v, int) and not isinstance(v, bool) for v in values):
+                types = client.key_types(ci, keys)
+            if values and (not keys or not set(keys) <= set(present) or None in (types or [])):
+                raise ValueError(
+                    f"snapshotChunks has key bounds, but {schema}.{table}'s key {keys} cannot "
+                    "be read in ranges (no unique index, a column it no longer has, or a type "
+                    "a bound cannot be bound as)"
+                )
+            return [
+                KeyRange(ci, lsn, commit_ts, schema, table, keys, types, lo, hi, columns, int(i))
+                for i, lo, hi in ((i, _key_tuple(a), _key_tuple(b)) for i, a, b in plan)
+            ]
         if self.num_partitions <= 1 or not keys or not set(keys) <= set(present):
             return ranges([], None, [])
         if len(keys) == 1:
@@ -788,9 +839,11 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
             "_operation": (0, pa.int32()),
             "_command_id": (None, pa.int32()),
             "_commit_ts": (commit_ts, pa.timestamp("us")),
+            "_chunk": (partition.chunk, pa.int32()),  # in the schema with snapshotChunks only
         }
         cols = self.source_columns if partition.columns is None else partition.columns
         client = self.client
+        started, rows, nbytes = time.perf_counter(), 0, 0
         try:
             for batch in client.iter_table(
                 partition.schema,
@@ -801,6 +854,7 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
                 partition.lo,
                 partition.hi,
                 self.batch_size,
+                self.isolation,
             ):
                 if batch.num_rows == 0:
                     continue
@@ -813,7 +867,25 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
                         table = table.append_column(
                             name, pa.nulls(table.num_rows, target.field(name).type)
                         )
-                yield from _to_schema(table.select(self.field_names), target).to_batches()
+                table = _to_schema(table.select(self.field_names), target)
+                rows, nbytes = rows + table.num_rows, nbytes + table.nbytes
+                yield from table.to_batches()
+            if self.metrics_path and partition.chunk is not None:
+                try:  # how far capture had got once the chunk was read
+                    high = client.max_lsn()
+                except Exception:  # noqa: BLE001 - a metric must never fail a read
+                    high = None
+                _write_metrics(
+                    self.metrics_path,
+                    f"chunk-{partition.chunk}",
+                    {
+                        "chunk": partition.chunk,
+                        "rows": rows,
+                        "bytes": nbytes,
+                        "seconds": time.perf_counter() - started,
+                        "high_lsn": high,
+                    },
+                )
         finally:
             client.close()
             self._client = None

@@ -769,3 +769,75 @@ def test_key_tiles_and_types_for_composite_or_non_integer_keys():
         SqlCdcClient(Meta([{"name": "region", "collation_name": "x; DROP"}])).key_types(
             "dbo_orders", ["region"]
         )
+
+
+# -- chunked snapshots (ADR 0028) ----------------------------------------------------
+def test_chunk_planning_queries():
+    from mssql_cdc.client import _key_select
+
+    keys, types = ["region", "id"], ["varchar(10) COLLATE Greek_CI_AS", "int"]
+    rec = Rows([{"region": "n", "id": 3}])
+    client = SqlCdcClient(rec, source_timezone="UTC")
+    assert client.key_bound("sales", "orders", keys, types, ("a", 1), ("s", 9), 1000) == ("n", 3)
+    sql, params = rec.calls[-1]
+    # every seekable piece of [lo, hi) takes its own first n + 1 keys, then the (n + 1)-th of
+    # their union is the bound: a TOP per seek, never a sort of the range
+    k = "[region], [id]"
+    assert sql.startswith(
+        f"SELECT {k} FROM (SELECT * FROM (SELECT TOP (1001) {k} FROM [sales].[orders] WHERE "
+    )
+    assert sql.count("SELECT TOP (1001)") == sql.count(f" ORDER BY {k}) p") == 3
+    assert sql.endswith(f") u ORDER BY {k} OFFSET 1000 ROWS FETCH NEXT 1 ROWS ONLY")
+    assert params == tuple(_key_select("x", keys, types, ("a", 1), ("s", 9))[1])
+    empty = Rows([])
+    assert SqlCdcClient(empty).key_bound("sales", "orders", ["id"], None, None, (9,), 5) is None
+    assert empty.calls[-1][0] == (
+        "SELECT [id] FROM (SELECT * FROM (SELECT TOP (6) [id] FROM [sales].[orders] WHERE "
+        "([id] < 9 OR [id] IS NULL) ORDER BY [id]) p) u ORDER BY [id] "
+        "OFFSET 5 ROWS FETCH NEXT 1 ROWS ONLY"
+    )
+
+    rec = Rows([{"region": "z", "id": 7}])
+    assert SqlCdcClient(rec).key_max("sales", "orders", keys) == ("z", 7)
+    assert rec.calls[-1] == (
+        "SELECT TOP (1) [region], [id] FROM [sales].[orders] ORDER BY [region] DESC, [id] DESC",
+        (),
+    )
+    rec = Rows([{"name": "orders", "rows": "1234                ", "reserved": "80 KB"}])
+    assert SqlCdcClient(rec).row_estimate("sales", "orders") == 1234  # char(20), public
+    assert rec.calls[-1] == ("EXEC sys.sp_spaceused @objname = ?", ("[sales].[orders]",))
+    with pytest.raises(ValueError):
+        client.key_bound("sales", "orders", ["id]) p; DROP TABLE x --"], None, None, None, 5)
+    with pytest.raises(ValueError):
+        client.key_bound("sales", "orders", ["id"], None, None, None, "5; DROP TABLE x")
+
+
+def test_a_chunk_reads_under_read_committed_or_snapshot_never_nolock():
+    rec = Recorder()
+    client = SqlCdcClient(rec, source_timezone="UTC")
+    list(client.iter_table("sales", "orders", ["id"], ["id"], None, (1,), None, 10))
+    assert rec.calls[-1][0] == "SELECT [id] FROM [sales].[orders] WHERE [id] >= 1"
+    list(client.iter_table("sales", "orders", ["id"], ["id"], None, (1,), None, 10, "snapshot"))
+    assert rec.calls[-1][0] == (
+        "SET TRANSACTION ISOLATION LEVEL SNAPSHOT; SELECT [id] FROM [sales].[orders] WHERE [id] >= 1"
+    )
+    with pytest.raises(ValueError, match="isolation"):
+        list(client.iter_table("sales", "orders", ["id"], [], None, None, None, 10, "uncommitted"))
+    assert not any("NOLOCK" in sql or "UNCOMMITTED" in sql for sql, _ in rec.calls)
+
+
+def test_chunk_bounds_cross_json_as_text_cast_reads_back():
+    from mssql_cdc.client import _json_key, _key_select, _key_tuple
+
+    at = datetime(2026, 9, 28, 10, 0, 0, 6667)
+    assert _json_key((5,), None) == 5 and _json_key((None, "n"), ["int", "char(1)"]) == [None, "n"]
+    assert _json_key((at, Decimal("0E-10"), b"\n\x0b"), ["datetime", "decimal(18,10)", "x"]) == [
+        "2026-09-28T10:00:00.006",
+        "0.0000000000",
+        "0x0a0b",
+    ]
+    assert _json_key((at,), ["datetime2(7)"]) == "2026-09-28T10:00:00.006667"
+    assert _key_tuple(None) is None and _key_tuple(5) == (5,) and _key_tuple([1, "a"]) == (1, "a")
+    # binary arrives as its hex text and is converted, not CAST from the characters
+    sql, params = _key_select("SELECT 1", ["b"], ["varbinary(4)"], ("0x0a0b",), None)
+    assert sql == "SELECT 1 WHERE [b] >= CONVERT(varbinary(4), ?, 1)" and params == ["0x0a0b"]

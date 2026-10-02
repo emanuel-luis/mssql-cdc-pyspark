@@ -965,3 +965,131 @@ def test_a_datetimeoffset_read_as_text_becomes_its_utc_instant():
     # other text, a varchar the columns option reads as TIMESTAMP, is pyarrow's to parse
     other = _to_schema(pa.table({"o": ["2026-09-28T13:50:01Z"]}), target).column(0)
     assert other.to_pylist()[0].replace(tzinfo=None) == datetime(2026, 9, 28, 13, 50, 1)
+
+
+# --------------------------------------------------------------------------- #
+# Chunked snapshots (ADR 0028)
+# --------------------------------------------------------------------------- #
+def _chunk_reader(src, schema, chunks, lsn, **options):
+    from mssql_cdc.source import MssqlCdcSnapshotReader
+
+    opts = {"backend": "fake", "fakePath": src, "captureInstance": CI}
+    opts.update(snapshotChunks=json.dumps(chunks), snapshotLsn=lsn, **options)
+    return MssqlCdcSnapshotReader(opts, schema)
+
+
+@pytest.mark.parametrize(
+    ("key", "values", "chunk_rows", "sizes"),
+    [
+        # sparse integers and a NULL key: steps of the span over the row estimate (16), so
+        # uneven chunks; NULL sorts first, into the first
+        ("order_id", [None, *range(10), *range(100, 110)], 3, [11, 0, 0, 0, 0, 0, 10]),
+        # one string key: keyset bounds, chunk_rows rows each up to the MAX at the open
+        ("code", [f"C{i:02}" for i in range(12)], 5, [5, 5, 2]),
+        # a composite key with NULLs, as ORDER BY sorts them
+        (
+            ["region", "id"],
+            [(None, "x"), (1, None), (1, "a"), (1, "b"), (2, "a"), (3, "z")],
+            2,
+            [2, 2, 2],
+        ),
+        # more rows per chunk than the table has: one chunk
+        ("code", ["a", "b", "c"], 100, [3]),
+    ],
+)
+def test_chunk_plans_tile_the_key_space(workdir, key, values, chunk_rows, sizes):
+    from pyspark.sql.types import IntegerType, StringType, StructField, StructType
+
+    from mssql_cdc.client import next_chunks, snapshot_plan
+    from mssql_cdc.fake import FakeCdcClient
+
+    src = os.path.join(workdir, "src")
+    keys = [key] if isinstance(key, str) else key
+    db = FakeCdcDatabase(src, [CI], keys={CI: key})
+    for v in values:
+        db.commit(CI, [(2, {**dict(zip(keys, v if len(keys) > 1 else (v,))), "status": "new"})])
+    client = FakeCdcClient(src)
+    source = client.source_table(CI)
+    plan = snapshot_plan(client, CI, source)
+    assert plan["kind"] == ("int" if key == "order_id" else "keyset")
+    chunks, last = [], None
+    while not (last and last[2] is None):  # in waves of two, each from the previous end
+        wave = next_chunks(client, CI, source, plan, len(chunks), last and last[2], 2, chunk_rows)
+        chunks += wave
+        last = wave[-1]
+    assert [c[0] for c in chunks] == list(range(len(chunks)))
+    assert chunks[0][1] is None and all(a[2] == b[1] for a, b in pairwise(chunks))
+
+    def typ(name):
+        return IntegerType() if name in ("order_id", "region") else StringType()
+
+    schema = StructType([StructField(k, typ(k)) for k in keys] + [StructField("status", typ("s"))])
+    reader = _chunk_reader(src, schema, chunks, client.max_lsn())
+    parts = reader.partitions()
+    read = [
+        [tuple(r[k] for k in keys) for b in reader.read(p) for r in b.to_pylist()] for p in parts
+    ]
+    every = [k for rows in read for k in rows]
+    assert sorted(every, key=str) == sorted(
+        (v if len(keys) > 1 else (v,) for v in values), key=str
+    )  # every row once
+    assert [len(rows) for rows in read] == sizes
+
+
+def test_chunk_rows_are_stamped_numbered_and_leave_metrics(spark, workdir):
+    from mssql_cdc.client import next_chunks, snapshot_plan
+    from mssql_cdc.fake import FakeCdcClient
+
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: "order_id"})
+    for i in range(6):
+        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+    client = FakeCdcClient(src)
+    source = client.source_table(CI)
+    s = client.max_lsn()
+    plan = snapshot_plan(client, CI, source)
+    assert plan == {"kind": "int", "lo": 0, "hi": 5, "rows": 6}
+    chunks = next_chunks(client, CI, source, plan, 0, None, 10, 2)
+    assert chunks == [[0, None, 2], [1, 2, 4], [2, 4, None]]
+    lsn = db.idle(at=T0 + timedelta(minutes=7))  # the wave's stamp L, at or after S
+    metrics = os.path.join(workdir, "metrics")
+    opts = {
+        "backend": "fake",
+        "fakePath": src,
+        "captureInstance": CI,
+        "columns": "order_id INT, status STRING",
+        "snapshotChunks": json.dumps(chunks),
+        "snapshotLsn": lsn,
+        "metricsPath": metrics,
+    }
+    df = spark.read.format("mssql_cdc_snapshot").options(**opts).load()
+    assert df.columns[-1] == "_chunk" and df.rdd.getNumPartitions() == 3
+    rows = df.collect()
+    assert sorted((r["_chunk"], r["order_id"]) for r in rows) == [
+        (0, 0), (0, 1), (1, 2), (1, 3), (2, 4), (2, 5)
+    ]  # fmt: skip
+    assert {(r["_start_lsn"], r["_operation"]) for r in rows} == {(lsn, 0)} and lsn >= s
+    files = {}
+    for name in os.listdir(metrics):
+        with open(os.path.join(metrics, name), encoding="utf-8") as fh:
+            files[name] = json.load(fh)
+    assert sorted(files) == ["chunk-0.json", "chunk-1.json", "chunk-2.json"]
+    assert [files[f"chunk-{i}.json"]["rows"] for i in range(3)] == [2, 2, 2]
+    assert {m["high_lsn"] for m in files.values()} == {lsn}  # max_lsn after each read
+
+    # a writer commits after the stamp L and before the read: the read sees it, and its
+    # change has an LSN after L, so the stream has it too
+    db.commit_before_read(
+        CI, [(1, {"order_id": 3, "status": "new"}), (2, {"order_id": 9, "status": "new"})]
+    )
+    reader = _chunk_reader(src, df.schema, chunks, lsn)
+    got = [(p.chunk, r["order_id"]) for p in reader.partitions() for r in _rows_of(reader, p)]
+    assert got == [(0, 0), (0, 1), (1, 2), (2, 4), (2, 5), (2, 9)]
+    later = client.max_lsn()  # the queued commit's
+    assert later > lsn and db.commit(CI, [(2, {"order_id": 10})]) > later  # LSNs keep order
+    with pytest.raises(ValueError, match="NOLOCK"):
+        _chunk_reader(src, df.schema, chunks, lsn, isolationLevel="readUncommitted")
+
+
+def _rows_of(reader, partition):
+    return [r for b in reader.read(partition) for r in b.to_pylist()]

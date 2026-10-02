@@ -12,6 +12,8 @@ Every parameter is text, all arrow-odbc binds, so both backends bind the same wa
 cross the driver boundary as hex strings converted server-side with
 ``CONVERT(binary(10), ?, 1)``, snapshot key bounds are CAST to their column's type.
 Changes are read from the change table ``cdc.<capture_instance>_CT`` (ADR 0009).
+A chunked snapshot's chunks are planned here too (``snapshot_plan``, ``next_chunks``,
+ADR 0028), from metadata and seeks on the table's key, never a scan of it.
 """
 
 from __future__ import annotations
@@ -156,10 +158,13 @@ def _text(v, sql_type: str) -> str:
     return str(v)  # str, int, bool (CAST reads 'True'), float, date, UUID
 
 
-def _key_select(select: str, keys: Sequence[str], types, lo, hi) -> tuple[str, list]:
+def _key_select(
+    select: str, keys: Sequence[str], types, lo, hi, piece=lambda sql: sql
+) -> tuple[str, list]:
     """``select`` (no WHERE) over the rows with ``lo <= (keys) < hi`` in the order ORDER BY
     sorts them: column by column, NULL first. A None bound is open. Returns the query and
-    its parameters, in the order of the ``?`` marks.
+    its parameters, in the order of the ``?`` marks. ``piece`` wraps each SELECT of the
+    UNION ALL (``key_bound`` gives each its own TOP and ORDER BY).
 
     T-SQL has no row-value comparison, and a seek takes equalities on leading key columns
     plus a range on the next one; anything else it filters row by row. So the range is cut
@@ -187,8 +192,10 @@ def _key_select(select: str, keys: Sequence[str], types, lo, hi) -> tuple[str, l
             x, params = str(int(v)), []
         else:
             t, _, coll = _check_type(types[i]).partition(" COLLATE ")
-            if isinstance(v, (bytes, bytearray)):  # hex, as LSNs are (invariant 6)
-                x, params = f"CONVERT({t}, ?, 1)", ["0x" + bytes(v).hex()]
+            # hex, as LSNs are (invariant 6); a chunk bound arrives as that text (_json_key)
+            if isinstance(v, (bytes, bytearray)) or t.startswith(("binary(", "varbinary(")):
+                hexed = v if isinstance(v, str) else "0x" + bytes(v).hex()
+                x, params = f"CONVERT({t}, ?, 1)", [hexed]
             else:
                 x, params = f"CAST(? {f'COLLATE {coll} ' if coll else ''}AS {t})", [_text(v, t)]
         return (f"({k} {op} {x} OR {k} IS NULL)" if op == "<" else f"{k} {op} {x}"), params
@@ -223,11 +230,103 @@ def _key_select(select: str, keys: Sequence[str], types, lo, hi) -> tuple[str, l
             for j in range(p + 1, n)
         ]
     sql, params = [], []
-    for piece in pieces:
-        where, ps = conj(piece)
-        sql.append(f"{select} WHERE {where}" if where else select)
+    for part in pieces:
+        where, ps = conj(part)
+        sql.append(piece(f"{select} WHERE {where}" if where else select))
         params += ps
     return " UNION ALL ".join(sql), params
+
+
+def _json_key(values: Sequence, types) -> object:
+    """A key as JSON, for a chunk bound (``snapshotChunks``, the facts' detail): a scalar for
+    one column, a list for several. A value JSON has no type for becomes the text ``CAST``
+    reads back (``_text``, typed by ``types``), binary its hex."""
+    out = []
+    for v, t in zip(values, types or [None] * len(values)):
+        if not (v is None or isinstance(v, (bool, int, float, str))):
+            v = "0x" + bytes(v).hex() if isinstance(v, (bytes, bytearray)) else _text(v, t or "")
+        out.append(v)
+    return out[0] if len(out) == 1 else out
+
+
+def _key_tuple(bound) -> tuple | None:
+    """A chunk bound from JSON back to the key tuple ``iter_table`` takes; None: open."""
+    if bound is None:
+        return None
+    return tuple(bound) if isinstance(bound, list) else (bound,)
+
+
+def snapshot_plan(client: CdcClient, capture_instance: str, source: SourceTable) -> dict:
+    """What a chunked snapshot's chunks tile, read after its LSN S was recorded (ADR 0028): a
+    key a row lacks below MIN or above MAX was inserted after S, so the stream has it.
+
+    One integer key: ``{"kind": "int", "lo": MIN, "hi": MAX, "rows": estimate}``, chunks a
+    step of the key apart. Other keys: ``{"kind": "keyset", "max": MAX}``, chunks found by
+    seeking the rows after the previous bound. ``max`` None (an empty table, no unique
+    index, a key type no bound can be bound as): one chunk, the whole table."""
+    s, t, keys = source.schema, source.table, source.keys
+    top: tuple | None = None
+    if len(keys) == 1:
+        lo, hi = client.key_range(s, t, keys[0])
+        if lo is not None and all(isinstance(v, int) and not isinstance(v, bool) for v in (lo, hi)):
+            return {"kind": "int", "lo": lo, "hi": hi, "rows": client.row_estimate(s, t)}
+        top = None if hi is None else (hi,)
+    elif keys:
+        top = client.key_max(s, t, keys)
+    types = client.key_types(capture_instance, keys) if top is not None else [None]
+    if top is None or None in types:
+        return {"kind": "keyset", "max": None}
+    return {"kind": "keyset", "max": _json_key(top, types)}
+
+
+def int_step(plan: dict, chunk_rows: int) -> int:
+    """How far apart an integer plan's chunk bounds are for about ``chunk_rows`` rows each."""
+    span = plan["hi"] - plan["lo"] + 1
+    return max(1, -(-chunk_rows * span // max(plan["rows"], 1)))  # ceiling
+
+
+def next_chunks(
+    client: CdcClient,
+    capture_instance: str,
+    source: SourceTable,
+    plan: dict,
+    first: int,
+    lo,
+    count: int,
+    chunk_rows: int,
+) -> list[list]:
+    """Up to ``count`` chunks ``[index, lo, hi]`` (JSON bounds, ``hi`` exclusive) of about
+    ``chunk_rows`` rows each, from chunk ``first`` on, which starts at ``lo`` (None: below
+    every key, NULL first). Each starts where the previous ends, so they tile the key space;
+    the plan's last chunk is open above (hi None). An integer key steps by the span over the
+    row estimate times ``chunk_rows``; other keys take the key ``chunk_rows`` rows after the
+    previous bound, below the plan's MAX (``key_bound``)."""
+    types: list | None = None  # the plan has a MAX only when every key has one
+    if plan["kind"] == "keyset" and plan["max"] is not None:
+        types = client.key_types(capture_instance, source.keys)
+    out: list[list] = []
+    while len(out) < count:
+        if plan["kind"] == "int":
+            nxt = (plan["lo"] if lo is None else lo) + int_step(plan, chunk_rows)
+            hi = nxt if nxt <= plan["hi"] else None
+        elif plan["max"] is None:
+            hi = None
+        else:
+            bound = client.key_bound(
+                source.schema,
+                source.table,
+                source.keys,
+                types,
+                _key_tuple(lo),
+                _key_tuple(plan["max"]),
+                chunk_rows,
+            )
+            hi = None if bound is None else _json_key(bound, types)
+        out.append([first + len(out), lo, hi])
+        if hi is None:
+            break
+        lo = hi
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -309,11 +408,36 @@ class CdcClient(ABC):
         lo: tuple | None,
         hi: tuple | None,
         batch_size: int,
+        isolation: str | None = None,
     ) -> Iterator[pa.RecordBatch]:
         """Current rows of the table (``columns`` only) with ``lo <= (keys) < hi``, compared
         column by column with NULL first, like ORDER BY. A None bound is open, so the range
         open below also holds the rows whose leading key is NULL. ``types``: the key columns'
-        SQL types for the bounds (``key_types``); None for integer bounds."""
+        SQL types for the bounds (``key_types``); None for integer bounds. ``isolation``:
+        None (READ COMMITTED) or ``"snapshot"``; never READ UNCOMMITTED."""
+
+    # -- chunked snapshots (ADR 0028) -------------------------------------------
+    @abstractmethod
+    def row_estimate(self, schema: str, table: str) -> int:
+        """About how many rows the table has, from metadata, not a count."""
+
+    @abstractmethod
+    def key_max(self, schema: str, table: str, keys: Sequence[str]) -> tuple | None:
+        """The last key of the table in ORDER BY's order; None when it is empty."""
+
+    @abstractmethod
+    def key_bound(
+        self,
+        schema: str,
+        table: str,
+        keys: Sequence[str],
+        types: Sequence[str] | None,
+        lo: tuple | None,
+        hi: tuple | None,
+        n: int,
+    ) -> tuple | None:
+        """The key that leaves ``n`` rows in ``[lo, key)``: the (n + 1)-th of the rows with
+        ``lo <= (keys) < hi`` in ORDER BY's order. None when they are ``n`` or fewer."""
 
     # -- schema changes and capture instance switches (ADR 0023) ----------------
     @abstractmethod
@@ -943,9 +1067,11 @@ class SqlCdcClient(CdcClient):
             for row in zip(*(c.to_pylist() for c in batch.columns))
         ]
 
-    def iter_table(self, schema, table, columns, keys, types, lo, hi, batch_size):
+    def iter_table(self, schema, table, columns, keys, types, lo, hi, batch_size, isolation=None):
         # READ COMMITTED, never NOLOCK: a dirty read can keep a row that a rollback then
         # removes, and no change row would ever correct it downstream.
+        if isolation not in (None, "snapshot"):
+            raise ValueError(f"isolation must be None or 'snapshot', not {isolation!r}")
         cols = ", ".join(f"[{_check_column(c)}]" for c in columns)
         sql, params = _key_select(
             f"SELECT {cols} FROM [{_check_column(schema)}].[{_check_column(table)}]",
@@ -954,7 +1080,49 @@ class SqlCdcClient(CdcClient):
             lo,
             hi,
         )
+        if isolation:
+            # SNAPSHOT reads the versions committed when the SELECT starts, without the
+            # writers' locks; SQL Server refuses it unless the DBA set ALLOW_SNAPSHOT_ISOLATION
+            sql = "SET TRANSACTION ISOLATION LEVEL SNAPSHOT; " + sql
         yield from self._b.batches(sql, params, batch_size)
+
+    def row_estimate(self, schema, table):
+        # sys.sp_spaceused: public, and a lookup of the partitions' row counts, not a scan
+        name = f"[{_check_column(schema)}].[{_check_column(table)}]"
+        for batch in self._b.batches("EXEC sys.sp_spaceused @objname = ?", (name,), 1):
+            if batch.num_rows:
+                return int(str(batch.column("rows")[0].as_py()).strip() or 0)
+        return 0
+
+    def key_max(self, schema, table, keys):
+        t = f"[{_check_column(schema)}].[{_check_column(table)}]"
+        k = ", ".join(f"[{_check_column(c)}]" for c in keys)
+        desc = ", ".join(f"[{c}] DESC" for c in keys)
+        for batch in self._b.batches(f"SELECT TOP (1) {k} FROM {t} ORDER BY {desc}", (), 1):
+            if batch.num_rows:
+                return tuple(c[0].as_py() for c in batch.columns)
+        return None
+
+    def key_bound(self, schema, table, keys, types, lo, hi, n):
+        # Each seekable piece of [lo, hi) takes its first n + 1 keys (TOP ends its seek there)
+        # and the (n + 1)-th of their union is the bound: at most a few times n keys read,
+        # never the range itself.
+        t = f"[{_check_column(schema)}].[{_check_column(table)}]"
+        k = ", ".join(f"[{_check_column(c)}]" for c in keys)
+        n = int(n)
+        union, params = _key_select(
+            f"SELECT TOP ({n + 1}) {k} FROM {t}",
+            keys,
+            types,
+            lo,
+            hi,
+            lambda sql: f"SELECT * FROM ({sql} ORDER BY {k}) p",
+        )
+        sql = f"SELECT {k} FROM ({union}) u ORDER BY {k} OFFSET {n} ROWS FETCH NEXT 1 ROWS ONLY"
+        for batch in self._b.batches(sql, params, 1):
+            if batch.num_rows:
+                return tuple(c[0].as_py() for c in batch.columns)
+        return None
 
     def _change_table_batches(self, ci: str, sql: str, params, batch_size: int):
         """Batches of a query on cdc.[<ci>_CT]; a denied read names the grant it needs."""
