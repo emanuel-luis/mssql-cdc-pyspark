@@ -1378,6 +1378,7 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
         len(snap),
     )
     assert json.loads(done["detail"])["chunks"] == 4
+    assert done["started_at"] == opened["written_at"] and done["duration_ms"] > 0  # since S
     # a whole snapshot is never a chunk's L: there is none here, and the rerun reused S
     assert cdc._last_snapshot(target, CI) is None
     assert len(_events(spark, facts, "snapshot_open")) == 1

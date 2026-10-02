@@ -764,8 +764,8 @@ class CdcStream:
         """
         from pyspark.sql import functions as F
 
+        from . import sink
         from .client import int_step, make_client, next_chunks
-        from .sink import write_event
         from .source import snapshot_lsn
         from .spark import available_cores
         from .tables import delta_table, exists
@@ -869,7 +869,7 @@ class CdcStream:
         done = bool(chunks) and chunks[-1]["hi"] is None
         if done:  # also after a crash between the last wave's facts and this row
             rows_in = sum(c["rows"] or 0 for c in chunks)
-            write_event(
+            sink.write_event(
                 self.spark,
                 facts_table,
                 "bootstrap" if info["mode"] == "bootstrap" else "resnapshot",
@@ -880,8 +880,8 @@ class CdcStream:
                 lsn=s,
                 commit_ts=_iso(top["min_commit_ts"]),
                 rows=rows_in,
-                started_at=top["written_at"],
-                duration_ms=round((time.monotonic() - t0) * 1000),
+                started_at=top["written_at"],  # from the open to the last chunk
+                duration_ms=round((sink._utc_now() - top["written_at"]).total_seconds() * 1000),
                 lost_from_ts=top["lost_from_ts"],
                 lost_to_ts=top["lost_to_ts"],
                 detail=json.dumps(
