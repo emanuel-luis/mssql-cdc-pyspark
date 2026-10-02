@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
 import time
 import uuid
+from contextlib import closing
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from itertools import pairwise
@@ -1209,3 +1211,455 @@ def test_a_transaction_open_during_the_enable_is_read_whole_from_one_instance(sp
     [(first_ci, first_lsn)], [(second_ci, second_lsn)] = first, second  # one commit each
     assert (first_ci, second_ci) == (ci, v2)
     assert first_lsn < sqlserver.start_lsn(v2) <= second_lsn
+
+
+# -- chunked snapshots (ADR 0028) ------------------------------------------------------------
+def _churn(sqlserver, table: str, top: int, seed: int):
+    """Commit one change to ``dbo.<table>`` (key ``id``, column ``v``) about every 20 ms on its
+    own connection until the returned function is called, which returns how many it made: an
+    update, a delete, a key update (``id`` to ``id + 1``) or an insert of a random id up to
+    ``top``, or an insert above it. A key that exists already skips its insert or key update."""
+    import random
+
+    stop, state = threading.Event(), {"commits": 0, "error": None}
+
+    def change(rnd: random.Random, i: int) -> tuple[str, tuple]:
+        x, op, t = rnd.randrange(1, top + 1), rnd.random(), f"dbo.{table}"
+        if op < 0.3:
+            return f"UPDATE {t} SET v = ? WHERE id = ?", (f"u{i}", x)
+        if op < 0.5:
+            return f"DELETE FROM {t} WHERE id = ?", (x,)
+        if op < 0.7:  # a key update: CDC records it as the old key's delete, the new one's insert
+            return f"UPDATE {t} SET id = id + 1 WHERE id = ?", (x,)
+        return f"INSERT INTO {t} VALUES (?, ?)", (x if op < 0.9 else top + i, f"i{i}")
+
+    def loop():
+        conn, rnd = sqlserver.connect(), random.Random(seed)
+        cur = conn.cursor()
+        try:
+            while not stop.is_set():
+                try:
+                    cur.execute(*change(rnd, state["commits"]))
+                except Exception as exc:
+                    if "PRIMARY KEY" not in str(exc):  # else the key exists: skip it
+                        raise
+                state["commits"] += 1
+                time.sleep(0.02)
+        except Exception as exc:  # noqa: BLE001 - reported by finish()
+            state["error"] = exc
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+
+    def finish() -> int:
+        stop.set()
+        thread.join()
+        assert state["error"] is None, state["error"]
+        return state["commits"]
+
+    return finish
+
+
+def _marker(sqlserver, table: str, ci: str, column: str, value) -> None:
+    """Insert one last row and wait for capture to reach it: the stream then reads up to it."""
+    sqlserver.run(f"INSERT INTO dbo.{table} ({column}, v) VALUES (?, 'end')", (value,))
+    sqlserver.wait_for(f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE {column} = ?", (value,))
+
+
+def _chunked(delta_spark, options: dict, workdir: str, app_id: str):
+    """Paths, the stream and ``run(**trigger)``: ``to_delta`` with a chunked bootstrap (which
+    opens the snapshot the first time), started; returns the query."""
+    from mssql_cdc import stream
+
+    names = ("bronze", "silver", "facts", "control", "ckpt")
+    paths = {n: os.path.join(workdir, n) for n in names}
+    cdc = stream(delta_spark, options)
+
+    def run(**trigger):
+        return cdc.to_delta(
+            paths["bronze"],
+            app_id,
+            paths["ckpt"],
+            paths["facts"],
+            trigger=trigger or {"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        )
+
+    return paths, cdc, run
+
+
+def _apply(delta_spark, paths: dict, ci: str, keys: list[str]) -> dict:
+    from mssql_cdc import apply_changes
+
+    return apply_changes(
+        delta_spark,
+        paths["bronze"],
+        paths["silver"],
+        ci,
+        keys,
+        control_table=paths["control"],
+        facts_table=paths["facts"],
+    )
+
+
+def _image(delta_spark, path: str, *columns: str) -> set:
+    return {
+        tuple(r) for r in delta_spark.read.format("delta").load(path).select(*columns).collect()
+    }
+
+
+def _chunk_facts(delta_spark, facts: str) -> list[dict]:
+    """The 'snapshot_chunk' facts rows: their detail with ``rows`` and ``lsn`` (the stamp L)."""
+    rows = delta_spark.read.format("delta").load(facts).where("event = 'snapshot_chunk'").collect()
+    found = [json.loads(r["detail"]) | {"rows": r["rows"], "lsn": r["min_lsn"]} for r in rows]
+    return sorted(found, key=lambda d: d["chunk"])
+
+
+def test_a_chunked_bootstrap_next_to_a_running_stream_and_a_writer_ends_equal_to_the_table(
+    delta_spark, sqlserver, workdir
+):
+    # the rows written before CDC are only in the table: the chunks bring them, while the
+    # stream, started at S, brings every change after it, deletes and key updates included
+    sqlserver.run("CREATE TABLE dbo.ck_live (id INT NOT NULL PRIMARY KEY, v VARCHAR(20) NOT NULL)")
+    sqlserver.run(f"INSERT INTO dbo.ck_live SELECT n, 'old' FROM {_ROWS} WHERE n <= 600")
+    ci = sqlserver.enable_cdc("ck_live")
+    options = {
+        "connectionString": _reader(sqlserver, "ck_live", ci),
+        "captureInstance": ci,
+        "numPartitions": "2",  # two chunks per wave
+    }
+    paths, cdc, run = _chunked(delta_spark, options, workdir, "ck-live")
+    finish = _churn(sqlserver, "ck_live", 600, seed=28)
+    statuses, applied = [], []
+    try:
+        q = run(processingTime="1 second")  # opens S and streams from it, next to the waves
+        while not (statuses and statuses[-1]["done"]):
+            statuses.append(
+                cdc.backfill(
+                    paths["bronze"],
+                    app_id="ck-live",
+                    facts_table=paths["facts"],
+                    chunk_rows=60,
+                    max_waves=1,
+                )
+            )
+            applied.append(_apply(delta_spark, paths, ci, ["id"]))  # wave by wave
+            assert q.exception() is None and len(statuses) < 30
+        q.stop()
+    finally:
+        commits = finish()
+    _marker(sqlserver, "ck_live", ci, "id", -1)
+    run().awaitTermination()
+    applied.append(_apply(delta_spark, paths, ci, ["id"]))
+
+    table = {tuple(r) for r in sqlserver.run("SELECT id, v FROM dbo.ck_live")}
+    image = _image(delta_spark, paths["silver"], "id", "v")
+    assert image == table, (commits, len(table), sorted(image ^ table)[:10])
+    assert commits > 100, commits
+    assert [s["chunks_done"] for s in statuses[:-1]] == [
+        2 * (i + 1) for i in range(len(statuses) - 1)
+    ]
+    assert any(a["rebuilt"] for a in applied[-2:])  # at completion
+    facts = delta_spark.read.format("delta").load(paths["facts"])
+    [s] = [r["min_lsn"] for r in facts.where("event = 'snapshot_open'").collect()]
+    chunks = _chunk_facts(delta_spark, paths["facts"])
+    assert len(chunks) == statuses[-1]["chunks_done"] and min(c["lsn"] for c in chunks) >= s
+    snap = delta_spark.read.format("delta").load(paths["bronze"]).where("_operation = 0")
+    assert snap.count() == snap.select("id").distinct().count()  # no key read twice
+    assert snap.where(f"_snapshot != '{s}' OR _start_lsn < '{s}'").isEmpty()
+
+
+# 'n' and 'N' are one leading value under the database's case-insensitive collation and two
+# in Python, and 'ş' sorts after both: bounds inside one leading value and across them
+_COMP = f"SELECT IIF(n % 3 = 0, N'n', IIF(n % 3 = 1, N'N', N'ş')), n, 'old' FROM {_ROWS}"
+KEYSETS = {  # table: (columns, rows, keys, changes between waves, a last key)
+    "ck_comp": (
+        "region NVARCHAR(10) NOT NULL, seq INT NOT NULL, v VARCHAR(20), PRIMARY KEY (region, seq)",
+        f"{_COMP} WHERE n <= 90",
+        ["region", "seq"],
+        [
+            ("INSERT INTO dbo.ck_comp VALUES (?, ?, 'new')", ("N", 1000)),
+            ("UPDATE dbo.ck_comp SET v = 'upd' WHERE region = ? AND seq = ?", ("ş", 89)),
+            ("DELETE FROM dbo.ck_comp WHERE region = ? AND seq = ?", ("n", 87)),
+            ("UPDATE dbo.ck_comp SET seq = 2000 WHERE region = ? AND seq = ?", ("N", 88)),
+        ],
+        ("ş", 99999),
+    ),
+    # one varchar key, ordered as text: 'k1' < 'k10' < 'k2'
+    "ck_code": (
+        "code VARCHAR(12) NOT NULL PRIMARY KEY, v VARCHAR(20)",
+        f"SELECT CONCAT('k', n), 'old' FROM {_ROWS} WHERE n <= 90",
+        ["code"],
+        [
+            ("INSERT INTO dbo.ck_code VALUES (?, 'new')", ("k45a",)),
+            ("UPDATE dbo.ck_code SET v = 'upd' WHERE code = ?", ("k89",)),
+            ("DELETE FROM dbo.ck_code WHERE code = ?", ("k88",)),
+            ("UPDATE dbo.ck_code SET code = 'k5a' WHERE code = ?", ("k87",)),
+        ],
+        ("zz",),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", KEYSETS)
+def test_keyset_chunks_tile_composite_and_varchar_keys_under_changes(
+    delta_spark, sqlserver, workdir, name
+):
+    ddl, rows, keys, changes, last = KEYSETS[name]
+    sqlserver.run(f"CREATE TABLE dbo.{name} ({ddl})")
+    sqlserver.run(f"INSERT INTO dbo.{name} {rows}")
+    ci = sqlserver.enable_cdc(name)
+    options = {
+        "connectionString": _reader(sqlserver, name, ci),
+        "captureInstance": ci,
+        "numPartitions": "2",
+    }
+    paths, cdc, run = _chunked(delta_spark, options, workdir, name)
+    run().awaitTermination()
+    facts = delta_spark.read.format("delta").load(paths["facts"])
+    [opened] = facts.where("event = 'snapshot_open'").collect()
+    assert json.loads(opened["detail"])["plan"]["kind"] == "keyset"
+    statuses, changes = [], list(changes)
+    while not (statuses and statuses[-1]["done"]):
+        statuses.append(
+            cdc.backfill(
+                paths["bronze"], app_id=name, facts_table=paths["facts"], chunk_rows=7, max_waves=1
+            )
+        )
+        if changes:  # in keys read already, and in keys not read yet
+            sqlserver.run(*changes.pop(0))
+        assert len(statuses) < 20
+    assert all(s["chunks_total"] is None for s in statuses[:-1])  # no estimate for a keyset
+    marker = ", ".join(["?"] * len(last))
+    sqlserver.run(f"INSERT INTO dbo.{name} ({', '.join(keys)}, v) VALUES ({marker}, 'end')", last)
+    sqlserver.wait_for(f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE v = 'end'")
+    run().awaitTermination()
+    assert _apply(delta_spark, paths, ci, keys)["rebuilt"]
+    table = {tuple(r) for r in sqlserver.run(f"SELECT {', '.join(keys)}, v FROM dbo.{name}")}
+    assert _image(delta_spark, paths["silver"], *keys, "v") == table
+
+    chunks = _chunk_facts(delta_spark, paths["facts"])
+    assert [c["chunk"] for c in chunks] == list(range(len(chunks)))
+    assert chunks[0]["lo"] is None and chunks[-1]["hi"] is None
+    assert all(a["hi"] == b["lo"] for a, b in pairwise(chunks))  # each starts where one ended
+    # planned and read in the same wave, so each holds chunk_rows rows and the last the rest
+    assert all(c["rows"] == 7 for c in chunks[:-1]) and 0 < chunks[-1]["rows"] <= 7
+    snap = delta_spark.read.format("delta").load(paths["bronze"]).where("_operation = 0")
+    assert snap.count() == snap.select(*keys).distinct().count() == sum(c["rows"] for c in chunks)
+
+
+def test_a_chunk_waits_under_read_committed_for_a_transaction_holding_locks_in_its_range(
+    delta_spark, sqlserver, workdir
+):
+    from mssql_cdc.lsn import normalize
+
+    sqlserver.run("CREATE TABLE dbo.ck_lock (id INT NOT NULL PRIMARY KEY, v VARCHAR(20) NOT NULL)")
+    sqlserver.run(f"INSERT INTO dbo.ck_lock SELECT n, 'old' FROM {_ROWS} WHERE n <= 40")
+    ci = sqlserver.enable_cdc("ck_lock")
+    options = {
+        "connectionString": _reader(sqlserver, "ck_lock", ci),
+        "captureInstance": ci,
+        "numPartitions": "2",
+    }
+    paths, cdc, run = _chunked(delta_spark, options, workdir, "ck-lock")
+    run().awaitTermination()  # chunks [-, 11) [11, 21) in wave 0, [21, 31) [31, -) in wave 1
+    holder = sqlserver.connect()
+    held = holder.cursor()
+    held.execute("SELECT @@SPID")
+    spid = held.fetchone()[0]
+    held.execute("BEGIN TRAN; UPDATE dbo.ck_lock SET v = 'held' WHERE id BETWEEN 21 AND 25")
+    waits: dict = {}
+
+    def release():  # once a chunk's read waits on the holder's locks, commit
+        deadline = time.time() + 120
+        while not waits and time.time() < deadline:
+            blocked = sqlserver.run(
+                "SELECT session_id, wait_type FROM sys.dm_exec_requests "
+                "WHERE blocking_session_id = ?",
+                (spid,),
+            )
+            waits.update(dict(blocked))
+            time.sleep(0.5)
+        time.sleep(2)
+        held.execute("COMMIT")
+
+    releaser = threading.Thread(target=release, daemon=True)
+    releaser.start()
+    try:
+        status = cdc.backfill(
+            paths["bronze"], app_id="ck-lock", facts_table=paths["facts"], chunk_rows=10
+        )
+    finally:
+        releaser.join(130)
+        holder.close()
+    assert status["done"] and status["chunks_done"] == 4
+    assert waits and all(w.startswith("LCK_M_S") for w in waits.values()), waits  # under RC
+    sqlserver.wait_for(f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE v = 'held'")
+    [(commit,)] = sqlserver.run(
+        f"SELECT CONVERT(varchar(22), MAX(__$start_lsn), 1) FROM cdc.[{ci}_CT] WHERE v = 'held'"
+    )
+    snap = delta_spark.read.format("delta").load(paths["bronze"]).where("id BETWEEN 21 AND 25")
+    # the chunk read the rows once committed, after its stamp L: an image newer than L, which
+    # the stream's change at that commit equals
+    assert {(r["v"], r["_chunk"]) for r in snap.collect()} == {("held", 2)}
+    assert all(r["_start_lsn"] < normalize(commit) for r in snap.collect())
+    run().awaitTermination()
+    assert _apply(delta_spark, paths, ci, ["id"])["rebuilt"]
+    table = {tuple(r) for r in sqlserver.run("SELECT id, v FROM dbo.ck_lock")}
+    assert _image(delta_spark, paths["silver"], "id", "v") == table
+
+
+def test_a_snapshot_isolation_read_takes_the_committed_rows_without_waiting(sqlserver, backend):
+    ci = sqlserver.cdc_table("ck_si", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL")
+    sqlserver.run(f"INSERT INTO dbo.ck_si SELECT n, 'old' FROM {_ROWS} WHERE n <= 10")
+    options = {"connectionString": _reader(sqlserver, "ck_si", ci), "backend": backend}
+
+    def read(isolation):
+        with closing(make_client(options)) as client:
+            batches = client.iter_table(
+                "dbo", "ck_si", ["id", "v"], ["id"], None, None, None, 100, isolation
+            )
+            return sorted((r["id"], r["v"]) for b in batches for r in b.to_pylist())
+
+    with pytest.raises(Exception, match="[Ss]napshot isolation .*not allowed"):
+        read("snapshot")  # until the DBA allows it
+    sqlserver.run("ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION ON")
+    holder = sqlserver.connect()
+    try:
+        holder.cursor().execute("BEGIN TRAN; UPDATE dbo.ck_si SET v = 'held' WHERE id = 5")
+        started = time.monotonic()
+        # the versions committed when the read began, and no wait for the writer's locks
+        assert read("snapshot") == [(i, "old") for i in range(1, 11)]
+        assert time.monotonic() - started < 10
+        holder.cursor().execute("COMMIT")
+        assert read("snapshot")[4] == (5, "held")
+    finally:
+        holder.close()
+        sqlserver.run("ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION OFF")
+
+
+@pytest.mark.parametrize("grant", ["table", "columns"])
+def test_chunk_planning_needs_only_select_on_the_table(sqlserver, grant, backend):
+    from mssql_cdc.client import next_chunks, snapshot_plan
+
+    table = f"ck_plan_{grant}"
+    ci = sqlserver.cdc_table(
+        table, "a INT NOT NULL, b VARCHAR(5) NOT NULL, v INT, PRIMARY KEY (a, b)"
+    )
+    sqlserver.run(
+        f"INSERT INTO dbo.{table} SELECT n % 4, CONCAT('b', n), n FROM {_ROWS} WHERE n <= 30"
+    )
+    on = f"dbo.{table}" if grant == "table" else f"dbo.{table} (a, b, v)"
+    user = f"{table}_reader"
+    conn = sqlserver.login(
+        user, f"GRANT SELECT ON {on} TO {user}", f"GRANT SELECT ON cdc.[{ci}_CT] TO {user}"
+    )
+    keys = sorted((r[0], r[1]) for r in sqlserver.run(f"SELECT a, b FROM dbo.{table}"))
+    with closing(make_client({"connectionString": conn, "backend": backend})) as client:
+        source = client.source_table(ci)
+        # sys.sp_spaceused is public; the key's seeks need SELECT on its columns, nothing more
+        assert client.row_estimate("dbo", table) == 30
+        assert client.key_max("dbo", table, source.keys) == keys[-1]
+        types = client.key_types(ci, source.keys)
+        assert client.key_bound("dbo", table, source.keys, types, None, None, 10) == keys[10]
+        assert client.key_bound("dbo", table, source.keys, types, keys[10], None, 25) is None
+        plan = snapshot_plan(client, ci, source)
+        assert plan == {"kind": "keyset", "max": list(keys[-1])}
+        chunks = next_chunks(client, ci, source, plan, 0, None, 10, 8)
+    assert [(i, lo, hi) for i, lo, hi in chunks] == [
+        (0, None, list(keys[8])),
+        (1, list(keys[8]), list(keys[16])),
+        (2, list(keys[16]), list(keys[24])),
+        (3, list(keys[24]), None),
+    ]
+
+
+def test_key_bound_seeks_each_piece_for_its_first_keys_only(sqlserver):
+    ci = sqlserver.cdc_table(
+        "ck_bound", "company INT NOT NULL, id INT NOT NULL, v INT, PRIMARY KEY (company, id)"
+    )
+    sqlserver.run(f"INSERT INTO dbo.ck_bound SELECT n % 3, n, n FROM {_ROWS}")
+    keys = sorted(tuple(r) for r in sqlserver.run("SELECT company, id FROM dbo.ck_bound"))
+    lo, hi, n = (0, 3000), (2, 30002), 500
+    inside = [k for k in keys if lo <= k < hi]
+    client = make_client({"connectionString": sqlserver.connection_string})
+    sent = []
+    real = client._b.batches
+
+    def record(sql, params, batch_size):
+        sent.append((sql, params))
+        return real(sql, params, batch_size)
+
+    client._b.batches = record
+    try:
+        types = client.key_types(ci, ["company", "id"])
+        sent.clear()
+        assert client.key_bound("dbo", "ck_bound", ["company", "id"], types, lo, hi, n) == inside[n]
+    finally:
+        client.close()
+    [(sql, params)] = sent
+    rows, plan = _plan(sqlserver, sql, params)
+    # three pieces (company 0 from id 3000, company 1, company 2 below id 30002), each a seek
+    # that stops after its first n + 1 keys: never the ~33,000 keys of the range
+    assert rows == 1 and sql.count(f"TOP ({n + 1})") == 3
+    assert _rows_read(plan) <= 3 * (n + 1), _rows_read(plan)
+
+
+def test_reconcile_matches_a_quiet_table_and_classifies_differences_injected_in_silver(
+    delta_spark, sqlserver, workdir
+):
+    from delta.tables import DeltaTable
+
+    from mssql_cdc import reconcile
+
+    sqlserver.run("CREATE TABLE dbo.rc_live (id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL)")
+    sqlserver.run(f"INSERT INTO dbo.rc_live SELECT n, 'old' FROM {_ROWS} WHERE n <= 300")
+    ci = sqlserver.enable_cdc("rc_live")
+    options = {
+        "connectionString": _reader(sqlserver, "rc_live", ci),
+        "captureInstance": ci,
+        "numPartitions": "2",
+    }
+    paths, cdc, run = _chunked(delta_spark, options, workdir, "rc-live")
+    run().awaitTermination()
+    assert cdc.backfill(
+        paths["bronze"], app_id="rc-live", facts_table=paths["facts"], chunk_rows=40
+    )["done"]
+    sqlserver.run("UPDATE dbo.rc_live SET v = 'new' WHERE id = 120")
+    sqlserver.run("DELETE FROM dbo.rc_live WHERE id = 250")
+    sqlserver.wait_for(f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE id = 250")
+    run().awaitTermination()
+    assert _apply(delta_spark, paths, ci, ["id"])["rebuilt"]
+
+    def check(**kw):
+        return reconcile(
+            delta_spark,
+            options,
+            paths["silver"],
+            bronze=paths["bronze"],
+            facts_table=paths["facts"],
+            bucket_rows=50,
+            seed=3,
+            **kw,
+        )
+
+    quiet = check(sample=1.0)  # every bucket counted and compared row by row
+    assert (quiet["mismatch"], quiet["in_flight"], quiet["failures"]) == (0, 0, {})
+    assert quiet["match"] == quiet["buckets"] == quiet["hashed"] >= 5
+    silver = DeltaTable.forPath(delta_spark, paths["silver"])
+    silver.delete("id = 7")  # an insert silver never got
+    silver.update("id = 120", {"v": "'old'"})  # an update it missed
+    stale = delta_spark.read.format("delta").load(paths["silver"]).where("id = 8")
+    stale.selectExpr("5000 AS id", "v", "_start_lsn", "_commit_ts").write.format("delta").mode(
+        "append"
+    ).save(paths["silver"])  # a delete it missed
+    found = check(sample=1.0)
+    failures = {
+        json.loads(r["key"])["id"]: r["failure_type"]
+        for r in found["report"].where("key IS NOT NULL").collect()
+    }
+    assert failures == {7: "MISSING_TARGET", 120: "RECORD_DIFF", 5000: "MISSING_SOURCE"}
+    assert found["mismatch"] == 2 and found["in_flight"] == 0  # 120 keeps the counts equal
