@@ -183,3 +183,58 @@ def test_a_string_key_is_counted_whole_and_compared_from_the_source_rows(delta_s
         '{"code":"k07"}': "MISSING_TARGET",
         '{"code":"k21"}': "RECORD_DIFF",
     }
+
+
+def test_a_chunked_bootstrap_applied_by_wave_reconciles_through_snapshot_chunks(
+    delta_spark, workdir
+):
+    # the parts together (ADR 0028): to_delta opens the snapshot and streams from S, backfill
+    # reads it in waves, apply_changes applies them and rebuilds at completion, and reconcile
+    # reads the source back with snapshotChunks
+    o = Orders(delta_spark, workdir)
+    o.options["numPartitions"] = "2"  # two chunks per wave
+    o.commit(*[(2, {"order_id": i, "status": "new"}) for i in range(12)])
+    facts = os.path.join(workdir, "facts")
+    cdc = stream(delta_spark, o.options)
+
+    def run():
+        cdc.to_delta(
+            o.bronze,
+            "orders-v1",
+            o.ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    def apply():
+        result = apply_changes(
+            delta_spark,
+            o.bronze,
+            o.silver,
+            CI,
+            [o.key],
+            control_table=o.control,
+            facts_table=facts,
+        )
+        keys = sorted(r[o.key] for r in delta_spark.read.format("delta").load(o.silver).collect())
+        return result, keys
+
+    run()  # S: the plan is 0..11, chunks of 3 keys
+    o.commit((1, {"order_id": 3, "status": "new"}), (2, {"order_id": 20, "status": "new"}))
+    o.at += timedelta(minutes=1)  # after the wave's stamp, before its read
+    o.db.commit_before_read(CI, [(1, {"order_id": 1, "status": "new"})], at=o.at)
+    backfill = {"app_id": "orders-v1", "facts_table": facts, "chunk_rows": 3}
+    assert cdc.backfill(o.bronze, max_waves=1, **backfill)["chunks_done"] == 2
+    run()
+    _, keys = apply()  # wave 0's chunks [-, 3) and [3, 6), and the changes
+    assert keys == [0, 2, 4, 5, 20]
+    assert cdc.backfill(o.bronze, **backfill)["done"]
+    run()
+    done, keys = apply()
+    assert done["rebuilt"] and keys == [0, 2, *range(4, 12), 20]
+
+    result = o.reconcile(sample=1.0)
+    assert (result["mismatch"], result["failures"]) == (0, {})
+    assert result["hashed"] == result["buckets"] == result["match"] > 0

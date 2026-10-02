@@ -71,9 +71,7 @@ SILVER_COLUMNS = [
     ),
     ("_commit_ts", "TIMESTAMP_NTZ", "Commit time of _start_lsn, UTC."),
 ]
-# bronze's metadata columns, none of them copied to silver (_snapshot and _chunk are listed
-# for bronze tables written before sink knew them)
-_META = {*BRONZE_COLUMN_COMMENTS, "_snapshot", "_chunk"}
+_META = set(BRONZE_COLUMN_COMMENTS)  # bronze's metadata columns, none of them copied to silver
 
 
 def _q(name: str) -> str:
@@ -127,10 +125,9 @@ def _record(
 
 
 def _resnapshot(opened) -> bool:
-    """A 'snapshot_open' facts row of a re-snapshot (ADR 0018): a later generation, or a
-    purged range."""
-    detail = json.loads(opened["detail"] or "{}")
-    return bool(detail.get("generation")) or opened["lost_from_ts"] is not None
+    """A 'snapshot_open' facts row of a re-snapshot (ADR 0018), not of a bootstrap: the mode
+    the stream opened it in, which its completion row is named after."""
+    return json.loads(opened["detail"] or "{}").get("mode") == "resnapshot"
 
 
 def _chunks(facts, snapshot: str) -> dict[int, tuple]:
@@ -249,7 +246,7 @@ def apply_changes(
             opened = (
                 facts.where(F.col("event") == "snapshot_open")
                 .orderBy(F.col("max_lsn").desc())
-                .select("max_lsn", "detail", "lost_from_ts")
+                .select("max_lsn", "detail")
                 .first()
             )
         if opened and (points[0] is None or opened["max_lsn"] > points[0]):

@@ -240,7 +240,7 @@ def reconcile(
     """
     from pyspark.sql import functions as F
 
-    from .client import _text, make_client
+    from .client import _json_key, make_client
     from .lsn import ZERO_LSN
     from .sink import _utc_now, _write
     from .source import METADATA_COLUMNS, _opt
@@ -280,25 +280,18 @@ def reconcile(
             tiles: list | None = []  # the first key of each range after the first
             if rows > bucket_rows:
                 types = client.key_types(ci, keys)
-
-                def value(v, t):  # JSON as is, else the text CAST(? AS t) reads back as v
-                    if v is None or isinstance(v, (bool, int, float, str)):
-                        return v
-                    return _text(v, t.partition(" COLLATE ")[0])
-
                 # ponytail: NTILE reads and spools the whole key; keyset bounds if it shows up.
                 # A key with no type to CAST a bound to gets no ranges.
                 n = math.ceil(rows / bucket_rows)
                 tiles = (
                     None
                     if None in types
-                    else [
-                        [value(v, t) for v, t in zip(b, types)]
+                    else [  # as snapshotChunks takes them
+                        _json_key(b, types)
                         for b in client.key_tiles(source.schema, source.table, keys, n)
                     ]
                 )
-            ranges = list(pairwise([None, *tiles, None])) if tiles is not None else []
-            parts = [tuple(b if b is None or len(keys) > 1 else b[0] for b in r) for r in ranges]
+            parts = list(pairwise([None, *tiles, None])) if tiles is not None else []
         for b in found:
             b["status"] = (
                 "MATCH" if b["source"] == b["silver"] else "IN_FLIGHT" if b["moved"] else "MISMATCH"
@@ -314,7 +307,8 @@ def reconcile(
             read_lsn = client.max_lsn() or ZERO_LSN  # M again, before the rows are read
             rows_read = (
                 spark.read.format("mssql_cdc_snapshot")
-                .options(**options)
+                # no chunk metrics: they are backfill()'s, and a stream's directory folds them
+                .options(**{k: v for k, v in options.items() if k.lower() != "metricspath"})
                 .option("snapshotChunks", json.dumps([[i, *parts[i]] for i in chosen]))
                 .option("snapshotLsn", read_lsn)
                 .load()
@@ -337,12 +331,7 @@ def reconcile(
                 theirs, how = target.transform(label), "full_outer"
             else:
                 theirs, how = target.withColumn("_rc_idx", F.lit(None).cast("int")), "left"
-            if "_chunk" in rows_read.columns:
-                ours = rows_read.withColumnRenamed("_chunk", "_rc_idx")
-            elif kind:  # ponytail: a reader without snapshotChunks reads it all; drop at merge
-                ours = rows_read.transform(label)
-            else:
-                ours = rows_read.withColumn("_rc_idx", F.lit(None).cast("int"))
+            ours = rows_read.withColumnRenamed("_chunk", "_rc_idx")  # the chunk is the bucket
             failures = _differences(
                 ours, theirs, keys, columns, how, changes, min(read_lsn, silver_lsn or ZERO_LSN)
             ).join(F.broadcast(labels), "_rc_idx", "left")

@@ -382,8 +382,10 @@ class Log:
         df = self.spark.createDataFrame([tuple(row.get(k) for k in _FACT_FIELDS)], FACTS_SCHEMA)
         df.write.format("delta").mode("append").save(self.facts)
 
-    def open(self, s, generation=0):
-        detail = {"mode": "chunked", "keys": ["order_id"], "generation": generation}
+    def open(self, s, mode="bootstrap"):
+        """The 'snapshot_open' row, as CdcStream._open writes it."""
+        generation = int(mode == "resnapshot")
+        detail = {"mode": mode, "keys": ["order_id"], "generation": generation}
         self.fact("snapshot_open", s, detail)
 
     def verdict(self, n):
@@ -510,7 +512,7 @@ def test_a_legacy_snapshot_rebuilds_and_an_open_resnapshot_holds_the_verdict_unt
 
     g.change(12, (2, 4, "new"))
     # 2 deleted in a purged gap; the re-snapshot at 50 opens and the stream goes on from it
-    g.open(50, generation=1)
+    g.open(50, "resnapshot")
     g.change(51, (3, 3, "new"), (4, 3, "paid"))
     g.wave(50, 0, 60, [(0, None, None, [(1, "new"), (3, "paid"), (4, "new")])])
     g.verdict(61)
