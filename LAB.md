@@ -53,6 +53,7 @@ at the same time.
 | `t8_fetch_throughput` | rows/s of one connection over a wide change table: with/without `(max)` columns, Arrow batch size, named time zone, `fetchall()` baseline | SQL Server | read performance; informational |
 | `t7_end_to_end` | bronze == change table up to the end LSN; restart and incremental runs; `--idle-minutes`: finalization advances without rows; `--destructive`: guard stops the stream | everything | the full pipeline, with per-batch timings |
 | `t9_capture_instance_switch` | a table moved to a new capture instance with a new column (`sql/switch_capture_instance.sql` as written) under a continuous writer: the running query stops at the new start S and resumes on restart; bronze holds every change once, below S from the old instance and from S on from the new; its latest image equals the table; one `capture_instance_switched` event; the stream keeps running once the old instance is dropped | everything (its own table `dbo.t9_switch` and login) | ADR 0023; the DBA procedure |
+| `t10_chunked_snapshot` | a chunked bootstrap read by `backfill()` next to the running stream, under a continuous writer (inserts, updates, deletes, key updates) and a transaction holding one range's locks: the chunks tile the key space, stamped at or after S, counted in the facts; no chunk row older than its stamp; a chunk waits for the held range under READ COMMITTED; bronze holds every change after S once; silver equals the table and `reconcile` matches. `--resnapshot`: a gap with deletes purged by a forced cleanup, recovered by a chunked re-snapshot in generation 1 (the gap's deleted keys gone from silver, with no delete row) | everything (its own table `dbo.t10_chunked` and login) | ADR 0028 |
 
 ```bash
 python -m lab.checks.t2_timezone
@@ -64,6 +65,8 @@ python -m lab.checks.t6_delta_semantics
 python -m lab.checks.t8_fetch_throughput --rows 200000   # informational; creates dbo.fetch_bench
 python -m lab.checks.t7_end_to_end --idle-minutes 6    # idle entries come about every 5 min
 python -m lab.checks.t9_capture_instance_switch        # recreates dbo.t9_switch; ~7 min
+python -m lab.checks.t10_chunked_snapshot              # recreates dbo.t10_chunked; ~15 min
+python -m lab.checks.t10_chunked_snapshot --resnapshot # cleans up its own change table
 # destructive, last:
 python -m lab.checks.t3_read_semantics --destructive
 python -m lab.checks.t7_end_to_end --destructive
@@ -117,3 +120,5 @@ them, since re-running a push run skips t1 and the destructive t7).
 | t8 | SQL Server 2022 CU27, local | INFO: 200k rows; Arrow with two (max) columns 22–26k rows/s vs 34–39k without (batch 10k), 28–30k vs 34–35k (batch 50k); fetchall 10–18k | local runs 2026-09-29 |
 | t9 | SQL Server 2022 CU27 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, local | PASS: the query stopped at S and resumed on restart; 3 batches after the old instance was dropped; 6,967 + 4,816 change rows (old + new instance) once each; latest image == table (3,631 rows) | `t9_capture_instance_switch-20261001T203738Z.json`, local run 2026-10-01 |
 | t9 | SQL Server 2017 CU31 (`2017-latest`), PySpark 4.2.0, delta-spark 4.4.0, local | PASS: the same; 7,616 + 4,187 change rows; latest image == table (3,733 rows) | `t9_capture_instance_switch-20261001T204603Z.json`, local run 2026-10-01 |
+| t10 | SQL Server 2022 CU27 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, local | PASS: 3,000 rows before CDC, 15 chunks in 8 waves next to the running stream under 20,028 writer transactions; 0 of 5,507 chunk rows older than their stamp; a chunk waited (`LCK_M_S`) on the held range; 18,731 change rows after S, each once; silver == table (4,735 rows); `reconcile` 10 buckets MATCH, no chunk failures | `t10_chunked_snapshot-20261002T234011Z.json`, local run 2026-10-02 |
+| t10 `--resnapshot` | SQL Server 2022 CU27 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, local | PASS: a forced cleanup purged a gap with 60 deleted keys; generation 1 opened a chunked snapshot, which backfill read in 15 chunks (8 waves) under 10,746 writer transactions and closed with its `resnapshot` row; 0 of 4,346 chunk rows stale; 10,668 change rows after S once; silver == table (3,428 rows), the 60 keys gone with no delete row | `t10_chunked_snapshot-20261002T235711Z.json`, local run 2026-10-02 |
