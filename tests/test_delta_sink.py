@@ -229,17 +229,18 @@ def test_facts_table_at_version_0_gains_every_column_and_the_current_comments(de
     )
     # the facts shape before migration 1, with the comments it was created with
     v0 = [(n, t, "old's") if n == "rows" else (n, t, c) for n, t, c in FACTS_COLUMNS]
+    names = {name for name, _, _ in added}
     tables.create_if_not_exists(
         spark,
         old,
-        [c for c in v0 if c not in added],
+        [c for c in v0 if c[0] not in names],
         "one row per non-empty batch",
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(spark, old, "facts") == 6
+    assert migrations.migrate(spark, old, "facts") == 7
     cols, description = _comments(spark, old)
     assert all(name in cols and cols[name][1] for name, _, _ in added)
-    # migrations 5 and 6 rewrote the comments whose meaning changed: as a new table has them
+    # migrations 5 to 7 rewrote the comments whose meaning changed: as a new table has them
     assert {n: cols[n][1] for n, _, _ in FACTS_COLUMNS} == {n: c for n, _, c in FACTS_COLUMNS}
     assert description == FACTS_COMMENT
 
@@ -523,13 +524,23 @@ def test_a_bronze_table_at_version_0_gets_the_capture_instance_comments(delta_sp
     tables.create_if_not_exists(  # includeCommandId=false: no _command_id to comment
         delta_spark,
         old,
-        [("_capture_instance", "STRING", "old's"), ("_start_lsn", "STRING", "old's")],
+        [
+            ("_capture_instance", "STRING", "old's"),
+            ("_start_lsn", "STRING", "old's"),
+            ("_batch_id", "INT", "old's"),
+        ],
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(delta_spark, old, "bronze") == 1
+    assert migrations.migrate(delta_spark, old, "bronze") == 2
     cols, description = _comments(delta_spark, old)
     assert cols["_capture_instance"][1] == BRONZE_COLUMN_COMMENTS["_capture_instance"]
-    assert cols["_start_lsn"][1] == "old's" and description == BRONZE_COMMENT
+    assert cols["_batch_id"][1] == "old's" and description == BRONZE_COMMENT
+    # migration 2 (ADR 0028): the snapshot and chunk columns, and _start_lsn's new comment
+    assert {n: cols[n] for n in ("_snapshot", "_chunk", "_start_lsn")} == {
+        "_snapshot": ("string", BRONZE_COLUMN_COMMENTS["_snapshot"]),
+        "_chunk": ("int", BRONZE_COLUMN_COMMENTS["_chunk"]),
+        "_start_lsn": ("string", BRONZE_COLUMN_COMMENTS["_start_lsn"]),
+    }
 
 
 # -- a newer capture instance of the table (ADR 0023) ----------------------------------------
@@ -758,10 +769,13 @@ def test_bootstrap_snapshots_once_and_the_stream_continues_from_it(delta_spark, 
     db.commit(CI, [(2, {"order_id": 9, "status": "new"})], at=T0 + timedelta(minutes=10))
     second = run()  # a rerun: the same snapshot, then only the new changes
     assert second.where("_operation = 0").count() == 5 and second.count() == 8
-    assert (
-        stream(spark, options).snapshot(target)["lsn"]
-        == second.where("_operation = 0").first()["_start_lsn"]
-    )  # the snapshot's LSN, not the newest change's
+    snap = stream(spark, options).snapshot(target)["lsn"]
+    assert snap == second.where("_operation = 0").first()["_start_lsn"]  # not a change's LSN
+    # a whole snapshot names itself in _snapshot; change rows name none, and no row a chunk
+    assert {(r["_operation"] == 0, r["_snapshot"], r["_chunk"]) for r in second.collect()} == {
+        (True, snap, None),
+        (False, None, None),
+    }
 
     # the latest image per key, as a MERGE downstream would apply it, is the source table now
     assert latest(second, "order_id", "status") == [
@@ -1141,6 +1155,10 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
     )
     with pytest.raises(ValueError, match="on_data_loss"):
         cdc.to_delta(target, "x", ckpt, on_data_loss="skip")
+    with pytest.raises(ValueError, match="snapshot must be 'full' or 'chunked'"):
+        cdc.to_delta(target, "x", ckpt, bootstrap=True, snapshot="lazy")
+    with pytest.raises(ValueError, match="snapshot='chunked' needs a facts_table"):
+        cdc.to_delta(target, "x", ckpt, bootstrap=True, snapshot="chunked")
     # the generation state is a file, and the checkpoint is read from Python
     for uri in ("abfss://c@a.dfs.core.windows.net/x", "/dbfs/ckpt/orders"):
         with pytest.raises(ValueError, match="same directory"):
@@ -1208,15 +1226,324 @@ def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
             + END_COLUMNS
             + DETAIL_COLUMNS
         )
+        names = {name for name, _, _ in added}
         tables.create_if_not_exists(
             spark,
             old,
-            [c for c in FACTS_COLUMNS if c not in added],
+            [c for c in FACTS_COLUMNS if c[0] not in names],
             properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
         )
         # add_columns through saveAsTable, set_comments on a table name
-        assert migrations.migrate(spark, old, "facts") == 6
+        assert migrations.migrate(spark, old, "facts") == 7
         assert {name for name, _, _ in added} <= set(spark.table(old).columns)
     finally:
         for name in (bronze, facts, control, old):
             spark.sql(f"DROP TABLE IF EXISTS {name}")
+
+
+# -- chunked snapshots next to the stream (ADR 0028) ---------------------------------------
+def _rebuilt(df, key, value, s):
+    """Sorted (key, value) of the latest image per key rebuilt from snapshot ``s``: its rows,
+    whichever chunk stamped them, and the changes after ``s`` (ADR 0028)."""
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    last = Window.partitionBy(key).orderBy(
+        F.col("_start_lsn").desc(),
+        F.col("_command_id").desc_nulls_last(),
+        F.col("_seqval").desc_nulls_last(),
+        F.col("_operation").desc(),
+    )
+    ours = (F.col("_operation") == 0) & (F.coalesce("_snapshot", "_start_lsn") == s)
+    after = ~F.col("_operation").isin(0, 3) & (F.col("_start_lsn") > s)
+    rows = (
+        df.where(ours | after)
+        .withColumn("n", F.row_number().over(last))
+        .where("n = 1 AND _operation != 1")
+        .collect()
+    )
+    return sorted((r[key], r[value]) for r in rows)
+
+
+def _source(db) -> list:
+    """Sorted (order_id, status) of the fake's source table now."""
+    with open(os.path.join(db.path, "tables", f"{CI}.json"), encoding="utf-8") as fh:
+        return sorted((r["order_id"], r["status"]) for r in json.load(fh).values())
+
+
+def _events(spark, facts, event):
+    rows = spark.read.format("delta").load(facts).where(f"event = '{event}'").collect()
+    return sorted(rows, key=lambda r: (r["min_lsn"], r["detail"] or ""))
+
+
+def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_spark, workdir):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=8)  # orders 0..7
+    options["numPartitions"] = "2"  # two chunks per wave
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        q = cdc.to_delta(
+            target,
+            "chunk-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        )
+        q.awaitTermination()
+
+    run()  # opens the snapshot at S and starts the stream there: the table is not read
+    assert not os.path.exists(target)
+    [opened] = _events(spark, facts, "snapshot_open")
+    s = opened["min_lsn"]
+    assert (opened["max_lsn"], opened["app_id"], opened["batch_id"]) == (s, "chunk-v1", None)
+    plan = json.loads(opened["detail"])
+    assert plan == {
+        "mode": "bootstrap",
+        "keys": ["order_id"],
+        "plan": {"kind": "int", "lo": 0, "hi": 7, "rows": 8},
+        "generation": 0,
+        "lost_from_ts": None,
+        "lost_to_ts": None,
+    }
+    # each wave: a change the stream reads, then one between the wave's stamp and its read
+    waves = [
+        (
+            [(3, {"order_id": 1, "status": "new"}), (4, {"order_id": 1, "status": "paid"})],
+            [(1, {"order_id": 3, "status": "new"}), (2, {"order_id": 9, "status": "new"})],
+        ),
+        (
+            [(1, {"order_id": 6, "status": "new"})],
+            [
+                (3, {"order_id": 0, "status": "new"}),
+                (4, {"order_id": 0, "status": "late"}),
+                (2, {"order_id": 6, "status": "again"}),
+            ],
+        ),
+    ]
+    statuses = []
+    for i, (before, during) in enumerate(waves):
+        db.commit(CI, before, at=T0 + timedelta(minutes=10 + 2 * i))
+        db.commit_before_read(CI, during, at=T0 + timedelta(minutes=11 + 2 * i))
+        statuses.append(
+            cdc.backfill(target, app_id="chunk-v1", facts_table=facts, chunk_rows=2, max_waves=1)
+        )
+        run()
+    assert [(st["chunks_done"], st["chunks_total"], st["done"]) for st in statuses] == [
+        (2, 4, False),
+        (4, 4, True),
+    ]
+    assert statuses[-1]["snapshot"] == s and not statuses[-1]["paused"]
+    db.commit(CI, [(1, {"order_id": 4, "status": "new"})], at=T0 + timedelta(minutes=20))
+    run()
+    bronze = spark.read.format("delta").load(target)
+    assert (
+        _rebuilt(bronze, "order_id", "status", s)
+        == _source(db)
+        == [
+            (0, "late"),
+            (1, "paid"),
+            (2, "new"),
+            (5, "new"),
+            (6, "again"),
+            (7, "new"),
+            (9, "new"),
+        ]
+    )
+    # every chunk row belongs to S, stamped at or after it, each key once
+    snap = bronze.where("_operation = 0").collect()
+    assert {r["_snapshot"] for r in snap} == {s} and all(r["_start_lsn"] >= s for r in snap)
+    assert len({r["order_id"] for r in snap}) == len(snap)
+    assert sorted({r["_chunk"] for r in snap}) == [0, 1, 2, 3]
+    chunks = _events(spark, facts, "snapshot_chunk")
+    details = sorted((json.loads(r["detail"]) for r in chunks), key=lambda d: d["chunk"])
+    assert [(d["chunk"], d["wave"], d["lo"], d["hi"]) for d in details] == [
+        (0, 0, None, 2),
+        (1, 0, 2, 4),
+        (2, 1, 4, 6),
+        (3, 1, 6, None),
+    ]
+    assert {d["snapshot"] for d in details} == {s} and all(r["min_lsn"] >= s for r in chunks)
+    assert sum(r["rows"] for r in chunks) == len(snap)
+    [done] = _events(spark, facts, "bootstrap")  # written once the last chunk is in
+    assert (done["min_lsn"], done["max_lsn"], done["app_id"], done["rows"]) == (
+        s,
+        s,
+        "chunk-v1",
+        len(snap),
+    )
+    assert json.loads(done["detail"])["chunks"] == 4
+    # a whole snapshot is never a chunk's L: there is none here, and the rerun reused S
+    assert cdc._last_snapshot(target, CI) is None
+    assert len(_events(spark, facts, "snapshot_open")) == 1
+    again = cdc.backfill(target, app_id="chunk-v1", facts_table=facts)
+    assert again["done"] and again["chunks_done"] == 4
+    assert spark.read.format("delta").load(target).count() == bronze.count()
+
+
+def test_backfill_resumes_after_a_crash_between_the_append_and_its_facts(
+    delta_spark, workdir, monkeypatch
+):
+    from mssql_cdc import sink, stream
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=6)
+    options["numPartitions"] = "2"
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        q = cdc.to_delta(
+            target,
+            "crash-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        )
+        q.awaitTermination()
+
+    run()
+    s = _events(spark, facts, "snapshot_open")[0]["min_lsn"]
+    write_facts = sink.write_facts
+
+    def crash(spark, table, rows, txn_app_id, version):
+        if rows[0]["event"] == "snapshot_chunk":
+            raise RuntimeError("the job died after the wave's append")
+        write_facts(spark, table, rows, txn_app_id, version)
+
+    monkeypatch.setattr(sink, "write_facts", crash)
+    with pytest.raises(RuntimeError, match="the job died"):
+        cdc.backfill(target, app_id="crash-v1", facts_table=facts, chunk_rows=2, max_waves=1)
+    monkeypatch.undo()
+    appended = spark.read.format("delta").load(target).where("_operation = 0").count()
+    assert appended == 4 and not _events(spark, facts, "snapshot_chunk")  # chunks 0 and 1
+    db.commit(CI, [(2, {"order_id": -1, "status": "new"})], at=T0 + timedelta(minutes=9))
+    # the rerun reads chunk 0 again (with order -1 now) but Delta skips its append; its facts
+    # rows come from the append committed before the crash
+    status = cdc.backfill(target, app_id="crash-v1", facts_table=facts, chunk_rows=2, max_waves=1)
+    assert (status["chunks_done"], status["done"]) == (2, False)
+    bronze = spark.read.format("delta").load(target)
+    assert bronze.where("_operation = 0").count() == appended
+    rows = {
+        json.loads(r["detail"])["chunk"]: r["rows"] for r in _events(spark, facts, "snapshot_chunk")
+    }
+    assert rows == {0: 2, 1: 2}
+    assert cdc.backfill(target, app_id="crash-v1", facts_table=facts, chunk_rows=2)["done"]
+    run()
+    bronze = spark.read.format("delta").load(target)
+    snap = bronze.where("_operation = 0").select("order_id").collect()
+    assert len(snap) == len({r["order_id"] for r in snap}) == 6  # no key twice
+    assert _rebuilt(bronze, "order_id", "status", s) == _source(db)  # order -1 by the stream
+
+
+def test_backfill_pauses_while_the_stream_lags_or_has_stopped(delta_spark, workdir, monkeypatch):
+    from mssql_cdc import sink, stream
+
+    spark = delta_spark
+    db, options = _orders(workdir)  # commits at T0 .. T0 + 2 min
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        q = cdc.to_delta(
+            target,
+            "slow-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        )
+        q.awaitTermination()
+
+    def backfill(hours):
+        return cdc.backfill(target, app_id="slow-v1", facts_table=facts, min_headroom_hours=hours)
+
+    run()  # its first batch planned no range: no headroom measured yet
+    paused = backfill(0)
+    assert paused["paused"] and "no facts row with retention_headroom_hours" in paused["reason"]
+    db.commit(CI, [(2, {"order_id": 3, "status": "new"})], at=T0 + timedelta(minutes=3))
+    run()  # headroom 0.05 h: from the watermark (T0) to the stream's position (T0 + 3 min)
+    paused = backfill(1)
+    assert (paused["paused"], paused["done"], paused["chunks_done"]) == (True, False, 0)
+    assert "below min_headroom_hours=1" in paused["reason"]
+    later = sink._utc_now() + timedelta(hours=1)
+    monkeypatch.setattr(sink, "_utc_now", lambda: later)  # the stream stopped an hour ago
+    assert "below min_headroom_hours=0.01" in backfill(0.01)["reason"]
+    monkeypatch.undo()
+    done = backfill(0.01)
+    assert done["done"] and not done["paused"]
+    assert not spark.read.format("delta").load(target).where("_operation = 0").isEmpty()
+
+
+def test_a_loss_while_a_chunked_snapshot_is_open_opens_a_newer_one(delta_spark, workdir):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=6)
+    options["numPartitions"] = "2"
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        q = cdc.to_delta(
+            target,
+            "reopen-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            on_data_loss="resnapshot",
+            snapshot="chunked",
+        )
+        q.awaitTermination()
+
+    run()
+    db.commit(CI, [(2, {"order_id": 6, "status": "new"})], at=T0 + timedelta(minutes=6))
+    run()  # the stream reads it
+    first = cdc.backfill(target, app_id="reopen-v1", facts_table=facts, chunk_rows=2, max_waves=1)
+    assert not first["done"]
+    db.commit(
+        CI,
+        [(3, {"order_id": 1, "status": "new"}), (4, {"order_id": 1, "status": "paid"})],
+        at=T0 + timedelta(minutes=7),
+    )
+    db.commit(CI, [(1, {"order_id": 2, "status": "new"})], at=T0 + timedelta(minutes=8))
+    db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=10)))  # purged before the stream read them
+    run()  # generation 1 opens a newer snapshot and starts there; nothing is read here
+    state = _generation(ckpt)
+    older, newer = _events(spark, facts, "snapshot_open")
+    assert (older["min_lsn"], older["app_id"]) == (first["snapshot"], "reopen-v1")
+    assert (state["generation"], state["snapshot_lsn"]) == (1, newer["min_lsn"])
+    assert newer["app_id"] == "reopen-v1.g1" and newer["min_lsn"] > older["min_lsn"]
+    detail = json.loads(newer["detail"])
+    assert (detail["mode"], detail["generation"]) == ("resnapshot", 1)
+    assert (newer["lost_from_ts"], newer["lost_to_ts"]) == (
+        T0 + timedelta(minutes=6),
+        T0 + timedelta(minutes=10),
+    )
+    assert not _events(spark, facts, "resnapshot")  # written once its last chunk is in
+    run()  # a rerun opens nothing more
+    assert len(_events(spark, facts, "snapshot_open")) == 2
+    status = cdc.backfill(target, app_id="reopen-v1", facts_table=facts, chunk_rows=2)
+    assert status["done"] and status["snapshot"] == newer["min_lsn"]  # the older is abandoned
+    [resnap] = _events(spark, facts, "resnapshot")
+    assert (resnap["min_lsn"], resnap["max_lsn"], resnap["app_id"]) == (
+        newer["min_lsn"],
+        newer["min_lsn"],
+        "reopen-v1.g1",
+    )
+    assert resnap["lost_to_ts"] == T0 + timedelta(minutes=10)
+    assert not _events(spark, facts, "bootstrap")  # the older one never completes
+    run()
+    bronze = spark.read.format("delta").load(target)
+    # order 2, deleted in the gap, has no delete row: rebuilt from the newer snapshot it is gone
+    assert _rebuilt(bronze, "order_id", "status", newer["min_lsn"]) == _source(db)
+    assert (2, "new") not in _source(db)

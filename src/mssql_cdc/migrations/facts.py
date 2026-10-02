@@ -217,6 +217,42 @@ DETAIL_COLUMNS = [
 ]
 
 
+# Migration 7 (2026-10-02): chunked snapshots (ADR 0028) add the 'snapshot_open' and
+# 'snapshot_chunk' rows, with JSON in detail. The shipped definitions above stay as they were;
+# the creation columns take these comments, and the migration gives them to existing tables.
+SNAPSHOT_COMMENTS = {
+    "event": (
+        "What the row records: NULL for a micro-batch. Snapshots, with no batch_id: "
+        "'bootstrap' for the initial snapshot of the target; 'resnapshot' for a snapshot taken "
+        "because CDC cleanup purged changes before the stream read them; min_lsn = max_lsn is "
+        "the LSN the snapshot is stamped with, and the only trace of a snapshot of an empty "
+        "table (rows = 0), which writes no target rows. A chunked snapshot writes its "
+        "'bootstrap' or 'resnapshot' row once its last chunk is in, after 'snapshot_open' when "
+        "it opened (min_lsn = max_lsn = its LSN S, recorded before any chunk was read, where its "
+        "stream generation starts) and one 'snapshot_chunk' row per chunk read (min_lsn = the "
+        "LSN the chunk was stamped with, recorded before it was read, at or after S; max_lsn = "
+        "max_lsn after the read); an open snapshot that a newer one supersedes is abandoned "
+        "and never gets that row. Changes to the source (ADR 0023), with the batch_id of the "
+        "batch that read past them and rows = 0: 'schema_change' for DDL on the source table, "
+        "'capture_instance_switched' when the stream first read a newer capture instance of the "
+        "table (the older one can be dropped once the same app_id has a row with a larger "
+        "batch_id: Spark commits the batch after this row); min_lsn = max_lsn is the change's "
+        "LSN, detail says what changed. Downstream rebuilds only from 'bootstrap' and "
+        "'resnapshot' rows."
+    ),
+    "detail": (
+        "On 'schema_change' rows, the DDL statement; on 'capture_instance_switched' rows, "
+        "'old -> new' capture instance, plus the columns the query reads that the new one does "
+        "not capture (NULL from then on). JSON on the rows of a chunked snapshot: "
+        "'snapshot_open' {mode, keys, plan, generation, lost_from_ts, lost_to_ts}; "
+        "'snapshot_chunk' {snapshot, chunk, wave, lo, hi}, the chunk's key range from lo "
+        "(inclusive) to hi (exclusive), null for an open end and a list for a composite key; "
+        "its 'bootstrap' or 'resnapshot' row {snapshot, chunks, rows, last_lsn}. NULL on other "
+        "rows."
+    ),
+}
+
+
 def _end_offset(spark, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT  # the comments new tables are created with
 
@@ -233,6 +269,13 @@ def _source_events(spark, table: str) -> None:
     set_comments(spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in changed}, FACTS_COMMENT)
 
 
+def _chunked_snapshots(spark, table: str) -> None:
+    from ..sink import FACTS_COLUMNS, FACTS_COMMENT
+
+    changed = ("rows", "event", "detail")
+    set_comments(spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in changed}, FACTS_COMMENT)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         "network and read metrics", lambda spark, table: add_columns(spark, table, NETWORK_COLUMNS)
@@ -244,4 +287,5 @@ MIGRATIONS: list[Migration] = [
     Migration("lag metrics", lambda spark, table: add_columns(spark, table, LAG_COLUMNS)),
     Migration("end offset", _end_offset),
     Migration("source change events", _source_events),
+    Migration("chunked snapshot events", _chunked_snapshots),
 ]

@@ -35,7 +35,9 @@
   ``delta.enableTypeWidening`` and the change widens.
 * Snapshots are facts too: ``write_event()`` records the bootstrap and every re-snapshot
   after data loss as one row with ``event`` set and no ``batch_id`` (ADR 0018), idempotent
-  the same way.
+  the same way; a chunked snapshot also its open and, through ``write_facts()``, its chunks
+  (ADR 0028). Every bronze writer adds ``_batch_id``, ``_snapshot`` and ``_chunk``
+  (``bronze_rows``); change rows leave the last two NULL.
 * Both tables are created on the first batch with the ``DeltaTable`` builder, with a
   comment on every metadata/facts column; existing ones get pending schema migrations
   (``mssql_cdc.migrations``).
@@ -61,6 +63,7 @@ from .migrations.facts import (
     LAG_COLUMNS,
     NETWORK_COLUMNS,
     RETENTION_COLUMNS,
+    SNAPSHOT_COMMENTS,
 )
 from .tables import is_path
 
@@ -68,9 +71,11 @@ BRONZE_COMMENT = (
     "Append-only change rows from SQL Server CDC, written by mssql-cdc-pyspark's delta_sink. "
     "One row per change: an update is two rows (operation 3, the row before; 4, the row after). "
     "Order changes by (_start_lsn, _command_id, _seqval, _operation). Rows with operation 0 "
-    "are a snapshot of the source table, all at one _start_lsn that precedes the changes read "
-    "after it. A column the source table gained through a newer capture instance is added when "
-    "the stream first reads it (older rows read NULL); a column it lost stays, NULL from then on."
+    "are a snapshot of the source table, the one _snapshot names: rebuild from it with its rows "
+    "and the changes with a larger _start_lsn. A whole snapshot's rows share its _start_lsn; a "
+    "chunked snapshot's (_chunk set) are stamped per chunk, at or after it. A column the source "
+    "table gained through a newer capture instance is added when the stream first reads it "
+    "(older rows read NULL); a column it lost stays, NULL from then on."
 )
 BRONZE_COLUMN_COMMENTS = {
     "_capture_instance": (
@@ -81,7 +86,8 @@ BRONZE_COLUMN_COMMENTS = {
     "_start_lsn": (
         "Commit LSN of the source transaction (__$start_lsn) as 0x + 20 uppercase hex. "
         "All changes of one transaction share it; string order is commit order. On snapshot "
-        "rows, the LSN recorded before the table was read: the row is at least that recent."
+        "rows, the LSN recorded before the table (or the row's chunk) was read: the row is at "
+        "least that recent."
     ),
     "_seqval": (
         "Position of the change in the transaction log (__$seqval), 0x + 20 hex. "
@@ -106,12 +112,35 @@ BRONZE_COLUMN_COMMENTS = {
         "Micro-batch that wrote the row; with the sink's app_id, the key of its row in the "
         "ingestion facts table. NULL on snapshot rows."
     ),
+    "_snapshot": (
+        "On snapshot rows, the snapshot they belong to: the LSN (0x + 20 hex) recorded before "
+        "any of its rows was read, where its stream generation starts; on a whole snapshot, its "
+        "_start_lsn. NULL on change rows, and on snapshot rows written before this column "
+        "existed, whose _start_lsn is their snapshot's."
+    ),
+    "_chunk": (
+        "On rows of a chunked snapshot (stream().backfill()), the chunk of the key space they "
+        "were read in; with _snapshot, the key of its 'snapshot_chunk' row in the ingestion "
+        "facts table. NULL on change rows and whole snapshots."
+    ),
 }
 
 
 def bronze_columns(df: DataFrame) -> list[tuple]:
     """The bronze table's creation columns: ``df``'s fields with their comments."""
     return [(f.name, f.dataType, BRONZE_COLUMN_COMMENTS.get(f.name)) for f in df.schema]
+
+
+def bronze_rows(df: DataFrame, batch_id: int | None = None, snapshot=None) -> DataFrame:
+    """``df`` with the columns every bronze writer adds, last and in this order: ``_batch_id``,
+    ``_snapshot`` (a Column, or NULL) and ``_chunk`` (``df``'s own, else NULL)."""
+    chunk = F.col("_chunk") if "_chunk" in df.columns else F.lit(None)
+    return df.select(
+        *(F.col("`" + c.replace("`", "``") + "`") for c in df.columns if c != "_chunk"),
+        F.lit(batch_id).cast("int").alias("_batch_id"),
+        (F.lit(None) if snapshot is None else snapshot).cast("string").alias("_snapshot"),
+        chunk.cast("int").alias("_chunk"),
+    )
 
 
 FACTS_COMMENT = (
@@ -122,7 +151,8 @@ FACTS_COMMENT = (
     "userMetadata (batches with rows only), which Delta log cleanup eventually drops. Each "
     "snapshot stream().to_delta takes (bootstrap or re-snapshot), each schema change on the "
     "source and each switch to a newer capture instance adds one row, with event set (see its "
-    "comment)."
+    "comment); a chunked snapshot adds one when it opens and one per chunk stream().backfill() "
+    "reads."
 )
 FACTS_COLUMNS = [
     (
@@ -150,7 +180,8 @@ FACTS_COLUMNS = [
             "read none: its end offset moved only past idle entries or other tables' commits (or, "
             "on a new checkpoint's first batch, not at all), so it wrote nothing to the target, "
             "just this row (LSN and commit-time ranges NULL, counts 0). On 'bootstrap' and "
-            "'resnapshot' rows, the rows of the snapshot; 0 on other event rows."
+            "'resnapshot' rows, the rows of the snapshot (of all its chunks); on "
+            "'snapshot_chunk' rows, the chunk's; 0 on other event rows."
         ),
     ),
     ("min_lsn", "STRING", "Smallest source commit LSN (__$start_lsn, 0x + 20 hex) in the batch."),
@@ -186,10 +217,10 @@ FACTS_COLUMNS = [
     ),
     *NETWORK_COLUMNS,
     *RETENTION_COLUMNS,
-    *EVENT_COLUMNS,
+    *((n, t, SNAPSHOT_COMMENTS.get(n, c)) for n, t, c in EVENT_COLUMNS),
     *LAG_COLUMNS,
     *END_COLUMNS,
-    *DETAIL_COLUMNS,
+    *((n, t, SNAPSHOT_COMMENTS.get(n, c)) for n, t, c in DETAIL_COLUMNS),
     ("target", "STRING", "Table name or path the batch was written to."),
     (
         "written_at",
@@ -398,7 +429,7 @@ def delta_sink(
             facts.update({"batch_id": batch_id, "app_id": app_id})
             spark = df.sparkSession
             if facts["rows"]:  # a batch that read none writes no target commit, only its facts
-                out = df.withColumn("_batch_id", F.lit(batch_id).cast("int"))
+                out = bronze_rows(df, batch_id)
                 ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
                 # mergeSchema: a column a newer capture instance captures joins bronze (ADR 0023)
                 _write(out, target, app_id, batch_id, _json(facts), merge_schema=True)
@@ -451,8 +482,10 @@ def write_event(
     duration_ms: int | None = None,
     lost_from_ts: datetime | None = None,
     lost_to_ts: datetime | None = None,
+    detail: str | None = None,
 ) -> None:
-    """Record a snapshot (``event`` 'bootstrap' or 'resnapshot') as one facts row.
+    """Record a snapshot (``event`` 'bootstrap', 'resnapshot' or a chunked snapshot's
+    'snapshot_open') as one facts row.
 
     The row has no ``batch_id``; ``lsn`` and ``commit_ts`` are the snapshot's offset.
     Idempotent like the batch rows: a rerun with the same ``txn_app_id`` and ``version``
@@ -477,9 +510,16 @@ def write_event(
         "event": event,
         "lost_from_ts": lost_from_ts,
         "lost_to_ts": lost_to_ts,
+        "detail": detail,
         "target": target,
-        "written_at": _utc_now(),
     }
+    write_facts(spark, facts_table, [facts], txn_app_id, version)
+
+
+def write_facts(spark, facts_table: str, rows: list[dict], txn_app_id: str, version: int) -> None:
+    """Append facts ``rows`` (column -> value; the rest NULL, ``written_at`` now) in one
+    commit, skipped by Delta when ``txn_app_id`` already wrote ``version``."""
     migrations.ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
-    df = spark.createDataFrame([tuple(facts.get(k) for k in _FACT_FIELDS)], FACTS_SCHEMA)
-    _write(df, facts_table, txn_app_id, version)
+    now = _utc_now()
+    data = [tuple({"written_at": now, **r}.get(k) for k in _FACT_FIELDS) for r in rows]
+    _write(spark.createDataFrame(data, FACTS_SCHEMA), facts_table, txn_app_id, version)
