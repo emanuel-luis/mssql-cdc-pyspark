@@ -245,7 +245,7 @@ class MssqlCdcSnapshotDataSource(MssqlCdcDataSource):
     them to Delta and returns the offset the stream starts from.
 
     With ``snapshotChunks``, a JSON list of ``[chunk, lo, hi]`` (key bounds as
-    ``client.next_chunks`` plans them), only those chunks, one partition each, stamped with
+    ``client.plan_chunks`` plans them), only those chunks, one partition each, stamped with
     ``snapshotLsn`` and numbered in an extra ``_chunk INT`` column; with ``metricsPath``,
     each leaves ``chunk-<chunk>.json`` there (ADR 0028). ``snapshotKeys``, a JSON list of
     columns, cuts ranges on those instead of the unique index. ``isolationLevel=snapshot`` reads
@@ -799,7 +799,7 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
             values = [
                 v for _, *ends in plan for b in ends for v in _key_tuple(b) or () if v is not None
             ]
-            types = None  # integer bounds are inlined, as the plan's arithmetic chunks are
+            types = None  # integer bounds are inlined, as an integer key's plan has them
             if not all(isinstance(v, int) and not isinstance(v, bool) for v in values):
                 types = client.key_types(ci, keys)
             if values and (not keys or not set(keys) <= set(present) or None in (types or [])):
