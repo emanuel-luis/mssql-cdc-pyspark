@@ -316,10 +316,11 @@ def test_a_control_table_at_version_0_gains_applied_lsn_and_snapshot_wave(delta_
     from mssql_cdc.migrations.control import APPLIED_COLUMNS, OPEN_COMMENTS, WAVE_COLUMNS
 
     old = os.path.join(workdir, "control_v0")
+    added = {name for name, _, _ in APPLIED_COLUMNS + WAVE_COLUMNS}
     tables.create_if_not_exists(
         delta_spark,
         old,
-        [c for c in CONTROL_COLUMNS if c not in APPLIED_COLUMNS + WAVE_COLUMNS],
+        [c for c in CONTROL_COLUMNS if c[0] not in added],
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
     assert migrations.migrate(delta_spark, old, "control") == 3
