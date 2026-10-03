@@ -370,7 +370,8 @@ How `bootstrap=True` and `on_data_loss="resnapshot"` take a snapshot.
 Anything else is a `ValueError`. The mode holds for the whole run, its bootstrap and its
 re-snapshot, and may change between runs. With a `facts_table`, both modes record the
 snapshot as open before reading, and a run in one mode raises `ValueError` while a snapshot
-of the other mode is still open, saying how to finish it
+of the other mode is still open, saying how to finish it; a full one stops counting once
+CDC cleanup passes its LSN, as it can then never complete
 ([One mode per run](../guides/bootstrap.md#one-mode-per-run)). See
 [Bootstrap](../guides/bootstrap.md#chunked-snapshots) and
 [ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md).
@@ -394,17 +395,19 @@ snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in waves 
 `done`.
 
 * `target`, `app_id`, `facts_table`: as passed to `to_delta`; the stream's generations
-  (`<app_id>.g<n>`) are found from `app_id`. Without an open chunked snapshot it returns at
-  once, `paused` with a `reason`. With a full snapshot of the stream still open it raises
-  `ValueError` ([One mode per run](../guides/bootstrap.md#one-mode-per-run)).
+  (`<app_id>.g<n>`) are found from `app_id`. With a full snapshot of the stream still
+  open it raises `ValueError`, before anything else
+  ([One mode per run](../guides/bootstrap.md#one-mode-per-run)). Otherwise, without an open
+  chunked snapshot it returns at once, `paused` with a `reason`.
 * `chunk_rows`: the most rows a chunk holds when planned (at least 1; `None` is
   1,000,000). It counts on the first call only, which plans every chunk and records the plan
   in a `snapshot_plan` facts row; later calls keep the plan's value and log a warning when
   given another. One integer key is counted per slice on the server and the slices packed
   into chunks of at most `chunk_rows` rows, each but the last short of it by less than one
   slice (about a sixteenth of `chunk_rows` on an even key); other keys are cut every
-  `chunk_rows` keys. The last chunk ends just above the MAX recorded at the open: rows
-  inserted above it come from the stream
+  `chunk_rows` keys. The last chunk ends just above the MAX recorded at the open (for other
+  keys at the first key after it, looked for again before each wave while there is none):
+  rows inserted above it come from the stream
   ([How chunks are sized](../guides/bootstrap.md#how-chunks-are-sized)).
 * `max_waves`, `max_seconds`: stop after that many waves, or before a wave once that many
   seconds have passed. `None`: until the snapshot is done.

@@ -2,7 +2,8 @@
 
 **Status:** accepted  
 **Date:** 2026-09-29T17:46:41-03:00  
-**Amended:** 2026-10-02T20:30:12-03:00, a chunked re-snapshot opens at S and is read by `backfill()` (see the Amendment, ADR 0028)
+**Amended:** 2026-10-02T20:30:12-03:00, a chunked re-snapshot opens at S and is read by `backfill()` (see the Amendment, ADR 0028)  
+**Amended:** 2026-10-03T18:10:05-03:00, a full re-snapshot opens too, under the mode lock of ADR 0028's Amendment (see Amendment 2)
 
 ## Context
 CDC cleanup deletes change rows by age (three days by default) whether or not the stream
@@ -132,7 +133,8 @@ recovery reads nothing from the table:
 * The pre-flight, the anti-loop guard and `recovering` are unchanged. Instead of steps 2 to
   4, it opens a chunked snapshot at S = the snapshot LSN recorded now: a `'snapshot_open'`
   facts row with `mode` `'resnapshot'`, the generation and the gap (`lost_from_ts`,
-  `lost_to_ts`), keyed `<app_id>#snapshots` and the generation. Then state `n + 1` with
+  `lost_to_ts`), keyed `<app_id>#snapshots` and the generation (now `mode` `'chunked'` and
+  `kind` `'resnapshot'`: Amendment 2). Then state `n + 1` with
   `snapshot_lsn` = S, and the generation's stream starts at S at once.
 * A crash between the open and the state finds the open row of the next generation's
   `app_id` and reuses it: no second open.
@@ -142,4 +144,19 @@ recovery reads nothing from the table:
   its chunks; downstream rebuilds from it as from a whole one.
 * A loss while a chunked snapshot is still open opens a newer one in the next generation;
   `backfill()` reads the newest open snapshot, and the older one never completes.
-* The default, `snapshot="full"`, keeps every step above.
+* The default, `snapshot="full"`, keeps every step above (Amendment 2 adds its open row).
+
+## Amendment 2: one snapshot mode per run
+ADR 0028's Amendment locks the snapshot mode while a snapshot is open. For recoveries:
+
+* The chunked open's detail has `mode` `'chunked'` and `kind` `'resnapshot'`; the first
+  version, unreleased, put `'resnapshot'` in `mode`. A consumer of the facts filters on
+  `get_json_object(detail, '$.kind') = 'resnapshot'`.
+* A full re-snapshot writes a `'snapshot_open'` row (detail `mode` `'full'`) before step 2
+  reads the table, one per attempt, with no `txnAppId`. Until its `'resnapshot'` row a
+  chunked run of the stream raises, unless CDC cleanup has passed its S: then it can never
+  complete, which is step 3's failure, and the rerun may switch to `snapshot="chunked"`
+  (with `resnapshot_interval_days=0`, as after any failed attempt), which opens the same
+  generation. The `DataLossError` of step 3 says so.
+* A chunked recovery that finds a full open of the next generation still being read raises
+  instead of starting from it; a complete one, an emptied table's, it starts from.

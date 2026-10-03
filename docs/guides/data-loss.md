@@ -147,7 +147,9 @@ generation, and the older one is abandoned.
 
 A run keeps one `snapshot` mode for its bootstrap and its re-snapshot, and a recovery in
 the other mode raises while a snapshot of the stream is still open
-([One mode per run](bootstrap.md#one-mode-per-run)): finish the open one first.
+([One mode per run](bootstrap.md#one-mode-per-run)): finish the open one first. A full
+re-snapshot that failed because it took longer than the retention no longer counts, so
+its rerun may switch to `snapshot="chunked"`, with `resnapshot_interval_days=0`.
 
 ### Downstream during a chunked re-snapshot
 

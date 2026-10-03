@@ -45,7 +45,7 @@ the target and read nothing again.
    capture instance's first LSN minus one when capture has not reached a new instance yet.
    Every commit up to `L` is already in the table when the read starts. With a facts table
    it first writes a `snapshot_open` facts row in mode `full`, which keeps a chunked run
-   from opening another snapshot until this one ends ([One mode per run](#one-mode-per-run)).
+   from opening another snapshot while this one is read ([One mode per run](#one-mode-per-run)).
 2. It reads the table's current rows in the stream's schema, READ COMMITTED and never with
    `NOLOCK`. Each row has `_operation = 0`, `_start_lsn = L` and `_commit_ts` the commit
    time of `L`; `_seqval`, `_command_id` and `_batch_id` are NULL.
@@ -210,7 +210,10 @@ each starts where the previous ends, and the last ends just above the MAX.
   last holds at most `chunk_rows` rows and loses less than one slice to the next; rows
   written while the snapshot is read change that a little.
 - Any other key (composite, string, date): each chunk ends `chunk_rows` keys after the
-  previous one, found by seeking the key on the server.
+  previous one, found by seeking the key on the server. The last ends at the first key after
+  the MAX; when there is none yet at planning, `backfill()` looks for it again before each
+  wave, so rows inserted above the MAX while a long backfill runs (a creation time, a
+  sequential `uniqueidentifier`) stay the stream's instead of growing the last chunk.
 
 Planning reads the whole key once before the first wave, under READ COMMITTED: on a table of
 billions of rows that is a full scan of the narrowest index on the key, at the start of the
@@ -222,11 +225,15 @@ row over the network but the counts and the bounds.
 A run, one `to_delta` call with its bootstrap and its re-snapshot, takes its snapshots in
 one `snapshot` mode. The next run may use the other mode, but not while a snapshot of the
 other mode is still open. Both modes write a `snapshot_open` facts row before they read the
-table, and the snapshot's `bootstrap` or `resnapshot` row closes it. With a facts table,
-`to_delta` (with `bootstrap=True` or `on_data_loss="resnapshot"`),
-`snapshot(app_id=..., facts_table=...)` and `backfill()` raise `ValueError` when
-the stream has an open snapshot of the other mode, and `seed(app_id=..., facts_table=...)`
-when it has one of either mode.
+table (a chunked one once per generation, a full one at each run), and the snapshot's
+`bootstrap` or `resnapshot` row closes it. With a facts table, `to_delta` (with
+`bootstrap=True` or `on_data_loss="resnapshot"`), `snapshot(app_id=..., facts_table=...)`
+and `backfill()` raise `ValueError` when the stream has an open snapshot of the other mode,
+and `seed(app_id=..., facts_table=...)` when it has one of either mode.
+
+A full snapshot is open only while a run may still be reading it. Once CDC cleanup has
+passed its LSN it can never complete, so it no longer holds the mode, and a chunked run takes
+its generation over.
 
 To finish an open snapshot and free the mode:
 
@@ -236,9 +243,11 @@ To finish an open snapshot and free the mode:
   `snapshot="full"`, which reads the table again and writes its `bootstrap` or `resnapshot`
   row.
 
-The error names the snapshot's LSN and generation. A full re-snapshot that cannot finish
-within the CDC retention never closes, so the stream stays in full mode until one does;
-moving it to chunked then takes a new checkpoint and `app_id`.
+The error names the snapshot's LSN and generation. The library cannot tell a full snapshot
+whose run died from one still being read: after a killed full run, either rerun it or wait
+until CDC cleanup passes its LSN (the retention at most) before switching to chunked. A full
+re-snapshot that failed because it outlived the retention is past that already: rerun with
+`snapshot="chunked"` (and `resnapshot_interval_days=0`, as after any failed attempt).
 
 ## Tables too big to snapshot
 

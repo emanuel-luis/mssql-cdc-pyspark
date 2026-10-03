@@ -300,6 +300,23 @@ MODE_COMMENTS = {
 }
 
 
+# Migration 9 (2026-10-03): a full snapshot's 'snapshot_open' stops holding the mode once CDC
+# cleanup passes its S, and each full run writes its own (ADR 0028). Comment only; the
+# creation columns take it, over migration 8's.
+LOCK_COMMENTS = {
+    "event": MODE_COMMENTS["event"]
+    .replace(
+        "no snapshot of the other mode is taken.",
+        "no snapshot of the other mode is taken, though a full one stops counting once CDC "
+        "cleanup passes S, as it can then never complete.",
+    )
+    .replace(
+        "(a rerun after a crash reads it again)",
+        "(a rerun after a crash reads it again, under a 'snapshot_open' of its own)",
+    ),
+}
+
+
 def _end_offset(spark, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT  # the comments new tables are created with
 
@@ -344,4 +361,8 @@ MIGRATIONS: list[Migration] = [
     Migration("source change events", _source_events),
     Migration("chunked snapshot events", _chunked_snapshots),
     Migration("snapshot plans and modes", _snapshot_modes),
+    Migration(
+        "full snapshot opens per run",
+        lambda spark, table: set_comments(spark, table, LOCK_COMMENTS),
+    ),
 ]

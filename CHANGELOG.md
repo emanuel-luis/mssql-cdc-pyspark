@@ -17,9 +17,9 @@ time a stream, `finalization.advance` or `apply_changes` opens them: bronze migr
 `_snapshot` and `_chunk` (NULL on existing rows, whose snapshot is still found by their
 `_start_lsn`) and rewrites the comment of `_start_lsn`; facts migration 7 rewrites the
 comments of `rows`, `event` and `detail`, and facts migration 8 those of `event` and
-`detail` and the table comment again (the facts schema version is now 8; no column is
-added); control migration 2 adds `open_snapshot_lsn` and
-`snapshot_wave`. New table kind `reconcile` (the report of `reconcile()`), with no
+`detail` and the table comment again, and facts migration 9 that of `event` (the facts
+schema version is now 9; no column is added); control migration 2 adds `open_snapshot_lsn`
+and `snapshot_wave`, and control migration 3 rewrites the comment of `open_snapshot_lsn`. New table kind `reconcile` (the report of `reconcile()`), with no
 migrations ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0013-schema-migrations-per-table-kind/)).
 
 ### Added
@@ -37,12 +37,14 @@ migrations ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/decision
   grid in one server-side `GROUP BY`, dense slices counted again on a finer grid, and the
   slices packed into chunks of at most `chunk_rows` rows whatever the skew; any other key
   gets keyset bounds `chunk_rows` rows apart. The last chunk ends just above the MAX recorded
-  at the open, so the rows inserted since come from the stream alone. New facts events
+  at the open, so the rows inserted since come from the stream alone (for a keyset plan, at
+  the first key after it, looked for again before each wave while there is none). New facts
+  events
   `snapshot_open`, `snapshot_plan` and `snapshot_chunk` (`last` on the final chunk); the
   `bootstrap` or `resnapshot` row comes after the last chunk. A crash between a wave's append
   and its facts rows reruns the wave without appending twice, rebuilding its facts rows from
-  the commit or, once log cleanup dropped it, from the wave's rows in bronze; a loss while
-  one is open opens a newer one
+  the commit or, once log cleanup dropped it, from the chunks bronze holds, whatever the
+  rerun's `numPartitions`; a loss while one is open opens a newer one
   ([ADR 0028](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0028-chunked-snapshot-next-to-the-stream/)).
 - Snapshot reader options `snapshotChunks` (read only the given key ranges, numbered in
   `_chunk`, with a `chunk-<i>.json` metrics file each), `snapshotKeys` (the columns those
@@ -119,11 +121,13 @@ migrations ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/decision
   passed the first.
 - One snapshot mode per run, locked while a snapshot is open: with a facts table, a full
   snapshot taken by `to_delta` now writes a `snapshot_open` facts row (detail `mode` `full`,
-  `kind` `bootstrap` or `resnapshot`) before it reads the table, closed by its `bootstrap` or
-  `resnapshot` row. `to_delta` (with `bootstrap=True` or `on_data_loss="resnapshot"`),
-  `snapshot()` and `backfill()` raise `ValueError` while a snapshot of the stream in the other
-  mode is open, and `seed()` while one in either mode is, saying how to finish it; the mode
-  may change between runs. `snapshot()` takes new keyword arguments `app_id` and
+  `kind` `bootstrap` or `resnapshot`; one per run, at its own LSN) before it reads the table,
+  closed by its `bootstrap` or `resnapshot` row. `to_delta` (with `bootstrap=True` or
+  `on_data_loss="resnapshot"`), `snapshot()` and `backfill()` raise `ValueError` while a
+  snapshot of the stream in the other mode is open, and `seed()` while one in either mode
+  is, saying how to finish it; the mode may change between runs. A full one stops counting
+  once CDC cleanup passes its LSN, as it can then never complete: a full re-snapshot that
+  outlived the retention can be retried with `snapshot="chunked"` in the same generation. `snapshot()` takes new keyword arguments `app_id` and
   `facts_table` for the check
   ([ADR 0028](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0028-chunked-snapshot-next-to-the-stream/) amended).
 - The file-backed fake gives an update's 3 and 4 rows one `__$seqval` and `__$command_id`,

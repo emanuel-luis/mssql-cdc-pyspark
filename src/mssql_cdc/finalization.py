@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 from pyspark.sql.streaming import StreamingQueryListener
 
 from . import migrations
-from .migrations.control import APPLIED_COLUMNS, WAVE_COLUMNS
+from .migrations.control import APPLIED_COLUMNS, OPEN_COMMENTS, WAVE_COLUMNS
 from .tables import delta_table, table_ref  # noqa: F401 - table_ref re-exported
 
 if TYPE_CHECKING:
@@ -121,7 +121,7 @@ CONTROL_COLUMNS = [
     ),
     ("updated_at", "TIMESTAMP_NTZ", "When the verdict last moved, UTC."),
     *APPLIED_COLUMNS,
-    *WAVE_COLUMNS,
+    *((n, t, OPEN_COMMENTS.get(n, c)) for n, t, c in WAVE_COLUMNS),
 ]
 
 

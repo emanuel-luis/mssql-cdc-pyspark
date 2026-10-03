@@ -40,9 +40,11 @@ S. A loss while one is open opens a newer one, which abandons it.
 
 A run (one ``to_delta`` call, its bootstrap and its re-snapshot) takes snapshots in one
 mode, and the mode may change between runs, but not while a snapshot of the other mode is
-open: both modes write 'snapshot_open' (``<app_id>#snapshots``, version the generation)
-before reading the table, the snapshot's 'bootstrap' or 'resnapshot' row closes it, and a
-run, ``snapshot()`` or ``seed()`` that finds one of the other mode still open raises.
+open: both modes write 'snapshot_open' before reading the table (a chunked one once per
+generation, ``<app_id>#snapshots``; a full one per run, at its own S), the snapshot's
+'bootstrap' or 'resnapshot' row closes it, and a run, ``snapshot()``, ``seed()`` or
+``backfill()`` that finds one of the other mode still open raises. A full one CDC cleanup
+has passed can never complete and stops counting.
 
 The stream follows a newer capture instance of its table (ADR 0023): snapshots in the target
 are found under any capture instance of the table, and ``snapshot_on_switch=True`` appends a
@@ -157,11 +159,13 @@ def _unfinished(target: str, lsn: str, mode: str, generation: int | None, what: 
     how = (
         "run backfill() until it is done, or rerun with snapshot='chunked'"
         if mode == "chunked"
-        else "rerun with snapshot='full', which reads the table again"
+        else "rerun with snapshot='full', which reads the table again. If no run is reading it "
+        f"any more, it also stops counting once CDC cleanup passes {lsn}: it can then never "
+        "complete"
     )
     return ValueError(
         f"{target} has a {mode} snapshot open at {lsn} (generation {generation}) that has not "
-        f"completed: {what}. To finish it, {how}; then either mode may be used (ADR 0028)."
+        f"completed: {what}. To finish it, {how}. Then either mode may be used (ADR 0028)."
     )
 
 
@@ -467,47 +471,71 @@ class CdcStream:
         return {"lsn": row["lsn"], "commit_ts": _iso(row["ts"])}
 
     def _opened(self, facts_table: str, target: str, sink_id: str) -> dict | None:
-        """The snapshot opened for the generation whose sink app_id is ``sink_id`` (its
-        'snapshot_open' row), open or complete: its offset and ``mode``; None when there is
-        none."""
+        """The snapshot opened for the generation whose sink app_id is ``sink_id``, open or
+        complete: its chunked 'snapshot_open' row, else its newest full one (each full run
+        writes its own). Its offset, ``mode``, ``generation`` and ``done`` (a 'bootstrap' or
+        'resnapshot' row of the generation at or after its LSN); None when there is none."""
         from pyspark.sql import functions as F
 
         from .tables import delta_table, exists
 
         if not exists(self.spark, facts_table):
             return None
-        row = (
+        rows = (
             delta_table(self.spark, facts_table)
             .toDF()
             .where(
-                (F.col("event") == "snapshot_open")
+                F.col("event").isin("snapshot_open", "bootstrap", "resnapshot")
                 & (F.col("target") == target)
                 & (F.col("app_id") == sink_id)
             )
-            .select("min_lsn", "min_commit_ts", "detail")
-            .first()
+            .select("event", "min_lsn", "max_lsn", "min_commit_ts", "detail")
+            .collect()
         )
-        if row is None:
+        opens = [r for r in rows if r["event"] == "snapshot_open"]
+        if not opens:
             return None
+        row = max(opens, key=lambda r: (_mode(r["detail"]) == "chunked", r["min_lsn"]))
         return {
             "lsn": row["min_lsn"],
             "commit_ts": _iso(row["min_commit_ts"]),
             "mode": _mode(row["detail"]),
+            "generation": json.loads(row["detail"]).get("generation"),
+            "done": any(
+                r["event"] != "snapshot_open" and r["max_lsn"] >= row["min_lsn"] for r in rows
+            ),
         }
+
+    def _purged(self, lsn: str) -> bool:
+        """CDC cleanup passed ``lsn``: a full snapshot opened there can never complete."""
+        from .client import make_client
+
+        with closing(make_client(self.options)) as client:
+            return _lost(client, self._capture_instance(), lsn) is not None
 
     def _reusable(self, facts_table: str, target: str, sink_id: str, chunked: bool) -> dict | None:
         """The snapshot opened for generation ``sink_id`` that a run starts the generation
         from instead of taking one: a chunked one, open or complete; in a chunked run a full
-        one too, complete since ``_lock`` passed. A full run takes a full one again: its rows
-        are found as a whole snapshot, or it stopped before writing them."""
+        one too once complete (an emptied table's: no rows to find it by). A full one still
+        being read raises, opened after this run's ``_lock``; one CDC cleanup has passed is
+        dead, and a chunked run opens the generation over it. A full run takes a full one
+        again: its rows are found as a whole snapshot, or it stopped before writing them."""
         opened = self._opened(facts_table, target, sink_id)
-        return opened if opened and (chunked or opened["mode"] == "chunked") else None
+        if opened is None or opened["mode"] == "chunked" or (chunked and opened["done"]):
+            return opened
+        if not chunked or self._purged(opened["lsn"]):
+            return None
+        what = "no chunked snapshot is taken until it does"
+        raise _unfinished(target, opened["lsn"], "full", opened["generation"], what)
 
     def _lock(self, facts_table: str, target: str, app_id: str, mode: str | None) -> None:
         """Raise when ``app_id``'s stream (any generation) has a snapshot open in ``target``
         in another mode than ``mode``, or in any mode when None: a 'snapshot_open' row with
-        no 'bootstrap' or 'resnapshot' row at or after its LSN. The mode may change between
-        runs, never while a snapshot of the other mode is unfinished."""
+        no 'bootstrap' or 'resnapshot' row at or after its LSN. A full one counts only while a
+        run may still be reading it: not once CDC cleanup has passed its S, as it can then
+        never complete, nor next to a chunked one of its generation, which stopped the full
+        run that read it back (``_open``) or took the generation once it was dead. The mode
+        may change between runs, never while a snapshot of the other mode is unfinished."""
         from pyspark.sql import functions as F
 
         from .tables import delta_table, exists
@@ -525,12 +553,17 @@ class CdcStream:
             if ours.fullmatch(r["app_id"] or "")
         ]
         done = max((r["max_lsn"] for r in rows if r["event"] != "snapshot_open"), default=None)
+        opens = [r for r in rows if r["event"] == "snapshot_open"]
+        taken = {r["app_id"] for r in opens if _mode(r["detail"]) == "chunked"}
         others = [
             r
-            for r in rows
-            if r["event"] == "snapshot_open"
-            and (done is None or r["max_lsn"] > done)
+            for r in opens
+            if (done is None or r["max_lsn"] > done)
             and _mode(r["detail"]) != mode
+            and (
+                _mode(r["detail"]) == "chunked"
+                or (r["app_id"] not in taken and not self._purged(r["max_lsn"]))
+            )
         ]
         if others:
             top = max(others, key=lambda r: r["max_lsn"])
@@ -562,8 +595,10 @@ class CdcStream:
         Nothing is read from the table here: ``backfill()`` reads the chunks (ADR 0028), the
         caller a full one, stamped with its own LSN, at or after S.
 
-        One per generation: Delta skips a second append (a rerun's, or a run's opening it at
-        the same time), so the row is read back, and one of the other mode raises."""
+        A chunked one once per generation: Delta skips a rerun's append, so the row is read
+        back. A full one per run, at its own S, so that ``_lock`` tells a run still reading
+        from one CDC cleanup has passed. A chunked one of the generation read back by a full
+        run raises: a run opened it after this one's ``_reusable``."""
         from .client import make_client, snapshot_plan
         from .sink import write_event
         from .source import snapshot_lsn
@@ -586,7 +621,7 @@ class CdcStream:
             facts_table,
             "snapshot_open",
             app_id=sink_id,
-            txn_app_id=f"{app_id}#snapshots",
+            txn_app_id=f"{app_id}#snapshots" if mode == "chunked" else None,
             version=generation,
             target=target,
             lsn=lsn,
@@ -598,7 +633,7 @@ class CdcStream:
         )
         stored = self._opened(facts_table, target, sink_id) or {**offset, "mode": mode}
         if stored["mode"] != mode:
-            what = f"another run opened it as this one tried to open a {mode} one, which stops"
+            what = f"another run opened it before this one opened a {mode} one, which stops"
             raise _unfinished(target, stored["lsn"], stored["mode"], generation, what)
         return stored
 
@@ -609,8 +644,8 @@ class CdcStream:
         ``target``, the LSN of the chunked one opened for ``app_id``, open or complete, in
         either ``snapshot`` mode: the table is never read twice, and that snapshot's
         'bootstrap' event is ``backfill()``'s. ``chunked``: opened now if there is none. With
-        a facts table a full one is opened too, before its read: until its 'bootstrap' row, a
-        chunked run raises (``_lock``)."""
+        a facts table a full one is opened too, before its read: until its 'bootstrap' row, or
+        until CDC cleanup passes it, a chunked run raises (``_lock``)."""
         ci = self._capture_instance()
         offset = self._last_snapshot(target, ci)
         if offset is None and facts_table:
@@ -755,9 +790,9 @@ class CdcStream:
                     raise DataLossError(
                         f"{lost}. The re-snapshot at {offset['lsn']} took longer than the CDC "
                         "retention, so the changes after it are gone too: lengthen the retention "
-                        "or speed up the read (numPartitions), then rerun with "
-                        "resnapshot_interval_days=0 and snapshot='full', which this open "
-                        "snapshot keeps until one completes."
+                        "or speed up the read (numPartitions), or read it next to the stream "
+                        "with snapshot='chunked', which has no such limit (ADR 0028); then "
+                        "rerun with resnapshot_interval_days=0."
                     )
             write_event(
                 self.spark,
@@ -926,9 +961,11 @@ class CdcStream:
         counts per slice of its range, the slices packed into chunks of at most ``chunk_rows``
         rows whatever the skew; other keys ``chunk_rows`` keys at a time) and records the plan
         in a 'snapshot_plan' facts row; later calls read it, so the chunks never change while
-        the snapshot is open. ``chunk_rows``: 1,000,000 when None; a later call's other value
-        is ignored, with a warning. A full snapshot of the stream still open raises (one mode
-        while a snapshot is open).
+        the snapshot is open (but for the end of a keyset plan's last chunk, the first key after
+        MAX: when there was none at planning, it is sought again before each wave).
+        ``chunk_rows``: 1,000,000 when None; a later call's other value is ignored, with a
+        warning. A full snapshot of the stream still being read raises (one mode while a
+        snapshot is open).
 
         Each wave is stamped with ``max_lsn`` before it is read, at or after the snapshot's
         LSN S, appended to ``target`` in one commit (operation 0, ``_snapshot`` S,
@@ -952,7 +989,7 @@ class CdcStream:
         from pyspark.sql import functions as F
 
         from . import sink
-        from .client import make_client
+        from .client import last_bound, make_client
         from .source import snapshot_lsn
         from .spark import available_cores
         from .tables import delta_table, exists
@@ -975,6 +1012,8 @@ class CdcStream:
                 if ours.fullmatch(r["app_id"] or "")
             ]
 
+        # a full snapshot of the stream still being read: no plan, no wave
+        self._lock(facts_table, target, app_id, "chunked")
         rows = read_facts()
         opens = [
             r for r in rows if r["event"] == "snapshot_open" and _mode(r["detail"]) == "chunked"
@@ -1013,8 +1052,6 @@ class CdcStream:
         # its own row, or a newer whole snapshot's (a full re-snapshot) that supersedes it
         if any(r["event"] in ("bootstrap", "resnapshot") and r["max_lsn"] >= s for r in rows):
             return {**status, "chunks_done": len(chunks), "chunks_total": len(chunks), "done": True}
-        # a full snapshot of the stream still open (a run raced this one): no plan, no wave
-        self._lock(facts_table, target, app_id, "chunked")
         given = str(_opt(self.options, "numPartitions") or "auto").strip().lower()
         k = int(given) if given != "auto" else available_cores(self.spark) or os.cpu_count() or 1
         base = _opt(self.options, "metricsPath")  # not the stream's own directory: it folds those
@@ -1052,8 +1089,13 @@ class CdcStream:
                     )
                 first = last["chunk"] + 1 if last else 0
                 every = plan["chunks"]
+                if every[-1][1] is None and info["plan"].get("max") is not None:
+                    # a keyset plan's last chunk ends at the first key after MAX, and there was
+                    # none at planning: sought again, so that rows inserted above MAX since,
+                    # the stream's, do not pile up in the last chunk
+                    end = last_bound(client, ci, source, info["plan"]["max"])
+                    every = [*every[:-1], [every[-1][0], end]]
                 planned = [[i, *every[i]] for i in range(first, min(first + max(1, k), len(every)))]
-                final = planned[-1][0] == len(every) - 1
                 wave = last["wave"] + 1 if last else 0
                 chunks += self._backfill_wave(
                     target,
@@ -1064,7 +1106,7 @@ class CdcStream:
                     wave,
                     lsn,
                     planned,
-                    final,
+                    every,
                     client,
                     metrics,
                     isolation,
@@ -1179,17 +1221,19 @@ class CdcStream:
         wave: int,
         lsn: str,
         planned: list[list],
-        final: bool,
+        every: list[list],
         client,
         metrics: str | None,
         isolation: str | None,
     ) -> list[dict]:
-        """Read the ``planned`` chunks stamped ``lsn`` (``final``: the last is the plan's
-        final one), append them to ``target`` and record them in the facts. Returns them as
-        ``{chunk, wave, lo, hi, last, rows, lsn}``."""
+        """Read the ``planned`` chunks stamped ``lsn``, append them to ``target`` and record
+        them in the facts; ``every``: the plan's chunks. Returns them as ``{chunk, wave, lo,
+        hi, last, rows, lsn}``: those of the commit that holds the wave, which an earlier
+        attempt may have made with other chunks (``_committed``)."""
         from pyspark.sql import functions as F
 
         from .sink import _files, _remove, _utc_now, bronze_rows, write_facts
+        from .tables import exists
 
         drop = ("snapshotchunks", "snapshotkeys", "snapshotlsn", "metricspath", "isolationlevel")
         reader = (
@@ -1227,7 +1271,7 @@ class CdcStream:
                         "chunk": i,
                         "lo": lo,
                         "hi": hi,
-                        "last": final and i == planned[-1][0],
+                        "last": i == len(every) - 1,
                         "rows": counts.get(i, 0),
                         "high_lsn": read.get(i, {}).get("high_lsn") or high,
                         "read_seconds": read[i]["seconds"] if i in read else None,
@@ -1237,7 +1281,9 @@ class CdcStream:
                 ],
             }
             if counts:  # an empty wave writes no commit
-                tag = self._append_wave(target, snapshot, rows, tag)
+                tag = self._append_wave(target, snapshot, rows, tag, every)
+            elif exists(self.spark, target):  # though an earlier attempt that read rows may have
+                tag = self._committed(target, snapshot, tag, every) or tag
         finally:
             rows.unpersist()
         times: dict = {}
@@ -1282,12 +1328,11 @@ class CdcStream:
             for c in tag["chunks"]
         ]
 
-    def _append_wave(self, target: str, snapshot: str, rows, tag: dict) -> dict:
+    def _append_wave(self, target: str, snapshot: str, rows, tag: dict, every: list) -> dict:
         """Append a wave's ``rows`` to ``target`` in one commit with ``tag`` as its
         userMetadata, once per (snapshot, wave). Returns the tag of the commit that holds
-        them: this one's or, when Delta skipped the append, the one an earlier attempt of the
-        wave committed before it stopped short of its facts rows (``_earlier_wave``), else
-        rebuilt from that attempt's rows in ``target``."""
+        them: this one's or, when Delta skipped the append, the earlier attempt's
+        (``_committed``)."""
         from pyspark.sql import functions as F
 
         from . import migrations
@@ -1308,32 +1353,66 @@ class CdcStream:
                 flat = str(exc).replace("_", "").lower()
                 if attempt or not any(s in flat for s in ("metadatachanged", "protocolchanged")):
                     raise
-        table = delta_table(self.spark, target)
         new = _version(self.spark, target) - before
-        if new and table.history(new).where(F.col("userMetadata") == text).first():
+        history = delta_table(self.spark, target).history(new) if new else None
+        if history is not None and history.where(F.col("userMetadata") == text).first():
             return tag
-        earlier = _earlier_wave(self.spark, target, key, wave)
+        earlier = self._committed(target, snapshot, tag, every)
+        if earlier is None:
+            raise RuntimeError(
+                f"Delta skipped wave {wave} of the snapshot at {snapshot} as appended to {target} "
+                f"already (txnAppId {key}), but neither {target}'s history nor its rows hold it"
+            )
+        return earlier
+
+    def _committed(self, target: str, snapshot: str, tag: dict, every: list) -> dict | None:
+        """The tag of the commit an earlier attempt of ``tag``'s wave made to ``target``
+        before it stopped short of its facts rows: from the history (``_earlier_wave``) or,
+        once log cleanup has dropped it, rebuilt from its rows. None when there is none.
+
+        The rebuild takes the chunks from the wave's first to the last that has rows in
+        ``target``, whatever the rerun planned (its ``numPartitions`` may differ): bounds from
+        ``every`` (the plan's), the stamp and the row counts from the rows, ``read_seconds``
+        and ``read_mb`` NULL. The attempt's empty chunks after them are read again by the
+        next wave."""
+        from pyspark.sql import functions as F
+
+        from .tables import delta_table
+
+        earlier = _earlier_wave(self.spark, target, tag["backfill"], tag["wave"])
         if earlier:
             return earlier
-        # log cleanup dropped that commit: its chunks' rows are in target, at their stamp
-        ids = [c["chunk"] for c in tag["chunks"]]
-        held = {
-            i: (n, high, low)
-            for i, n, high, low in table.toDF()
-            .where(
+        df = delta_table(self.spark, target).toDF()
+        if "_chunk" not in df.columns:  # bronze migration 2: no chunk ever appended
+            return None
+        first = tag["chunks"][0]["chunk"]  # the earlier waves' chunks are all below it
+        found = (
+            df.where(
                 (F.col("_operation") == 0)
                 & (F.col("_snapshot") == snapshot)
-                & F.col("_chunk").isin(ids)
+                & (F.col("_chunk") >= first)
             )
             .groupBy("_chunk")
-            .agg(F.count(F.lit(1)), F.max("_start_lsn"), F.min("_start_lsn"))
+            .agg(F.count(F.lit(1)), F.min("_start_lsn"))
             .collect()
-        }
-        lsn = min((low for _, _, low in held.values()), default=tag["lsn"])
-        chunks = []
-        for c in tag["chunks"]:
-            n, high, _ = held.get(c["chunk"], (0, lsn, lsn))
-            chunks.append({**c, "rows": n, "high_lsn": high, "read_seconds": None, "read_mb": None})
+        )
+        held = {i: (n, low) for i, n, low in found}
+        if not held:
+            return None
+        lsn = min(low for _, low in held.values())  # the wave's stamp, on every row
+        chunks = [
+            {
+                "chunk": i,
+                "lo": every[i][0],
+                "hi": every[i][1],
+                "last": i == len(every) - 1,
+                "rows": held.get(i, (0,))[0],
+                "high_lsn": lsn,
+                "read_seconds": None,
+                "read_mb": None,
+            }
+            for i in range(first, max(held) + 1)
+        ]
         return {**tag, "lsn": lsn, "chunks": chunks}
 
 

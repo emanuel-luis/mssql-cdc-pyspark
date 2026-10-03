@@ -237,10 +237,10 @@ def test_facts_table_at_version_0_gains_every_column_and_the_current_comments(de
         "one row per non-empty batch",
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(spark, old, "facts") == 8
+    assert migrations.migrate(spark, old, "facts") == 9
     cols, description = _comments(spark, old)
     assert all(name in cols and cols[name][1] for name, _, _ in added)
-    # migrations 5 to 8 rewrote the comments whose meaning changed: as a new table has them
+    # migrations 5 to 9 rewrote the comments whose meaning changed: as a new table has them
     assert {n: cols[n][1] for n, _, _ in FACTS_COLUMNS} == {n: c for n, _, c in FACTS_COLUMNS}
     assert description == FACTS_COMMENT
 
@@ -1246,7 +1246,7 @@ def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
             properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
         )
         # add_columns through saveAsTable, set_comments on a table name
-        assert migrations.migrate(spark, old, "facts") == 8
+        assert migrations.migrate(spark, old, "facts") == 9
         assert {name for name, _, _ in added} <= set(spark.table(old).columns)
     finally:
         for name in (bronze, facts, control, old):
@@ -1429,8 +1429,9 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
     assert len(_events(spark, facts, "bootstrap")) == 1
 
 
+@pytest.mark.parametrize("change", ["insert", "delete"])
 def test_backfill_resumes_after_a_crash_between_the_append_and_its_facts(
-    delta_spark, workdir, monkeypatch
+    delta_spark, workdir, monkeypatch, change
 ):
     from mssql_cdc import sink, stream
 
@@ -1467,9 +1468,12 @@ def test_backfill_resumes_after_a_crash_between_the_append_and_its_facts(
     monkeypatch.undo()
     appended = spark.read.format("delta").load(target).where("_operation = 0").count()
     assert appended == 4 and not _events(spark, facts, "snapshot_chunk")  # chunks 0 and 1
-    db.commit(CI, [(2, {"order_id": -1, "status": "new"})], at=T0 + timedelta(minutes=9))
-    # the rerun reads chunk 0 again (with order -1 now) but Delta skips its append; its facts
-    # rows come from the append committed before the crash
+    if change == "insert":  # the rerun reads chunk 0 again, with order -1, and Delta skips it
+        db.commit(CI, [(2, {"order_id": -1, "status": "new"})], at=T0 + timedelta(minutes=9))
+    else:  # the rerun reads nothing, so it appends nothing
+        gone = [(1, {"order_id": i, "status": "new"}) for i in range(4)]
+        db.commit(CI, gone, at=T0 + timedelta(minutes=9))
+    # either way its facts rows come from the append committed before the crash
     status = cdc.backfill(target, app_id="crash-v1", facts_table=facts, chunk_rows=2, max_waves=1)
     assert (status["chunks_done"], status["done"]) == (2, False)
     bronze = spark.read.format("delta").load(target)
@@ -1524,8 +1528,10 @@ def test_backfill_keeps_its_plan_and_rebuilds_a_waves_facts_from_bronze_without_
     # log cleanup dropped the wave's commit: its facts rows come from its rows in bronze
     monkeypatch.setattr(pipeline, "_earlier_wave", lambda *args: None)
     db.commit(CI, [(2, {"order_id": -1, "status": "new"})], at=T0 + timedelta(minutes=9))
+    # the rerun plans a wave of three chunks; the commit it finds holds chunks 0 and 1 only
+    wider = stream(spark, {**options, "numPartitions": "3"})
     with caplog.at_level("WARNING", logger="mssql_cdc.pipeline"):
-        status = cdc.backfill(
+        status = wider.backfill(
             target, app_id="lost-v1", facts_table=facts, chunk_rows=5, max_waves=1
         )
     assert "backfill(chunk_rows=5) ignored" in caplog.text  # planned with 2: three chunks
@@ -1546,6 +1552,54 @@ def test_backfill_keeps_its_plan_and_rebuilds_a_waves_facts_from_bronze_without_
     assert len(snap) == len({r["order_id"] for r in snap}) == 6  # no key twice
     assert sum(r["rows"] for r in _events(spark, facts, "snapshot_chunk")) == 6
     assert _rebuilt(bronze, "order_id", "status", s) == _source(db)  # order -1 by the stream
+
+
+def test_a_keyset_plans_open_last_chunk_ends_at_the_first_key_after_max_when_read(
+    delta_spark, workdir
+):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: "code"})
+    for i, code in enumerate("abcdef"):
+        db.commit(CI, [(2, {"code": code, "status": "new"})], at=T0 + timedelta(minutes=i))
+    options = {
+        "backend": "fake",
+        "fakePath": src,
+        "captureInstance": CI,
+        "columns": "code STRING, status STRING",
+        "numPartitions": "1",
+    }
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        cdc.to_delta(
+            target,
+            "keys-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    run()
+    cdc.backfill(target, app_id="keys-v1", facts_table=facts, chunk_rows=2, max_waves=1)
+    [planned] = _events(spark, facts, "snapshot_plan")  # no key after MAX yet: open
+    assert json.loads(planned["detail"])["chunks"] == [[None, "c"], ["c", "e"], ["e", None]]
+    # inserted after S, above MAX: the stream's, and no reason for the last chunk to grow
+    later = [(2, {"code": c, "status": "new"}) for c in "hg"]
+    db.commit(CI, later, at=T0 + timedelta(minutes=9))
+    assert cdc.backfill(target, app_id="keys-v1", facts_table=facts)["done"]
+    chunks = {json.loads(r["detail"])["chunk"]: r for r in _events(spark, facts, "snapshot_chunk")}
+    assert (json.loads(chunks[2]["detail"])["hi"], chunks[2]["rows"]) == ("g", 2)
+    run()
+    bronze = spark.read.format("delta").load(target)
+    assert sorted(r["code"] for r in bronze.where("_operation = 0").collect()) == list("abcdef")
+    s = planned["min_lsn"]
+    assert _rebuilt(bronze, "code", "status", s) == [(c, "new") for c in "abcdefgh"]
 
 
 def test_backfill_pauses_while_the_stream_lags_or_has_stopped(delta_spark, workdir, monkeypatch):
@@ -1754,17 +1808,79 @@ def test_a_full_snapshot_a_crash_left_open_holds_its_mode_until_a_full_run_compl
             app_id="full-v1",
             facts_table=facts,
         )
-    status = cdc.backfill(target, app_id="full-v1", facts_table=facts)
-    assert status["paused"] and "no chunked snapshot" in status["reason"]  # none to read
-    run("full")  # takes it again, in the same generation, and completes it
+    with pytest.raises(ValueError, match=lock):  # nothing to read, but no chunked one either
+        cdc.backfill(target, app_id="full-v1", facts_table=facts)
+    run("full")  # takes it again, in the same generation, under an open of its own
     [done] = _events(spark, facts, "bootstrap")
-    assert done["max_lsn"] >= opened["min_lsn"] and done["rows"] == 3
+    first, again = _events(spark, facts, "snapshot_open")
+    assert first["min_lsn"] == opened["min_lsn"] <= again["min_lsn"] <= done["max_lsn"]
+    assert done["rows"] == 3
     run("chunked")  # either mode now: the whole snapshot is reused, nothing opened or read
-    assert len(_events(spark, facts, "snapshot_open")) == 1
+    assert len(_events(spark, facts, "snapshot_open")) == 2
     assert _snapshots(spark.read.format("delta").load(target)) == 1
 
 
-def test_two_runs_opening_one_generation_in_different_modes_stop_the_second(delta_spark, workdir):
+def test_a_full_snapshot_cdc_cleanup_has_passed_gives_its_generation_to_a_chunked_run(
+    delta_spark, workdir, monkeypatch
+):
+    from mssql_cdc import DataLossError, stream
+    from mssql_cdc.pipeline import CdcStream
+
+    spark = delta_spark
+    db, options = _orders(workdir)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run(**kw):
+        cdc.to_delta(
+            target,
+            "late-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            on_data_loss="resnapshot",
+            **kw,
+        ).awaitTermination()
+
+    def purge(minutes):
+        db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=minutes))
+        db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=minutes + 1)))
+
+    run()
+    purge(3)
+    take = CdcStream._take_snapshot
+
+    def slow(self, target, ci):  # cleanup passes the snapshot's LSN while the table is read
+        taken = take(self, target, ci)
+        db.commit(CI, [(2, {"order_id": 5, "status": "new"})], at=T0 + timedelta(minutes=5))
+        db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=6)))
+        return taken
+
+    monkeypatch.setattr(CdcStream, "_take_snapshot", slow)
+    with pytest.raises(DataLossError, match="snapshot='chunked', which has no such limit"):
+        run()
+    monkeypatch.undo()
+    [full] = _events(spark, facts, "snapshot_open")
+    assert (full["app_id"], json.loads(full["detail"])["mode"]) == ("late-v1.g1", "full")
+    # its S is purged: no run can complete it, so it holds no mode
+    run(snapshot="chunked", resnapshot_interval_days=0)
+    state = _generation(ckpt)
+    full, chunked = _events(spark, facts, "snapshot_open")
+    assert chunked["app_id"] == "late-v1.g1" and json.loads(chunked["detail"])["mode"] == "chunked"
+    assert (state["generation"], state["snapshot_lsn"]) == (1, chunked["min_lsn"])
+    status = cdc.backfill(target, app_id="late-v1", facts_table=facts)
+    assert status["done"] and status["snapshot"] == chunked["min_lsn"]
+    [resnap] = _events(spark, facts, "resnapshot")
+    assert (resnap["app_id"], resnap["max_lsn"]) == ("late-v1.g1", chunked["min_lsn"])
+    run(snapshot="chunked")
+    bronze = spark.read.format("delta").load(target)
+    assert _rebuilt(bronze, "order_id", "status", chunked["min_lsn"]) == _source(db)
+
+
+def test_a_run_finding_the_other_mode_opened_after_its_lock_stops(delta_spark, workdir):
+    """Opens committed one after the other, as a rerun or a later run finds them. Two opens of
+    one chunked generation at the same instant fail Delta's conflict check instead
+    (ConcurrentTransactionException); the rerun then reads the stored one."""
     from mssql_cdc import stream
 
     spark = delta_spark
@@ -1772,21 +1888,26 @@ def test_two_runs_opening_one_generation_in_different_modes_stop_the_second(delt
     target, facts = (os.path.join(workdir, n) for n in ("bronze", "facts"))
     cdc = stream(spark, options)
 
-    def open_(app_id, mode):  # what each run writes once both found nothing open
+    def open_(app_id, mode):  # what a run writes once it found nothing open
         return cdc._open(target, CI, app_id, app_id, facts, 0, "bootstrap", mode=mode)
 
-    for i, (first, second) in enumerate((("chunked", "full"), ("full", "chunked"))):
-        app_id = f"race{i}-v1"
-        s = open_(app_id, first)["lsn"]
-        db.commit(CI, [(2, {"order_id": 10 + i, "status": "new"})], at=T0 + timedelta(hours=i + 1))
-        assert open_(app_id, first)["lsn"] == s  # Delta skipped it: the stored one's S
-        with pytest.raises(ValueError, match=rf"{first} snapshot open at {s} .*another run"):
-            open_(app_id, second)  # skipped too: it reads back the other mode's
-    opens = _events(spark, facts, "snapshot_open")
-    assert [(o["app_id"], json.loads(o["detail"])["mode"]) for o in opens] == [
-        ("race0-v1", "chunked"),
-        ("race1-v1", "full"),
-    ]
+    # chunked first: Delta skips a rerun's open, and a full run reading it back stops
+    s = open_("race0-v1", "chunked")["lsn"]
+    db.commit(CI, [(2, {"order_id": 10, "status": "new"})], at=T0 + timedelta(hours=1))
+    assert open_("race0-v1", "chunked")["lsn"] == s  # the stored one's S
+    with pytest.raises(ValueError, match=rf"chunked snapshot open at {s} .*another run"):
+        open_("race0-v1", "full")
+    # the full run stopped: its open next to the chunked one holds no mode
+    assert cdc.backfill(target, app_id="race0-v1", facts_table=facts, max_waves=0)["snapshot"] == s
+    # full first, still being read: a chunked run that passed its lock before stops
+    f = open_("race1-v1", "full")["lsn"]
+    with pytest.raises(
+        ValueError, match=rf"full snapshot open at {f} .*rerun with snapshot='full'"
+    ):
+        cdc._reusable(facts, target, "race1-v1", True)
+    assert cdc._reusable(facts, target, "race1-v1", False) is None  # a full run reads again
+    db.commit(CI, [(2, {"order_id": 11, "status": "new"})], at=T0 + timedelta(hours=2))
+    assert open_("race1-v1", "full")["lsn"] > f  # under an open of its own
     # a full one a racing run opened in a later generation: backfill neither plans nor reads
     cdc._open(target, CI, "race0-v1", "race0-v1.g1", facts, 1, "resnapshot", mode="full")
     with pytest.raises(ValueError, match=r"full snapshot open at .* rerun with snapshot='full'"):

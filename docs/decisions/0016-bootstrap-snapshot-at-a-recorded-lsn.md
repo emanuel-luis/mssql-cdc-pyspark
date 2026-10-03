@@ -5,7 +5,8 @@
 **Amended:** 2026-09-30T11:02:01-03:00, NTILE tiles for composite and non-integer keys (see the Amendment)  
 **Amended:** 2026-09-30T15:21:04-03:00, the capture instance matches ignoring case (see Amendment 2)  
 **Amended:** 2026-10-01T17:55:59-03:00, key bounds bound as text for either backend (ADR 0003 Amendment 2)  
-**Amended:** 2026-10-02T20:30:12-03:00, a snapshot is named by `_snapshot`; chunked snapshots (see Amendment 3, ADR 0028)
+**Amended:** 2026-10-02T20:30:12-03:00, a snapshot is named by `_snapshot`; chunked snapshots (see Amendment 3, ADR 0028)  
+**Amended:** 2026-10-03T18:10:05-03:00, chunk bounds planned once, from row counts (Amendment 3's last bullet, superseded by ADR 0028's Amendment)
 
 ## Context
 The stream starts from what CDC retention still holds (`startingLsn=earliest`), which is
@@ -160,4 +161,6 @@ largest `_start_lsn` of the operation-0 rows" no longer holds.
   `NOLOCK`.
 * Chunks do not use the NTILE tiles above: an integer key steps over [MIN, MAX], any other
   key takes keyset bounds per wave, a `TOP (n + 1)` per seekable piece of `_key_select`
-  (`tests/integration` checks it reads at most `n + 1` rows per piece).
+  (`tests/integration` checks it reads at most `n + 1` rows per piece). Superseded by ADR
+  0028's Amendment: the first `backfill()` call plans every chunk, an integer key from row
+  counts per slice and any other key by those keyset seeks, all before the first wave.

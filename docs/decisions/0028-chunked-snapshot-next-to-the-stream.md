@@ -3,6 +3,7 @@
 **Status:** accepted  
 **Date:** 2026-10-02T20:30:12-03:00  
 **Amended:** 2026-10-03T14:30:38-03:00, chunks planned once from per-slice counts and fixed in a `'snapshot_plan'` row; a wave's facts rebuilt from bronze; one snapshot mode per run, locked while a snapshot is open; per-wave range deletes in silver, in re-snapshots and on datetime2 keys (see the Amendment)
+**Amended:** 2026-10-03T18:10:05-03:00, a full snapshot opens once per run and stops holding the mode once CDC cleanup passes it; a wave rebuilt from the chunks bronze holds; a keyset plan's open last chunk closed when read (see the Amendment)
 
 ## Context
 A snapshot taken before the stream starts (ADR 0016) has to be read within the CDC
@@ -218,8 +219,10 @@ passage of the Decision that points here.
 * The first `backfill()` call plans every chunk (`client.plan_chunks`) and records them in a
   `'snapshot_plan'` facts row (`txnAppId <app_id>#snapplan.<S>`, version 0; detail
   `{snapshot, kind, keys, chunk_rows, chunks}`). Later calls read it: their `chunk_rows` is
-  ignored with a warning, `chunks_total` is exact from the first call on, and when two calls
-  plan at once Delta keeps the first row, which both then read. The open still records only
+  ignored with a warning, and `chunks_total` is exact from the first call on. A rerun's plan
+  row is skipped by Delta and the rerun reads the stored one; for two calls committing it at
+  the same instant this rests on Delta's conflict check on the `txnAppId`, which fails the
+  second (not tested here). The open still records only
   the key's extent (the `plan` of `'snapshot_open'`), so the stream starts at S without
   waiting for the planning.
 * One integer key: its rows are counted per slice of a fixed grid over [MIN, MAX] in one
@@ -239,6 +242,11 @@ passage of the Decision that points here.
   the key after MAX shares MAX's microsecond its bound reads back as MAX's, at or below MAX:
   the last chunk is then open, or the keys of that microsecond would be in no chunk (found
   while amending, `tests/integration`).
+* The end of a keyset plan's last chunk is the first key after MAX. When there is none at
+  planning, `backfill()` seeks it again before each wave (`client.last_bound`), so the rows
+  inserted above MAX while a long backfill runs, the stream's, do not pile up in the last
+  chunk (a key that grows at the top: a `datetime2` creation time, a sequential
+  `uniqueidentifier`). Every other bound stays as planned.
 * Cost: planning reads the whole key once before the first wave (one `GROUP BY` over the
   narrowest index on the key plus the recounts, or one `TOP (n + 1)` seek per chunk), under
   READ COMMITTED even with `isolation="snapshot"`, so a writer holding locks delays it as it
@@ -252,35 +260,52 @@ passage of the Decision that points here.
 ### A wave's facts rebuilt from bronze
 When a rerun's append is skipped and the commit that holds the wave is no longer in the
 target's history (Delta log cleanup), its `'snapshot_chunk'` rows are rebuilt from its rows
-in bronze: rows per `_chunk` of `_snapshot` = S, bounds from the plan, the stamp from the
-rows' `_start_lsn` (the rerun's own stamp when none of the wave's chunks has rows), and
-`read_seconds` and `read_mb` NULL. Before, `backfill()` raised and the snapshot had to be
-taken again, though all its rows were in bronze. The history lookup stays the first try.
+in bronze: the chunks of `_snapshot` = S from the wave's first to the last that has rows
+there, whatever the rerun planned (its `numPartitions` may differ from the attempt's), with
+the bounds of the plan, the stamp and the counts of the rows, and `read_seconds` and
+`read_mb` NULL. The attempt's empty chunks after those are read again by the next wave. A
+rerun whose own read is empty looks for that commit too, and a skipped append whose rows
+are nowhere raises. Before, `backfill()` raised and the snapshot had to be taken again,
+though all its rows were in bronze. The history lookup stays the first try.
 
 ### One snapshot mode per run, locked while a snapshot is open
 * A run (one `to_delta` call: its bootstrap and its re-snapshot) takes its snapshots in one
   `snapshot` mode. The mode may change from one run to the next, never while a snapshot of
   the other mode is open: a full read over a chunked snapshot still being backfilled, or a
   chunked open over an unfinished full one, would put two snapshots in one generation.
-* A full snapshot now writes `'snapshot_open'` too, before it reads the table, under the
-  chunked open's `txnAppId` (`<app_id>#snapshots`, the generation). Its detail `mode` is
-  `'full'` or `'chunked'`, and `kind` holds `'bootstrap'` or `'resnapshot'` (the first
-  version, unreleased, put the kind in `mode`). A snapshot is open until a `'bootstrap'` or
-  `'resnapshot'` row of the same stream, any generation, has `max_lsn` at or after its S.
+* A full snapshot now writes `'snapshot_open'` too, before it reads the table: one per run,
+  at the run's own S and with no `txnAppId`; a chunked one stays one per generation
+  (`<app_id>#snapshots`, the generation). Its detail `mode` is `'full'` or `'chunked'`, and
+  `kind` holds `'bootstrap'` or `'resnapshot'` (the first version, unreleased, put the kind
+  in `mode`). A snapshot is open until a `'bootstrap'` or `'resnapshot'` row of the same
+  stream, any generation, has `max_lsn` at or after its S.
+* A full one holds the mode only while a run may still be reading it: not once CDC cleanup
+  has passed its S, as it can then never complete (a re-snapshot that outlived the
+  retention, a run killed long ago), nor next to a chunked one of its generation. A chunked
+  run then opens the generation over it. That is why a full run writes its own open: a
+  rerun under the first attempt's S would count as dead while it reads.
 * With a facts table, `to_delta` (with `bootstrap=True` or `on_data_loss="resnapshot"`),
   `snapshot(app_id=, facts_table=)` and `backfill()` raise on an open snapshot of the other
   mode, and `seed(app_id=, facts_table=)` on one of either mode. The error says how to
   finish it: `backfill()` until done for a chunked one, a rerun with `snapshot="full"`
-  (which reads the table again) for a full one. Two runs opening one generation in
-  different modes: Delta keeps the first open row, the second reads it back and raises.
-  `backfill()` checks once per call, so a full open made during a call stops the next one.
+  (which reads the table again) for a full one. A run that finds an open of the other mode
+  committed after its own check stops too: a chunked run whose generation holds only a
+  full open still being read, and a full run that reads back a chunked open of its
+  generation after writing its own. Two chunked opens of one generation at the same
+  instant rest on Delta's conflict check on the shared `txnAppId` (not tested here).
+  `backfill()` checks once per call, first, so a full open made during a call stops the
+  next one.
 * Considered: no lock, the newest open wins. Silver's rebuild point and reconcile's chunk
   checks would then mix two snapshots.
 * Considered: one mode for the stream's lifetime. A table that grows past what the
   retention allows needs to move to chunked without a new checkpoint.
-* Consequence: a full re-snapshot that cannot finish within the retention never writes its
-  completion row, so the lock refuses `snapshot="chunked"` until a full run completes or the
-  stream starts over with a new checkpoint and `app_id`.
+* Considered: a row closing a full open when its run raises, so that a chunked run could
+  follow at once. A killed process writes none, so the cleanup test is needed anyway; the
+  row would only shorten the wait after an exception.
+* Consequence: a full snapshot no run reads any more holds the mode until CDC cleanup passes
+  its S, the retention at most: the library cannot tell it from one still being read. A
+  full re-snapshot that outlived the retention is past that already, so its rerun may be
+  chunked at once.
 
 ### Range deletes per wave, in re-snapshots and on datetime2 keys
 * An open re-snapshot's waves are applied as a bootstrap's are: chunk rows with every later
@@ -307,10 +332,14 @@ taken again, though all its rows were in bronze. The history lookup stays the fi
 ### Tests
 `tests/test_source_fake.py`: an integer plan packing counted slices whatever the skew.
 `tests/test_delta_sink.py`: the plan kept across calls and a wave's facts rebuilt from
-bronze without its commit; a full snapshot a crash left open holding its mode until a full
-run completes it; two runs opening one generation in different modes. `tests/test_silver.py`:
-each wave deleting the stale keys of its ranges, a chunked re-snapshot deleting the gap's
-keys wave by wave, an integer plan's last bound past BIGINT. `tests/test_client_sql.py`: the
+bronze without its commit, a rerun planning more chunks than the commit holds; a rerun
+reading nothing finding the commit; a keyset plan's open last chunk closed at the first key
+after MAX when read; a full snapshot a crash left open holding its mode until a full run
+completes it; a full re-snapshot past the retention giving its generation to a chunked
+rerun; runs finding the other mode opened after their check. `tests/test_silver.py`: each
+wave deleting the stale keys of its ranges, a chunked re-snapshot deleting the gap's keys
+wave by wave, an integer plan's last bound past BIGINT, no range deletes on a composite key
+or on a key the bounds were not cut on. `tests/test_client_sql.py`: the
 counting and seeking SQL. `tests/integration`: an integer plan counted on the server for a
 skewed BIGINT key (a dense cluster, a sparse region, a key at BIGINT's maximum) and
 backfilled; a `datetime2(7)` plan reading the keys in MAX's microsecond; a chunked

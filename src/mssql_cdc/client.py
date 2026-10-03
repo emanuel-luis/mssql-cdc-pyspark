@@ -298,10 +298,10 @@ def plan_chunks(
     ``extent``, of at most about ``chunk_rows`` rows each, planned once before its first wave
     (ADR 0028). They tile the key space up to MAX: the first is open below (NULL first), each
     starts where the previous ends, and the last ends just above MAX, at MAX + 1 or at the
-    first key after it (None, open, when there is none or it reads back as MAX, a truncated
-    datetime2(7) in MAX's microsecond): the keys after MAX were inserted
-    after S and come from the stream, so a table written while it is read does not pile them
-    into the last chunk.
+    first key after it (``last_bound``; None, open, when there is none or it reads back as
+    MAX, a truncated datetime2(7) in MAX's microsecond, and then sought again before each
+    wave): the keys after MAX were inserted after S and come from the stream, so a table
+    written while it is read does not pile them into the last chunk.
 
     One integer key: rows counted per slice of a fixed grid (``_int_chunks``), so a sparse
     region or a sentinel far above the ids neither empties nor overfills a chunk. Other keys:
@@ -321,12 +321,21 @@ def plan_chunks(
             break
         out.append([lo, _json_key(bound, types)])
         lo = out[-1][1]
-    after = client.key_bound(s, t, keys, types, top, None, 1)  # the first after MAX, if it exists
+    return [*out, [lo, last_bound(client, capture_instance, source, extent["max"])]]
+
+
+def last_bound(client: CdcClient, capture_instance: str, source: SourceTable, top) -> object:
+    """The end of a keyset plan's last chunk: the first key after MAX (``top``, as JSON) now,
+    as JSON; None (open) when there is none."""
+    types: list = client.key_types(capture_instance, source.keys)  # all set: there is a MAX
+    after = client.key_bound(
+        source.schema, source.table, source.keys, types, _key_tuple(top), None, 1
+    )
     end = None if after is None else _json_key(after, types)
     # A datetime2(7) last key column comes back truncated to the microsecond (key_types): when
     # the key after MAX shares MAX's microsecond, its bound reads back as MAX's, at or below
     # MAX, and would leave the keys of that microsecond in no chunk. Then the last is open.
-    return [*out, [lo, None if end == extent["max"] else end]]
+    return None if end == top else end
 
 
 def _int_chunks(

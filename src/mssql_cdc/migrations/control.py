@@ -8,7 +8,7 @@ Append only; see ``mssql_cdc.migrations``. For example::
     ]
 """
 
-from .base import Migration, add_columns
+from .base import Migration, add_columns, set_comments
 
 # Migration 1 (2026-09-30): the position of tables built by silver.apply_changes (ADR 0019).
 APPLIED_COLUMNS = [
@@ -55,6 +55,18 @@ WAVE_COLUMNS = [
     ),
 ]
 
+# Migration 3 (2026-10-03): a chunked re-snapshot's waves are applied as a bootstrap's are
+# (ADR 0019 Amendment 2), so open_snapshot_lsn names either. Comment only; the creation
+# columns take it, over migration 2's.
+OPEN_COMMENTS = {
+    "open_snapshot_lsn": (
+        "Tables built by mssql_cdc.apply_changes: the LSN of the chunked snapshot, bootstrap or "
+        "re-snapshot, still being read (its 'snapshot_open' facts row, no completion row yet) "
+        "whose chunks are applied as they arrive. NULL for other tables and when none is open."
+    ),
+}
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         "add applied_lsn and snapshot_lsn",
@@ -63,5 +75,8 @@ MIGRATIONS: list[Migration] = [
     Migration(
         "add open_snapshot_lsn and snapshot_wave",
         lambda spark, table: add_columns(spark, table, WAVE_COLUMNS),
+    ),
+    Migration(
+        "open re-snapshots too", lambda spark, table: set_comments(spark, table, OPEN_COMMENTS)
     ),
 ]

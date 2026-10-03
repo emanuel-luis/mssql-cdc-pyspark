@@ -61,6 +61,7 @@ from .migrations.facts import (
     END_COLUMNS,
     EVENT_COLUMNS,
     LAG_COLUMNS,
+    LOCK_COMMENTS,
     MODE_COMMENTS,
     NETWORK_COLUMNS,
     RETENTION_COLUMNS,
@@ -217,7 +218,7 @@ FACTS_COLUMNS = [
     ),
     *NETWORK_COLUMNS,
     *RETENTION_COLUMNS,
-    *((n, t, MODE_COMMENTS.get(n, c)) for n, t, c in EVENT_COLUMNS),
+    *((n, t, LOCK_COMMENTS.get(n, MODE_COMMENTS.get(n, c))) for n, t, c in EVENT_COLUMNS),
     *LAG_COLUMNS,
     *END_COLUMNS,
     *((n, t, MODE_COMMENTS.get(n, c)) for n, t, c in DETAIL_COLUMNS),
@@ -472,7 +473,7 @@ def write_event(
     event: str,
     *,
     app_id: str,
-    txn_app_id: str,
+    txn_app_id: str | None,
     version: int,
     target: str,
     lsn: str,
@@ -489,7 +490,7 @@ def write_event(
 
     The row has no ``batch_id``; ``lsn`` and ``commit_ts`` are the snapshot's offset.
     Idempotent like the batch rows: a rerun with the same ``txn_app_id`` and ``version``
-    is skipped by Delta.
+    is skipped by Delta. ``txn_app_id`` None: appended every time (a full snapshot's open).
     """
     ts = datetime.fromisoformat(commit_ts) if commit_ts else None
     facts = {
@@ -516,9 +517,11 @@ def write_event(
     write_facts(spark, facts_table, [facts], txn_app_id, version)
 
 
-def write_facts(spark, facts_table: str, rows: list[dict], txn_app_id: str, version: int) -> None:
+def write_facts(
+    spark, facts_table: str, rows: list[dict], txn_app_id: str | None, version: int
+) -> None:
     """Append facts ``rows`` (column -> value; the rest NULL, ``written_at`` now) in one
-    commit, skipped by Delta when ``txn_app_id`` already wrote ``version``."""
+    commit, skipped by Delta when ``txn_app_id`` already wrote ``version`` (never when None)."""
     migrations.ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
     now = _utc_now()
     data = [tuple({"written_at": now, **r}.get(k) for k in _FACT_FIELDS) for r in rows]

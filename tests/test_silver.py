@@ -313,7 +313,7 @@ def test_silver_follows_the_switch_to_a_newer_capture_instance_and_gains_its_col
 def test_a_control_table_at_version_0_gains_applied_lsn_and_snapshot_wave(delta_spark, workdir):
     from mssql_cdc import migrations, tables
     from mssql_cdc.finalization import CONTROL_COLUMNS
-    from mssql_cdc.migrations.control import APPLIED_COLUMNS, WAVE_COLUMNS
+    from mssql_cdc.migrations.control import APPLIED_COLUMNS, OPEN_COMMENTS, WAVE_COLUMNS
 
     old = os.path.join(workdir, "control_v0")
     tables.create_if_not_exists(
@@ -322,8 +322,9 @@ def test_a_control_table_at_version_0_gains_applied_lsn_and_snapshot_wave(delta_
         [c for c in CONTROL_COLUMNS if c not in APPLIED_COLUMNS + WAVE_COLUMNS],
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(delta_spark, old, "control") == 2
+    assert migrations.migrate(delta_spark, old, "control") == 3
     schema = delta_spark.read.format("delta").load(old).schema
+    assert schema["open_snapshot_lsn"].metadata["comment"] == OPEN_COMMENTS["open_snapshot_lsn"]
     types = {"applied_lsn": "string", "snapshot_lsn": "string", "open_snapshot_lsn": "string"}
     for name, data_type in {**types, "snapshot_wave": "int"}.items():
         assert (
@@ -418,23 +419,23 @@ class Log:
         df = self.spark.createDataFrame([tuple(row.get(k) for k in _FACT_FIELDS)], FACTS_SCHEMA)
         df.write.format("delta").mode("append").save(self.facts)
 
-    def open(self, s, kind="bootstrap"):
+    def open(self, s, kind="bootstrap", keys=("order_id",)):
         """The 'snapshot_open' row, as CdcStream._open writes it."""
         generation = int(kind == "resnapshot")
-        detail = {"mode": "chunked", "kind": kind, "keys": ["order_id"], "generation": generation}
+        detail = {"mode": "chunked", "kind": kind, "keys": list(keys), "generation": generation}
         self.fact("snapshot_open", s, detail)
 
     def verdict(self, n):
         offset = {"lsn": _lsn(n), "commit_ts": _ts(n).isoformat(timespec="milliseconds")}
         return finalization.advance(self.spark, self.control, self.bronze, offset)
 
-    def apply(self, facts=True):
+    def apply(self, facts=True, keys=("order_id",)):
         return apply_changes(
             self.spark,
             self.bronze,
             self.silver,
             CI,
-            ["order_id"],
+            list(keys),
             control_table=self.control,
             facts_table=self.facts if facts else None,
         )
@@ -579,6 +580,25 @@ def test_an_integer_plans_last_bound_past_bigint_still_deletes_up_to_the_last_ke
     g.open(S, "resnapshot")
     g.wave(S, 0, 110, [(0, None, top + 1, [(1, "snap")])])  # plan_chunks ends at MAX + 1
     g.apply()
+    assert g.rows() == [(1, "snap")]
+
+
+@pytest.mark.parametrize(
+    ("keys", "cut"),
+    [(["order_id", "status"], ["order_id", "status"]), (["order_id"], ["status"])],
+)
+def test_no_range_deletes_unless_silver_has_the_snapshots_one_column_key(
+    delta_spark, workdir, keys, cut
+):
+    g, S = Log(delta_spark, workdir), 100
+    g.change(10, (2, 1, "new"), (2, 2, "new"))  # 2's delete is lost in a purged gap
+    g.apply(keys=keys)
+    g.open(S, "resnapshot", keys=cut)  # its bounds are not cut on silver's one key column
+    g.wave(S, 0, 110, [(0, None, None, [(1, "snap")])])  # a whole-table range without 2
+    g.apply(keys=keys)
+    assert (2, "new") in g.rows()  # left to the rebuild
+    g.fact("resnapshot", S, {"snapshot": _lsn(S)})
+    g.apply(keys=keys)
     assert g.rows() == [(1, "snap")]
 
 
