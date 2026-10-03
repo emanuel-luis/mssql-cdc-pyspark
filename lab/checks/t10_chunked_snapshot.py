@@ -5,8 +5,10 @@ thread then commits continuously (an insert, an update, a delete or a key update
 several in one transaction) while ``stream().to_delta(snapshot="chunked")`` reads the change
 table from the snapshot's LSN S into local Delta paths as a least-privilege login, and
 ``backfill()`` reads the table in small chunks next to it, wave by wave, each followed by
-``apply_changes``. One transaction holds the locks of a range of keys until a chunk read waits
-on them (READ COMMITTED), then commits.
+``apply_changes``. Its first call plans every chunk from row counts per slice of the key (the
+'snapshot_plan' facts row); the result records the rows each chunk read. One transaction
+holds the locks of a range of keys until a chunk read waits on them (READ COMMITTED), then
+commits.
 
 1. backfill completes: chunks tile the key space, each stamped at or after S, its facts row
    counting its bronze rows (``reconcile(facts_table=...)``), no key twice in the snapshot;
@@ -20,8 +22,10 @@ on them (READ COMMITTED), then commits.
 writer's changes (deletes among them) and a forced cleanup up to ``max_lsn`` purge what the
 stream has not read. ``to_delta(on_data_loss="resnapshot", snapshot="chunked")`` opens a new
 chunked snapshot in generation 1 and the checks above run on it, plus: the keys deleted in the
-purged gap have no delete row in bronze and are gone from silver (the rebuild at completion
-removes them by absence); facts hold its 'resnapshot' row.
+purged gap have no delete row in bronze and are gone from silver at the end; after each wave
+before the completion, silver holds none of them below the end of the chunks applied (each
+wave's range deletes remove them, since the key is one integer) and fewer than at first;
+facts hold its 'resnapshot' row.
 
 Needs ``python -m lab.workload setup`` (the database). Recreates ``dbo.t10_chunked`` each run.
 
@@ -30,6 +34,7 @@ Needs ``python -m lab.workload setup`` (the database). Recreates ``dbo.t10_chunk
 """
 
 import argparse
+import json
 import os
 import random
 import re
@@ -223,6 +228,30 @@ def _stale(conn, chunk_rows: list, base: dict, after: str | None) -> list:
     return stale
 
 
+def _behind(spark, facts: str, silver: str, status: dict, gone: list) -> tuple[int, int]:
+    """Of the keys deleted in the purged gap (``gone``), how many silver still holds with an
+    image older than the snapshot's S: below the end of the chunks applied so far (which
+    their range deletes must have removed), and in all."""
+    from pyspark.sql import functions as F
+
+    s, n = status["snapshot"], status["chunks_done"]
+    plan = (
+        spark.read.format("delta")
+        .load(facts)
+        .where(
+            (F.col("event") == "snapshot_plan") & (F.get_json_object("detail", "$.snapshot") == s)
+        )
+        .first()
+    )
+    old = (
+        spark.read.format("delta")
+        .load(silver)
+        .where((F.col("_start_lsn") < s) & F.col("id").isin(gone))
+    )
+    hi = json.loads(plan["detail"])["chunks"][n - 1][1] if plan and n else -(2**31)
+    return (old.count() if hi is None else old.where(F.col("id") < hi).count(), old.count())
+
+
 def main(argv=None) -> bool:
     p = argparse.ArgumentParser()
     p.add_argument("--rows", type=int, default=3000, help="rows in the table before CDC")
@@ -309,7 +338,7 @@ def main(argv=None) -> bool:
     mid = a.rows // 2
     held = range(mid, mid + 10)
     finish = _writer(a.rows, held, seed=10)
-    statuses, applied, waits = [], [], {}
+    statuses, applied, waits, behind = [], [], {}, []
     try:
         q = start(processingTime="2 seconds")  # opens S (a re-snapshot: generation 1) at once
         release = _holder(held, a.hold_timeout)
@@ -321,6 +350,8 @@ def main(argv=None) -> bool:
                     )
                 )
                 applied.append(apply())
+                if a.resnapshot and not statuses[-1]["done"]:  # the last call also rebuilds
+                    behind.append(_behind(spark, facts, silver, statuses[-1], gap_deleted))
                 if q.exception() is not None:
                     raise RuntimeError(f"the stream failed: {q.exception()}")
                 if len(statuses) > 10 * a.rows // a.chunk_rows:
@@ -448,6 +479,19 @@ def main(argv=None) -> bool:
                 f"{len(deleted)} deleted in the gap, {len(back)} still in silver",
             )
         )
+        checks.append(
+            (
+                "range deletes: each wave removed the gap's keys below its chunks, before completion",
+                bool(behind) and all(b == 0 for b, _ in behind) and behind[-1][1] < len(deleted),
+                f"(below the waves applied, left in silver) after each wave: {behind}",
+            )
+        )
+    sizes = [
+        r["rows"]
+        for r in facts_df()
+        .where(f"event = 'snapshot_chunk' AND get_json_object(detail, '$.snapshot') = '{s}'")
+        .collect()
+    ]
     return report(
         "t10_chunked_snapshot",
         checks,
@@ -461,6 +505,7 @@ def main(argv=None) -> bool:
             "waves": waves,
             "rows": a.rows,
             "chunk_rows": a.chunk_rows,
+            "chunk_rows_read": {"min": min(sizes), "max": max(sizes)} if sizes else None,
             "rebuilt": any(x["rebuilt"] for x in applied),
         },
     )
