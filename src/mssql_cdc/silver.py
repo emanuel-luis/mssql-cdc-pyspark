@@ -168,8 +168,9 @@ def _bound(v, key_type, lower: bool):
         return None
     from pyspark.sql.types import DateType, IntegralType
 
-    if isinstance(key_type, IntegralType):
-        return int(v)
+    if isinstance(key_type, IntegralType):  # bound as BIGINT
+        v = int(v)
+        return None if v > 2**63 - 1 else v  # the plan's MAX + 1 past BIGINT: no key above
     if isinstance(key_type, DateType):
         return date.fromisoformat(str(v)[:10])
     whole, _, digits = str(v).replace(" ", "T").partition(".")
@@ -187,6 +188,7 @@ def _absent(spark, target: str, key: str, key_type, chunks: dict, held):
     from pyspark.sql.types import (
         DateType,
         IntegralType,
+        LongType,
         StringType,
         StructField,
         StructType,
@@ -201,8 +203,9 @@ def _absent(spark, target: str, key: str, key_type, chunks: dict, held):
             ranges.append((_bound(lo, key_type, True), _bound(hi, key_type, False), stamp))
         except OverflowError:  # a lower bound past the last microsecond: no key surely inside
             continue
+    bound = LongType() if isinstance(key_type, IntegralType) else key_type  # MAX + 1 fits
     schema = StructType(
-        [StructField("lo", key_type), StructField("hi", key_type), StructField("l", StringType())]
+        [StructField("lo", bound), StructField("hi", bound), StructField("l", StringType())]
     )
     r = F.broadcast(spark.createDataFrame(ranges, schema)).alias("r")
     t = delta_table(spark, target).toDF().alias("t")

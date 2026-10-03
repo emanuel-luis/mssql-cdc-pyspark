@@ -1577,10 +1577,7 @@ def test_a_chunked_resnapshot_deletes_stale_datetime2_keys_but_not_one_in_a_boun
 
     # bounds with 100 ns digits, as the snapshot reader CASTs them to datetime2(7)
     b1, b2 = "2026-09-28T10:00:02.1234568", "2026-09-28T10:00:05.0000000"
-    chunks = [[0, None, b1], [1, b1, b2], [2, b2, None]]
-    monkeypatch.setattr(
-        cdc_client, "next_chunks", lambda c, ci, s, plan, i, *_: ([chunks[i]], i == 2)
-    )
+    monkeypatch.setattr(cdc_client, "plan_chunks", lambda *_: [[None, b1], [b1, b2], [b2, None]])
 
     def wave() -> set:
         cdc.backfill(paths["bronze"], app_id="ck-dt2", facts_table=paths["facts"], max_waves=1)

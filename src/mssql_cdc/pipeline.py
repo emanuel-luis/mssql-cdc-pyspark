@@ -1011,6 +1011,8 @@ class CdcStream:
         # its own row, or a newer whole snapshot's (a full re-snapshot) that supersedes it
         if any(r["event"] in ("bootstrap", "resnapshot") and r["max_lsn"] >= s for r in rows):
             return {**status, "chunks_done": len(chunks), "chunks_total": len(chunks), "done": True}
+        # a full snapshot of the stream still open (a run raced this one): no plan, no wave
+        self._lock(facts_table, target, app_id, "chunked")
         given = str(_opt(self.options, "numPartitions") or "auto").strip().lower()
         k = int(given) if given != "auto" else available_cores(self.spark) or os.cpu_count() or 1
         base = _opt(self.options, "metricsPath")  # not the stream's own directory: it folds those

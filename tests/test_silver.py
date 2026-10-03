@@ -570,6 +570,18 @@ def test_each_wave_deletes_the_stale_keys_of_its_ranges_and_completion_any_absen
     assert g.rows() == _ordered(live + [(k5, "snap")])  # absent from both: deleted
 
 
+def test_an_integer_plans_last_bound_past_bigint_still_deletes_up_to_the_last_key(
+    delta_spark, workdir
+):
+    g, S, top = Log(delta_spark, workdir, "BIGINT"), 100, 2**63 - 1
+    g.change(10, (2, 1, "new"), (2, top, "new"))
+    g.apply()
+    g.open(S, "resnapshot")
+    g.wave(S, 0, 110, [(0, None, top + 1, [(1, "snap")])])  # plan_chunks ends at MAX + 1
+    g.apply()
+    assert g.rows() == [(1, "snap")]
+
+
 def test_a_legacy_snapshot_rebuilds_and_an_open_resnapshot_holds_the_verdict_until_complete(
     delta_spark, workdir
 ):

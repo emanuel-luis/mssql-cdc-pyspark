@@ -1787,3 +1787,8 @@ def test_two_runs_opening_one_generation_in_different_modes_stop_the_second(delt
         ("race0-v1", "chunked"),
         ("race1-v1", "full"),
     ]
+    # a full one a racing run opened in a later generation: backfill neither plans nor reads
+    cdc._open(target, CI, "race0-v1", "race0-v1.g1", facts, 1, "resnapshot", mode="full")
+    with pytest.raises(ValueError, match=r"full snapshot open at .* rerun with snapshot='full'"):
+        cdc.backfill(target, app_id="race0-v1", facts_table=facts)
+    assert not _events(spark, facts, "snapshot_plan")
