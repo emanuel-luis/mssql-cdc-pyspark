@@ -353,7 +353,7 @@ def main(argv=None) -> bool:
                 "the loss opened a newer chunked snapshot in generation 1",
                 len(opens) == 2
                 and opens[-1]["app_id"] == f"{APP}.g1"
-                and '"mode": "resnapshot"' in detail
+                and '"kind": "resnapshot"' in detail
                 and opens[-1]["lost_from_ts"] is not None,
                 f"{[(o['app_id'], o['min_lsn']) for o in opens]}",
             )

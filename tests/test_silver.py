@@ -390,10 +390,10 @@ class Log:
         df = self.spark.createDataFrame([tuple(row.get(k) for k in _FACT_FIELDS)], FACTS_SCHEMA)
         df.write.format("delta").mode("append").save(self.facts)
 
-    def open(self, s, mode="bootstrap"):
+    def open(self, s, kind="bootstrap"):
         """The 'snapshot_open' row, as CdcStream._open writes it."""
-        generation = int(mode == "resnapshot")
-        detail = {"mode": mode, "keys": ["order_id"], "generation": generation}
+        generation = int(kind == "resnapshot")
+        detail = {"mode": "chunked", "kind": kind, "keys": ["order_id"], "generation": generation}
         self.fact("snapshot_open", s, detail)
 
     def verdict(self, n):

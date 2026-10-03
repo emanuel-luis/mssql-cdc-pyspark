@@ -254,40 +254,47 @@ SNAPSHOT_COMMENTS = {
 
 
 # Migration 8 (2026-10-03): a chunked snapshot's chunks are planned once, by its first
-# backfill() call, and recorded in a 'snapshot_plan' row (ADR 0028). Comments only; the
-# creation columns take these, over migration 7's.
-PLAN_COMMENTS = {
+# backfill() call, and recorded in a 'snapshot_plan' row; a full snapshot writes
+# 'snapshot_open' too, and its detail says the mode ('full' or 'chunked') and the kind
+# ('bootstrap' or 'resnapshot'): while a snapshot of one mode is open, no snapshot of the other
+# is taken (ADR 0028). Comments only; the creation columns take these, over migration 7's.
+MODE_COMMENTS = {
     "event": (
         "What the row records: NULL for a micro-batch. Snapshots, with no batch_id: "
         "'bootstrap' for the initial snapshot of the target; 'resnapshot' for a snapshot taken "
         "because CDC cleanup purged changes before the stream read them; min_lsn = max_lsn is "
         "the LSN the snapshot is stamped with, and the only trace of a snapshot of an empty "
-        "table (rows = 0), which writes no target rows. A chunked snapshot writes its "
-        "'bootstrap' or 'resnapshot' row once its last chunk is in, after 'snapshot_open' when "
-        "it opened (min_lsn = max_lsn = its LSN S, recorded before any chunk was read, where its "
-        "stream generation starts), 'snapshot_plan' when its first backfill() call planned "
-        "every chunk (min_lsn = max_lsn = S; started_at and duration_ms the planning's) and one "
-        "'snapshot_chunk' row per chunk read (min_lsn = the LSN the chunk was stamped with, "
-        "recorded before it was read, at or after S; max_lsn = max_lsn after the read); an open "
-        "snapshot that a newer one supersedes is abandoned and never gets that row. Changes to "
-        "the source (ADR 0023), with the batch_id of the batch that read past them and rows = "
-        "0: 'schema_change' for DDL on the source table, 'capture_instance_switched' when the "
-        "stream first read a newer capture instance of the table (the older one can be dropped "
-        "once the same app_id has a row with a larger batch_id: Spark commits the batch after "
-        "this row); min_lsn = max_lsn is the change's LSN, detail says what changed. Downstream "
-        "rebuilds only from 'bootstrap' and 'resnapshot' rows."
+        "table (rows = 0), which writes no target rows. Before reading the table, a snapshot "
+        "stream().to_delta takes writes 'snapshot_open' (min_lsn = max_lsn = an LSN S recorded "
+        "first; detail says its mode, full or chunked): it stays open until a 'bootstrap' or "
+        "'resnapshot' row of the same stream has max_lsn at or after S, and while it is open no "
+        "snapshot of the other mode is taken. A full snapshot writes that row once its read "
+        "ends (a rerun after a crash reads it again); a chunked one once its last chunk is in, "
+        "after 'snapshot_plan' when its first backfill() call planned every chunk (min_lsn = "
+        "max_lsn = S; started_at and duration_ms the planning's) and one 'snapshot_chunk' row "
+        "per chunk read (min_lsn = the LSN the chunk was stamped with, recorded before it was "
+        "read, at or after S; max_lsn = max_lsn after the read), and its stream generation "
+        "starts at S; an open chunked snapshot that a newer one supersedes is abandoned and "
+        "never gets that row. Changes to the source (ADR 0023), with the batch_id of the batch "
+        "that read past them and rows = 0: 'schema_change' for DDL on the source table, "
+        "'capture_instance_switched' when the stream first read a newer capture instance of the "
+        "table (the older one can be dropped once the same app_id has a row with a larger "
+        "batch_id: Spark commits the batch after this row); min_lsn = max_lsn is the change's "
+        "LSN, detail says what changed. Downstream rebuilds only from 'bootstrap' and "
+        "'resnapshot' rows."
     ),
     "detail": (
         "On 'schema_change' rows, the DDL statement; on 'capture_instance_switched' rows, "
         "'old -> new' capture instance, plus the columns the query reads that the new one does "
-        "not capture (NULL from then on). JSON on the rows of a chunked snapshot: "
-        "'snapshot_open' {mode, keys, plan, generation, lost_from_ts, lost_to_ts}, plan the "
-        "key's extent read just after S ({kind: 'int', lo, hi, rows} for one integer key, else "
-        "{kind: 'keyset', max}); 'snapshot_plan' {snapshot, kind, keys, chunk_rows, chunks}, "
-        "chunks the [lo, hi] of every chunk in order, fixed while the snapshot is open; "
-        "'snapshot_chunk' {snapshot, chunk, wave, lo, hi, last}, the chunk's key range from lo "
-        "(inclusive) to hi (exclusive), null for an open end and a list for a composite key, "
-        "last true on the plan's final chunk, whose read completes the snapshot; its "
+        "not capture (NULL from then on). JSON on the rows of snapshots: 'snapshot_open' "
+        "{mode ('full' or 'chunked'), kind ('bootstrap' or 'resnapshot'), generation, "
+        "lost_from_ts, lost_to_ts, and on a chunked one keys and plan, the key's extent read "
+        "just after S ({kind: 'int', lo, hi, rows} for one integer key, else {kind: 'keyset', "
+        "max})}; 'snapshot_plan' {snapshot, kind, keys, chunk_rows, chunks}, chunks the [lo, hi] "
+        "of every chunk in order, fixed while the snapshot is open; 'snapshot_chunk' "
+        "{snapshot, chunk, wave, lo, hi, last}, the chunk's key range from lo (inclusive) to hi "
+        "(exclusive), null for an open end and a list for a composite key, last true on the "
+        "plan's final chunk, whose read completes the snapshot; a chunked snapshot's "
         "'bootstrap' or 'resnapshot' row {snapshot, chunks, rows, last_lsn}. NULL on other rows."
     ),
 }
@@ -316,11 +323,11 @@ def _chunked_snapshots(spark, table: str) -> None:
     set_comments(spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in changed}, FACTS_COMMENT)
 
 
-def _snapshot_plans(spark, table: str) -> None:
+def _snapshot_modes(spark, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT
 
     set_comments(
-        spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in PLAN_COMMENTS}, FACTS_COMMENT
+        spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in MODE_COMMENTS}, FACTS_COMMENT
     )
 
 
@@ -336,5 +343,5 @@ MIGRATIONS: list[Migration] = [
     Migration("end offset", _end_offset),
     Migration("source change events", _source_events),
     Migration("chunked snapshot events", _chunked_snapshots),
-    Migration("chunked snapshot plans", _snapshot_plans),
+    Migration("snapshot plans and modes", _snapshot_modes),
 ]

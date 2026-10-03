@@ -61,8 +61,8 @@ from .migrations.facts import (
     END_COLUMNS,
     EVENT_COLUMNS,
     LAG_COLUMNS,
+    MODE_COMMENTS,
     NETWORK_COLUMNS,
-    PLAN_COMMENTS,
     RETENTION_COLUMNS,
 )
 from .tables import is_path
@@ -151,8 +151,8 @@ FACTS_COMMENT = (
     "userMetadata (batches with rows only), which Delta log cleanup eventually drops. Each "
     "snapshot stream().to_delta takes (bootstrap or re-snapshot), each schema change on the "
     "source and each switch to a newer capture instance adds one row, with event set (see its "
-    "comment); a chunked snapshot adds one when it opens, one with the chunks its first "
-    "stream().backfill() call plans and one per chunk it reads."
+    "comment); a snapshot adds one more when it opens; a chunked one also adds one with the "
+    "chunks its first stream().backfill() call plans and one per chunk it reads."
 )
 FACTS_COLUMNS = [
     (
@@ -217,10 +217,10 @@ FACTS_COLUMNS = [
     ),
     *NETWORK_COLUMNS,
     *RETENTION_COLUMNS,
-    *((n, t, PLAN_COMMENTS.get(n, c)) for n, t, c in EVENT_COLUMNS),
+    *((n, t, MODE_COMMENTS.get(n, c)) for n, t, c in EVENT_COLUMNS),
     *LAG_COLUMNS,
     *END_COLUMNS,
-    *((n, t, PLAN_COMMENTS.get(n, c)) for n, t, c in DETAIL_COLUMNS),
+    *((n, t, MODE_COMMENTS.get(n, c)) for n, t, c in DETAIL_COLUMNS),
     ("target", "STRING", "Table name or path the batch was written to."),
     (
         "written_at",
@@ -484,8 +484,8 @@ def write_event(
     lost_to_ts: datetime | None = None,
     detail: str | None = None,
 ) -> None:
-    """Record a snapshot (``event`` 'bootstrap', 'resnapshot' or a chunked snapshot's
-    'snapshot_open' and 'snapshot_plan') as one facts row.
+    """Record a snapshot (``event`` 'bootstrap', 'resnapshot', the 'snapshot_open' written
+    before either is read or a chunked snapshot's 'snapshot_plan') as one facts row.
 
     The row has no ``batch_id``; ``lsn`` and ``commit_ts`` are the snapshot's offset.
     Idempotent like the batch rows: a rerun with the same ``txn_app_id`` and ``version``

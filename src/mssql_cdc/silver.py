@@ -125,9 +125,9 @@ def _record(
 
 
 def _resnapshot(opened) -> bool:
-    """A 'snapshot_open' facts row of a re-snapshot (ADR 0018), not of a bootstrap: the mode
-    the stream opened it in, which its completion row is named after."""
-    return json.loads(opened["detail"] or "{}").get("mode") == "resnapshot"
+    """A 'snapshot_open' facts row of a re-snapshot (ADR 0018), not of a bootstrap: the kind
+    the stream opened it as, which its completion row is named after."""
+    return json.loads(opened["detail"] or "{}").get("kind") == "resnapshot"
 
 
 def _chunks(facts, snapshot: str) -> dict[int, int]:
@@ -205,8 +205,10 @@ def apply_changes(
         snapshots = F.col("event").isin("bootstrap", "resnapshot")  # not the source's changes
         points.append(_one(facts.where(snapshots).agg(F.max("max_lsn"))))
         if "detail" in facts.columns:  # facts migration 6
+            # a full snapshot's open row only locks the mode: its rows come whole
+            full = F.get_json_object("detail", "$.mode").eqNullSafe("full")
             opened = (
-                facts.where(F.col("event") == "snapshot_open")
+                facts.where((F.col("event") == "snapshot_open") & ~full)
                 .orderBy(F.col("max_lsn").desc())
                 .select("max_lsn", "detail")
                 .first()

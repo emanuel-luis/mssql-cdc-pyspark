@@ -512,7 +512,11 @@ def _chunk_checks(spark, bronze: str, facts_table: str) -> list[dict]:
         .select("event", "rows", "min_lsn", "max_lsn", "detail")
         .collect()
     )
-    opens = [r["max_lsn"] for r in rows if r["event"] == "snapshot_open"]
+    opens = [
+        r["max_lsn"]
+        for r in rows
+        if r["event"] == "snapshot_open" and json.loads(r["detail"]).get("mode") != "full"
+    ]  # a full snapshot's open row only locks the mode: it has no chunks
     if not opens:
         return []
     s = max(opens)  # a newer open abandons an older one

@@ -923,7 +923,7 @@ def test_data_loss_resnapshots_into_a_new_generation_once_per_interval(
         return (
             spark.read.format("delta")
             .load(facts)
-            .where("event IS NOT NULL")
+            .where("event IN ('bootstrap', 'resnapshot')")
             .orderBy("written_at")
             .collect()
         )
@@ -963,6 +963,17 @@ def test_data_loss_resnapshots_into_a_new_generation_once_per_interval(
         T0 + timedelta(minutes=7),
     )
     assert resnap["retention_watermark_ts"] == resnap["lost_to_ts"]
+    # each opened before its read (ADR 0028), at or before the LSN it is stamped with
+    opens = _events(spark, facts, "snapshot_open")
+    details = [json.loads(o["detail"]) for o in opens]
+    assert [
+        (o["app_id"], d["mode"], d["kind"], d["generation"]) for o, d in zip(opens, details)
+    ] == [
+        ("loss-v1", "full", "bootstrap", 0),
+        ("loss-v1.g1", "full", "resnapshot", 1),
+    ]
+    assert [o["min_lsn"] <= e["min_lsn"] for o, e in zip(opens, events())] == [True, True]
+    assert opens[1]["lost_to_ts"] == resnap["lost_to_ts"] and "plan" not in details[1]
     # a crash just before the state file: the rerun reuses the snapshot and the event row
     os.remove(os.path.join(ckpt, "_mssql_cdc_generation.json"))
     bronze = run()
@@ -1212,6 +1223,7 @@ def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
             ("batch", 0),
             ("batch", 1),
             ("bootstrap", 3),
+            ("snapshot_open", 0),  # before the read: the mode lock (ADR 0028)
         ]
         end = finalization.end_offset_from_progress(q.lastProgress)
         assert isinstance(finalization.advance(spark, control, "bronze_orders", end), datetime)
@@ -1234,7 +1246,7 @@ def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
             properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
         )
         # add_columns through saveAsTable, set_comments on a table name
-        assert migrations.migrate(spark, old, "facts") == 7
+        assert migrations.migrate(spark, old, "facts") == 8
         assert {name for name, _, _ in added} <= set(spark.table(old).columns)
     finally:
         for name in (bronze, facts, control, old):
@@ -1305,13 +1317,24 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
     assert (opened["max_lsn"], opened["app_id"], opened["batch_id"]) == (s, "chunk-v1", None)
     plan = json.loads(opened["detail"])
     assert plan == {
-        "mode": "bootstrap",
+        "mode": "chunked",
+        "kind": "bootstrap",
         "keys": ["order_id"],
         "plan": {"kind": "int", "lo": 0, "hi": 7, "rows": 8},
         "generation": 0,
         "lost_from_ts": None,
         "lost_to_ts": None,
     }
+    # the mode holds while the snapshot is open: a full run, snapshot() and seed() raise
+    lock = rf"chunked snapshot open at {s} \(generation 0\) that has not completed"
+    with pytest.raises(ValueError, match=lock):
+        cdc.to_delta(target, "chunk-v1", ckpt, facts, bootstrap=True)
+    with pytest.raises(ValueError, match=lock):
+        cdc.snapshot(target, app_id="chunk-v1", facts_table=facts)
+    copy = spark.createDataFrame([(0, "new")], COLUMNS)
+    with pytest.raises(ValueError, match=lock):
+        cdc.seed(target, copy, s, app_id="chunk-v1", facts_table=facts)
+    assert not os.path.exists(target) and not spark.streams.active
     # each wave: a change the stream reads, then one between the wave's stamp and its read
     waves = [
         (
@@ -1402,6 +1425,7 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
     ).awaitTermination()
     assert cdc.snapshot(target)["lsn"] == s  # S, from the chunk rows
     assert _version(spark, target) == version  # nothing appended
+    assert len(_events(spark, facts, "bootstrap")) == len(_events(spark, facts, "snapshot_open"))
     assert len(_events(spark, facts, "bootstrap")) == 1
 
 
@@ -1605,7 +1629,7 @@ def test_a_loss_while_a_chunked_snapshot_is_open_opens_a_newer_one(delta_spark, 
     assert (state["generation"], state["snapshot_lsn"]) == (1, newer["min_lsn"])
     assert newer["app_id"] == "reopen-v1.g1" and newer["min_lsn"] > older["min_lsn"]
     detail = json.loads(newer["detail"])
-    assert (detail["mode"], detail["generation"]) == ("resnapshot", 1)
+    assert (detail["mode"], detail["kind"], detail["generation"]) == ("chunked", "resnapshot", 1)
     assert (newer["lost_from_ts"], newer["lost_to_ts"]) == (
         T0 + timedelta(minutes=6),
         T0 + timedelta(minutes=10),
@@ -1679,3 +1703,87 @@ def test_a_chunked_resnapshot_opened_before_a_crash_and_purged_since_is_opened_p
         cdc.backfill(target, app_id="crash-v1", facts_table=facts)["snapshot"]
         == state["snapshot_lsn"]
     )
+
+
+def test_a_full_snapshot_a_crash_left_open_holds_its_mode_until_a_full_run_completes_it(
+    delta_spark, workdir, monkeypatch
+):
+    from mssql_cdc import stream
+    from mssql_cdc.pipeline import CdcStream
+
+    spark = delta_spark
+    _, options = _orders(workdir)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run(snapshot):
+        cdc.to_delta(
+            target,
+            "full-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot=snapshot,
+        ).awaitTermination()
+
+    def killed(self, *args):
+        raise RuntimeError("killed while reading the table")
+
+    monkeypatch.setattr(CdcStream, "_write_snapshot", killed)
+    with pytest.raises(RuntimeError, match="killed"):
+        run("full")
+    monkeypatch.undo()
+    [opened] = _events(spark, facts, "snapshot_open")  # written before the read
+    detail = json.loads(opened["detail"])
+    assert (opened["app_id"], detail["mode"], detail["kind"], detail["generation"]) == (
+        "full-v1",
+        "full",
+        "bootstrap",
+        0,
+    )
+    assert not os.path.exists(target) and not _events(spark, facts, "bootstrap")
+    lock = rf"full snapshot open at {opened['min_lsn']} .* rerun with snapshot='full'"
+    with pytest.raises(ValueError, match=lock):
+        run("chunked")
+    with pytest.raises(ValueError, match=lock):  # seed() waits for an open one of either mode
+        cdc.seed(
+            target,
+            spark.createDataFrame([(0, "new")], COLUMNS),
+            opened["min_lsn"],
+            app_id="full-v1",
+            facts_table=facts,
+        )
+    status = cdc.backfill(target, app_id="full-v1", facts_table=facts)
+    assert status["paused"] and "no chunked snapshot" in status["reason"]  # none to read
+    run("full")  # takes it again, in the same generation, and completes it
+    [done] = _events(spark, facts, "bootstrap")
+    assert done["max_lsn"] >= opened["min_lsn"] and done["rows"] == 3
+    run("chunked")  # either mode now: the whole snapshot is reused, nothing opened or read
+    assert len(_events(spark, facts, "snapshot_open")) == 1
+    assert _snapshots(spark.read.format("delta").load(target)) == 1
+
+
+def test_two_runs_opening_one_generation_in_different_modes_stop_the_second(delta_spark, workdir):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _orders(workdir)
+    target, facts = (os.path.join(workdir, n) for n in ("bronze", "facts"))
+    cdc = stream(spark, options)
+
+    def open_(app_id, mode):  # what each run writes once both found nothing open
+        return cdc._open(target, CI, app_id, app_id, facts, 0, "bootstrap", mode=mode)
+
+    for i, (first, second) in enumerate((("chunked", "full"), ("full", "chunked"))):
+        app_id = f"race{i}-v1"
+        s = open_(app_id, first)["lsn"]
+        db.commit(CI, [(2, {"order_id": 10 + i, "status": "new"})], at=T0 + timedelta(hours=i + 1))
+        assert open_(app_id, first)["lsn"] == s  # Delta skipped it: the stored one's S
+        with pytest.raises(ValueError, match=rf"{first} snapshot open at {s} .*another run"):
+            open_(app_id, second)  # skipped too: it reads back the other mode's
+    opens = _events(spark, facts, "snapshot_open")
+    assert [(o["app_id"], json.loads(o["detail"])["mode"]) for o in opens] == [
+        ("race0-v1", "chunked"),
+        ("race1-v1", "full"),
+    ]
