@@ -164,17 +164,19 @@ How it behaves ([ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream
    `max_lsn` again, at or after S. The wave is appended to the target in one Delta commit:
    operation 0, `_start_lsn` = L, `_snapshot` = S and the chunk in `_chunk`. Then one
    `snapshot_chunk` facts row per chunk: its rows, L and its key range.
-3. After the last chunk, it writes the snapshot's `bootstrap` facts row, with min = max = S
+3. After the last chunk, which ends just above the MAX recorded at the open, it writes the snapshot's `bootstrap` facts row, with min = max = S
    and the rows of every chunk, and returns `done`. Downstream rebuilds from S: its rows and
    every change after S.
 
 A commit that lands between a chunk's stamp and its read can show in the chunk and again as
 a change after S; the latest image per key absorbs it, as with a full snapshot. A key that
-moves between chunks while they are read is a change after S, which the stream carries.
+moves between chunks while they are read is a change after S, which the stream carries, and
+so is every row inserted above the MAX: no chunk reads those.
 
 - Chunks: one integer key steps over its MIN..MAX from a row estimate
-  (`sys.sp_spaceused`), so `chunks_total` is an estimate; any other key is cut by seeking
-  the key `chunk_rows` rows after the previous chunk's end, wave by wave (`chunks_total` is
+  (`sys.sp_spaceused`), so `chunks_total` is an estimate; a sparse one (more than 4 values
+  per row, as with a sentinel far above the ids) and any other key are cut by seeking the
+  key `chunk_rows` rows after the previous chunk's end, wave by wave (`chunks_total` is
   None until done). Both need only the stream's grants ([Permissions](permissions.md)).
 - A crash between a wave's append and its facts rows reruns that wave: Delta skips the
   append and the facts rows are rebuilt from the commit, so nothing is appended twice.
@@ -273,8 +275,11 @@ whole. With `snapshot="chunked"` the re-snapshot is chunked too
   waves.
 - A chunked snapshot needs the stream running while it is read: a gap after S (data loss,
   `failOnDataLoss=false`) abandons it. Leave `snapshotLsn` unset: a stamp below S breaks it.
-- Use one kind of snapshot per target and `app_id`: `snapshot()` and `seed()` see whole
-  snapshots only, not a chunked one still open.
+- `to_delta(bootstrap=True)` with either `snapshot` mode, and `snapshot()`, return the S of
+  a chunked snapshot of the target, open or complete, instead of reading the table again;
+  `seed()` refuses a target that holds one. To take another kind, start a new target, or a
+  new checkpoint and `app_id`. Before the first wave lands only the facts show it, so
+  `snapshot()` and `seed()`, which do not read them, would not see it then.
 
 ## See also
 

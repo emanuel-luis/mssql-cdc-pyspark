@@ -181,9 +181,11 @@ def test_metadata_columns_and_types(spark, workdir):
     assert types["amount"] == "decimal(18,2)"
     assert types["updated_at"] == "timestamp_ntz"
     assert types["_commit_ts"] == "timestamp_ntz"
-    rows = df.orderBy("_command_id").collect()
+    rows = df.orderBy("_command_id", "_operation").collect()
     assert [r["_operation"] for r in rows] == [2, 3, 4, 1]
-    assert [r["_command_id"] for r in rows] == [1, 2, 3, 4]
+    # an update's 3 and 4 share __$command_id and __$seqval, as on SQL Server
+    assert [r["_command_id"] for r in rows] == [1, 2, 2, 4]
+    assert rows[1]["_seqval"] == rows[2]["_seqval"] != rows[0]["_seqval"]
     assert rows[2]["amount"] == Decimal("12.25")
     assert rows[0]["_capture_instance"] == CI
     assert rows[0]["_start_lsn"].startswith("0x") and len(rows[0]["_start_lsn"]) == 22
@@ -979,25 +981,29 @@ def _chunk_reader(src, schema, chunks, lsn, **options):
 
 
 @pytest.mark.parametrize(
-    ("key", "values", "chunk_rows", "sizes"),
+    ("key", "values", "above", "chunk_rows", "kind", "sizes"),
     [
-        # sparse integers and a NULL key: steps of the span over the row estimate (16), so
-        # uneven chunks; NULL sorts first, into the first
-        ("order_id", [None, *range(10), *range(100, 110)], 3, [11, 0, 0, 0, 0, 0, 10]),
+        # dense integers and a NULL key: steps of the span over the row estimate (13 rows,
+        # 5 a chunk: 5 keys a step); NULL sorts first, into the first
+        ("order_id", [None, *range(12)], 99, 5, "int", [6, 5, 2]),
+        # sparse integers, 110 keys for 21 rows: keyset bounds, which a sentinel cannot skew
+        ("order_id", [None, *range(10), *range(100, 110)], 200, 3, "keyset", [3] * 7),
         # one string key: keyset bounds, chunk_rows rows each up to the MAX at the open
-        ("code", [f"C{i:02}" for i in range(12)], 5, [5, 5, 2]),
+        ("code", [f"C{i:02}" for i in range(12)], "C99", 5, "keyset", [5, 5, 2]),
         # a composite key with NULLs, as ORDER BY sorts them
         (
             ["region", "id"],
             [(None, "x"), (1, None), (1, "a"), (1, "b"), (2, "a"), (3, "z")],
+            (4, "a"),
             2,
+            "keyset",
             [2, 2, 2],
         ),
         # more rows per chunk than the table has: one chunk
-        ("code", ["a", "b", "c"], 100, [3]),
+        ("code", ["a", "b", "c"], "d", 100, "keyset", [3]),
     ],
 )
-def test_chunk_plans_tile_the_key_space(workdir, key, values, chunk_rows, sizes):
+def test_chunk_plans_tile_the_key_space(workdir, key, values, above, chunk_rows, kind, sizes):
     from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 
     from mssql_cdc.client import next_chunks, snapshot_plan
@@ -1006,17 +1012,22 @@ def test_chunk_plans_tile_the_key_space(workdir, key, values, chunk_rows, sizes)
     src = os.path.join(workdir, "src")
     keys = [key] if isinstance(key, str) else key
     db = FakeCdcDatabase(src, [CI], keys={CI: key})
-    for v in values:
+
+    def insert(v):
         db.commit(CI, [(2, {**dict(zip(keys, v if len(keys) > 1 else (v,))), "status": "new"})])
+
+    for v in values:
+        insert(v)
     client = FakeCdcClient(src)
     source = client.source_table(CI)
     plan = snapshot_plan(client, CI, source)
-    assert plan["kind"] == ("int" if key == "order_id" else "keyset")
-    chunks, last = [], None
-    while not (last and last[2] is None):  # in waves of two, each from the previous end
-        wave = next_chunks(client, CI, source, plan, len(chunks), last and last[2], 2, chunk_rows)
+    assert plan["kind"] == kind
+    insert(above)  # after S, above the MAX: the stream's, and no chunk reads it
+    chunks, final = [], False
+    while not final:  # in waves of two, each from the previous end
+        lo = chunks[-1][2] if chunks else None
+        wave, final = next_chunks(client, CI, source, plan, len(chunks), lo, 2, chunk_rows)
         chunks += wave
-        last = wave[-1]
     assert [c[0] for c in chunks] == list(range(len(chunks)))
     assert chunks[0][1] is None and all(a[2] == b[1] for a, b in pairwise(chunks))
 
@@ -1049,8 +1060,8 @@ def test_chunk_rows_are_stamped_numbered_and_leave_metrics(spark, workdir):
     s = client.max_lsn()
     plan = snapshot_plan(client, CI, source)
     assert plan == {"kind": "int", "lo": 0, "hi": 5, "rows": 6}
-    chunks = next_chunks(client, CI, source, plan, 0, None, 10, 2)
-    assert chunks == [[0, None, 2], [1, 2, 4], [2, 4, None]]
+    chunks, final = next_chunks(client, CI, source, plan, 0, None, 10, 2)
+    assert (chunks, final) == ([[0, None, 2], [1, 2, 4], [2, 4, 6]], True)  # MAX + 1
     lsn = db.idle(at=T0 + timedelta(minutes=7))  # the wave's stamp L, at or after S
     metrics = os.path.join(workdir, "metrics")
     opts = {
@@ -1078,13 +1089,13 @@ def test_chunk_rows_are_stamped_numbered_and_leave_metrics(spark, workdir):
     assert {m["high_lsn"] for m in files.values()} == {lsn}  # max_lsn after each read
 
     # a writer commits after the stamp L and before the read: the read sees it, and its
-    # change has an LSN after L, so the stream has it too
+    # change has an LSN after L, so the stream has it too; 9, above MAX, is the stream's alone
     db.commit_before_read(
         CI, [(1, {"order_id": 3, "status": "new"}), (2, {"order_id": 9, "status": "new"})]
     )
     reader = _chunk_reader(src, df.schema, chunks, lsn)
     got = [(p.chunk, r["order_id"]) for p in reader.partitions() for r in _rows_of(reader, p)]
-    assert got == [(0, 0), (0, 1), (1, 2), (2, 4), (2, 5), (2, 9)]
+    assert got == [(0, 0), (0, 1), (1, 2), (2, 4), (2, 5)]
     later = client.max_lsn()  # the queued commit's
     assert later > lsn and db.commit(CI, [(2, {"order_id": 10})]) > later  # LSNs keep order
     with pytest.raises(ValueError, match="NOLOCK"):

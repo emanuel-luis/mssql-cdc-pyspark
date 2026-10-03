@@ -80,7 +80,8 @@ with one Delta MERGE ([ADR 0019](../decisions/0019-silver-helper-applies-the-cha
   purged gap never reached bronze ([Data loss](data-loss.md)).
 - Silver's `finalized_until` is the bronze verdict as it stood before the call read bronze,
   truncated with `granularity` (`"hour"` by default). Bronze commits its rows before its
-  verdict, so silver never claims more than it has applied. Gate silver consumers on the
+  verdict, so silver never claims more than it has applied. Without `facts_table` it is
+  never advanced: a chunked snapshot shows in the facts alone until its first wave lands. Gate silver consumers on the
   silver name, as in [Finalization](finalization.md).
 - Until the stream has created bronze, a call does nothing and returns the previous
   position and verdict.
@@ -102,15 +103,12 @@ A [chunked snapshot](bootstrap.md#chunked-snapshots) arrives in waves over days,
   last one, tracked by `open_snapshot_lsn` and `snapshot_wave` in the control table. A
   chunk row is ranked with every later change of its key in bronze, so it never brings back
   a key the stream deleted after the chunk's stamp.
-- With one integer or date key, a chunk also deletes the silver keys of its range that it
-  does not hold, when their image is older than the chunk's stamp: the chunk saw every
-  commit up to it. Other keys wait for the rebuild: Spark orders strings by bytes, SQL
-  Server by the column's collation, so a range Spark cuts is not SQL Server's.
 - At the snapshot's `bootstrap` or `resnapshot` row, silver is rebuilt from its rows and
   the changes after S, and every key absent from both is deleted, whatever the key type.
 - While a chunked re-snapshot is open, the calls only apply changes, as before it.
 - Silver's `finalized_until` stays where it was while a snapshot is open: silver lacks
-  keys, or still holds deleted ones, until the rebuild.
+  keys, or still holds deleted ones, until the rebuild. A silver table built before the
+  snapshot keeps its stale keys until then too.
 
 ### After a switch to a new capture instance
 
@@ -128,9 +126,11 @@ silver, and rows that have not changed since read NULL for it.
   `bronze.orders` and the table's storage path are two different keys.
 - One bronze table per source table. The snapshot events carry no capture instance, so a
   bronze table shared by two source tables would rebuild one from the other's snapshot.
-- Pass `facts_table`. A re-snapshot of a table that was empty writes no bronze rows, only
-  its facts event; without the facts, silver keeps the rows that the table lost. A chunked
-  snapshot needs it.
+- Pass `facts_table`, the stream's; a stream without one still needs a name here, where
+  no table will appear. A re-snapshot of a table that was empty writes no bronze rows, only
+  its facts event, and a chunked snapshot opens in the facts alone: without them, silver
+  would keep the rows that the table lost, or claim periods the snapshot has not reached.
+  So silver's verdict only advances with `facts_table`.
 - One call per silver table at a time, as with one job per stream.
 - `apply_changes` adds columns but never changes a column's type: its MERGE runs without
   schema evolution, so `delta.enableTypeWidening` alone leaves silver at the old type. After

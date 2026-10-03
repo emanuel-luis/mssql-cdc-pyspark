@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -48,6 +48,7 @@ class Orders:
         return q
 
     def apply(self, **kw):
+        kw.setdefault("facts_table", self.facts)  # the verdict needs it, even when it is empty
         return apply_changes(
             self.spark, self.bronze, self.silver, CI, ["order_id"], control_table=self.control, **kw
         )
@@ -130,6 +131,8 @@ def test_snapshot_then_changes_and_the_verdict_is_the_bronze_one_read_before_the
     q = o.run(bootstrap=True)
     end = finalization.end_offset_from_progress(q.lastProgress)
     bronze_fu = finalization.advance(delta_spark, o.control, o.bronze, end)
+    # without the facts, a snapshot open in them alone could not be seen: no verdict
+    assert o.apply(facts_table=None)["finalized_until"] is None
     applied = o.apply()
     assert applied["finalized_until"] == bronze_fu == datetime(2026, 9, 30, 10, 0)
     assert o.rows() == o.source()
@@ -339,10 +342,15 @@ class Log:
         )
 
     def change(self, n, *changes):
-        """One transaction at LSN ``n``: (operation, key, status) in statement order."""
+        """One transaction at LSN ``n``: (operation, key, status) in statement order. An
+        update's 3 and 4 share _seqval and _command_id, as on SQL Server."""
+        ids = [
+            i - 1 if op == 4 and i > 1 and changes[i - 2][0] == 3 else i
+            for i, (op, _, _) in enumerate(changes, start=1)
+        ]
         rows = [
-            (key, status, CI, _lsn(n), _lsn(n * 100 + i), op, i, _ts(n), 0)
-            for i, (op, key, status) in enumerate(changes, start=1)
+            (key, status, CI, _lsn(n), _lsn(n * 100 + j), op, j, _ts(n), 0)
+            for j, (op, key, status) in zip(ids, changes)
         ]
         self._append(rows, CHANGE)
 
@@ -471,32 +479,20 @@ def test_an_open_bootstrap_applies_its_waves_without_resurrecting_deletes_and_ho
     assert not g.apply()["rebuilt"]
 
 
-@pytest.mark.parametrize(
-    ("key_type", "keys", "by_range"),
-    [
-        ("INT", [1, 2, 3, 4], True),
-        ("DATE", [date(2026, 1, d) for d in (1, 2, 3, 4)], True),
-        ("STRING", ["a", "b", "c", "d"], False),  # Spark orders it by bytes, SQL Server not
-    ],
-)
-def test_a_chunk_deletes_the_keys_of_its_range_it_lacks_and_completion_any_absent_key(
-    delta_spark, workdir, key_type, keys, by_range
-):
-    g, S = Log(delta_spark, workdir, key_type), 100
-    k1, k2, k3, k4 = keys
+def test_the_waves_leave_stale_keys_to_the_rebuild_at_completion(delta_spark, workdir):
+    g, S = Log(delta_spark, workdir), 100
     # silver from changes whose history lost 2's and the NULL key's deletes: a repair
-    g.change(10, *[(2, k, "new") for k in (*keys, None)])
+    g.change(10, *[(2, k, "new") for k in (1, 2, 3, 4, None)])
     g.apply()
     g.open(S)
-    g.change(112, (1, k4, "new"))
-    g.change(113, (2, k4, "again"))  # chunk 1 read in between: no 4; this outranks its delete
-    g.wave(S, 0, 110, [(0, None, k3, [(k1, "new")]), (1, k3, None, [(k3, "new")])])
+    g.change(112, (1, 4, "new"))
+    g.change(113, (2, 4, "again"))  # chunk 1 read in between: no 4; this outranks its delete
+    g.wave(S, 0, 110, [(0, None, 3, [(1, "new")]), (1, 3, 5, [(3, "new")])])
     g.apply()
-    kept = [(k1, "new"), (k3, "new"), (k4, "again")]
-    # the NULL key sorts first, in chunk 0's open end: never deleted by range
-    assert g.rows() == _ordered(kept + [(None, "new")] + ([] if by_range else [(k2, "new")]))
+    kept = [(1, "new"), (3, "new"), (4, "again")]
+    assert g.rows() == _ordered(kept + [(None, "new"), (2, "new")])  # 2 and NULL: stale
     g.fact("bootstrap", S, {"snapshot": _lsn(S)})
-    assert g.apply()["rebuilt"] and g.rows() == _ordered(kept)
+    assert g.apply()["rebuilt"] and g.rows() == _ordered(kept)  # absent from both: deleted
 
 
 def test_a_legacy_snapshot_rebuilds_and_an_open_resnapshot_holds_the_verdict_until_complete(

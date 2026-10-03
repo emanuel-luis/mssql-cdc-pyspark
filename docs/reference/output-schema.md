@@ -40,9 +40,13 @@ history = spark.read.table("bronze.orders").orderBy(
 After a switch to a newer capture instance, the two instances number the same change
 differently in `_command_id`, but all the rows of one commit come from one instance, so the
 order holds. Across instances, `(_start_lsn, _seqval, _operation)` identifies a change.
-Snapshot rows share one `_start_lsn`, below every change read after them, so a MERGE that
-keeps the latest image per key absorbs the overlap between a snapshot and the stream
-([Silver](../guides/silver.md) does that for you).
+The rows of a whole snapshot share one `_start_lsn`, below every change read after them, so
+a MERGE that keeps the latest image per key absorbs the overlap between a snapshot and the
+stream ([Silver](../guides/silver.md) does that for you). A chunked snapshot's rows carry
+their wave's stamp instead, at or after the snapshot's LSN, and can hold a commit newer than
+it: rebuild from the snapshot's rows and every change after its LSN, and do not read a chunk
+row as the table's state at its stamp
+([ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md)).
 
 ## Captured columns
 

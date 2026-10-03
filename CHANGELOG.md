@@ -29,25 +29,28 @@ migrations ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/decision
   `stream(...).backfill(target, *, app_id, facts_table, chunk_rows, max_waves, max_seconds,
   min_headroom_hours, isolation)`, called repeatedly in its own task, reads them in waves of
   `numPartitions` chunks, each stamped with `max_lsn` before its read, one Delta commit per
-  wave. Chunks step over MIN..MAX for one integer key (row estimate from `sys.sp_spaceused`)
-  and are keyset bounds for any other key. New facts events `snapshot_open` and
-  `snapshot_chunk`; the `bootstrap` or `resnapshot` row comes after the last chunk. A crash
+  wave. Chunks step over MIN..MAX for one integer key spanning at most 4 values per row (row
+  estimate from `sys.sp_spaceused`) and are keyset bounds for any other key; the last ends
+  just above the MAX recorded at the open, so the rows inserted since come from the stream
+  alone. New facts events `snapshot_open` and `snapshot_chunk` (`last` on the final chunk);
+  the `bootstrap` or `resnapshot` row comes after the last chunk. A crash
   between a wave's append and its facts rows reruns the wave without appending twice; a
   loss while one is open opens a newer one
   ([ADR 0028](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0028-chunked-snapshot-next-to-the-stream/)).
 - Snapshot reader options `snapshotChunks` (read only the given key ranges, numbered in
-  `_chunk`, with a `chunk-<i>.json` metrics file each) and `isolationLevel=snapshot` (SNAPSHOT
+  `_chunk`, with a `chunk-<i>.json` metrics file each), `snapshotKeys` (the columns those
+  ranges apply to, by default the unique index) and `isolationLevel=snapshot` (SNAPSHOT
   isolation where the database allows it; never `NOLOCK`).
 - `apply_changes` applies an open chunked bootstrap wave by wave (control columns
   `open_snapshot_lsn`, `snapshot_wave`): a chunk row never brings back a key deleted after
-  its stamp, and with one integer or date key a chunk deletes the keys of its range it lacks.
-  At the snapshot's completion row silver is rebuilt by absence; its verdict is held while a
-  snapshot is open ([ADR 0019](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0019-silver-helper-applies-the-change-log/) amended).
-- `reconcile(spark, options, silver, keys=None, *, bronze, facts_table=None, bucket_rows,
-  sample, report_table, seed)`: compares silver with its SQL Server table by row count and
-  key sum per bucket of an integer or date key (one count for other keys), then row by row
-  through a SHA-256 of the captured columns on the mismatched buckets and a sample, and
-  classifies keys as MISSING_TARGET, MISSING_SOURCE, RECORD_DIFF or IN_FLIGHT. With
+  its stamp. At the snapshot's completion row silver is rebuilt by absence; its verdict is
+  held while a snapshot is open ([ADR 0019](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0019-silver-helper-applies-the-change-log/) amended).
+- `reconcile(spark, options, silver, keys=None, *, bronze, control_table, facts_table=None,
+  bucket_rows, sample, report_table, seed)`: compares silver with its SQL Server table by row
+  count and key sum per bucket of an integer or date key (one count for other keys), then row
+  by row through a SHA-256 of the captured columns on the mismatched buckets and a sample,
+  read in ranges of `keys`, and classifies keys as MISSING_TARGET, MISSING_SOURCE,
+  RECORD_DIFF or IN_FLIGHT (against silver's `applied_lsn` in `control_table`). With
   `facts_table` it checks the newest chunked snapshot's chunks against bronze (CHUNK_TILING,
   CHUNK_ROWS, CHUNK_STAMP). The report goes to an optional `report_table`; a "Validation"
   guide covers it.
@@ -88,8 +91,22 @@ migrations ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/decision
   ([ADR 0023](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0023-schema-changes-and-capture-instance-switching/) amended, which also
   records that the production SQL Server 2016 SP3 change tables have `__$command_id`).
 
+### Breaking
+
+- `apply_changes` advances silver's `finalized_until` only when given `facts_table`: a
+  chunked snapshot shows in the facts alone until its first wave, and an emptied table's
+  re-snapshot only there, so without them silver could claim periods it does not hold. A
+  stream without a facts table can pass any name where no table exists.
+
 ### Changed
 
+- `to_delta(bootstrap=True)` with either `snapshot` mode, and `snapshot()`, return the S of a
+  chunked snapshot of the target, open or complete, instead of reading the table again;
+  `seed()` refuses a target that holds one. A recovery that opened a chunked re-snapshot and
+  stopped before writing its state opens a newer one, a generation on, once cleanup has
+  passed the first.
+- The file-backed fake gives an update's 3 and 4 rows one `__$seqval` and `__$command_id`,
+  as SQL Server does, so the unit tests rank them by `__$operation` alone.
 - A snapshot in bronze is named by its `_snapshot` column, never by the largest
   `_start_lsn` of its rows: `snapshot()`, `to_delta(bootstrap=True)`, the re-snapshot's
   reuse check, `seed()`'s reruns and silver's rebuild point read

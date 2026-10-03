@@ -1278,6 +1278,7 @@ def _events(spark, facts, event):
 
 def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_spark, workdir):
     from mssql_cdc import stream
+    from mssql_cdc.pipeline import _version
 
     spark = delta_spark
     db, options = _orders(workdir, n=8)  # orders 0..7
@@ -1366,7 +1367,7 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
         (0, 0, None, 2),
         (1, 0, 2, 4),
         (2, 1, 4, 6),
-        (3, 1, 6, None),
+        (3, 1, 6, 8),  # MAX + 1: 9, inserted after S, is the stream's
     ]
     assert {d["snapshot"] for d in details} == {s} and all(r["min_lsn"] >= s for r in chunks)
     assert sum(r["rows"] for r in chunks) == len(snap)
@@ -1382,9 +1383,17 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
     # a whole snapshot is never a chunk's L: there is none here, and the rerun reused S
     assert cdc._last_snapshot(target, CI) is None
     assert len(_events(spark, facts, "snapshot_open")) == 1
+    assert [d["last"] for d in details] == [False, False, False, True]
+    version = _version(spark, target)
     again = cdc.backfill(target, app_id="chunk-v1", facts_table=facts)
     assert again["done"] and again["chunks_done"] == 4
-    assert spark.read.format("delta").load(target).count() == bronze.count()
+    # restarted without snapshot="chunked" (a template, a fan-out call): S again, no full read
+    cdc.to_delta(
+        target, "chunk-v1", ckpt, facts, trigger={"availableNow": True}, bootstrap=True
+    ).awaitTermination()
+    assert cdc.snapshot(target)["lsn"] == s  # S, from the chunk rows
+    assert _version(spark, target) == version  # nothing appended
+    assert len(_events(spark, facts, "bootstrap")) == 1
 
 
 def test_backfill_resumes_after_a_crash_between_the_append_and_its_facts(
@@ -1548,3 +1557,54 @@ def test_a_loss_while_a_chunked_snapshot_is_open_opens_a_newer_one(delta_spark, 
     # order 2, deleted in the gap, has no delete row: rebuilt from the newer snapshot it is gone
     assert _rebuilt(bronze, "order_id", "status", newer["min_lsn"]) == _source(db)
     assert (2, "new") not in _source(db)
+
+
+def test_a_chunked_resnapshot_opened_before_a_crash_and_purged_since_is_opened_past(
+    delta_spark, workdir, monkeypatch
+):
+    from mssql_cdc import pipeline, stream
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=4)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        cdc.to_delta(
+            target,
+            "crash-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            on_data_loss="resnapshot",
+            snapshot="chunked",
+        ).awaitTermination()
+
+    def purge(minutes):
+        db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=minutes))
+        db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=minutes + 1)))
+
+    run()
+    purge(10)
+    real = pipeline._write_state
+
+    def killed(checkpoint, state):  # after the open, before the new generation's state
+        if "recovering" not in state:
+            raise RuntimeError("killed")
+        real(checkpoint, state)
+
+    monkeypatch.setattr(pipeline, "_write_state", killed)
+    with pytest.raises(RuntimeError, match="killed"):
+        run()
+    monkeypatch.setattr(pipeline, "_write_state", real)
+    purge(20)  # rerun after the retention: what generation 1 opened at is purged too
+    run()
+    opens = _events(spark, facts, "snapshot_open")
+    assert [o["app_id"] for o in opens] == ["crash-v1", "crash-v1.g1", "crash-v1.g2"]
+    state = _generation(ckpt)
+    assert (state["generation"], state["snapshot_lsn"]) == (2, opens[-1]["min_lsn"])
+    assert (
+        cdc.backfill(target, app_id="crash-v1", facts_table=facts)["snapshot"]
+        == state["snapshot_lsn"]
+    )

@@ -34,16 +34,23 @@ Read the password from your platform's secret store rather than writing it in co
 
 | Grant | Used for |
 |---|---|
-| `SELECT` on the source table | What SQL Server checks before the CDC metadata procedures and functions answer: `sys.sp_cdc_help_change_data_capture` (the table, its key and its capture instances), `sys.sp_cdc_get_captured_columns` (the inferred schema), `sys.sp_cdc_get_ddl_history` (schema changes), `sys.fn_cdc_get_min_lsn` (the retention guard). The snapshot for `bootstrap=True`, a re-snapshot and `snapshot_on_switch` reads the table itself. |
+| `SELECT` on the source table | What SQL Server checks before the CDC metadata procedures and functions answer: `sys.sp_cdc_help_change_data_capture` (the table, its key and its capture instances), `sys.sp_cdc_get_captured_columns` (the inferred schema), `sys.sp_cdc_get_ddl_history` (schema changes), `sys.fn_cdc_get_min_lsn` (the retention guard). The snapshot for `bootstrap=True`, a re-snapshot and `snapshot_on_switch` reads the table itself; so do `backfill()`, which plans a chunked snapshot with seeks on the key (MIN, MAX, `TOP (n + 1)`) and reads it in key ranges, and `reconcile()`, which counts the rows per key range in one scan and reads the ranges it compares. `SELECT` on the key and captured columns alone is enough. |
 | Membership in the gating role | Required by the same procedures and functions when the capture instance has one. |
 | `SELECT` on `cdc.[<capture instance>_CT]` | The changes. The reader queries the change table directly, because `cdc.fn_cdc_get_all_changes_<ci>` does not return `__$command_id` on SQL Server 2022 ([ADR 0009](../decisions/0009-read-change-tables-directly.md)). |
 
 Everything else the reader touches needs no grant: `cdc.lsn_time_mapping`,
 `sys.fn_cdc_get_max_lsn`, `sys.fn_cdc_increment_lsn`, `sys.fn_cdc_map_lsn_to_time`, the
-server's time zone, and its own session's `ASYNC_NETWORK_IO` wait in
-`sys.dm_exec_session_wait_stats`, which a session may read without `VIEW SERVER STATE`. The
-integration tests run the stream and the bootstrap against SQL Server 2022 with a login that
-has only the two `SELECT` grants (no gating role).
+server's time zone, its own session's `ASYNC_NETWORK_IO` wait in
+`sys.dm_exec_session_wait_stats`, which a session may read without `VIEW SERVER STATE`,
+`sys.sp_spaceused` (the row estimate a chunked snapshot's integer key is stepped by), and
+`sys.columns` for the collation of a string key, which shows the columns of a table the login
+can `SELECT`. The integration tests run the stream, the bootstrap, chunked snapshots and
+`reconcile` against SQL Server 2022 with a login that has only the two `SELECT` grants (no
+gating role).
+
+`backfill(isolation="snapshot")` needs no grant either, but the database must allow it: a
+DBA runs `ALTER DATABASE <db> SET ALLOW_SNAPSHOT_ISOLATION ON`, and SQL Server refuses the
+read until then.
 
 ## What the reader never needs
 

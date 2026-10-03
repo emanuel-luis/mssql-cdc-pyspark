@@ -14,6 +14,7 @@ result = reconcile(
     options,  # the stream's
     "silver.orders",
     bronze="bronze.orders",
+    control_table="ops.table_finalization",  # apply_changes's
     facts_table="ops.ingestion_facts",
     report_table="ops.reconcile_report",
 )
@@ -42,12 +43,13 @@ matched. `report` holds one row per bucket and one per key or chunk that failed;
    - RECORD_DIFF: other values, an update it never applied; `detail` names the columns.
 3. **In flight.** A bucket or key that differs while bronze holds a change to it newer than
    what either side read is IN_FLIGHT: silver has not applied it yet, or the source read
-   came before it. Run again later; it clears once silver catches up.
+   came before it. What silver read is its `applied_lsn` in the control table. Run again
+   later; it clears once silver catches up.
 4. **Chunks.** With `facts_table`, bronze's newest [chunked snapshot](bootstrap.md#chunked-snapshots)
    is checked against its facts rows, without reading SQL Server:
    - CHUNK_TILING: the chunks leave a gap or overlap: a chunk missing or recorded twice, the
      first not open below, one not starting where the one before ended, or the last of a
-     complete snapshot not open above;
+     complete snapshot not the plan's final one;
    - CHUNK_ROWS: a chunk's `snapshot_chunk` row counts other rows than bronze holds of it;
    - CHUNK_STAMP: a chunk stamped below the snapshot's LSN.
 
@@ -56,7 +58,10 @@ matched. `report` holds one row per bucket and one per key or chunk that failed;
 
 ## Parameters
 
-- `keys`: the key columns; by default the capture instance's unique index.
+- `keys`: the key columns; by default the capture instance's unique index. The ranges read
+  from the source are cut on them, so they can be another column, or the key of a table
+  with no unique index, as long as they identify a row.
+- `control_table`: the one `apply_changes` keeps silver's position in.
 - `bronze`: the table silver is applied from, whose newer changes make a difference
   IN_FLIGHT.
 - `facts_table`: the stream's, for the chunk checks.
@@ -69,6 +74,9 @@ matched. `report` holds one row per bucket and one per key or chunk that failed;
 
 - Run it while the stream keeps up: a change the stream has not read yet cannot be seen,
   and shows as a MISMATCH until a later run.
+- Run it once a chunked snapshot is complete and applied: before that, silver lacks the
+  keys of the chunks not read or applied yet, and they show as MISSING_TARGET. Snapshot rows
+  are no change in flight.
 - The row comparison reads the source rows of the buckets it compares. Keep `sample` small
   on a large table, and run it off-peak.
 - A string or composite key is counted as a whole table, and its rows are compared from the

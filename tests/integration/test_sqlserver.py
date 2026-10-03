@@ -1443,7 +1443,7 @@ def test_keyset_chunks_tile_composite_and_varchar_keys_under_changes(
 
     chunks = _chunk_facts(delta_spark, paths["facts"])
     assert [c["chunk"] for c in chunks] == list(range(len(chunks)))
-    assert chunks[0]["lo"] is None and chunks[-1]["hi"] is None
+    assert chunks[0]["lo"] is None and [c["last"] for c in chunks].index(True) == len(chunks) - 1
     assert all(a["hi"] == b["lo"] for a, b in pairwise(chunks))  # each starts where one ended
     # planned and read in the same wave, so each holds chunk_rows rows and the last the rest
     assert all(c["rows"] == 7 for c in chunks[:-1]) and 0 < chunks[-1]["rows"] <= 7
@@ -1568,8 +1568,8 @@ def test_chunk_planning_needs_only_select_on_the_table(sqlserver, grant, backend
         assert client.key_bound("dbo", table, source.keys, types, keys[10], None, 25) is None
         plan = snapshot_plan(client, ci, source)
         assert plan == {"kind": "keyset", "max": list(keys[-1])}
-        chunks = next_chunks(client, ci, source, plan, 0, None, 10, 8)
-    assert [(i, lo, hi) for i, lo, hi in chunks] == [
+        chunks, final = next_chunks(client, ci, source, plan, 0, None, 10, 8)
+    assert final and [(i, lo, hi) for i, lo, hi in chunks] == [
         (0, None, list(keys[8])),
         (1, list(keys[8]), list(keys[16])),
         (2, list(keys[16]), list(keys[24])),
@@ -1640,6 +1640,7 @@ def test_reconcile_matches_a_quiet_table_and_classifies_differences_injected_in_
             options,
             paths["silver"],
             bronze=paths["bronze"],
+            control_table=paths["control"],
             facts_table=paths["facts"],
             bucket_rows=50,
             seed=3,
@@ -1663,3 +1664,57 @@ def test_reconcile_matches_a_quiet_table_and_classifies_differences_injected_in_
     }
     assert failures == {7: "MISSING_TARGET", 120: "RECORD_DIFF", 5000: "MISSING_SOURCE"}
     assert found["mismatch"] == 2 and found["in_flight"] == 0  # 120 keeps the counts equal
+
+
+def test_reconcile_buckets_a_date_key_as_sql_server_does(delta_spark, sqlserver, workdir):
+    """Tier 1 on a date key: the server's DATEDIFF from 1970-01-01 against Spark's datediff
+    with pmod flooring, dates before 1970, and the 9999-12-31 sentinel a calendar table has,
+    whose bucket ends past the last date."""
+    from delta.tables import DeltaTable
+
+    from mssql_cdc import reconcile
+
+    sqlserver.run("CREATE TABLE dbo.rc_date (d DATE NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL)")
+    sqlserver.run(
+        "INSERT INTO dbo.rc_date "
+        f"SELECT DATEADD(day, n * 97, '1900-01-01'), 'old' FROM {_ROWS} WHERE n <= 300"
+    )  # from 1900-04-08, every 97 days, across 1970
+    sqlserver.run("INSERT INTO dbo.rc_date VALUES ('9999-12-31', 'end')")
+    ci = sqlserver.enable_cdc("rc_date")
+    options = {
+        "connectionString": _reader(sqlserver, "rc_date", ci),
+        "captureInstance": ci,
+        "numPartitions": "2",
+    }
+    paths, cdc, run = _chunked(delta_spark, options, workdir, "rc-date")
+    run().awaitTermination()
+    assert cdc.backfill(
+        paths["bronze"], app_id="rc-date", facts_table=paths["facts"], chunk_rows=40
+    )["done"]
+    run().awaitTermination()
+    assert _apply(delta_spark, paths, ci, ["d"])["rebuilt"]
+
+    def check():
+        return reconcile(
+            delta_spark,
+            options,
+            paths["silver"],
+            bronze=paths["bronze"],
+            control_table=paths["control"],
+            bucket_rows=50,
+            sample=1.0,
+        )
+
+    quiet = check()
+    assert (quiet["mismatch"], quiet["in_flight"], quiet["failures"]) == (0, 0, {})
+    assert quiet["match"] == quiet["buckets"] == quiet["hashed"] >= 5
+    silver = DeltaTable.forPath(delta_spark, paths["silver"])
+    silver.delete("d = DATE'1900-04-08'")  # the first key: an insert silver never got
+    silver.update("d = DATE'9999-12-31'", {"v": "'lost'"})  # the sentinel's update it missed
+    found = check()
+    failures = {
+        json.loads(r["key"])["d"]: r["failure_type"]
+        for r in found["report"].where("key IS NOT NULL").collect()
+    }
+    assert failures == {"1900-04-08": "MISSING_TARGET", "9999-12-31": "RECORD_DIFF"}
+    assert found["mismatch"] == 1 and found["in_flight"] == 0

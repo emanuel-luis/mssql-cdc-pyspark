@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -43,7 +43,14 @@ class Orders:
 
     def reconcile(self, **kw):
         kw = {"bucket_rows": 10, "seed": 7, "report_table": self.report, **kw}
-        return reconcile(self.spark, self.options, self.silver, bronze=self.bronze, **kw)
+        return reconcile(
+            self.spark,
+            self.options,
+            self.silver,
+            bronze=self.bronze,
+            control_table=self.control,
+            **kw,
+        )
 
     def failures(self, result):
         rows = result["report"].where("key IS NOT NULL").collect()
@@ -183,6 +190,25 @@ def test_a_string_key_is_counted_whole_and_compared_from_the_source_rows(delta_s
         '{"code":"k07"}': "MISSING_TARGET",
         '{"code":"k21"}': "RECORD_DIFF",
     }
+    # keyed on another column than the capture instance's index: ranges are cut on it
+    by_qty = o.reconcile(sample=1.0, keys=["qty"])
+    assert {k: v[0] for k, v in o.failures(by_qty).items()} == {
+        '{"qty":7}': "MISSING_TARGET",
+        '{"qty":21}': "MISSING_TARGET",
+        '{"qty":-1}': "MISSING_SOURCE",
+    }
+
+
+def test_a_date_buckets_ends_past_the_date_range_stay_in_it():
+    from mssql_cdc.reconcile import _bound
+
+    top = (date.max - date(1970, 1, 1)).days  # 9999-12-31, a sentinel's key
+    assert (_bound("date", top), _bound("date", top + 1)) == ("9999-12-31", None)
+    assert (_bound("date", -(10**7)), _bound("date", 0), _bound("int", -3)) == (
+        "0001-01-01",
+        "1970-01-01",
+        -3,
+    )
 
 
 def test_a_chunked_bootstrap_applied_by_wave_reconciles_through_snapshot_chunks(
@@ -238,6 +264,7 @@ def test_a_chunked_bootstrap_applied_by_wave_reconciles_through_snapshot_chunks(
     result = o.reconcile(sample=1.0)
     assert (result["mismatch"], result["failures"]) == (0, {})
     assert result["hashed"] == result["buckets"] == result["match"] > 0
+    assert result["silver_lsn"] == done["applied_lsn"]  # E: what silver applied, no stamp
 
 
 def test_chunk_checks_report_gaps_overlaps_counts_and_stamps_bronze_and_facts_disagree_on(
@@ -259,8 +286,9 @@ def test_chunk_checks_report_gaps_overlaps_counts_and_stamps_bronze_and_facts_di
         bootstrap=True,
         snapshot="chunked",
     ).awaitTermination()
+    o.db.idle(at=o.at + timedelta(minutes=1))  # the chunks' stamp, above S
     status = cdc.backfill(o.bronze, app_id="orders-v1", facts_table=facts, chunk_rows=3)
-    assert status["done"] and status["chunks_done"] == 4  # [-, 3) [3, 6) [6, 9) [9, -)
+    assert status["done"] and status["chunks_done"] == 4  # [-, 3) [3, 6) [6, 9) [9, 12)
     apply_changes(
         delta_spark, o.bronze, o.silver, CI, [o.key], control_table=o.control, facts_table=facts
     )
@@ -293,7 +321,7 @@ def test_chunk_checks_report_gaps_overlaps_counts_and_stamps_bronze_and_facts_di
     overlap = rows[("CHUNK_TILING", 3)]
     assert (overlap["bucket_lo"], overlap["bucket_hi"], overlap["key"], overlap["status"]) == (
         "8",
-        None,
+        "12",
         None,
         None,
     )
@@ -309,3 +337,8 @@ def test_chunk_checks_report_gaps_overlaps_counts_and_stamps_bronze_and_facts_di
     assert (
         written.where(f"run_id = '{found['run_id']}' AND failure_type LIKE 'CHUNK%'").count() == 5
     )
+    # silver applied up to S, its rows are stamped above it: a snapshot row is no change in
+    # flight, so a row silver lost is a MISMATCH
+    o.silver_table().delete("order_id = 4")
+    lost = o.reconcile(sample=0.0)
+    assert (lost["mismatch"], lost["in_flight"], lost["failures"]) == (1, 0, {"MISSING_TARGET": 1})

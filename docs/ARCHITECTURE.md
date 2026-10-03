@@ -16,10 +16,15 @@ flowchart TB
     SK[sink.delta_sink<br/>foreachBatch]
     FN[finalization<br/>advance / is_final]
     PL[pipeline.CdcStream<br/>to_delta, snapshot, generations]
-    SV[silver.apply_changes<br/>MERGE, rebuild]
+    BF[pipeline.CdcStream.backfill<br/>chunked snapshot waves]
+    SV[silver.apply_changes<br/>MERGE, waves, rebuild]
+    RC[reconcile<br/>bucket counts, row hashes]
   end
   PL --> DS
   PL --> SK
+  BF --> SN
+  RC --> SN
+  RC --> CL
   DS --> RD --> CL
   DS --> SN --> CL
   CL --> SQL --> BE1 & BE2
@@ -28,13 +33,18 @@ flowchart TB
   SN -. snapshot rows .-> PL
   SK -. after commit .-> FN
   SK -. bronze .-> SV
+  BF -. chunk waves .-> SV
   SV -. after MERGE .-> FN
+  SV -. silver .-> RC
 ```
 
 * **Source**: Spark Python DataSource V2 (`pyspark.sql.datasource`). One stream per
   source table: its capture instance, and the newer one it switches to (ADR 0023).
   `mssql_cdc_snapshot` is its batch sibling: the tracked table's current rows in the same
-  schema, stamped with one LSN, for the initial load (ADR 0016).
+  schema, stamped with the LSN recorded before they are read, for the initial load
+  (ADR 0016). A whole snapshot has one stamp; a chunked one (`snapshotChunks`) a stamp per
+  wave, each at or after the snapshot's own LSN S, so its rows do not share one `_start_lsn`
+  ([ADR 0028](decisions/0028-chunked-snapshot-next-to-the-stream.md)).
 * **Client**: the only code that knows T-SQL. The reader depends on the `CdcClient`
   interface, so the fake can replace SQL Server in tests.
 * **Backends**: turn a query into Arrow record batches. Interchangeable because every
@@ -42,9 +52,16 @@ flowchart TB
 * **Sink**: an optional, Delta-specific `foreachBatch` writer. The source works with any
   sink.
 * **Finalization**: a control table with one row per target table.
-* **Silver**: `apply_changes` reads bronze (and the facts, for re-snapshots) and MERGEs the
-  latest image per key into a current-state table; its position and verdict are its row in
-  the control table ([ADR 0019](decisions/0019-silver-helper-applies-the-change-log.md)).
+* **Backfill**: `CdcStream.backfill` reads a chunked snapshot that `to_delta` opened, in
+  waves next to the running stream: one bronze commit and one facts row per chunk each
+  ([ADR 0028](decisions/0028-chunked-snapshot-next-to-the-stream.md)).
+* **Silver**: `apply_changes` reads bronze (and the facts, for re-snapshots and chunked
+  snapshots) and MERGEs the latest image per key into a current-state table; its position
+  and verdict are its row in the control table
+  ([ADR 0019](decisions/0019-silver-helper-applies-the-change-log.md)).
+* **Reconcile**: `reconcile` compares silver with its SQL Server table, by row count and key
+  sum per key range and then row by row through the snapshot reader, and reports what
+  differs.
 
 ## Where code runs
 
@@ -163,17 +180,19 @@ older instance first. It needs only the permissions of the CDC query functions. 
 infers them too when its capture instances record their columns
 (`FakeCdcDatabase(columns=...)`), and needs `columns` otherwise.
 
-## Tables written by the sink, finalization and silver
+## Tables written by the sink, finalization, silver and reconcile
 
 | Table | Grain | Written by | Notes |
 |---|---|---|---|
-| bronze (e.g. `bronze_orders`) | one row per change | `delta_sink` | append-only; `_batch_id` added; commit `userMetadata` holds the batch facts; appends with `mergeSchema`, so a column a newer capture instance captures joins the table ([ADR 0023](decisions/0023-schema-changes-and-capture-instance-switching.md)) |
-| facts (optional) | one row per micro-batch, including batches that read no change rows (`rows = 0`, no target commit: the offset moved past idle entries or other tables' commits), one per snapshot `to_delta` takes (bootstrap or re-snapshot), and one per schema change or capture instance switch a batch read past | `delta_sink`, `write_event` | snapshot rows have `event` `'bootstrap'` or `'resnapshot'` (NULL for batches), no `batch_id`, and on a re-snapshot the purged gap in `lost_from_ts`/`lost_to_ts` ([ADR 0018](decisions/0018-automatic-resnapshot-after-data-loss.md)); `'schema_change'` and `'capture_instance_switched'` rows have the batch's `batch_id`, `rows = 0`, the change's LSN and what changed in `detail`, written in one commit with the batch's row ([ADR 0023](decisions/0023-schema-changes-and-capture-instance-switching.md)): rebuild only from `'bootstrap'` and `'resnapshot'` rows; durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write), `written_at`, and optional network and read metrics (`source_rtt_ms`, `read_seconds`, `read_mb`, `network_wait_ms`; [ADR 0014](decisions/0014-network-and-read-metrics-in-facts.md)), the batch's end offset (`end_lsn`, `end_commit_ts`), and, measured from it, the retention headroom (`retention_watermark_ts`, `retention_headroom_hours`; [ADR 0017](decisions/0017-retention-headroom-in-facts.md)) and the ingestion lag, with the capture lag (`source_max_commit_ts`, `capture_lag_seconds`, `ingestion_lag_seconds`; [ADR 0020](decisions/0020-capture-and-ingestion-lag-in-facts.md)) |
-| `table_finalization` | one row per target table | `finalization.advance`, `apply_changes` | `finalized_until`, `end_lsn`, `end_commit_ts`, `updated_at`; `applied_lsn` and `snapshot_lsn` for silver tables: how far bronze is applied, and the snapshot last rebuilt from |
-| silver (e.g. `silver_orders`) | one row per source key | `apply_changes` | current state: captured columns plus `_start_lsn` and `_commit_ts` of the row's image; deletes remove rows; rebuilt from the newest snapshot after a re-snapshot ([ADR 0019](decisions/0019-silver-helper-applies-the-change-log.md)) |
+| bronze (e.g. `bronze_orders`) | one row per change, plus snapshot rows (`_operation = 0`) | `delta_sink`, `to_delta`, `backfill` | append-only; `_batch_id` added, and on snapshot rows `_snapshot` (the snapshot's LSN S) and `_chunk` (the chunk of a chunked one, whose rows carry its wave's stamp in `_start_lsn`, at or after S); commit `userMetadata` holds the batch facts; appends with `mergeSchema`, so a column a newer capture instance captures joins the table ([ADR 0023](decisions/0023-schema-changes-and-capture-instance-switching.md)) |
+| facts (optional) | one row per micro-batch, including batches that read no change rows (`rows = 0`, no target commit: the offset moved past idle entries or other tables' commits), one per snapshot `to_delta` takes (bootstrap or re-snapshot), one per schema change or capture instance switch a batch read past, and for a chunked snapshot one when it opens and one per chunk | `delta_sink`, `write_event`, `backfill` | snapshot rows have `event` `'bootstrap'` or `'resnapshot'` (NULL for batches), no `batch_id`, and on a re-snapshot the purged gap in `lost_from_ts`/`lost_to_ts` ([ADR 0018](decisions/0018-automatic-resnapshot-after-data-loss.md)); a chunked snapshot writes `'snapshot_open'` (its LSN S and plan in `detail`) and `'snapshot_chunk'` rows (the chunk's stamp, rows and key range) before its completion row ([ADR 0028](decisions/0028-chunked-snapshot-next-to-the-stream.md)); `'schema_change'` and `'capture_instance_switched'` rows have the batch's `batch_id`, `rows = 0`, the change's LSN and what changed in `detail`, written in one commit with the batch's row ([ADR 0023](decisions/0023-schema-changes-and-capture-instance-switching.md)): rebuild only from `'bootstrap'` and `'resnapshot'` rows; durable copy of the facts (Delta checkpoints drop `commitInfo`), plus `started_at`/`duration_ms` (source read + target write), `written_at`, and optional network and read metrics (`source_rtt_ms`, `read_seconds`, `read_mb`, `network_wait_ms`; [ADR 0014](decisions/0014-network-and-read-metrics-in-facts.md)), the batch's end offset (`end_lsn`, `end_commit_ts`), and, measured from it, the retention headroom (`retention_watermark_ts`, `retention_headroom_hours`; [ADR 0017](decisions/0017-retention-headroom-in-facts.md)) and the ingestion lag, with the capture lag (`source_max_commit_ts`, `capture_lag_seconds`, `ingestion_lag_seconds`; [ADR 0020](decisions/0020-capture-and-ingestion-lag-in-facts.md)) |
+| `table_finalization` | one row per target table | `finalization.advance`, `apply_changes` | `finalized_until`, `end_lsn`, `end_commit_ts`, `updated_at`; `applied_lsn` and `snapshot_lsn` for silver tables: how far bronze is applied, and the snapshot last rebuilt from; `open_snapshot_lsn` and `snapshot_wave`: the open chunked bootstrap and the last of its waves applied |
+| silver (e.g. `silver_orders`) | one row per source key | `apply_changes` | current state: captured columns plus `_start_lsn` and `_commit_ts` of the row's image; deletes remove rows; rebuilt from the newest snapshot after a re-snapshot, or once a chunked one completes ([ADR 0019](decisions/0019-silver-helper-applies-the-change-log.md)) |
+| reconcile report (optional) | one row per bucket, differing key and chunk failure of each run | `reconcile` (`report_table`) | `run_id` groups a run; the counts and key sums per bucket, MISSING_TARGET, MISSING_SOURCE, RECORD_DIFF and IN_FLIGHT keys, CHUNK_ checks ([Tables](reference/tables.md#reconcile-report)) |
 
-All four are created on first use with `DeltaTable.createIfNotExists`: explicit types, and a
-comment on the table and on every control, facts, bronze and silver metadata column
+All five are created on first use with `DeltaTable.createIfNotExists`: explicit types, and a
+comment on the table and on every control, facts and report column and every bronze and
+silver metadata column
 (`DESCRIBE TABLE` shows them), and stamped with the table property
 `mssql_cdc.schema_version`. Existing tables get the schema migrations of their kind that
 they have not had yet ([ADR 0012](decisions/0012-delta-tables-through-the-deltatable-api.md),

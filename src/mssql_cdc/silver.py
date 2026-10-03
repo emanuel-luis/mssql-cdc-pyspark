@@ -35,13 +35,14 @@ Run it after the stream, in the same job or another; one job per silver table.
   snapshot), each call applies the waves its 'snapshot_chunk' rows announce, tracked by
   ``open_snapshot_lsn`` and ``snapshot_wave`` (the chunks land below ``applied_lsn``), with
   every change after S of their keys: a chunk row never brings back a key deleted since.
-  With one integer or date key, a chunk also deletes the silver keys of its range [lo, hi)
-  it does not hold whose image is older than its stamp: it saw every commit up to it. An
-  open re-snapshot only keeps applying changes. Either way, the rebuild comes at completion.
+  An open re-snapshot only keeps applying changes. Either way, the rebuild comes at
+  completion, and deletes the keys absent from the snapshot and the changes after it.
 * Verdict: silver's ``finalized_until`` advances to the bronze verdict read before bronze
   itself. Bronze commits its rows before its verdict (ADR 0005), so the rows applied hold
   every commit up to it: silver never claims more than it has applied. While a snapshot is
-  open, silver lacks keys or holds stale ones: its verdict is held until the rebuild.
+  open, silver lacks keys or holds stale ones: its verdict is held until the rebuild. Without
+  ``facts_table`` it is never advanced: a chunked snapshot opens, and an emptied table's
+  re-snapshot happens, in the facts alone, before bronze holds any row of it.
 """
 
 from __future__ import annotations
@@ -49,7 +50,6 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from contextlib import closing
-from datetime import date
 
 from . import finalization, migrations
 from .sink import BRONZE_COLUMN_COMMENTS
@@ -130,9 +130,9 @@ def _resnapshot(opened) -> bool:
     return json.loads(opened["detail"] or "{}").get("mode") == "resnapshot"
 
 
-def _chunks(facts, snapshot: str) -> dict[int, tuple]:
-    """The chunks of ``snapshot`` its 'snapshot_chunk' facts rows announce, by index:
-    ``(wave, lo, hi, stamp)``. They are written after the chunks' bronze rows."""
+def _chunks(facts, snapshot: str) -> dict[int, int]:
+    """The wave of each chunk of ``snapshot`` its 'snapshot_chunk' facts rows announce, by
+    index. They are written after the chunks' bronze rows."""
     from pyspark.sql import functions as F
 
     rows = (
@@ -140,14 +140,10 @@ def _chunks(facts, snapshot: str) -> dict[int, tuple]:
             (F.col("event") == "snapshot_chunk")
             & (F.get_json_object("detail", "$.snapshot") == snapshot)
         )
-        .select("detail", "min_lsn")
+        .select("detail")
         .collect()
     )  # ponytail: every chunk of the snapshot on each call; filter by wave if it shows up
-    chunks: dict[int, tuple] = {}
-    for row in rows:
-        d = json.loads(row["detail"])
-        chunks[int(d["chunk"])] = (int(d["wave"]), d.get("lo"), d.get("hi"), row["min_lsn"])
-    return chunks
+    return {int(d["chunk"]): int(d["wave"]) for d in (json.loads(r["detail"]) for r in rows)}
 
 
 def _by_key(df, other, keys: Sequence[str], how: str):
@@ -157,41 +153,6 @@ def _by_key(df, other, keys: Sequence[str], how: str):
 
     a, b = df.alias("a"), other.alias("b")
     return a.join(b, [F.col(f"a.{_q(k)}").eqNullSafe(F.col(f"b.{_q(k)}")) for k in keys], how)
-
-
-def _absent(spark, target: str, key: str, key_type, chunks: dict, held):
-    """Synthetic deletes at each chunk's stamp L of the silver keys in its range [lo, hi)
-    that it does not hold (``held``: its rows' keys), when their image is older than L. The
-    chunk saw every commit up to L, so those keys were gone by then. Only for an integer or
-    date key, which Spark orders as SQL Server does; None for other keys. A NULL key is in
-    no range here unless the range is the whole table (lo and hi open), as on SQL Server."""
-    from pyspark.sql import functions as F
-    from pyspark.sql.types import DateType, IntegralType, StringType, StructField, StructType
-
-    if not isinstance(key_type, (IntegralType, DateType)):
-        return None
-
-    def bound(v):
-        if v is None:  # open end
-            return None
-        return date.fromisoformat(v) if isinstance(key_type, DateType) else int(v)
-
-    schema = StructType(
-        [StructField("lo", key_type), StructField("hi", key_type), StructField("l", StringType())]
-    )
-    ranges = [(bound(lo), bound(hi), stamp) for _, lo, hi, stamp in chunks.values()]
-    r = F.broadcast(spark.createDataFrame(ranges, schema)).alias("r")
-    t = delta_table(spark, target).toDF().alias("t")
-    k = F.col(f"t.{_q(key)}")
-    inside = (
-        (F.col("r.lo").isNull() | (k >= F.col("r.lo")))
-        & (F.col("r.hi").isNull() | (k < F.col("r.hi")))
-        & (F.col("t._start_lsn") < F.col("r.l"))
-    )
-    gone = t.join(r, inside).select(
-        k.alias(key), F.col("r.l").alias("_start_lsn"), F.lit(1).alias("_operation")
-    )
-    return _by_key(gone, held, [key], "left_anti")
 
 
 def apply_changes(
@@ -216,7 +177,8 @@ def apply_changes(
     the position and gets the verdict; ``bronze``'s own verdict must be under the same name
     or path.
     ``facts_table``: the stream's, needed to see the re-snapshot of an emptied table and
-    any chunked snapshot (a call fails on chunk rows without it).
+    any chunked snapshot (a call fails on chunk rows without it). Without it, the verdict is
+    not advanced.
     Returns ``{"rebuilt", "applied_lsn", "finalized_until"}``.
     """
     from pyspark.sql import Window
@@ -294,7 +256,7 @@ def apply_changes(
     else:
         base = change & (F.col("_start_lsn") > applied)
     after = wave_from if not rebuild and open_from == s_open and wave_from is not None else -1
-    new = {c: v for c, v in chunks.items() if v[0] > after} if bootstrap_open else {}
+    new = {c: w for c, w in chunks.items() if w > after} if bootstrap_open else {}
     rows = pinned.where(base)
     if new:  # the open bootstrap's waves that arrived since the last call
         waves = pinned.where(
@@ -343,10 +305,6 @@ def apply_changes(
                     "left_semi",
                 )
             )
-            key_type = pinned.schema[keys[0]].dataType
-            gone = _absent(spark, target, keys[0], key_type, new, held) if len(keys) == 1 else None
-            if gone is not None:
-                rows = rows.unionByName(gone, allowMissingColumns=True)
         columns_out = [*names, "_start_lsn", "_commit_ts"]
         last = Window.partitionBy(*[F.col(_q(k)) for k in keys]).orderBy(
             F.col("_start_lsn").desc(),
@@ -378,7 +336,7 @@ def apply_changes(
     rebuilt = snapshot if rebuild else rebuilt_from
     progress: tuple = (None, None)
     if bootstrap_open:
-        wave = max([after, *(v[0] for v in new.values())])
+        wave = max([after, *new.values()])
         progress = (s_open, wave if wave >= 0 else None)
     if (position, rebuilt, *progress) != (applied, rebuilt_from, open_from, wave_from):
         _record(spark, control_table, target, position, rebuilt, *progress)
@@ -393,8 +351,9 @@ def apply_changes(
     return {
         "rebuilt": rebuild and merged,
         "applied_lsn": position,
-        # held while a snapshot is open: silver lacks its keys, or still has stale ones
+        # held while a snapshot is open: silver lacks its keys, or still has stale ones; and
+        # without the facts, which alone tell that one is open
         "finalized_until": finalized
-        if is_open
+        if is_open or not facts_table
         else finalization.advance(spark, control_table, target, offset, granularity),
     }

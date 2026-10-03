@@ -107,11 +107,11 @@ snapshot's `'snapshot_open'` row, so the rebuild point and the apply change:
   since the last call, tracked by `open_snapshot_lsn` and `snapshot_wave` (control migration
   2): the chunks land below `applied_lsn`, so the position alone cannot track them. Each
   chunk's rows are ranked with every bronze change of their keys after S: a chunk row never
-  outranks a delete the stream committed after its stamp. With one integer or date key, a
-  chunk also deletes the silver keys of its range it lacks whose image is older than its
-  stamp; Spark orders other keys differently from SQL Server's collations.
+  outranks a delete the stream committed after its stamp. Stale keys wait for the rebuild.
 * An open re-snapshot keeps applying changes; the rebuild comes at its completion row.
 * Silver's verdict is held while a snapshot is open: silver lacks keys or holds stale ones.
+  Without `facts_table` it is never advanced: a chunked snapshot shows in the facts alone
+  until its first wave, and so does an emptied table's re-snapshot.
 * Operation 3 now deletes its own key; the 4 of the same key and commit outranks it
   (`_operation` descending), so only a 3 whose update moved the row to another key is the
   latest row. SQL Server records a primary-key update as 1 and 2 (`tests/integration`), but

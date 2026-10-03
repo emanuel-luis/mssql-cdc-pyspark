@@ -443,13 +443,16 @@ class FakeCdcDatabase:
                     and captured[pair] == row
                 ):
                     continue
+                # an update's 3 and 4 share __$seqval and __$command_id, as on SQL Server:
+                # only __$operation orders them
+                n = cmd - 1 if op == 4 and cmd > 1 and changes[cmd - 2][0] == 3 else cmd
                 self._append(
                     os.path.join("changes", f"{name}.jsonl"),
                     {
                         "start_lsn": start,
-                        "seqval": _lsn.from_int(seq + cmd),  # the same in every instance
+                        "seqval": _lsn.from_int(seq + n),  # the same in every instance
                         # differs per instance, as on SQL Server (ADR 0023); order kept
-                        "command_id": cmd + k,
+                        "command_id": n + k,
                         "operation": op,
                         "row": row,
                     },

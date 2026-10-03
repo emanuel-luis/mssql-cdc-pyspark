@@ -48,6 +48,7 @@ anything else.
 | [metricsPath](#metricspath) | none (see below) | stream |
 | [snapshotLsn](#snapshotlsn) | `max_lsn` before the read | snapshot |
 | [snapshotChunks](#snapshotchunks) | none: the whole table | snapshot |
+| [snapshotKeys](#snapshotkeys) | the unique index's columns | snapshot |
 | [isolationLevel](#isolationlevel) | `readCommitted` | snapshot |
 
 "Snapshot" is `spark.read.format("mssql_cdc_snapshot")`, which `snapshot()`,
@@ -242,6 +243,14 @@ chunk's number, and with [metricsPath](#metricspath) each chunk leaves
 whose key cannot be read in ranges (no unique index, a type no bound can be bound as) are a
 `ValueError`. `backfill()` sets it; set it yourself only to read part of a table.
 
+### snapshotKeys
+
+For `mssql_cdc_snapshot` only: the columns that key bounds ([snapshotChunks](#snapshotchunks),
+and the ranges of [numPartitions](#numpartitions)) apply to, as a JSON list such as
+`["id"]`. By default, the capture instance's unique index. `reconcile()` sets it to the key
+it compares, which can be another column, or the only key of a table without a unique index;
+on a column no index leads, each range scans the table.
+
 ### isolationLevel
 
 For `mssql_cdc_snapshot` only: `readCommitted` (the default) or `snapshot`, which reads
@@ -384,8 +393,10 @@ snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in waves 
   (`<app_id>.g<n>`) are found from `app_id`. Without an open snapshot it returns at once,
   `paused` with a `reason`.
 * `chunk_rows`: about how many rows a chunk holds (at least 1). One integer key steps over
-  its MIN..MAX from a row estimate, so chunks vary with the key's gaps; other keys are cut at
-  exactly that many rows when the chunk is planned.
+  its MIN..MAX from a row estimate, so chunks vary with the key's gaps; a sparser one (more
+  than 4 values per row) and other keys are cut at exactly that many rows when the chunk is
+  planned. The last chunk ends just above the MAX recorded at the open: rows inserted above
+  it come from the stream.
 * `max_waves`, `max_seconds`: stop after that many waves, or before a wave once that many
   seconds have passed. `None`: until the snapshot is done.
 * `min_headroom_hours`: before each wave, pause while the stream's newest facts row has

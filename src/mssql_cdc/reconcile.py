@@ -2,6 +2,7 @@
 
     from mssql_cdc import reconcile
     result = reconcile(spark, options, "silver.orders", bronze="bronze.orders",
+                       control_table="ops.table_finalization",
                        report_table="ops.reconcile_report")
 
 ``options`` are the stream's; ``silver`` is the table ``apply_changes`` builds from ``bronze``.
@@ -15,22 +16,24 @@ NOLOCK).
   string a collation orders) gets one count of the whole table.
 * Tier 2, row by row: every MISMATCH bucket and a ``sample`` of the MATCH ones (for any other
   key, a sample of ranges of about ``bucket_rows`` rows cut by ``NTILE``) are read through the
-  snapshot reader (``snapshotChunks``) and joined with silver on the key, comparing
+  snapshot reader (``snapshotChunks``, on ``keys``: ``snapshotKeys``) and joined with silver on the key, comparing
   ``sha2(to_json(struct(<captured columns>)), 256)`` computed by the same Spark function on
   both sides. MISSING_TARGET: the key only in the source (an insert not applied);
   MISSING_SOURCE: only in silver (a delete not applied, a stale key); RECORD_DIFF: other
   values (an update not applied). For any other key silver is joined from the source's rows,
   which finds only the first and the last: no range Spark cuts of silver is SQL Server's.
-* IN_FLIGHT: M is ``max_lsn`` read just before the source is read, E the newest
-  ``_start_lsn`` in the silver version compared (at most its ``applied_lsn``). A bucket or a
-  key that differs while bronze holds a change to it after the older of the two is
-  IN_FLIGHT: check it again later. Equal counts are a MATCH even then. A change the stream has
+* IN_FLIGHT: M is ``max_lsn`` read just before the source is read, E silver's
+  ``applied_lsn`` in ``control_table``, read before the silver version compared, which holds
+  every change up to it (not its newest ``_start_lsn``: a chunk row's stamp can be ahead of
+  the changes applied). A bucket or a key that differs while bronze holds a change to it
+  (not a snapshot row) after the older of the two is IN_FLIGHT: check it again later. While
+  a chunked snapshot is open, the keys of the chunks silver lacks are MISSING_TARGET. Equal counts are a MATCH even then. A change the stream has
   not read yet cannot be seen: run it while the stream keeps up; a MISMATCH that causes
   clears on the next run.
 * Chunks, with ``facts_table``: bronze's newest chunked snapshot (ADR 0028) is checked
   against its 'snapshot_chunk' facts rows, without reading SQL Server. CHUNK_TILING: the
   chunks leave a gap or overlap (each starts where the one before ended, the first open
-  below and, once complete, the last open above); CHUNK_ROWS: a chunk's facts row counts
+  below and, once complete, the last the plan's final one); CHUNK_ROWS: a chunk's facts row counts
   other rows than bronze holds of it; CHUNK_STAMP: a chunk stamped below the snapshot's LSN
   S. The facts are read before bronze, which commits a wave's rows before its facts rows,
   so a wave still being written is no failure.
@@ -71,7 +74,10 @@ REPORT_COLUMNS = [
     (
         "silver_lsn",
         "STRING",
-        "Newest _start_lsn (0x + 20 hex) in that version: silver holds the changes up to it.",
+        (
+            "Silver's applied_lsn (0x + 20 hex) in the control table, read before that "
+            "version: silver holds the changes up to it."
+        ),
     ),
     (
         "source_lsn",
@@ -143,7 +149,7 @@ REPORT_COLUMNS = [
             "check again later). Chunk rows (with facts_table, for the newest chunked snapshot "
             "of bronze): CHUNK_TILING (its chunks leave a gap or overlap: an index missing or "
             "twice, the first not open below, one not starting where the one before ended, the "
-            "last of a complete snapshot not open above), CHUNK_ROWS (a chunk's "
+            "last of a complete snapshot not the plan's final one), CHUNK_ROWS (a chunk's "
             "'snapshot_chunk' facts row counts other rows than bronze holds of it) or "
             "CHUNK_STAMP (a chunk stamped below the snapshot's LSN)."
         ),
@@ -160,6 +166,7 @@ REPORT_COLUMNS = [
 ]
 _SCHEMA = ", ".join(f"`{n}` {t}" for n, t, _ in REPORT_COLUMNS)
 _EPOCH = date(1970, 1, 1)
+_DAYS = ((date.min - _EPOCH).days, (date.max - _EPOCH).days)  # a date key's ordinals
 # ponytail: about this many buckets come back from the count query (and from silver's), merged
 # into buckets of bucket_rows rows on the driver: a bucket is never finer than 1/_FINE of the
 # key's range. Raise it if very skewed keys need finer buckets.
@@ -176,14 +183,28 @@ def _ordinal_sql(kind: str, key: str) -> str:
 
 
 def _bound(kind: str, o: int):
-    """The key at ordinal ``o``, as JSON holds it: a snapshotChunks bound, a report column."""
-    return o if kind == "int" else (_EPOCH + timedelta(days=o)).isoformat()
+    """The key at ordinal ``o``, as JSON holds it: a snapshotChunks bound, a report column. A
+    bucket's ends can pass a date key's range (9999-12-31): below it, its first day; above, None
+    (open), which is the same rows."""
+    if kind == "int":
+        return o
+    if o > _DAYS[1]:
+        return None
+    return (_EPOCH + timedelta(days=max(o, _DAYS[0]))).isoformat()
 
 
 def _latest(spark, table: str):
     """``table``'s latest version and a read pinned to it."""
     version = int(delta_table(spark, table).history(1).first()["version"])
     return version, spark.sql(f"SELECT * FROM {table_ref(table)} VERSION AS OF {version}")
+
+
+def _after(bronze, lower: str):
+    """``bronze``'s changes after ``lower``: what one side may not hold yet. Snapshot rows are
+    no change: a chunk's stamp can be above all silver applied once it is rebuilt."""
+    from pyspark.sql import functions as F
+
+    return bronze.where((F.col("_operation") != 0) & (F.col("_start_lsn") > lower))
 
 
 def _sample(rng: random.Random, items: list[int], fraction: float) -> list[int]:
@@ -214,7 +235,7 @@ def _range_buckets(spark, client, source, key, kind, target, bronze, lower, buck
         "source": {b: (n, s) for b, n, s in in_source},
         "silver": {b: (n, s) for b, n, s in in_silver},
     }
-    moved = changes.where(F.col("_start_lsn") > lower).select(fine).distinct().collect()
+    moved = _after(changes, lower).select(fine).distinct().collect()
     ids = sorted(sides["source"].keys() | sides["silver"].keys())
     starts, rows = [], bucket_rows
     for b in ids:
@@ -247,6 +268,7 @@ def reconcile(
     keys: Sequence[str] | None = None,
     *,
     bronze: str,
+    control_table: str,
     facts_table: str | None = None,
     bucket_rows: int = 1_000_000,
     sample: float = 0.01,
@@ -258,7 +280,8 @@ def reconcile(
 
     ``keys``: the source's key columns; without them, the capture instance's unique index.
     ``bronze``: the table silver is applied from; its newer changes make a difference
-    IN_FLIGHT. ``facts_table``: the stream's, to check the chunks of bronze's newest chunked
+    IN_FLIGHT. ``control_table``: ``apply_changes``'s, for silver's ``applied_lsn``.
+    ``facts_table``: the stream's, to check the chunks of bronze's newest chunked
     snapshot. ``bucket_rows``: rows per bucket. ``sample``: the fraction of the MATCH buckets
     also compared row by row (0: none, 1: all). ``seed``: of that sample.
     """
@@ -281,8 +304,9 @@ def reconcile(
     if missing:
         raise ValueError(f"keys {missing} are not captured columns: {schema.fieldNames()}")
     kind = _KINDS.get(schema[keys[0]].dataType.typeName()) if len(keys) == 1 else None
+    control = delta_table(spark, control_table).toDF()  # before silver: it holds this much
+    silver_lsn = _one(control.where(F.col("table_name") == silver).select("applied_lsn"))
     version, target = _latest(spark, silver)
-    silver_lsn = _one(target.agg(F.max("_start_lsn")))
 
     def json_or_null(v) -> str | None:
         return None if v is None else json.dumps(v)
@@ -299,7 +323,7 @@ def reconcile(
         else:  # one count of the whole table; Tier 2 on ranges SQL Server cuts
             rows = client.key_buckets(source.schema, source.table, None, None, 1)[0][1]
             _, changes = _latest(spark, bronze)
-            moved = _one(changes.where(F.col("_start_lsn") > lower).select(F.lit(True)))
+            moved = _one(_after(changes, lower).select(F.lit(True)))
             found = [{"source": [rows, None], "silver": [target.count(), None], "moved": moved}]
             tiles: list | None = []  # the first key of each range after the first
             if rows > bucket_rows:
@@ -334,6 +358,7 @@ def reconcile(
                 # no chunk metrics: they are backfill()'s, and a stream's directory folds them
                 .options(**{k: v for k, v in options.items() if k.lower() != "metricspath"})
                 .option("snapshotChunks", json.dumps([[i, *parts[i]] for i in chosen]))
+                .option("snapshotKeys", json.dumps(keys))  # the bounds' columns
                 .option("snapshotLsn", read_lsn)
                 .load()
                 .localCheckpoint()  # read once, before bronze is pinned
@@ -456,7 +481,7 @@ def _differences(ours, theirs, keys, columns, how, changes, lower):
     # a key bronze changed after the older read: either side may not have that change yet.
     # ponytail: joined by =, so a NULL key's change is not seen (one row, if a unique index has it)
     moved = (
-        changes.where(F.col("_start_lsn") > lower)
+        _after(changes, lower)
         .select(*[F.col(_q(k)) for k in keys])
         .distinct()
         .withColumn("_rc_moved", F.lit(True))
@@ -533,7 +558,7 @@ def _chunk_checks(spark, bronze: str, facts_table: str) -> list[dict]:
         before = chunks.get(i - 1)
         if i == 0 and c["lo"] is not None:
             fail("CHUNK_TILING", i, c, problem="the first chunk is not open below")
-        elif before and (before["hi"] is None or c["lo"] != before["hi"]):
+        elif before and (before.get("last") or c["lo"] != before["hi"]):
             fail("CHUNK_TILING", i, c, problem="it does not start where the one before ended")
         n, low = held.get(i, (0, None))
         if c["rows"] != n:
@@ -541,9 +566,9 @@ def _chunk_checks(spark, bronze: str, facts_table: str) -> list[dict]:
         stamp = min((x for x in (c["lsn"], low) if x), default=s)
         if stamp < s:
             fail("CHUNK_STAMP", i, c, lsn=stamp)
-    if complete and chunks and chunks[max(chunks)]["hi"] is not None:
+    if complete and chunks and not chunks[max(chunks)].get("last"):
         last = max(chunks)
-        fail("CHUNK_TILING", last, chunks[last], problem="the last chunk is not open above")
+        fail("CHUNK_TILING", last, chunks[last], problem="the last chunk is not the plan's final")
     for i in sorted(set(held) - set(chunks)) if complete else []:
         fail("CHUNK_ROWS", i, None, facts_rows=None, bronze_rows=held[i][0])
     return out

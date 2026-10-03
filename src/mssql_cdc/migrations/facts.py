@@ -245,10 +245,10 @@ SNAPSHOT_COMMENTS = {
         "'old -> new' capture instance, plus the columns the query reads that the new one does "
         "not capture (NULL from then on). JSON on the rows of a chunked snapshot: "
         "'snapshot_open' {mode, keys, plan, generation, lost_from_ts, lost_to_ts}; "
-        "'snapshot_chunk' {snapshot, chunk, wave, lo, hi}, the chunk's key range from lo "
-        "(inclusive) to hi (exclusive), null for an open end and a list for a composite key; "
-        "its 'bootstrap' or 'resnapshot' row {snapshot, chunks, rows, last_lsn}. NULL on other "
-        "rows."
+        "'snapshot_chunk' {snapshot, chunk, wave, lo, hi, last}, the chunk's key range from lo "
+        "(inclusive) to hi (exclusive), null for an open end and a list for a composite key, "
+        "last true on the plan's final chunk, whose read completes the snapshot; its "
+        "'bootstrap' or 'resnapshot' row {snapshot, chunks, rows, last_lsn}. NULL on other rows."
     ),
 }
 

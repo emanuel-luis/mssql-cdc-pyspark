@@ -9,9 +9,10 @@ retention: the stream starts at its LSN, and whatever cleanup purges after that 
 the table is still being read is lost, which an automatic re-snapshot can only repeat
 (ADR 0018). The read time is the table's size over the link: runs against a production
 source moved 1.8 to 5.9 MB/s of source data over four connections, 18,000 to 105,000 rows
-per second depending on the row width. A table of 13.7 billion rows takes 14 to 40 days at
-those rates, about six weeks at the measured ceiling. Seeding from a copy (ADR 0025) needs
-a copy someone already has. A long snapshot also shows no progress until its one Delta
+per second depending on the row width. At those rates a table of 13.7 billion rows takes 1.5
+to 9 days, against a default retention of 3 days, and longer for wider rows or a slower link
+shared with the stream. Seeding from a copy (ADR 0025) needs a copy someone already has.
+A long snapshot also shows no progress until its one Delta
 commit at the end, and a failed task reads its whole range again.
 
 What removes the retention limit is starting the stream **first**, at a recorded LSN S,
@@ -47,9 +48,9 @@ written to it (invariant 11 unchanged). The conditions the design rests on:
   ones; READ COMMITTED and RCSI see what was committed before the statement started.
 * **P2:** every stamp is at or after S (`max_lsn` only moves forward, S is read first).
 * **P3:** bronze holds every change after S without a gap: the stream generation starts at S.
-* **P4:** the chunks tile the key space: complementary predicates (`client._key_select`),
-  first open below, last open above. Keys outside [MIN, MAX] read after S were inserted
-  after S, so the stream has them.
+* **P4:** the chunks tile the key space up to MAX: complementary predicates
+  (`client._key_select`), the first open below, the last ending just above MAX. Keys
+  outside [MIN, MAX] read after S were inserted after S, so the stream has them.
 * **P5:** removing a key always reaches bronze as a row: a delete (operation 1), a key
   update recorded as a delete and an insert (1 and 2), or a before-image (3) with the old key.
 
@@ -80,7 +81,7 @@ silver's rebuild point), which chunk stamps break.
    before it, `_start_lsn` stands in) and `_chunk` (bronze migration 2). The facts carry
    `'snapshot_open'` (min = max = S, detail: mode, keys, plan, generation, the gap),
    one `'snapshot_chunk'` row per chunk (rows, min = its stamp L, max = `max_lsn` after the
-   read, detail: snapshot, chunk, wave, bounds) and, once the last chunk is in, the usual
+   read, detail: snapshot, chunk, wave, bounds, last) and, once the last chunk is in, the usual
    `'bootstrap'` or `'resnapshot'` row with min = max = S (facts migration 7 rewrites the
    comments). Only those two remain snapshots (invariant 14). The chunked mode requires
    `facts_table`. A wave is one bronze append (`txnAppId <app_id>#snap.<S>`, `txnVersion`
@@ -93,22 +94,25 @@ silver's rebuild point), which chunk stamps break.
      keep consistent with bronze and the facts, which already record every other event.
    - Considered: state in the checkpoint directory. Local or Volume paths only, and
      downstream (silver) could not read it. Bronze `userMetadata` alone: log cleanup drops it.
-3. **Silver: rebuild at completion by absence, plus range deletes for order-safe keys.**
+3. **Silver: waves applied as they arrive, rebuild at completion by absence.**
    At the completion row silver is rebuilt from the rows of S and the changes after S, with
    `whenNotMatchedBySourceDelete`: absence from the snapshot deletes, whatever the key type.
    While a bootstrap is open, its waves are applied as their `'snapshot_chunk'` rows arrive
    (position `open_snapshot_lsn` and `snapshot_wave`, control migration 2), each chunk row
    with every bronze change of its key after S, so a chunk row never brings back a key the
-   stream deleted after its stamp. For one integer or date key, a chunk also deletes the
-   silver keys in its range that it lacks and whose image is older than its stamp. An open
-   re-snapshot keeps applying changes and rebuilds at completion; silver's verdict is held
-   while a snapshot is open. Operation 3 now deletes its own key, outranked by the 4 of the
+   stream deleted after its stamp. An open re-snapshot keeps applying changes and rebuilds
+   at completion; silver's verdict is held while a snapshot is open, and never advanced
+   without `facts_table`, the only place a snapshot shows before its first wave.
+   Operation 3 now deletes its own key, outranked by the 4 of the
    same key and commit: a key update SQL Server records as 3 and 4 no longer leaves the
    old key behind.
    - Considered: only the rebuild at completion. A weeks-long bootstrap would leave silver
      without most rows for weeks.
-   - Considered: range deletes for every key type. Spark compares strings by bytes, SQL
-     Server by the column's collation: a range cut in Spark is not SQL Server's.
+   - Considered: each chunk deleting the silver keys of its range it lacks. A silver table
+     fresh at the open only gets keys from chunk rows and changes after S, whose removals
+     reach bronze (P5); the rest are stale keys of a silver built before a lost history,
+     which the rebuild removes for every key type while the verdict is held. Spark also
+     orders strings by bytes, SQL Server by the column's collation.
 4. **Isolation: READ COMMITTED, optionally SNAPSHOT, never `NOLOCK`.** A chunk reads as a
    whole snapshot does. `isolation="snapshot"` (reader option `isolationLevel=snapshot`)
    prefixes `SET TRANSACTION ISOLATION LEVEL SNAPSHOT` where the DBA set
@@ -122,17 +126,24 @@ silver's rebuild point), which chunk stamps break.
    2 reads every mismatched bucket and a sample of the rest through the snapshot reader and
    compares `sha2(to_json(struct(...)), 256)` computed by the same Spark function on both
    sides, classifying keys as AWS DMS validation does (MISSING_TARGET, MISSING_SOURCE,
-   RECORD_DIFF), or IN_FLIGHT when bronze holds a newer change: check again later. With
-   `facts_table`, the newest chunked snapshot's chunks are checked against bronze
+   RECORD_DIFF), or IN_FLIGHT when bronze holds a change (no snapshot row) newer than
+   silver's `applied_lsn` (`control_table`, not the newest stamp silver holds) or the source
+   read: check again later.
+   Its ranges are cut on the key it compares (`snapshotKeys`), not always the unique index.
+   With `facts_table`, the newest chunked snapshot's chunks are checked against bronze
    (CHUNK_TILING, CHUNK_ROWS, CHUNK_STAMP). The report is a new table kind, `reconcile`.
    - Considered: server-side `HASHBYTES` per bucket (a later tier, not now); never
      `CHECKSUM_AGG` or `BINARY_CHECKSUM`, which XOR and collide.
 
 Planning, in `client.snapshot_plan` and `client.next_chunks`, after S: one integer key gets
 arithmetic chunks over [MIN, MAX] with a step from a row estimate (`sys.sp_spaceused`,
-public); any other key gets keyset bounds found per wave, the key `chunk_rows` rows after
-the previous bound (`key_bound`: a `TOP (n + 1)` per seekable piece of the range), below the
-MAX recorded at the open. Each wave is stamped with `snapshot_lsn()` before it is read and
+public), while it spans at most 4 values per row; a sparser one (a sentinel far above the ids
+would put every row in the first step) and any other key get keyset bounds found per wave,
+the key `chunk_rows` rows after the previous bound (`key_bound`: a `TOP (n + 1)` per seekable
+piece of the range), below the MAX recorded at the open. The final chunk ends at MAX + 1, or
+at the first key after MAX (open when there is none): a table written while it is read does
+not pile the rows inserted since S into the last chunk. Facts mark it `last`, which is what
+completes the snapshot. Each wave is stamped with `snapshot_lsn()` before it is read and
 fails if that is below S (a readable secondary). `min_headroom_hours` pauses `backfill()`
 while the stream's newest facts row has less retention headroom, or there is none. A loss
 while a chunked snapshot is open opens a newer one in the next generation, which abandons
@@ -155,10 +166,15 @@ read ends no longer exists for it.
 * State: bronze migration 2, facts migration 7, control migration 2 and the `reconcile`
   kind; existing tables migrate when next opened, and the legacy snapshots read
   `coalesce(_snapshot, _start_lsn)`.
+* `to_delta(bootstrap=True)` in either `snapshot` mode, and `snapshot()`, return the S of a
+  chunked snapshot opened for the stream instead of reading the table again; seeding refuses
+  a target that holds one. A recovery that opened a chunked re-snapshot and stopped before
+  writing its state reuses it, unless cleanup has passed it too: then it opens a newer one, a
+  generation on.
 * Tests: `tests/test_source_fake.py` and `tests/test_delta_sink.py` run the plans, the waves,
   a commit between a chunk's stamp and its read (the fake's `commit_before_read`), a crash
   between a wave's append and its facts rows, the throttle and a loss while a snapshot is
-  open; `tests/test_silver.py` the waves, range deletes and the rebuild;
+  open; `tests/test_silver.py` the waves and the rebuild;
   `tests/test_reconcile.py` the tiers and the chunk checks. `tests/integration`, on SQL
   Server 2022 with a least-privilege login: a chunked bootstrap next to a running stream and
   a writer making inserts, updates, deletes and key updates ends with silver equal to the

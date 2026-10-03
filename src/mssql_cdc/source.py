@@ -247,7 +247,8 @@ class MssqlCdcSnapshotDataSource(MssqlCdcDataSource):
     With ``snapshotChunks``, a JSON list of ``[chunk, lo, hi]`` (key bounds as
     ``client.next_chunks`` plans them), only those chunks, one partition each, stamped with
     ``snapshotLsn`` and numbered in an extra ``_chunk INT`` column; with ``metricsPath``,
-    each leaves ``chunk-<chunk>.json`` there (ADR 0028). ``isolationLevel=snapshot`` reads
+    each leaves ``chunk-<chunk>.json`` there (ADR 0028). ``snapshotKeys``, a JSON list of
+    columns, cuts ranges on those instead of the unique index. ``isolationLevel=snapshot`` reads
     under SNAPSHOT isolation instead of READ COMMITTED, where the DBA allows it."""
 
     @classmethod
@@ -774,6 +775,11 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         lsn = normalize(given) if given else snapshot_lsn(client, source)
         commit_ts = client.lsn_to_time(lsn)
         schema, table, keys = source.schema, source.table, source.keys
+        given_keys = _opt(self.options, "snapshotKeys")
+        if given_keys:  # reconcile()'s keys, which bound its ranges: not always the index's
+            import json
+
+            keys = [str(k) for k in json.loads(given_keys)]
         # a captured column the table no longer has reads NULL, like its later change rows
         present = client.present_columns(ci, self.source_columns)
         columns = None if len(present) == len(self.source_columns) else present

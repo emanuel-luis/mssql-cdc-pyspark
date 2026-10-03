@@ -256,20 +256,29 @@ def _key_tuple(bound) -> tuple | None:
     return tuple(bound) if isinstance(bound, list) else (bound,)
 
 
+# ponytail: an integer key spanning more values per row than this gets keyset chunks (an extra
+# seek per chunk) instead of arithmetic ones; a skewed key within it still gets uneven chunks.
+_DENSE = 4
+
+
 def snapshot_plan(client: CdcClient, capture_instance: str, source: SourceTable) -> dict:
     """What a chunked snapshot's chunks tile, read after its LSN S was recorded (ADR 0028): a
     key a row lacks below MIN or above MAX was inserted after S, so the stream has it.
 
-    One integer key: ``{"kind": "int", "lo": MIN, "hi": MAX, "rows": estimate}``, chunks a
-    step of the key apart. Other keys: ``{"kind": "keyset", "max": MAX}``, chunks found by
-    seeking the rows after the previous bound. ``max`` None (an empty table, no unique
-    index, a key type no bound can be bound as): one chunk, the whole table."""
+    One dense integer key: ``{"kind": "int", "lo": MIN, "hi": MAX, "rows": estimate}``, chunks
+    a step of the key apart. Other keys, and an integer key spanning more than
+    ``_DENSE`` values per row (a sentinel far above the ids would put every row in one step):
+    ``{"kind": "keyset", "max": MAX}``, chunks found by seeking the rows after the previous
+    bound. ``max`` None (an empty table, no unique index, a key type no bound can be bound
+    as): one chunk, the whole table."""
     s, t, keys = source.schema, source.table, source.keys
     top: tuple | None = None
     if len(keys) == 1:
         lo, hi = client.key_range(s, t, keys[0])
         if lo is not None and all(isinstance(v, int) and not isinstance(v, bool) for v in (lo, hi)):
-            return {"kind": "int", "lo": lo, "hi": hi, "rows": client.row_estimate(s, t)}
+            rows = client.row_estimate(s, t)
+            if hi - lo + 1 <= _DENSE * rows:
+                return {"kind": "int", "lo": lo, "hi": hi, "rows": rows}
         top = None if hi is None else (hi,)
     elif keys:
         top = client.key_max(s, t, keys)
@@ -294,39 +303,40 @@ def next_chunks(
     lo,
     count: int,
     chunk_rows: int,
-) -> list[list]:
+) -> tuple[list[list], bool]:
     """Up to ``count`` chunks ``[index, lo, hi]`` (JSON bounds, ``hi`` exclusive) of about
     ``chunk_rows`` rows each, from chunk ``first`` on, which starts at ``lo`` (None: below
-    every key, NULL first). Each starts where the previous ends, so they tile the key space;
-    the plan's last chunk is open above (hi None). An integer key steps by the span over the
-    row estimate times ``chunk_rows``; other keys take the key ``chunk_rows`` rows after the
-    previous bound, below the plan's MAX (``key_bound``)."""
+    every key, NULL first), and whether the last of them is the plan's final chunk. Each
+    starts where the previous ends, so they tile the key space up to the plan's MAX. An
+    integer key steps by the span over the row estimate times ``chunk_rows``; other keys take
+    the key ``chunk_rows`` rows after the previous bound, below MAX (``key_bound``).
+
+    The final chunk ends just above MAX: at MAX + 1, or at the first key after MAX (None, open,
+    when there is none yet). The keys after MAX were inserted after S and come from the stream,
+    so a table written while it is read does not pile them into the last chunk."""
     types: list | None = None  # the plan has a MAX only when every key has one
     if plan["kind"] == "keyset" and plan["max"] is not None:
         types = client.key_types(capture_instance, source.keys)
+    s, t, keys = source.schema, source.table, source.keys
     out: list[list] = []
-    while len(out) < count:
+    final = False
+    while not final and len(out) < count:
         if plan["kind"] == "int":
             nxt = (plan["lo"] if lo is None else lo) + int_step(plan, chunk_rows)
-            hi = nxt if nxt <= plan["hi"] else None
+            final = nxt > plan["hi"]
+            hi = plan["hi"] + 1 if final else nxt
         elif plan["max"] is None:
-            hi = None
+            final, hi = True, None
         else:
-            bound = client.key_bound(
-                source.schema,
-                source.table,
-                source.keys,
-                types,
-                _key_tuple(lo),
-                _key_tuple(plan["max"]),
-                chunk_rows,
-            )
+            top = _key_tuple(plan["max"])
+            bound = client.key_bound(s, t, keys, types, _key_tuple(lo), top, chunk_rows)
+            final = bound is None
+            if final:  # the second key from MAX on: the first after it, while MAX still exists
+                bound = client.key_bound(s, t, keys, types, top, None, 1)
             hi = None if bound is None else _json_key(bound, types)
         out.append([first + len(out), lo, hi])
-        if hi is None:
-            break
         lo = hi
-    return out
+    return out, final
 
 
 # --------------------------------------------------------------------------- #

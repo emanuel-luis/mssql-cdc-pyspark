@@ -359,7 +359,14 @@ def main(argv=None) -> bool:
             )
         )
     result = reconcile(
-        spark, options, silver, bronze=bronze, facts_table=facts, bucket_rows=500, sample=0.2
+        spark,
+        options,
+        silver,
+        bronze=bronze,
+        control_table=control,
+        facts_table=facts,
+        bucket_rows=500,
+        sample=0.2,
     )
     checks.append(
         (
