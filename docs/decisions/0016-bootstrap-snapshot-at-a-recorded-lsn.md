@@ -4,7 +4,8 @@
 **Date:** 2026-09-29T12:38:28-03:00  
 **Amended:** 2026-09-30T11:02:01-03:00, NTILE tiles for composite and non-integer keys (see the Amendment)  
 **Amended:** 2026-09-30T15:21:04-03:00, the capture instance matches ignoring case (see Amendment 2)  
-**Amended:** 2026-10-01T17:55:59-03:00, key bounds bound as text for either backend (ADR 0003 Amendment 2)
+**Amended:** 2026-10-01T17:55:59-03:00, key bounds bound as text for either backend (ADR 0003 Amendment 2)  
+**Amended:** 2026-10-02T20:30:12-03:00, a snapshot is named by `_snapshot`; chunked snapshots (see Amendment 3, ADR 0028)
 
 ## Context
 The stream starts from what CDC retention still holds (`startingLsn=earliest`), which is
@@ -137,3 +138,26 @@ broke the snapshot, `bootstrap`, `on_data_loss="resnapshot"` and silver's key in
 * The fake resolves names the same way. `tests/test_client_sql.py`,
   `tests/test_delta_sink.py`, `tests/test_silver.py` and `tests/integration` (a bootstrap
   with the name upper-cased, then a rerun in its own case) check it.
+
+## Amendment 3: the snapshot a row belongs to, and chunked snapshots
+A chunked snapshot (ADR 0028) reads the table in chunks next to the running stream, each
+stamped with its own LSN L at or after the snapshot's LSN S, so "the snapshot's LSN is the
+largest `_start_lsn` of the operation-0 rows" no longer holds.
+
+* Bronze gains `_snapshot` (bronze migration 2): on snapshot rows, the LSN of the snapshot
+  they belong to, recorded before any of its rows was read; NULL on change rows. A whole
+  snapshot, as this ADR takes it, writes `_snapshot = _start_lsn`; rows written before the
+  column exist read `coalesce(_snapshot, _start_lsn)`. `_chunk` numbers a chunked
+  snapshot's chunks and is NULL on a whole one.
+* `snapshot()` and `to_delta(bootstrap=True)` find the target's snapshot among whole ones
+  only (`_chunk` NULL). A chunked one is complete only when its `'bootstrap'` facts row is
+  written, after its last chunk; until then `to_delta(bootstrap=True, snapshot="chunked")`
+  returns the S of the snapshot it opened, never a newer LSN: the rule of this ADR, a
+  rerun never skips the changes after the snapshot, holds for both.
+* The stamp is still recorded before the read: per wave of chunks instead of once, and never
+  below S (P2 of ADR 0028). A chunk's rows can be newer than its stamp, as a whole
+  snapshot's can be newer than its LSN; READ COMMITTED (or SNAPSHOT where allowed), never
+  `NOLOCK`.
+* Chunks do not use the NTILE tiles above: an integer key steps over [MIN, MAX], any other
+  key takes keyset bounds per wave, a `TOP (n + 1)` per seekable piece of `_key_select`
+  (`tests/integration` checks it reads at most `n + 1` rows per piece).

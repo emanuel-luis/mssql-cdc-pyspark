@@ -1,7 +1,8 @@
 # 0018: Automatic re-snapshot after CDC data loss
 
 **Status:** accepted  
-**Date:** 2026-09-29T17:46:41-03:00
+**Date:** 2026-09-29T17:46:41-03:00  
+**Amended:** 2026-10-02T20:30:12-03:00, a chunked re-snapshot opens at S and is read by `backfill()` (see the Amendment, ADR 0028)
 
 ## Context
 CDC cleanup deletes change rows by age (three days by default) whether or not the stream
@@ -123,3 +124,22 @@ scheduled job fails on every run.
 * ponytail: a fixed interval misses slow drift. A stream at 70% of the source's rate loses
   again only after retention / 0.3 (10 days at the default), so it re-snapshots every 10
   days; the event rows show the pattern. A progress-rate check if that shows up in practice.
+
+## Amendment: chunked re-snapshots
+With `to_delta(..., on_data_loss="resnapshot", snapshot="chunked")` (ADR 0028) the
+recovery reads nothing from the table:
+
+* The pre-flight, the anti-loop guard and `recovering` are unchanged. Instead of steps 2 to
+  4, it opens a chunked snapshot at S = the snapshot LSN recorded now: a `'snapshot_open'`
+  facts row with `mode` `'resnapshot'`, the generation and the gap (`lost_from_ts`,
+  `lost_to_ts`), keyed `<app_id>#snapshots` and the generation. Then state `n + 1` with
+  `snapshot_lsn` = S, and the generation's stream starts at S at once.
+* A crash between the open and the state finds the open row of the next generation's
+  `app_id` and reuses it: no second open.
+* Step 3 disappears for it: the stream reads the changes from S while `backfill()` reads
+  the chunks, so the snapshot's own LSN cannot be purged before the read ends. The
+  `'resnapshot'` row comes when its last chunk is in, with min = max = S and the rows of all
+  its chunks; downstream rebuilds from it as from a whole one.
+* A loss while a chunked snapshot is still open opens a newer one in the next generation;
+  `backfill()` reads the newest open snapshot, and the older one never completes.
+* The default, `snapshot="full"`, keeps every step above.

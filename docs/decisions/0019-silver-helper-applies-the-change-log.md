@@ -1,7 +1,8 @@
 # 0019: A silver helper applies the bronze change log to a current-state table
 
 **Status:** accepted  
-**Date:** 2026-09-30T11:07:22-03:00
+**Date:** 2026-09-30T11:07:22-03:00  
+**Amended:** 2026-10-02T20:30:12-03:00, chunked snapshots, snapshots named by `_snapshot` and completion events, operation 3 deletes its own key (see the Amendment, ADR 0028)
 
 ## Context
 Bronze is an append-only change log: one row per change, updates as two rows, the snapshot
@@ -89,3 +90,29 @@ nothing fails when it is skipped.
   the rebuild after a re-snapshot (with and without rows) or a bootstrap stamped at
   `applied_lsn`, and the verdict with a bronze batch committed during the call;
   `tests/integration` checks a composite key read from SQL Server and a key update.
+
+## Amendment: chunked snapshots
+Chunk rows (ADR 0028) are stamped per chunk at or above S and arrive in waves after the
+snapshot's `'snapshot_open'` row, so the rebuild point and the apply change:
+
+* The newest snapshot is the newest `max_lsn` of the facts' `'bootstrap'` and
+  `'resnapshot'` rows, or the newest `coalesce(_snapshot, _start_lsn)` of whole snapshots'
+  operation-0 rows (`_chunk` NULL). A rebuild applies the operation-0 rows of that snapshot
+  (`coalesce(_snapshot, _start_lsn)` = S, whatever their stamps) and the changes after S,
+  with `whenNotMatchedBySourceDelete` as before.
+* `facts_table` is required once bronze holds chunk rows: the facts say which chunks are in
+  and when the snapshot is complete.
+* While a bootstrap is open (a `'snapshot_open'` newer than every complete snapshot, its
+  `mode` `'bootstrap'`), each call applies the waves its `'snapshot_chunk'` rows announced
+  since the last call, tracked by `open_snapshot_lsn` and `snapshot_wave` (control migration
+  2): the chunks land below `applied_lsn`, so the position alone cannot track them. Each
+  chunk's rows are ranked with every bronze change of their keys after S: a chunk row never
+  outranks a delete the stream committed after its stamp. With one integer or date key, a
+  chunk also deletes the silver keys of its range it lacks whose image is older than its
+  stamp; Spark orders other keys differently from SQL Server's collations.
+* An open re-snapshot keeps applying changes; the rebuild comes at its completion row.
+* Silver's verdict is held while a snapshot is open: silver lacks keys or holds stale ones.
+* Operation 3 now deletes its own key; the 4 of the same key and commit outranks it
+  (`_operation` descending), so only a 3 whose update moved the row to another key is the
+  latest row. SQL Server records a primary-key update as 1 and 2 (`tests/integration`), but
+  a key update recorded as 3 and 4 would have left the old key in silver forever.

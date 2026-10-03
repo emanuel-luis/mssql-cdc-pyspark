@@ -87,6 +87,7 @@ nav:
       - guides/bootstrap.md
       - guides/data-loss.md
       - guides/silver.md
+      - guides/validation.md
       - guides/finalization.md
       - guides/monitoring.md
       - guides/permissions.md
@@ -134,5 +135,6 @@ nav:
       - decisions/0025-seed-from-an-existing-copy.md
       - decisions/0026-continuous-finalization-listener.md
       - decisions/0027-fan-out-one-stream-per-table.md
+      - decisions/0028-chunked-snapshot-next-to-the-stream.md
   - Changelog: changelog.md
   - Contributing: contributing.md

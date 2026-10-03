@@ -9,30 +9,34 @@ is a catalog table, and anything with a `/` or a `:` is a path.
 | [Facts](#facts) | one row per micro-batch, snapshot and source change | `to_delta` (`delta_sink`) | `facts_table` |
 | [Control](#control) | one row per table | `finalization.advance`, `apply_changes` | `control_table` |
 | [Silver](#silver) | one row per source key | `apply_changes` | its `target` |
+| [Reconcile report](#reconcile-report) | one row per bucket, differing key and chunk failure of each run | `reconcile` | `report_table` |
 
 Each is created on first use with the `DeltaTable` builder: explicit types, a comment on the
 table and on every column the library defines, which `DESCRIBE TABLE` shows
 ([ADR 0012](../decisions/0012-delta-tables-through-the-deltatable-api.md)). The comments
 below are the ones the tables carry, copied from the code (`mssql_cdc.sink`,
-`mssql_cdc.finalization`, `mssql_cdc.silver` and `mssql_cdc.migrations`), and
+`mssql_cdc.finalization`, `mssql_cdc.silver`, `mssql_cdc.reconcile` and
+`mssql_cdc.migrations`), and
 `tests/test_docs_tables.py` fails when they drift. How the pieces fit: [Architecture](../ARCHITECTURE.md#tables-written-by-the-sink-finalization-and-silver).
 
 ## Bronze
 
 The change log, append-only.
 
-> Append-only change rows from SQL Server CDC, written by mssql-cdc-pyspark's delta_sink. One row per change: an update is two rows (operation 3, the row before; 4, the row after). Order changes by (_start_lsn, _command_id, _seqval, _operation). Rows with operation 0 are a snapshot of the source table, all at one _start_lsn that precedes the changes read after it. A column the source table gained through a newer capture instance is added when the stream first reads it (older rows read NULL); a column it lost stays, NULL from then on.
+> Append-only change rows from SQL Server CDC, written by mssql-cdc-pyspark's delta_sink. One row per change: an update is two rows (operation 3, the row before; 4, the row after). Order changes by (_start_lsn, _command_id, _seqval, _operation). Rows with operation 0 are a snapshot of the source table, the one _snapshot names: rebuild from it with its rows and the changes with a larger _start_lsn. A whole snapshot's rows share its _start_lsn; a chunked snapshot's (_chunk set) are stamped per chunk, at or after it. A column the source table gained through a newer capture instance is added when the stream first reads it (older rows read NULL); a column it lost stays, NULL from then on.
 
 | Column | Type | Comment |
 |---|---|---|
 | `_capture_instance` | STRING | CDC capture instance the change came from, e.g. dbo_orders: after the stream switched to a newer capture instance of the table (from that instance's start LSN on), the newer one. On snapshot rows, the instance the snapshot was taken for. |
-| `_start_lsn` | STRING | Commit LSN of the source transaction (__$start_lsn) as 0x + 20 uppercase hex. All changes of one transaction share it; string order is commit order. On snapshot rows, the LSN recorded before the table was read: the row is at least that recent. |
+| `_start_lsn` | STRING | Commit LSN of the source transaction (__$start_lsn) as 0x + 20 uppercase hex. All changes of one transaction share it; string order is commit order. On snapshot rows, the LSN recorded before the table (or the row's chunk) was read: the row is at least that recent. |
 | `_seqval` | STRING | Position of the change in the transaction log (__$seqval), 0x + 20 hex. Tie-breaker only: order by _command_id first. NULL on snapshot rows. |
 | `_operation` | INT | What happened to the row: 1 = delete, 2 = insert, 3 = update (row before), 4 = update (row after), 0 = snapshot (the row as read from the source table). |
 | `_command_id` | INT | Order of the statement within its transaction (__$command_id). Numbered per capture instance: another instance of the table numbers the same change differently, so it orders rows only within one _start_lsn (all rows of a commit come from one instance); (_start_lsn, _seqval, _operation) identifies a change across instances. NULL on snapshot rows. |
 | `_commit_ts` | TIMESTAMP_NTZ | Commit time of the source transaction, UTC (from cdc.lsn_time_mapping); on snapshot rows, the commit time of their _start_lsn. |
 | captured columns | see [Output schema](output-schema.md#captured-columns) | none |
 | `_batch_id` | INT | Micro-batch that wrote the row; with the sink's app_id, the key of its row in the ingestion facts table. NULL on snapshot rows. |
+| `_snapshot` | STRING | On snapshot rows, the snapshot they belong to: the LSN (0x + 20 hex) recorded before any of its rows was read, where its stream generation starts; on a whole snapshot, its _start_lsn. NULL on change rows, and on snapshot rows written before this column existed, whose _start_lsn is their snapshot's. |
+| `_chunk` | INT | On rows of a chunked snapshot (stream().backfill()), the chunk of the key space they were read in; with _snapshot, the key of its 'snapshot_chunk' row in the ingestion facts table. NULL on change rows and whole snapshots. |
 
 `_command_id` is absent with `includeCommandId=false`. A column a newer capture instance
 captures is added after the existing ones.
@@ -46,7 +50,14 @@ How it is written:
 * A snapshot is one append whose `userMetadata` is `{"snapshot": <capture instance>, "lsn":
   ..., "commit_ts": ...}`; a seed's, from a copy you already had, is `{"seed": <capture
   instance>, "lsn": ..., "commit_ts": ...}`
-  ([Bootstrap](../guides/bootstrap.md#tables-too-big-to-snapshot)).
+  ([Bootstrap](../guides/bootstrap.md#tables-too-big-to-snapshot)). Its rows have
+  `_snapshot` = `_start_lsn` and no `_chunk`.
+* A chunked snapshot is one append per wave of `backfill()`, with `txnAppId`
+  `<app_id>#snap.<S>` and `txnVersion` the wave, so a rerun of a wave is skipped. Its
+  `userMetadata` is `{"backfill": "<app_id>#snap.<S>", "wave", "lsn", "attempt", "chunks"}`:
+  the wave's stamp and, per chunk, its bounds and rows. Every row has `_snapshot` = S, its
+  chunk in `_chunk` and the wave's stamp in `_start_lsn`, at or after S
+  ([Bootstrap](../guides/bootstrap.md#chunked-snapshots)).
 * Every append uses `mergeSchema`. A changed column type fails it with `SchemaChangedError`
   unless the table has `delta.enableTypeWidening` and the change widens
   ([Schema changes](../guides/schema-changes.md#changing-a-column-type)).
@@ -60,13 +71,13 @@ DESCRIBE HISTORY bronze.orders;  -- userMetadata of each append
 What each micro-batch did, plus one row per snapshot and per source change. Optional, but
 monitoring, the data-loss recovery and the schema-change events all need it.
 
-> One row per micro-batch written by mssql-cdc-pyspark's delta_sink, including batches that read no change rows (rows = 0), so a current stream on a quiet table keeps writing rows: what was written (counts, LSN and commit-time ranges), how far the stream had read (end_lsn, end_commit_ts) and how long it took. The same facts are in each target commit's userMetadata (batches with rows only), which Delta log cleanup eventually drops. Each snapshot stream().to_delta takes (bootstrap or re-snapshot), each schema change on the source and each switch to a newer capture instance adds one row, with event set (see its comment).
+> One row per micro-batch written by mssql-cdc-pyspark's delta_sink, including batches that read no change rows (rows = 0), so a current stream on a quiet table keeps writing rows: what was written (counts, LSN and commit-time ranges), how far the stream had read (end_lsn, end_commit_ts) and how long it took. The same facts are in each target commit's userMetadata (batches with rows only), which Delta log cleanup eventually drops. Each snapshot stream().to_delta takes (bootstrap or re-snapshot), each schema change on the source and each switch to a newer capture instance adds one row, with event set (see its comment); a chunked snapshot adds one when it opens and one per chunk stream().backfill() reads.
 
 | Column | Type | Comment |
 |---|---|---|
 | `app_id` | STRING | Identity of the sink that wrote the batch (Delta txnAppId of the target write). Stable for the life of one streaming checkpoint; a new checkpoint needs a new app_id. |
 | `batch_id` | BIGINT | Structured Streaming micro-batch id. With app_id, the idempotency key: a replayed batch is skipped, so its row (event NULL) never appears twice. Its 'schema_change' and 'capture_instance_switched' rows carry it too; snapshot event rows have none. |
-| `rows` | BIGINT | Change rows written to the target in this batch, all operations. 0 when the batch read none: its end offset moved only past idle entries or other tables' commits (or, on a new checkpoint's first batch, not at all), so it wrote nothing to the target, just this row (LSN and commit-time ranges NULL, counts 0). On 'bootstrap' and 'resnapshot' rows, the rows of the snapshot; 0 on other event rows. |
+| `rows` | BIGINT | Change rows written to the target in this batch, all operations. 0 when the batch read none: its end offset moved only past idle entries or other tables' commits (or, on a new checkpoint's first batch, not at all), so it wrote nothing to the target, just this row (LSN and commit-time ranges NULL, counts 0). On 'bootstrap' and 'resnapshot' rows, the rows of the snapshot (of all its chunks); on 'snapshot_chunk' rows, the chunk's; 0 on other event rows. |
 | `min_lsn` | STRING | Smallest source commit LSN (__$start_lsn, 0x + 20 hex) in the batch. |
 | `max_lsn` | STRING | Largest source commit LSN in the batch; hex strings sort in LSN order. |
 | `min_commit_ts` | TIMESTAMP_NTZ | Earliest source commit time in the batch, UTC. |
@@ -82,7 +93,7 @@ monitoring, the data-loss recovery and the schema-change events all need it.
 | `network_wait_ms` | BIGINT | Milliseconds SQL Server waited for the client to take the rows (ASYNC_NETWORK_IO of each partition's session), summed. Close to read_seconds * 1000 means the network, not the server, set the pace. NULL under the same condition, or where the server does not expose sys.dm_exec_session_wait_stats. |
 | `retention_watermark_ts` | TIMESTAMP_NTZ | How far CDC cleanup had deleted when the batch was read: the commit time (UTC) of sys.fn_cdc_get_min_lsn for the capture instance, the latest seen by the batch's partitions after reading. Changes committed before it are gone from the source. NULL unless the source option metricsPath and delta_sink(metrics_path=...) are set. |
 | `retention_headroom_hours` | DOUBLE | Hours between retention_watermark_ts and end_commit_ts: how far the stream's position (the batch's end offset) is ahead of what cleanup has deleted. A current stream sits near the retention period (3 days by default), on a quiet table too, since a batch that read no rows also writes its row; it shrinks as the stream falls behind, and at 0 the next changes to read are being purged. Cleanup moves the watermark in steps (the default job runs daily), so alert with more margin than that interval, and also when facts stop arriving: the stream or CDC capture has stopped, and the real headroom keeps shrinking from the last value. Rows written before end_commit_ts existed measured from max_commit_ts, the batch's last change, which on a quiet table made a current stream look behind. NULL under the same condition as retention_watermark_ts. |
-| `event` | STRING | What the row records: NULL for a micro-batch. Snapshots, with no batch_id: 'bootstrap' for the initial snapshot of the target; 'resnapshot' for a snapshot taken because CDC cleanup purged changes before the stream read them; min_lsn = max_lsn is the LSN the snapshot is stamped with, and the only trace of a snapshot of an empty table (rows = 0), which writes no target rows. Changes to the source (ADR 0023), with the batch_id of the batch that read past them and rows = 0: 'schema_change' for DDL on the source table, 'capture_instance_switched' when the stream first read a newer capture instance of the table (the older one can be dropped once the same app_id has a row with a larger batch_id: Spark commits the batch after this row); min_lsn = max_lsn is the change's LSN, detail says what changed. Downstream rebuilds only from 'bootstrap' and 'resnapshot' rows. |
+| `event` | STRING | What the row records: NULL for a micro-batch. Snapshots, with no batch_id: 'bootstrap' for the initial snapshot of the target; 'resnapshot' for a snapshot taken because CDC cleanup purged changes before the stream read them; min_lsn = max_lsn is the LSN the snapshot is stamped with, and the only trace of a snapshot of an empty table (rows = 0), which writes no target rows. A chunked snapshot writes its 'bootstrap' or 'resnapshot' row once its last chunk is in, after 'snapshot_open' when it opened (min_lsn = max_lsn = its LSN S, recorded before any chunk was read, where its stream generation starts) and one 'snapshot_chunk' row per chunk read (min_lsn = the LSN the chunk was stamped with, recorded before it was read, at or after S; max_lsn = max_lsn after the read); an open snapshot that a newer one supersedes is abandoned and never gets that row. Changes to the source (ADR 0023), with the batch_id of the batch that read past them and rows = 0: 'schema_change' for DDL on the source table, 'capture_instance_switched' when the stream first read a newer capture instance of the table (the older one can be dropped once the same app_id has a row with a larger batch_id: Spark commits the batch after this row); min_lsn = max_lsn is the change's LSN, detail says what changed. Downstream rebuilds only from 'bootstrap' and 'resnapshot' rows. |
 | `lost_from_ts` | TIMESTAMP_NTZ | On 'resnapshot' rows, the UTC commit time of the last offset the stream had processed. Changes committed after it and before lost_to_ts were purged unread: the target has the rows as of the snapshot, but those changes are missing from its change history. NULL on other rows. |
 | `lost_to_ts` | TIMESTAMP_NTZ | On 'resnapshot' rows, the UTC commit time of the CDC retention watermark (sys.fn_cdc_get_min_lsn) when the loss was detected: where the gap in the change history ends. NULL on other rows. |
 | `source_max_commit_ts` | TIMESTAMP_NTZ | How far CDC capture had got when the batch was read: the commit time (UTC) of sys.fn_cdc_get_max_lsn, the latest seen by the batch's partitions after reading. The stream can read nothing newer than this. NULL unless the source option metricsPath and delta_sink(metrics_path=...) are set. |
@@ -90,7 +101,7 @@ monitoring, the data-loss recovery and the schema-change events all need it.
 | `ingestion_lag_seconds` | DOUBLE | Seconds between end_commit_ts and source_max_commit_ts: how far the stream's position (the batch's end offset) is behind what CDC capture had processed. Near 0 for a current stream, on a quiet table too, since a batch that read no rows also writes its row. Growing means the stream is falling behind, and as it grows retention_headroom_hours shrinks. Only moves while the stream runs: also alert when facts stop arriving (the stream or CDC capture has stopped). Rows written before end_commit_ts existed measured from max_commit_ts, which also counted the time from the table's last change to the database's newest commit. NULL under the same condition as source_max_commit_ts. |
 | `end_lsn` | STRING | The batch's end offset: the commit LSN (0x + 20 hex) the stream had processed up to after this batch, the largest to_lsn of its partitions. At or after max_lsn: offsets follow CDC capture (sys.fn_cdc_get_max_lsn), which moves with idle entries and with other tables' commits, so on a quiet table it keeps moving while its batches read no rows. On event rows, the snapshot's or the change's LSN. NULL unless the source option metricsPath and delta_sink(metrics_path=...) are set, and on a batch that planned no range to read (a new checkpoint's first batch when nothing is new). |
 | `end_commit_ts` | TIMESTAMP_NTZ | Commit time (UTC) of end_lsn: how far through the source's commit history the stream had read after this batch, whether the batch had rows or not. retention_headroom_hours and ingestion_lag_seconds are measured from it. Later than max_commit_ts, the batch's last change, when the table changed less recently than the database. On event rows, the snapshot's or the change's commit time. NULL under the same condition as end_lsn. |
-| `detail` | STRING | On 'schema_change' rows, the DDL statement; on 'capture_instance_switched' rows, 'old -> new' capture instance, plus the columns the query reads that the new one does not capture (NULL from then on). NULL on other rows. |
+| `detail` | STRING | On 'schema_change' rows, the DDL statement; on 'capture_instance_switched' rows, 'old -> new' capture instance, plus the columns the query reads that the new one does not capture (NULL from then on). JSON on the rows of a chunked snapshot: 'snapshot_open' {mode, keys, plan, generation, lost_from_ts, lost_to_ts}; 'snapshot_chunk' {snapshot, chunk, wave, lo, hi}, the chunk's key range from lo (inclusive) to hi (exclusive), null for an open end and a list for a composite key; its 'bootstrap' or 'resnapshot' row {snapshot, chunks, rows, last_lsn}. NULL on other rows. |
 | `target` | STRING | Table name or path the batch was written to. |
 | `written_at` | TIMESTAMP_NTZ | When this facts row was written, after the target commit, UTC. |
 
@@ -101,12 +112,16 @@ The kinds of row, and the Delta `txnAppId` and `txnVersion` that make each write
 | Micro-batch | NULL | the batch's | change rows, 0 when none | the sink's | `<app_id>#facts`, the batch id |
 | Initial snapshot, or a seed from a copy | `bootstrap` | NULL | snapshot rows | as passed to `to_delta` or `seed` | `<app_id>#events`, 0 |
 | Re-snapshot after data loss | `resnapshot` | NULL | snapshot rows | the new generation's, `<app_id>.g<n>` | `<app_id>#events`, `n` |
+| A chunked snapshot opened | `snapshot_open` | NULL | 0 | the generation's (`<app_id>` or `<app_id>.g<n>`) | `<app_id>#snapshots`, the generation |
+| A chunk of it read | `snapshot_chunk` | NULL | the chunk's rows | the generation's | `<app_id>#snapchunks.<S>`, the wave |
 | DDL on the source | `schema_change` | the batch's | 0 | the sink's | in the batch's own commit |
 | Switch to a newer capture instance | `capture_instance_switched` | the batch's | 0 | the sink's | in the batch's own commit |
 
 The sink's `app_id` is the one passed to `to_delta`, or `<app_id>.g<n>` in generation `n`.
 Statistics over micro-batches filter `event IS NULL`; the snapshots downstream rebuilds from
-are `event IN ('bootstrap', 'resnapshot')`:
+are `event IN ('bootstrap', 'resnapshot')`. A chunked snapshot's `bootstrap` or `resnapshot`
+row comes once `backfill()` has read its last chunk, with the same key as a whole one's: its
+`min_lsn` = `max_lsn` is S, `rows` the sum of its chunks.
 
 ```sql
 SELECT app_id, batch_id, rows, end_commit_ts, retention_headroom_hours, ingestion_lag_seconds
@@ -135,10 +150,13 @@ silver table.
 | `updated_at` | TIMESTAMP_NTZ | When the verdict last moved, UTC. |
 | `applied_lsn` | STRING | Tables built by mssql_cdc.apply_changes: the highest source commit LSN (0x + 20 hex) of the bronze changes applied to the table; the next call reads the changes after it. NULL for other tables. |
 | `snapshot_lsn` | STRING | Tables built by mssql_cdc.apply_changes: the LSN of the bronze snapshot the table was last rebuilt from; a newer snapshot rebuilds it. NULL for other tables and before the first snapshot. |
+| `open_snapshot_lsn` | STRING | Tables built by mssql_cdc.apply_changes: the LSN of the chunked bootstrap snapshot still being read (its 'snapshot_open' facts row, no completion row yet) whose chunks are applied as they arrive. NULL for other tables and when none is open. |
+| `snapshot_wave` | INT | Tables built by mssql_cdc.apply_changes: the last wave of open_snapshot_lsn's chunks applied to the table; the next call applies the later ones. NULL when none is. |
 
 `finalization.advance` MERGEs on `table_name` and updates the row only when the new verdict
 is later, so it never moves back. `apply_changes` records `applied_lsn` and `snapshot_lsn`
-for its silver table, then advances that table's verdict. See
+for its silver table (and, while a chunked bootstrap is open, `open_snapshot_lsn` and
+`snapshot_wave`), then advances that table's verdict. See
 [Finalization](../guides/finalization.md) and [Silver](../guides/silver.md).
 
 ```sql
@@ -161,6 +179,46 @@ The current state of the source table, built by `apply_changes`.
 A column bronze gains is added to silver (older rows read NULL); a column's type never
 changes ([ADR 0019](../decisions/0019-silver-helper-applies-the-change-log.md)).
 
+## Reconcile report
+
+What each `reconcile()` run found, appended when it is given a `report_table`
+([Validation](../guides/validation.md)).
+
+> Report of mssql-cdc-pyspark's reconcile(), which compares a silver table with its SQL Server table. Each run adds one row per bucket of the key's range (the rows and the key sum on each side) and one row per key whose row differs in the buckets compared row by row; run_id groups them.
+
+| Column | Type | Comment |
+|---|---|---|
+| `run_id` | STRING | Id of the reconcile() run (a UUID): every row it wrote has it. |
+| `run_at` | TIMESTAMP_NTZ | When the run started, UTC. |
+| `silver` | STRING | The silver table compared (a name or a path). |
+| `silver_version` | BIGINT | The Delta version of silver compared, the same in the run. |
+| `silver_lsn` | STRING | Newest _start_lsn (0x + 20 hex) in that version: silver holds the changes up to it. |
+| `source_lsn` | STRING | sys.fn_cdc_get_max_lsn() read just before the source was read: the source held every commit up to it. Bucket rows: before the counts; key rows: before the rows; NULL on chunk rows. |
+| `bucket_lo` | STRING | First key of the bucket, inclusive, as JSON: a value for a one-column key, a list for a composite one. NULL: open (both NULL: the whole table, counted as one). Chunk rows: the chunk's first key. |
+| `bucket_hi` | STRING | Key the bucket ends before, exclusive, as JSON. NULL: open. Chunk rows: the chunk's. |
+| `source_rows` | BIGINT | Bucket rows: the bucket's rows in the source table. |
+| `source_key_sum` | DECIMAL(38,0) | Bucket rows: the sum of the bucket's keys in the source table (a date as its day number from 1970-01-01); NULL on a whole-table count. |
+| `silver_rows` | BIGINT | Bucket rows: the bucket's rows in silver. |
+| `silver_key_sum` | DECIMAL(38,0) | Bucket rows: the sum of the bucket's keys in silver. |
+| `status` | STRING | Bucket rows: MATCH (rows and key sums equal), IN_FLIGHT (they differ, and bronze holds a change to the bucket newer than what one side read: check again later) or MISMATCH (they differ). NULL on key and chunk rows. |
+| `hashed` | BOOLEAN | Bucket rows: whether its rows were also compared one by one (every MISMATCH and a sample of the rest); the key rows of the run in it are what differs. |
+| `key` | STRING | Key rows: the key of a row that differs, as a JSON object. NULL on bucket and chunk rows. |
+| `failure_type` | STRING | Key rows: MISSING_TARGET (in the source, not in silver: an insert not applied), MISSING_SOURCE (in silver, not in the source: a delete not applied, or a stale key), RECORD_DIFF (in both with other values: an update not applied) or IN_FLIGHT (differs, and bronze holds a change to the key newer than what one side read: check again later). Chunk rows (with facts_table, for the newest chunked snapshot of bronze): CHUNK_TILING (its chunks leave a gap or overlap: an index missing or twice, the first not open below, one not starting where the one before ended, the last of a complete snapshot not open above), CHUNK_ROWS (a chunk's 'snapshot_chunk' facts row counts other rows than bronze holds of it) or CHUNK_STAMP (a chunk stamped below the snapshot's LSN). |
+| `detail` | STRING | Key rows: JSON with the silver row's _start_lsn (silver_start_lsn) and, when both sides have the row, the columns that differ (columns). Chunk rows: JSON with the snapshot's LSN (snapshot), the chunk and what was found. |
+
+Three kinds of row share it, told apart by which columns are set:
+
+| Row | Set | NULL |
+|---|---|---|
+| Bucket | `status`, the counts and key sums, `hashed`, `source_lsn` | `key`, `failure_type`, `detail` |
+| Key that differs | `key`, `failure_type`, `detail`, `source_lsn` and the bucket's bounds | `status`, the counts |
+| Chunk failure (with `facts_table`) | `failure_type` (`CHUNK_...`), `detail`, the chunk's bounds | `key`, `status`, `source_lsn` |
+
+```sql
+SELECT status, count(*) FROM ops.reconcile_report
+WHERE run_id = '<run_id>' AND status IS NOT NULL GROUP BY status;
+```
+
 ## Schema versions
 
 Each table carries the table property `mssql_cdc.schema_version`: the number of migrations
@@ -171,13 +229,15 @@ The versions, from `mssql_cdc.migrations.<kind>.MIGRATIONS`:
 
 | Kind | Version | Migrations |
 |---|---|---|
-| bronze | 1 | 1 capture instance comments |
-| facts | 6 | 1 network and read metrics, 2 retention headroom, 3 snapshot events, 4 lag metrics, 5 end offset, 6 source change events |
-| control | 1 | 1 add `applied_lsn` and `snapshot_lsn` |
+| bronze | 2 | 1 capture instance comments, 2 snapshot and chunk columns |
+| facts | 7 | 1 network and read metrics, 2 retention headroom, 3 snapshot events, 4 lag metrics, 5 end offset, 6 source change events, 7 chunked snapshot events |
+| control | 2 | 1 add `applied_lsn` and `snapshot_lsn`, 2 add `open_snapshot_lsn` and `snapshot_wave` |
 | silver | 0 | none |
+| reconcile | 0 | none |
 
 A migration that adds columns appends them, so in a table created by an older release they
-come after `written_at` (facts) or `updated_at` (control): select columns by name. The
+come after `written_at` (facts), `updated_at` (control) or `_batch_id` and the captured
+columns (bronze): select columns by name. The
 library sets no other table property; type widening is yours to enable.
 
 ```sql

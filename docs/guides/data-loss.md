@@ -110,6 +110,42 @@ The check runs only before the query starts. A purge while the query runs still 
 with `DataLossError`, and the next run recovers: give the job a retry, or let the next
 scheduled run do it.
 
+## Chunked re-snapshots
+
+With `snapshot="chunked"` the recovery reads nothing before the query starts. It opens a
+[chunked snapshot](bootstrap.md#chunked-snapshots) at a new LSN S instead, and the new
+generation's stream starts at S at once:
+
+```python
+cdc = stream(spark, options)
+query = cdc.to_delta(
+    "bronze.orders",
+    app_id="orders-v1",
+    checkpoint="/Volumes/main/ops/checkpoints/orders",
+    facts_table="ops.ingestion_facts",
+    bootstrap=True,
+    on_data_loss="resnapshot",
+    snapshot="chunked",
+)
+# in the backfill task, as for a bootstrap
+cdc.backfill("bronze.orders", app_id="orders-v1", facts_table="ops.ingestion_facts")
+```
+
+1. As above, it records where the stream was, and the interval between re-snapshots still
+   applies.
+2. It writes a `snapshot_open` facts row for the next generation (`app_id` `<app_id>.g<n>`)
+   with `mode` `resnapshot` and the gap in `lost_from_ts` and `lost_to_ts`, then the
+   generation's state with S as its snapshot LSN.
+3. `backfill()`, called with the same `app_id`, reads the chunks of the newest open
+   snapshot and, after the last one, writes the `resnapshot` row with min = max = S.
+
+The table no longer has to be read within the retention: the stream reads every change
+from S while the chunks are read, so a re-snapshot cannot outlive its own LSN, and the
+failed attempt described in [the interval](#the-interval-between-re-snapshots) does not
+happen to it. Another loss while one is still open opens a newer one in the next
+generation, and the older one is abandoned. Downstream keeps applying changes while it is
+open and rebuilds from S once its `resnapshot` row is in ([Silver](silver.md#chunked-snapshots)).
+
 ## Generations
 
 A generation is a checkpoint and an `app_id` that belong together. Generation 0 is the pair
@@ -134,7 +170,8 @@ Earlier generations' files stay in place, unread. More in
 ## The events in the facts
 
 The bootstrap and every re-snapshot leave one facts row with `event` set and no `batch_id`:
-`'bootstrap'` for the first, `'resnapshot'` for each recovery. On those rows `min_lsn`,
+`'bootstrap'` for the first, `'resnapshot'` for each recovery. A chunked one writes it when
+its last chunk is in, after its `'snapshot_open'` and `'snapshot_chunk'` rows. On those rows `min_lsn`,
 `max_lsn` and `end_lsn` are the snapshot's LSN and `rows` is the snapshot's row count (0
 for an empty table, whose snapshot writes nothing else; NULL when an interrupted recovery's
 snapshot was reused). A `'resnapshot'` row also carries the gap:
@@ -159,12 +196,15 @@ Statistics over micro-batches filter on `event IS NULL`. The other events,
 The changes committed between `lost_from_ts` and `lost_to_ts` are gone for good. The
 snapshot restores the current rows, not the versions in between, and a row deleted during
 the gap has no delete row. Downstream rebuilds from the newest snapshot, then applies the
-changes after it. The newest snapshot's LSN is the higher of the target's operation-0 rows
-and the facts' snapshot events, because a snapshot of an empty table writes no rows:
+changes after it. The newest snapshot's LSN is the higher of the target's whole snapshots
+and the facts' snapshot events, because a snapshot of an empty table writes no rows and a
+chunked one is complete only at its event. A snapshot's rows are those whose
+`coalesce(_snapshot, _start_lsn)` is that LSN, whatever their own stamps:
 
 ```sql
 SELECT greatest(
-  (SELECT max(_start_lsn) FROM bronze.orders WHERE _operation = 0),
+  (SELECT max(coalesce(_snapshot, _start_lsn)) FROM bronze.orders
+   WHERE _operation = 0 AND _chunk IS NULL),
   (SELECT max(max_lsn) FROM ops.ingestion_facts
    WHERE target = 'bronze.orders' AND event IN ('bootstrap', 'resnapshot'))
 ) AS snapshot_lsn

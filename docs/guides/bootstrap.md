@@ -5,6 +5,21 @@ default. Rows written before CDC was enabled, or not changed within that window,
 arrive. A bootstrap loads the whole table once, with a snapshot that meets the stream at an
 exact LSN: no gap, no overlap that a MERGE cannot absorb, and no lock on the source.
 
+## Which snapshot
+
+| | Full (the default) | [Chunked](#chunked-snapshots) | [Seed](#tables-too-big-to-snapshot) |
+|---|---|---|---|
+| What reads the table | `to_delta`, before the stream starts | `backfill()`, in waves, next to the running stream | nothing: you have a copy |
+| Has to finish within | the CDC retention | the time the stream runs without a gap | (the copy's own load) |
+| Progress | one Delta commit at the end | one commit and facts rows per wave | one commit |
+| Needs | nothing more | a `facts_table`, a second task | a copy and when it started |
+| For | tables read in hours | tables the link needs days or weeks to read | very large tables with a copy |
+
+Size a snapshot by its data, not its rows: what limits the read is the link to SQL Server.
+Runs against a production source moved 1.8 to 5.9 MB/s over four connections, which was
+18,000 to 105,000 rows per second depending on the row width. Divide the table's size by
+that and compare with the retention.
+
 ## The smallest bootstrap
 
 ```python
@@ -95,15 +110,98 @@ Every action on `rows` reads the table again, stamped with the LSN recorded for 
 write it once and take the LSN from the rows' `_start_lsn`. The `snapshotLsn` option stamps
 an LSN you recorded yourself instead, before the read started.
 
+## Chunked snapshots
+
+A full snapshot has to finish within the CDC retention, or the changes after its LSN are
+purged before the stream reads them. A chunked snapshot starts the stream first, at an LSN
+S, and reads the table in chunks next to it, so it only needs the stream to keep running.
+Run the stream as usual, with `snapshot="chunked"`:
+
+```python
+from mssql_cdc import stream
+
+orders = stream(spark, options)
+query = orders.to_delta(
+    "bronze.orders",
+    app_id="orders-v1",
+    checkpoint="/Volumes/main/ops/checkpoints/orders",
+    facts_table="ops.ingestion_facts",  # required: its rows hold the snapshot's state
+    trigger={"processingTime": "1 minute"},
+    bootstrap=True,
+    snapshot="chunked",
+)
+```
+
+and, in a task of its own, call `backfill()` until it is done:
+
+```python
+import time
+
+while True:
+    status = orders.backfill(
+        "bronze.orders",
+        app_id="orders-v1",
+        facts_table="ops.ingestion_facts",
+        chunk_rows=1_000_000,
+        max_seconds=3600,  # one call's budget; the next call goes on
+        min_headroom_hours=24,
+    )
+    if status["done"]:
+        break
+    if status["paused"]:
+        time.sleep(600)  # status["reason"] says why
+```
+
+How it behaves ([ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md)):
+
+1. The first `to_delta` records S, `sys.fn_cdc_get_max_lsn()` as for a full snapshot,
+   plans the chunks and writes a `snapshot_open` facts row with the plan. It reads nothing
+   from the table and starts the stream at S at once. Later runs find that row and start
+   from S again until the checkpoint has offsets.
+2. Each `backfill()` call finds the newest open snapshot of the target and reads it in
+   waves of [numPartitions](../reference/options.md#numpartitions) chunks of about
+   `chunk_rows` rows, one connection each. Before a wave is read, its stamp L is recorded,
+   `max_lsn` again, at or after S. The wave is appended to the target in one Delta commit:
+   operation 0, `_start_lsn` = L, `_snapshot` = S and the chunk in `_chunk`. Then one
+   `snapshot_chunk` facts row per chunk: its rows, L and its key range.
+3. After the last chunk, it writes the snapshot's `bootstrap` facts row, with min = max = S
+   and the rows of every chunk, and returns `done`. Downstream rebuilds from S: its rows and
+   every change after S.
+
+A commit that lands between a chunk's stamp and its read can show in the chunk and again as
+a change after S; the latest image per key absorbs it, as with a full snapshot. A key that
+moves between chunks while they are read is a change after S, which the stream carries.
+
+- Chunks: one integer key steps over its MIN..MAX from a row estimate
+  (`sys.sp_spaceused`), so `chunks_total` is an estimate; any other key is cut by seeking
+  the key `chunk_rows` rows after the previous chunk's end, wave by wave (`chunks_total` is
+  None until done). Both need only the stream's grants ([Permissions](permissions.md)).
+- A crash between a wave's append and its facts rows reruns that wave: Delta skips the
+  append and the facts rows are rebuilt from the commit, so nothing is appended twice.
+- `min_headroom_hours` pauses before a wave while the stream's newest facts row shows less
+  [retention headroom](monitoring.md), or the stream has written none: the chunks share the
+  link with the stream, and a stream that falls behind the retention loses the snapshot too.
+- `isolation="snapshot"` reads under SNAPSHOT isolation, where the DBA has set
+  `ALLOW_SNAPSHOT_ISOLATION`: a chunk then does not wait for writers' locks, at the cost of
+  the version store. By default it reads READ COMMITTED, where a chunk waits for a
+  transaction holding locks in its range; never `NOLOCK`.
+- `max_waves` and `max_seconds` bound one call; the result also has `chunks_done` and the
+  snapshot's LSN.
+
+[`apply_changes`](silver.md#chunked-snapshots) applies the waves as they arrive, when given
+the facts table. [`reconcile`](validation.md) checks the chunks against the facts and the
+result against the table.
+
 ## Tables too big to snapshot
 
 A snapshot has to finish within the CDC retention, or the changes after its LSN are purged
-before the stream reads them and the stream stops with `DataLossError`. At the 4,000 to
-11,000 rows per second measured against a production source, the default three days hold
-roughly 1 to 3 billion rows: a table of billions of rows cannot be snapshotted in time.
+before the stream reads them and the stream stops with `DataLossError`. When the table's
+size over the link's MB/s does not fit in the retention, take a
+[chunked snapshot](#chunked-snapshots), or, when a copy already exists, seed the target from
+it: hours instead of the weeks a chunked snapshot of billions of rows takes.
 
-Seed the target from a copy you already have instead, an existing lake table for instance,
-and let the stream start where the copy ends:
+Seed the target from a copy you already have, an existing lake table for instance, and let
+the stream start where the copy ends:
 
 ```python
 from datetime import datetime, timezone
@@ -158,7 +256,9 @@ Nothing is written when:
   also under a snapshot appended later, and once cleanup has passed a time `as_of`, when
   the newest snapshot of the table at or before it is taken as the seed.
 
-Never use `on_data_loss="resnapshot"` on such a table: it snapshots it. After a
+Never use `on_data_loss="resnapshot"` with a full snapshot on such a table: it reads it
+whole. With `snapshot="chunked"` the re-snapshot is chunked too
+([Data loss](data-loss.md#chunked-re-snapshots)). After a
 `DataLossError`, seed a newer copy with `reseed=True`, then start a new checkpoint and
 `app_id` from it ([Data loss](data-loss.md#recovering-by-hand)). The reasoning is in
 [ADR 0025](../decisions/0025-seed-from-an-existing-copy.md).
@@ -169,13 +269,20 @@ Never use `on_data_loss="resnapshot"` on such a table: it snapshots it. After a
 - Do not delete the snapshot rows (`_operation = 0`) from bronze. The next run with
   `bootstrap=True` would find none and read the whole table again.
 - The snapshot reads the source table, not CDC: it puts a full scan's load on SQL Server.
-  Cap `numPartitions` on a busy server.
+  Cap `numPartitions` on a busy server. A chunked snapshot spreads the same load over its
+  waves.
+- A chunked snapshot needs the stream running while it is read: a gap after S (data loss,
+  `failOnDataLoss=false`) abandons it. Leave `snapshotLsn` unset: a stamp below S breaks it.
+- Use one kind of snapshot per target and `app_id`: `snapshot()` and `seed()` see whole
+  snapshots only, not a chunked one still open.
 
 ## See also
 
 - [Data loss and re-snapshots](data-loss.md): snapshots taken after CDC cleanup purged
   unread changes.
 - [Silver tables](silver.md): the current state from the snapshot and the changes.
-- [`CdcStream.snapshot`](../reference/api.md#mssql_cdc.pipeline.CdcStream.snapshot) and
+- [Validation](validation.md): compare silver with the source table after a bootstrap.
+- [`CdcStream.snapshot`](../reference/api.md#mssql_cdc.pipeline.CdcStream.snapshot),
+  [`CdcStream.backfill`](../reference/api.md#mssql_cdc.pipeline.CdcStream.backfill) and
   [`CdcStream.seed`](../reference/api.md#mssql_cdc.pipeline.CdcStream.seed) in the API
   reference.

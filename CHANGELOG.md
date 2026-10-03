@@ -12,10 +12,50 @@ compatibility" line.
 
 ## [Unreleased]
 
-State compatibility: unchanged. No offset, checkpoint or table schema change, and no
-migration.
+State compatibility: offsets and checkpoints unchanged. Existing tables migrate the next
+time a stream, `finalization.advance` or `apply_changes` opens them: bronze migration 2 adds
+`_snapshot` and `_chunk` (NULL on existing rows, whose snapshot is still found by their
+`_start_lsn`) and rewrites the comment of `_start_lsn`; facts migration 7 rewrites the
+comments of `rows`, `event` and `detail`; control migration 2 adds `open_snapshot_lsn` and
+`snapshot_wave`. New table kind `reconcile` (the report of `reconcile()`), with no
+migrations ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0013-schema-migrations-per-table-kind/)).
 
 ### Added
+
+- Chunked snapshots read next to the running stream, for tables the link cannot read
+  within the CDC retention: `to_delta(..., snapshot="chunked")` (with `bootstrap=True` or
+  `on_data_loss="resnapshot"`; needs `facts_table`) records the snapshot's LSN S, plans the
+  chunks and starts the stream at S without reading the table, and
+  `stream(...).backfill(target, *, app_id, facts_table, chunk_rows, max_waves, max_seconds,
+  min_headroom_hours, isolation)`, called repeatedly in its own task, reads them in waves of
+  `numPartitions` chunks, each stamped with `max_lsn` before its read, one Delta commit per
+  wave. Chunks step over MIN..MAX for one integer key (row estimate from `sys.sp_spaceused`)
+  and are keyset bounds for any other key. New facts events `snapshot_open` and
+  `snapshot_chunk`; the `bootstrap` or `resnapshot` row comes after the last chunk. A crash
+  between a wave's append and its facts rows reruns the wave without appending twice; a
+  loss while one is open opens a newer one
+  ([ADR 0028](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0028-chunked-snapshot-next-to-the-stream/)).
+- Snapshot reader options `snapshotChunks` (read only the given key ranges, numbered in
+  `_chunk`, with a `chunk-<i>.json` metrics file each) and `isolationLevel=snapshot` (SNAPSHOT
+  isolation where the database allows it; never `NOLOCK`).
+- `apply_changes` applies an open chunked bootstrap wave by wave (control columns
+  `open_snapshot_lsn`, `snapshot_wave`): a chunk row never brings back a key deleted after
+  its stamp, and with one integer or date key a chunk deletes the keys of its range it lacks.
+  At the snapshot's completion row silver is rebuilt by absence; its verdict is held while a
+  snapshot is open ([ADR 0019](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0019-silver-helper-applies-the-change-log/) amended).
+- `reconcile(spark, options, silver, keys=None, *, bronze, facts_table=None, bucket_rows,
+  sample, report_table, seed)`: compares silver with its SQL Server table by row count and
+  key sum per bucket of an integer or date key (one count for other keys), then row by row
+  through a SHA-256 of the captured columns on the mismatched buckets and a sample, and
+  classifies keys as MISSING_TARGET, MISSING_SOURCE, RECORD_DIFF or IN_FLIGHT. With
+  `facts_table` it checks the newest chunked snapshot's chunks against bronze (CHUNK_TILING,
+  CHUNK_ROWS, CHUNK_STAMP). The report goes to an optional `report_table`; a "Validation"
+  guide covers it.
+- Lab check t10 (`lab/checks/t10_chunked_snapshot.py`): a chunked bootstrap next to the
+  running stream under a continuous writer (inserts, updates, deletes, key updates) and a
+  transaction holding a range's locks, and with `--resnapshot` a chunked re-snapshot after a
+  forced cleanup purged a gap with deletes. Passes on SQL Server 2022 CU27; runs in the CI
+  lab job.
 
 - `stream(...).seed(target, df, as_of)`: seed the target from a copy of the table you already
   have, for tables too big to snapshot within the CDC retention. `as_of` is an LSN or the
@@ -50,6 +90,18 @@ migration.
 
 ### Changed
 
+- A snapshot in bronze is named by its `_snapshot` column, never by the largest
+  `_start_lsn` of its rows: `snapshot()`, `to_delta(bootstrap=True)`, the re-snapshot's
+  reuse check, `seed()`'s reruns and silver's rebuild point read
+  `coalesce(_snapshot, _start_lsn)` of whole snapshots, and the facts' completion rows
+  ([ADR 0016](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn/) amendment 3,
+  [ADR 0025](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0025-seed-from-an-existing-copy/) amended).
+- `apply_changes`: operation 3 deletes its own key, outranked by the 4 of the same key and
+  commit, instead of being ignored, so a key update SQL Server records as 3 and 4 cannot
+  leave the old key in silver.
+- The bootstrap guide sizes a snapshot by MB/s (1.8 to 5.9 MB/s measured against a
+  production source), not a fixed rows-per-second figure: rows per second vary with the row
+  width.
 - Snapshot key bounds are bound as text and `CAST` server-side for both backends (binary as
   hex): the same SQL shape and the same seeks
   ([ADR 0016](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn/) amended).

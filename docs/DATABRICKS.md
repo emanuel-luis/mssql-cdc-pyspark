@@ -55,7 +55,10 @@ Nothing in `mssql_cdc` imports Databricks APIs; the same package runs on any Spa
 6. **Tables too big to snapshot.** A table of billions of rows cannot be snapshotted within
    the CDC retention: seed it from a copy already in the lakehouse with `seed()`, then
    `to_delta(bootstrap=True)` starts from the seed without reading the table
-   ([Bootstrap](guides/bootstrap.md#tables-too-big-to-snapshot)).
+   ([Bootstrap](guides/bootstrap.md#tables-too-big-to-snapshot)). Without a copy, take a
+   chunked snapshot: the stream task runs `to_delta(..., snapshot="chunked")` and a second
+   task of the same job calls `backfill()` until it is done
+   ([Bootstrap](guides/bootstrap.md#chunked-snapshots)); not run on Databricks yet.
 7. **Schema changes.** Type widening on a Unity Catalog bronze table is the same statement,
    `ALTER TABLE <catalog>.<schema>.<table> SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true')`;
    `to_delta(snapshot_on_switch=True)` needs `metricsPath` when the checkpoint is a URI

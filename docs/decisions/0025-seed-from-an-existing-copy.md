@@ -2,7 +2,8 @@
 
 **Status:** accepted  
 **Date:** 2026-10-01T16:53:59-03:00  
-**Amended:** 2026-10-01T19:44:50-03:00, a rerun finds its seed after cleanup and under a newer snapshot; a fall-back hour maps earlier (see the Amendment)
+**Amended:** 2026-10-01T19:44:50-03:00, a rerun finds its seed after cleanup and under a newer snapshot; a fall-back hour maps earlier (see the Amendment)  
+**Amended:** 2026-10-02T20:30:12-03:00, a seed's rows carry `_snapshot`; seed or a chunked snapshot (see Amendment 2, ADR 0028)
 
 ## Context
 A snapshot has to finish within the CDC retention, or the changes after its LSN are purged
@@ -93,3 +94,12 @@ rebuild (ADR 0019) sees it as a snapshot.
   local time an hour later less that hour: off a fall-back that is `as_of`'s own, and in it,
   an hour earlier, which only replays. `tests/integration` checks the conversion on SQL
   Server for `Eastern Standard Time` around the 2026 changes.
+
+## Amendment 2: `_snapshot`, and a seed or a chunked snapshot
+* A seed is a whole snapshot: its rows get `_snapshot` = L (bronze migration 2, ADR 0016
+  Amendment 3), and the rerun and refusal checks look for whole snapshots only, by
+  `coalesce(_snapshot, _start_lsn)`, never at a chunked snapshot's chunk rows.
+* A table too big to snapshot within the retention now has two ways in: this seed, when a
+  copy exists (hours, for a table whose chunked snapshot would take weeks), or a chunked
+  snapshot read next to the stream (ADR 0028), when none does. `reconcile()` validates
+  either against the source.

@@ -19,9 +19,16 @@
 - [x] Snapshot partitions for composite or non-integer keys: NTILE tiles of the rows,
       bounds bound typed (ADR 0016 amendment).
 - [x] **Seeding from an existing copy**: a helper for tables too big to snapshot within the
-      CDC retention (at 4-11k rows/s, billions of rows do not fit in 3 days):
+      CDC retention (the read takes the table's size over the link's few MB/s):
       `CdcStream.seed(target, df, as_of)` writes the copy as the target's snapshot at the LSN
       of the time it started, then `to_delta(bootstrap=True)` starts from it (ADR 0025).
+- [x] **Chunked first import**: `to_delta(snapshot="chunked")` starts the stream at the
+      snapshot's LSN and `backfill()` reads the table in chunks next to it, so a table no
+      longer has to be read within the retention; silver applies the waves and rebuilds at
+      completion; `reconcile()` validates silver against the source (ADR 0028). Integration
+      tests on SQL Server 2022 and lab check t10, also through a purged gap.
+- [ ] Chunked snapshots on Databricks against the production source: backfill throughput
+      next to the stream, and a weeks-long run.
 - [ ] NTILE tiles for sparse single integer keys, if uneven MIN..MAX ranges show up
       (NTILE scans and spools the key, MIN..MAX is two seeks).
 - [x] **Schema changes**: DDL detected on the driver through `sys.sp_cdc_get_ddl_history`

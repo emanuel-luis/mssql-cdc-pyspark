@@ -62,9 +62,11 @@ A capture instance without a unique index fails with `ValueError` and asks for `
 Each call reads the capture instance's bronze rows beyond the last call and applies them
 with one Delta MERGE ([ADR 0019](../decisions/0019-silver-helper-applies-the-change-log.md)):
 
-- Per key, the latest image by `(_start_lsn, _command_id, _seqval, _operation)`. Operation 3
-  (the row before an update) is ignored, 1 deletes the key, and 0 (snapshot), 2 and 4
-  upsert it. Keys match with null-safe equality, since a unique index admits one NULL.
+- Per key, the latest image by `(_start_lsn, _command_id, _seqval, _operation)`. Operation 1
+  deletes the key, and 0 (snapshot), 2 and 4 upsert it. Operation 3 (the row before an
+  update) deletes its own key: the 4 of the same update outranks it, so it is the latest row
+  only when the update moved the row to another key. Keys match with null-safe equality,
+  since a unique index admits one NULL.
 - Silver has the captured columns plus `_start_lsn` and `_commit_ts` of each row's current
   image. Deletes remove the row; bronze keeps the history. The column comments are in
   [Tables](../reference/tables.md).
@@ -91,6 +93,25 @@ FROM ops.table_finalization
 WHERE table_name IN ('bronze.orders', 'silver.orders');
 ```
 
+### Chunked snapshots
+
+A [chunked snapshot](bootstrap.md#chunked-snapshots) arrives in waves over days, so pass
+`facts_table`: a call that finds chunk rows without it raises `ValueError`.
+
+- While a chunked bootstrap is open, each call applies the waves that arrived since the
+  last one, tracked by `open_snapshot_lsn` and `snapshot_wave` in the control table. A
+  chunk row is ranked with every later change of its key in bronze, so it never brings back
+  a key the stream deleted after the chunk's stamp.
+- With one integer or date key, a chunk also deletes the silver keys of its range that it
+  does not hold, when their image is older than the chunk's stamp: the chunk saw every
+  commit up to it. Other keys wait for the rebuild: Spark orders strings by bytes, SQL
+  Server by the column's collation, so a range Spark cuts is not SQL Server's.
+- At the snapshot's `bootstrap` or `resnapshot` row, silver is rebuilt from its rows and
+  the changes after S, and every key absent from both is deleted, whatever the key type.
+- While a chunked re-snapshot is open, the calls only apply changes, as before it.
+- Silver's `finalized_until` stays where it was while a snapshot is open: silver lacks
+  keys, or still holds deleted ones, until the rebuild.
+
 ### After a switch to a new capture instance
 
 When the stream moves to a newer capture instance of the table, bronze holds rows of both
@@ -108,7 +129,8 @@ silver, and rows that have not changed since read NULL for it.
 - One bronze table per source table. The snapshot events carry no capture instance, so a
   bronze table shared by two source tables would rebuild one from the other's snapshot.
 - Pass `facts_table`. A re-snapshot of a table that was empty writes no bronze rows, only
-  its facts event; without the facts, silver keeps the rows that the table lost.
+  its facts event; without the facts, silver keeps the rows that the table lost. A chunked
+  snapshot needs it.
 - One call per silver table at a time, as with one job per stream.
 - `apply_changes` adds columns but never changes a column's type: its MERGE runs without
   schema evolution, so `delta.enableTypeWidening` alone leaves silver at the old type. After
@@ -126,6 +148,7 @@ silver, and rows that have not changed since read NULL for it.
 
 - [Bootstrap](bootstrap.md): the snapshot silver is first built from.
 - [Finalization](finalization.md): gating consumers on silver's verdict.
+- [Validation](validation.md): compare silver with the source table.
 - [API reference](../reference/api.md#mssql_cdc.apply_changes) for every parameter.
 - [ADR 0019](../decisions/0019-silver-helper-applies-the-change-log.md): why a batch call,
   hard deletes and a position in the control table.

@@ -3,7 +3,8 @@
 Everything a stream takes: the source options, given once to
 [`stream()`](api.md#mssql_cdc.stream) or one by one to `spark.readStream.format("mssql_cdc")`,
 and the parameters of [`to_delta()`](api.md#mssql_cdc.pipeline.CdcStream.to_delta),
-[`snapshot()`](api.md#mssql_cdc.pipeline.CdcStream.snapshot) and
+[`snapshot()`](api.md#mssql_cdc.pipeline.CdcStream.snapshot),
+[`backfill()`](api.md#mssql_cdc.pipeline.CdcStream.backfill) and
 [`seed()`](api.md#mssql_cdc.pipeline.CdcStream.seed).
 
 ```python
@@ -46,9 +47,11 @@ anything else.
 | [schemaChangePolicy](#schemachangepolicy) | `classify` | stream |
 | [metricsPath](#metricspath) | none (see below) | stream |
 | [snapshotLsn](#snapshotlsn) | `max_lsn` before the read | snapshot |
+| [snapshotChunks](#snapshotchunks) | none: the whole table | snapshot |
+| [isolationLevel](#isolationlevel) | `readCommitted` | snapshot |
 
 "Snapshot" is `spark.read.format("mssql_cdc_snapshot")`, which `snapshot()`,
-`to_delta(bootstrap=True)` and the re-snapshots use.
+`to_delta(bootstrap=True)`, the re-snapshots, `backfill()` and `reconcile()` use.
 
 ### captureInstance
 
@@ -223,7 +226,29 @@ For `mssql_cdc_snapshot` only: the LSN stamped on the snapshot's rows. By defaul
 reached a just-enabled instance yet, the LSN just before its start). `snapshot()` and
 `to_delta` set it themselves. Set it only for a snapshot you read yourself, with an LSN
 recorded before the read: a row in the snapshot may be newer than the LSN, never older
-([ADR 0016](../decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)).
+([ADR 0016](../decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)). A chunked snapshot's
+waves are stamped this way by `backfill()`, never below the snapshot's own LSN.
+
+### snapshotChunks
+
+For `mssql_cdc_snapshot` only: read only these chunks of the table, one partition each, as
+`backfill()` and `reconcile()` do. A JSON list of `[chunk, lo, hi]`: the chunk's number,
+its first key (inclusive) and the key it ends before (exclusive). A key is a value for a
+one-column key and a list for a composite one, `null` for an open end; a value JSON has no
+type for is the text `CAST` reads back (a datetime in ISO 8601, binary as `0x` hex), as
+`client.next_chunks` plans them. With it, the rows gain a `_chunk INT` column with the
+chunk's number, and with [metricsPath](#metricspath) each chunk leaves
+`chunk-<chunk>.json` (rows, bytes, seconds, `max_lsn` after the read). Key bounds on a table
+whose key cannot be read in ranges (no unique index, a type no bound can be bound as) are a
+`ValueError`. `backfill()` sets it; set it yourself only to read part of a table.
+
+### isolationLevel
+
+For `mssql_cdc_snapshot` only: `readCommitted` (the default) or `snapshot`, which reads
+under SNAPSHOT isolation and needs the database's `ALLOW_SNAPSHOT_ISOLATION`; SQL Server
+refuses it otherwise. A SNAPSHOT read does not wait for writers' locks and holds versions
+in tempdb while it runs. Anything else is a `ValueError`: a snapshot never reads
+uncommitted rows (`NOLOCK`). `backfill(isolation="snapshot")` sets it.
 
 ## to_delta parameters
 
@@ -239,6 +264,7 @@ stream(spark, options).to_delta(
     on_data_loss="fail",
     resnapshot_interval_days=7.0,
     snapshot_on_switch=False,
+    snapshot="full",
 )
 ```
 
@@ -290,8 +316,9 @@ Passed to `DataStreamWriter.queryName`.
 later runs find it, under any capture instance of the table) and starts the checkpoint at
 its LSN, so the target holds the whole table, not only what CDC retention still has. With a
 `facts_table` it also writes a `bootstrap` facts row. Not with `startingLsn` (`ValueError`).
-On a table too big to snapshot, only after [seed](#seed-parameters): it then finds the seed
-and reads nothing ([Bootstrap](../guides/bootstrap.md#tables-too-big-to-snapshot)).
+On a table too big to snapshot within the retention, with `snapshot="chunked"`, or after
+[seed](#seed-parameters): it then finds the seed and reads nothing
+([Bootstrap](../guides/bootstrap.md#tables-too-big-to-snapshot)).
 
 ### on_data_loss
 
@@ -318,6 +345,58 @@ instance, so that rows unchanged since the switch carry the columns only the new
 captures instead of NULL. It reads the whole table. With a URI checkpoint it needs
 `metricsPath` (`ValueError` otherwise). See
 [Schema changes](../guides/schema-changes.md#rows-unchanged-since-the-switch).
+
+### snapshot
+
+How `bootstrap=True` and `on_data_loss="resnapshot"` take a snapshot.
+
+* `"full"`: read the whole table before the query starts, as above.
+* `"chunked"`: only open one: record its LSN S, plan the chunks and write a
+  `snapshot_open` facts row, then start the stream (the new generation, after a loss) at S
+  at once. [backfill()](#backfill-parameters), run in a task of its own, reads the table in
+  chunks next to the stream and writes the `bootstrap` or `resnapshot` row at the end.
+  Requires `facts_table` (`ValueError`). A rerun finds the snapshot it opened and opens no
+  second one.
+
+Anything else is a `ValueError`. See
+[Bootstrap](../guides/bootstrap.md#chunked-snapshots) and
+[ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md).
+
+## backfill parameters
+
+```python
+status = stream(spark, options).backfill(
+    "bronze.orders",
+    app_id="orders-v1",
+    facts_table="ops.ingestion_facts",
+)
+# {"snapshot": "0x...", "chunks_done": 8, "chunks_total": 40, "done": False,
+#  "paused": False, "reason": None}
+```
+
+`backfill(target, *, app_id, facts_table, chunk_rows=1_000_000, max_waves=None,
+max_seconds=None, min_headroom_hours=None, isolation=None)` reads the newest chunked
+snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in waves of
+[numPartitions](#numpartitions) chunks, and returns how far it got. Call it again until
+`done`.
+
+* `target`, `app_id`, `facts_table`: as passed to `to_delta`; the stream's generations
+  (`<app_id>.g<n>`) are found from `app_id`. Without an open snapshot it returns at once,
+  `paused` with a `reason`.
+* `chunk_rows`: about how many rows a chunk holds (at least 1). One integer key steps over
+  its MIN..MAX from a row estimate, so chunks vary with the key's gaps; other keys are cut at
+  exactly that many rows when the chunk is planned.
+* `max_waves`, `max_seconds`: stop after that many waves, or before a wave once that many
+  seconds have passed. `None`: until the snapshot is done.
+* `min_headroom_hours`: before each wave, pause while the stream's newest facts row has
+  less retention headroom (less that row's age), or there is none. `None`: never pause.
+* `isolation`: `"snapshot"` sets [isolationLevel](#isolationlevel); `None` reads READ
+  COMMITTED.
+
+The result: `snapshot` (its LSN S), `chunks_done`, `chunks_total` (an estimate for one
+integer key, `None` for other keys until done), `done`, and `paused` with its `reason`.
+Each wave is one commit to `target` and one `snapshot_chunk` facts row per chunk
+([Tables](tables.md#facts)).
 
 ## snapshot parameters
 

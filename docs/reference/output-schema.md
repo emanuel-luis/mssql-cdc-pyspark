@@ -86,5 +86,10 @@ With `columns`, the declared list and types are the schema, for example
 The snapshot reads the source table itself, under READ COMMITTED (never `NOLOCK`), in the
 same schema. A captured column the source table no longer has (dropped, matched by
 `column_id`) reads NULL, as its change rows do since the drop. Written by `snapshot()` or
-`to_delta`, snapshot rows also get `_batch_id` NULL in bronze
-([ADR 0016](../decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)).
+`to_delta`, snapshot rows also get `_batch_id` NULL in bronze, and `_snapshot`, the LSN of
+the snapshot they belong to ([ADR 0016](../decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)).
+
+With [snapshotChunks](options.md#snapshotchunks) the snapshot reads only those chunks and has
+one more column, `_chunk INT`, the chunk each row was read in. `backfill()` writes them to
+bronze with `_snapshot` set to the chunked snapshot's LSN S, while each wave's `_start_lsn` is
+its own stamp, at or after S ([ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md)).
