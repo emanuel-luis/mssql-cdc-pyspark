@@ -1432,7 +1432,8 @@ def test_keyset_chunks_tile_composite_and_varchar_keys_under_changes(
         if changes:  # in keys read already, and in keys not read yet
             sqlserver.run(*changes.pop(0))
         assert len(statuses) < 20
-    assert all(s["chunks_total"] is None for s in statuses[:-1])  # no estimate for a keyset
+    total = statuses[0]["chunks_total"]  # planned by the first call, the plan's from then on
+    assert total > 2 and all(s["chunks_total"] == total for s in statuses)
     marker = ", ".join(["?"] * len(last))
     sqlserver.run(f"INSERT INTO dbo.{name} ({', '.join(keys)}, v) VALUES ({marker}, 'end')", last)
     sqlserver.wait_for(f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE v = 'end'")
@@ -1442,11 +1443,12 @@ def test_keyset_chunks_tile_composite_and_varchar_keys_under_changes(
     assert _image(delta_spark, paths["silver"], *keys, "v") == table
 
     chunks = _chunk_facts(delta_spark, paths["facts"])
-    assert [c["chunk"] for c in chunks] == list(range(len(chunks)))
+    assert [c["chunk"] for c in chunks] == list(range(total))
     assert chunks[0]["lo"] is None and [c["last"] for c in chunks].index(True) == len(chunks) - 1
     assert all(a["hi"] == b["lo"] for a, b in pairwise(chunks))  # each starts where one ended
-    # planned and read in the same wave, so each holds chunk_rows rows and the last the rest
-    assert all(c["rows"] == 7 for c in chunks[:-1]) and 0 < chunks[-1]["rows"] <= 7
+    # planned up front with 7 rows each (the last with the rest): read later, a chunk holds
+    # that give or take the changes made in its range since, at most two here
+    assert all(5 <= c["rows"] <= 9 for c in chunks[:-1]) and 0 < chunks[-1]["rows"] <= 9
     snap = delta_spark.read.format("delta").load(paths["bronze"]).where("_operation = 0")
     assert snap.count() == snap.select(*keys).distinct().count() == sum(c["rows"] for c in chunks)
 
@@ -1465,7 +1467,11 @@ def test_a_chunk_waits_under_read_committed_for_a_transaction_holding_locks_in_i
         "numPartitions": "2",
     }
     paths, cdc, run = _chunked(delta_spark, options, workdir, "ck-lock")
-    run().awaitTermination()  # chunks [-, 11) [11, 21) in wave 0, [21, 31) [31, -) in wave 1
+    run().awaitTermination()  # chunks [-, 11) [11, 21) in wave 0, [21, 31) [31, 41) in wave 1
+    backfill = {"app_id": "ck-lock", "facts_table": paths["facts"]}
+    # the first call plans, counting every key (under READ COMMITTED it would wait too), and
+    # reads wave 0
+    assert cdc.backfill(paths["bronze"], chunk_rows=10, max_waves=1, **backfill)["chunks_done"] == 2
     holder = sqlserver.connect()
     held = holder.cursor()
     held.execute("SELECT @@SPID")
@@ -1489,9 +1495,7 @@ def test_a_chunk_waits_under_read_committed_for_a_transaction_holding_locks_in_i
     releaser = threading.Thread(target=release, daemon=True)
     releaser.start()
     try:
-        status = cdc.backfill(
-            paths["bronze"], app_id="ck-lock", facts_table=paths["facts"], chunk_rows=10
-        )
+        status = cdc.backfill(paths["bronze"], **backfill)
     finally:
         releaser.join(130)
         holder.close()
@@ -1543,7 +1547,7 @@ def test_a_snapshot_isolation_read_takes_the_committed_rows_without_waiting(sqls
 
 @pytest.mark.parametrize("grant", ["table", "columns"])
 def test_chunk_planning_needs_only_select_on_the_table(sqlserver, grant, backend):
-    from mssql_cdc.client import next_chunks, snapshot_plan
+    from mssql_cdc.client import plan_chunks, snapshot_plan
 
     table = f"ck_plan_{grant}"
     ci = sqlserver.cdc_table(
@@ -1566,15 +1570,65 @@ def test_chunk_planning_needs_only_select_on_the_table(sqlserver, grant, backend
         types = client.key_types(ci, source.keys)
         assert client.key_bound("dbo", table, source.keys, types, None, None, 10) == keys[10]
         assert client.key_bound("dbo", table, source.keys, types, keys[10], None, 25) is None
-        plan = snapshot_plan(client, ci, source)
-        assert plan == {"kind": "keyset", "max": list(keys[-1])}
-        chunks, final = next_chunks(client, ci, source, plan, 0, None, 10, 8)
-    assert final and [(i, lo, hi) for i, lo, hi in chunks] == [
-        (0, None, list(keys[8])),
-        (1, list(keys[8]), list(keys[16])),
-        (2, list(keys[16]), list(keys[24])),
-        (3, list(keys[24]), None),
+        extent = snapshot_plan(client, ci, source)
+        assert extent == {"kind": "keyset", "max": list(keys[-1])}
+        chunks = plan_chunks(client, ci, source, extent, 8)
+    assert chunks == [
+        [None, list(keys[8])],
+        [list(keys[8]), list(keys[16])],
+        [list(keys[16]), list(keys[24])],
+        [list(keys[24]), None],
     ]
+
+
+def test_an_integer_plan_counts_a_skewed_key_on_the_server_and_backfills_it(
+    delta_spark, sqlserver, workdir
+):
+    from mssql_cdc.client import plan_chunks, snapshot_plan
+
+    # a dense cluster, a sparse region and a sentinel near the bigint max
+    sqlserver.run(
+        "CREATE TABLE dbo.ck_skew (id BIGINT NOT NULL PRIMARY KEY, v VARCHAR(20) NOT NULL)"
+    )
+    sqlserver.run(f"INSERT INTO dbo.ck_skew SELECT n, 'old' FROM {_ROWS} WHERE n <= 1000")
+    sqlserver.run(f"INSERT INTO dbo.ck_skew SELECT n * 10000, 'old' FROM {_ROWS} WHERE n <= 50")
+    top = 2**63 - 1  # the last chunk ends at MAX + 1, past bigint: compared as numeric
+    sqlserver.run(f"INSERT INTO dbo.ck_skew VALUES ({top}, 'old')")
+    ci = sqlserver.enable_cdc("ck_skew")
+    ids = sorted(r[0] for r in sqlserver.run("SELECT id FROM dbo.ck_skew"))
+    options = {
+        "connectionString": _reader(sqlserver, "ck_skew", ci),  # SELECT on the table only
+        "captureInstance": ci,
+        "numPartitions": "4",
+    }
+    with closing(make_client(options)) as client:
+        source = client.source_table(ci)
+        extent = snapshot_plan(client, ci, source)
+        assert extent == {"kind": "int", "lo": 1, "hi": top, "rows": len(ids)}
+        plan = plan_chunks(client, ci, source, extent, 100)
+    assert plan[0][0] is None and plan[-1][1] == top + 1
+    assert all(a[1] == b[0] for a, b in pairwise(plan))
+    sizes = [sum((lo is None or i >= lo) and i < hi for i in ids) for lo, hi in plan]
+    # counted per slice on the server: none empty, none above chunk_rows, no two neighbours
+    # that would fit in one; a step from MIN to MAX would put all but one row in the first
+    assert sum(sizes) == len(ids) and all(0 < n <= 100 for n in sizes)
+    assert all(a + b > 100 for a, b in pairwise(sizes)) and len(plan) <= 12
+
+    paths, cdc, run = _chunked(delta_spark, options, workdir, "ck-skew")
+    run().awaitTermination()  # opens S
+    status = cdc.backfill(
+        paths["bronze"], app_id="ck-skew", facts_table=paths["facts"], chunk_rows=100
+    )
+    assert status["done"] and status["chunks_done"] == status["chunks_total"] == len(plan)
+    facts = delta_spark.read.format("delta").load(paths["facts"])
+    [planned] = facts.where("event = 'snapshot_plan'").collect()
+    assert json.loads(planned["detail"])["chunks"] == plan
+    assert [c["rows"] for c in _chunk_facts(delta_spark, paths["facts"])] == sizes
+    _marker(sqlserver, "ck_skew", ci, "id", -1)
+    run().awaitTermination()
+    assert _apply(delta_spark, paths, ci, ["id"])["rebuilt"]
+    table = {tuple(r) for r in sqlserver.run("SELECT id, v FROM dbo.ck_skew")}
+    assert _image(delta_spark, paths["silver"], "id", "v") == table
 
 
 def test_key_bound_seeks_each_piece_for_its_first_keys_only(sqlserver):

@@ -983,11 +983,11 @@ def _chunk_reader(src, schema, chunks, lsn, **options):
 @pytest.mark.parametrize(
     ("key", "values", "above", "chunk_rows", "kind", "sizes"),
     [
-        # dense integers and a NULL key: steps of the span over the row estimate (13 rows,
-        # 5 a chunk: 5 keys a step); NULL sorts first, into the first
+        # integers and a NULL key: slices of one key counted, 5 a chunk; NULL, uncounted, sorts
+        # first, into the first
         ("order_id", [None, *range(12)], 99, 5, "int", [6, 5, 2]),
-        # sparse integers, 110 keys for 21 rows: keyset bounds, which a sentinel cannot skew
-        ("order_id", [None, *range(10), *range(100, 110)], 200, 3, "keyset", [3] * 7),
+        # sparse integers: the empty keys 10..99 join the chunk before, no chunk is empty
+        ("order_id", [None, *range(10), *range(100, 110)], 200, 3, "int", [4, 3, 3, 3, 3, 3, 2]),
         # one string key: keyset bounds, chunk_rows rows each up to the MAX at the open
         ("code", [f"C{i:02}" for i in range(12)], "C99", 5, "keyset", [5, 5, 2]),
         # a composite key with NULLs, as ORDER BY sorts them
@@ -1006,7 +1006,7 @@ def _chunk_reader(src, schema, chunks, lsn, **options):
 def test_chunk_plans_tile_the_key_space(workdir, key, values, above, chunk_rows, kind, sizes):
     from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 
-    from mssql_cdc.client import next_chunks, snapshot_plan
+    from mssql_cdc.client import plan_chunks, snapshot_plan
     from mssql_cdc.fake import FakeCdcClient
 
     src = os.path.join(workdir, "src")
@@ -1020,15 +1020,10 @@ def test_chunk_plans_tile_the_key_space(workdir, key, values, above, chunk_rows,
         insert(v)
     client = FakeCdcClient(src)
     source = client.source_table(CI)
-    plan = snapshot_plan(client, CI, source)
-    assert plan["kind"] == kind
+    extent = snapshot_plan(client, CI, source)
+    assert extent["kind"] == kind
     insert(above)  # after S, above the MAX: the stream's, and no chunk reads it
-    chunks, final = [], False
-    while not final:  # in waves of two, each from the previous end
-        lo = chunks[-1][2] if chunks else None
-        wave, final = next_chunks(client, CI, source, plan, len(chunks), lo, 2, chunk_rows)
-        chunks += wave
-    assert [c[0] for c in chunks] == list(range(len(chunks)))
+    chunks = [[i, *c] for i, c in enumerate(plan_chunks(client, CI, source, extent, chunk_rows))]
     assert chunks[0][1] is None and all(a[2] == b[1] for a, b in pairwise(chunks))
 
     def typ(name):
@@ -1047,8 +1042,48 @@ def test_chunk_plans_tile_the_key_space(workdir, key, values, above, chunk_rows,
     assert [len(rows) for rows in read] == sizes
 
 
+def test_an_integer_plan_packs_counted_slices_whatever_the_skew(workdir, monkeypatch):
+    from pyspark.sql.types import LongType, StringType, StructField, StructType
+
+    from mssql_cdc.client import plan_chunks, snapshot_plan
+    from mssql_cdc.fake import FakeCdcClient
+
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], keys={CI: "order_id"})
+    top = 2**63 - 10  # a sentinel near the bigint max, a sparse region, a dense cluster
+    ids = [*range(1000), *range(10_000, 510_000, 10_000), top]
+    db.commit(CI, [(2, {"order_id": i, "status": "new"}) for i in ids])
+    client = FakeCdcClient(src)
+    source = client.source_table(CI)
+    extent = snapshot_plan(client, CI, source)
+    assert extent == {"kind": "int", "lo": 0, "hi": top, "rows": len(ids)}
+    widths, real = [], FakeCdcClient.key_buckets
+
+    def counted(self, *args):
+        widths.append(args[4])
+        return real(self, *args)
+
+    monkeypatch.setattr(FakeCdcClient, "key_buckets", counted)
+    plan = plan_chunks(client, CI, source, extent, 100)
+    assert plan[0][0] is None and plan[-1][1] == top + 1  # open below, MAX + 1
+    assert all(a[1] == b[0] for a, b in pairwise(plan))
+    sizes = [sum((lo is None or i >= lo) and i < hi for i in ids) for lo, hi in plan]
+    # the top slice holds the cluster and the region: counted again over 0..500000, where the
+    # first slice still holds the cluster: counted again over 0..999, in slices of 7 keys
+    assert widths[1:] == [2977, 7]
+    # 14 slices of 7 a chunk; the cluster's last 20, the sparse region and the sentinel: one
+    assert sizes == [98] * 10 + [71]
+    assert all(a + b > 100 for a, b in pairwise(sizes))  # no two neighbours fit in one
+
+    schema = StructType([StructField("order_id", LongType()), StructField("status", StringType())])
+    chunks = [[i, *c] for i, c in enumerate(plan)]
+    reader = _chunk_reader(src, schema, chunks, client.max_lsn())
+    read = [[r["order_id"] for r in _rows_of(reader, p)] for p in reader.partitions()]
+    assert [len(r) for r in read] == sizes and sorted(i for r in read for i in r) == ids
+
+
 def test_chunk_rows_are_stamped_numbered_and_leave_metrics(spark, workdir):
-    from mssql_cdc.client import next_chunks, snapshot_plan
+    from mssql_cdc.client import plan_chunks, snapshot_plan
     from mssql_cdc.fake import FakeCdcClient
 
     src = os.path.join(workdir, "src")
@@ -1058,10 +1093,10 @@ def test_chunk_rows_are_stamped_numbered_and_leave_metrics(spark, workdir):
     client = FakeCdcClient(src)
     source = client.source_table(CI)
     s = client.max_lsn()
-    plan = snapshot_plan(client, CI, source)
-    assert plan == {"kind": "int", "lo": 0, "hi": 5, "rows": 6}
-    chunks, final = next_chunks(client, CI, source, plan, 0, None, 10, 2)
-    assert (chunks, final) == ([[0, None, 2], [1, 2, 4], [2, 4, 6]], True)  # MAX + 1
+    extent = snapshot_plan(client, CI, source)
+    assert extent == {"kind": "int", "lo": 0, "hi": 5, "rows": 6}
+    chunks = [[i, *c] for i, c in enumerate(plan_chunks(client, CI, source, extent, 2))]
+    assert chunks == [[0, None, 2], [1, 2, 4], [2, 4, 6]]  # MAX + 1
     lsn = db.idle(at=T0 + timedelta(minutes=7))  # the wave's stamp L, at or after S
     metrics = os.path.join(workdir, "metrics")
     opts = {

@@ -12,8 +12,9 @@ Every parameter is text, all arrow-odbc binds, so both backends bind the same wa
 cross the driver boundary as hex strings converted server-side with
 ``CONVERT(binary(10), ?, 1)``, snapshot key bounds are CAST to their column's type.
 Changes are read from the change table ``cdc.<capture_instance>_CT`` (ADR 0009).
-A chunked snapshot's chunks are planned here too (``snapshot_plan``, ``next_chunks``,
-ADR 0028), from metadata and seeks on the table's key, never a scan of it.
+A chunked snapshot's chunks are planned here too (``snapshot_plan``, ``plan_chunks``,
+ADR 0028), once per snapshot: an integer key from per-slice row counts aggregated on the
+server, other keys from seeks on the table's key; no row crosses the network.
 """
 
 from __future__ import annotations
@@ -237,6 +238,12 @@ def _key_select(
     return " UNION ALL ".join(sql), params
 
 
+def _int_range(k: str, lo, hi, joiner: str) -> str:
+    """`` <joiner> k >= lo AND k < hi`` for integer bounds, inlined (None: open); '' for none."""
+    parts = [f"{k} {op} {int(v)}" for op, v in ((">=", lo), ("<", hi)) if v is not None]
+    return f" {joiner} " + " AND ".join(parts) if parts else ""
+
+
 def _json_key(values: Sequence, types) -> object:
     """A key as JSON, for a chunk bound (``snapshotChunks``, the facts' detail): a scalar for
     one column, a list for several. A value JSON has no type for becomes the text ``CAST``
@@ -256,29 +263,19 @@ def _key_tuple(bound) -> tuple | None:
     return tuple(bound) if isinstance(bound, list) else (bound,)
 
 
-# ponytail: an integer key spanning more values per row than this gets keyset chunks (an extra
-# seek per chunk) instead of arithmetic ones; a skewed key within it still gets uneven chunks.
-_DENSE = 4
-
-
 def snapshot_plan(client: CdcClient, capture_instance: str, source: SourceTable) -> dict:
     """What a chunked snapshot's chunks tile, read after its LSN S was recorded (ADR 0028): a
     key a row lacks below MIN or above MAX was inserted after S, so the stream has it.
 
-    One dense integer key: ``{"kind": "int", "lo": MIN, "hi": MAX, "rows": estimate}``, chunks
-    a step of the key apart. Other keys, and an integer key spanning more than
-    ``_DENSE`` values per row (a sentinel far above the ids would put every row in one step):
-    ``{"kind": "keyset", "max": MAX}``, chunks found by seeking the rows after the previous
-    bound. ``max`` None (an empty table, no unique index, a key type no bound can be bound
-    as): one chunk, the whole table."""
+    One integer key: ``{"kind": "int", "lo": MIN, "hi": MAX, "rows": estimate}``. Other keys:
+    ``{"kind": "keyset", "max": MAX}``; ``max`` None (an empty table, no unique index, a key
+    type no bound can be bound as): one chunk, the whole table. ``plan_chunks`` cuts it."""
     s, t, keys = source.schema, source.table, source.keys
     top: tuple | None = None
     if len(keys) == 1:
         lo, hi = client.key_range(s, t, keys[0])
         if lo is not None and all(isinstance(v, int) and not isinstance(v, bool) for v in (lo, hi)):
-            rows = client.row_estimate(s, t)
-            if hi - lo + 1 <= _DENSE * rows:
-                return {"kind": "int", "lo": lo, "hi": hi, "rows": rows}
+            return {"kind": "int", "lo": lo, "hi": hi, "rows": client.row_estimate(s, t)}
         top = None if hi is None else (hi,)
     elif keys:
         top = client.key_max(s, t, keys)
@@ -288,55 +285,81 @@ def snapshot_plan(client: CdcClient, capture_instance: str, source: SourceTable)
     return {"kind": "keyset", "max": _json_key(top, types)}
 
 
-def int_step(plan: dict, chunk_rows: int) -> int:
-    """How far apart an integer plan's chunk bounds are for about ``chunk_rows`` rows each."""
-    span = plan["hi"] - plan["lo"] + 1
-    return max(1, -(-chunk_rows * span // max(plan["rows"], 1)))  # ceiling
+# ponytail: an integer key is counted in about this many slices per chunk, and one count query
+# returns at most _MAX_SLICES of them; a chunk then holds chunk_rows less at most one slice.
+_SLICES = 16
+_MAX_SLICES = 100_000
 
 
-def next_chunks(
-    client: CdcClient,
-    capture_instance: str,
-    source: SourceTable,
-    plan: dict,
-    first: int,
-    lo,
-    count: int,
-    chunk_rows: int,
-) -> tuple[list[list], bool]:
-    """Up to ``count`` chunks ``[index, lo, hi]`` (JSON bounds, ``hi`` exclusive) of about
-    ``chunk_rows`` rows each, from chunk ``first`` on, which starts at ``lo`` (None: below
-    every key, NULL first), and whether the last of them is the plan's final chunk. Each
-    starts where the previous ends, so they tile the key space up to the plan's MAX. An
-    integer key steps by the span over the row estimate times ``chunk_rows``; other keys take
-    the key ``chunk_rows`` rows after the previous bound, below MAX (``key_bound``).
+def plan_chunks(
+    client: CdcClient, capture_instance: str, source: SourceTable, extent: dict, chunk_rows: int
+) -> list[list]:
+    """Every chunk ``[lo, hi)`` (JSON bounds) of a chunked snapshot whose ``snapshot_plan`` is
+    ``extent``, of at most about ``chunk_rows`` rows each, planned once before its first wave
+    (ADR 0028). They tile the key space up to MAX: the first is open below (NULL first), each
+    starts where the previous ends, and the last ends just above MAX, at MAX + 1 or at the
+    first key after it (None, open, when there is none): the keys after MAX were inserted
+    after S and come from the stream, so a table written while it is read does not pile them
+    into the last chunk.
 
-    The final chunk ends just above MAX: at MAX + 1, or at the first key after MAX (None, open,
-    when there is none yet). The keys after MAX were inserted after S and come from the stream,
-    so a table written while it is read does not pile them into the last chunk."""
-    types: list | None = None  # the plan has a MAX only when every key has one
-    if plan["kind"] == "keyset" and plan["max"] is not None:
-        types = client.key_types(capture_instance, source.keys)
+    One integer key: rows counted per slice of a fixed grid (``_int_chunks``), so a sparse
+    region or a sentinel far above the ids neither empties nor overfills a chunk. Other keys:
+    the key ``chunk_rows`` rows after the previous bound (``key_bound``), walked up front."""
     s, t, keys = source.schema, source.table, source.keys
+    if extent["kind"] == "int":
+        return _int_chunks(client, s, t, keys[0], extent, chunk_rows)
+    if extent["max"] is None:
+        return [[None, None]]
+    types: list = client.key_types(capture_instance, keys)  # all set: the extent has a MAX
+    top = _key_tuple(extent["max"])
     out: list[list] = []
-    final = False
-    while not final and len(out) < count:
-        if plan["kind"] == "int":
-            nxt = (plan["lo"] if lo is None else lo) + int_step(plan, chunk_rows)
-            final = nxt > plan["hi"]
-            hi = plan["hi"] + 1 if final else nxt
-        elif plan["max"] is None:
-            final, hi = True, None
-        else:
-            top = _key_tuple(plan["max"])
-            bound = client.key_bound(s, t, keys, types, _key_tuple(lo), top, chunk_rows)
-            final = bound is None
-            if final:  # the second key from MAX on: the first after it, while MAX still exists
-                bound = client.key_bound(s, t, keys, types, top, None, 1)
-            hi = None if bound is None else _json_key(bound, types)
-        out.append([first + len(out), lo, hi])
-        lo = hi
-    return out, final
+    lo = None
+    while True:
+        bound = client.key_bound(s, t, keys, types, _key_tuple(lo), top, chunk_rows)
+        if bound is None:
+            break
+        out.append([lo, _json_key(bound, types)])
+        lo = out[-1][1]
+    after = client.key_bound(s, t, keys, types, top, None, 1)  # the first after MAX, if it exists
+    return [*out, [lo, None if after is None else _json_key(after, types)]]
+
+
+def _int_chunks(
+    client: CdcClient, schema: str, table: str, key: str, extent: dict, chunk_rows: int
+) -> list[list]:
+    """An integer key's chunks: its rows counted per slice of a fixed grid in one GROUP BY
+    (``key_buckets``, about ``_SLICES`` slices per ``chunk_rows``), then consecutive slices
+    packed into chunks of at most ``chunk_rows`` rows, so empty and sparse slices join their
+    neighbours. A slice of more rows is counted again on a finer grid over its own keys (two
+    seeks for its MIN and MAX, then a GROUP BY of its rows), down to one value a slice. Every
+    bound but the last is the start of a slice holding rows: no chunk starts empty."""
+
+    def cut(a, b, lo: int, hi: int, rows: int) -> list[tuple[int, int]]:
+        # (start, rows) of the slices of [a, b) holding rows, on a grid of width w over lo..hi
+        n = min(_MAX_SLICES, max(1, -(-_SLICES * rows // chunk_rows)))
+        w = max(1, -(-(hi - lo + 1) // n))
+        out: list[tuple[int, int]] = []
+        for i, count, _ in sorted(client.key_buckets(schema, table, key, "int", w, a, b)):
+            x = i * w if a is None else max(i * w, a)
+            y = (i + 1) * w if b is None else min((i + 1) * w, b)
+            big = count > chunk_rows and w > 1
+            inner = client.key_range(schema, table, key, x, y) if big else (None,)
+            if inner[0] is not None:
+                out += cut(x, y, inner[0], inner[1], count)
+            else:
+                out.append((x, count))
+        return out
+
+    # keys above MAX are the stream's; below MIN, the first chunk's (it is open below)
+    end = extent["hi"] + 1
+    bounds: list[list] = []
+    start, rows = None, 0
+    for x, count in cut(None, end, extent["lo"], extent["hi"], extent["rows"]):
+        if rows and rows + count > chunk_rows:
+            bounds.append([start, x])
+            start, rows = x, 0
+        rows += count
+    return [*bounds, [start, end]]
 
 
 # --------------------------------------------------------------------------- #
@@ -394,8 +417,9 @@ class CdcClient(ABC):
         """The table ``capture_instance`` tracks, its key and the instance's first LSN."""
 
     @abstractmethod
-    def key_range(self, schema: str, table: str, key: str) -> tuple:
-        """(MIN, MAX) of ``key`` in the table; (None, None) when it is empty."""
+    def key_range(self, schema: str, table: str, key: str, lo=None, hi=None) -> tuple:
+        """(MIN, MAX) of ``key`` in the table; (None, None) when it is empty. ``lo``/``hi``:
+        an integer key's rows in ``[lo, hi)`` only (None: open)."""
 
     @abstractmethod
     def key_types(self, capture_instance: str, keys: Sequence[str]) -> list[str | None]:
@@ -409,12 +433,21 @@ class CdcClient(ABC):
 
     @abstractmethod
     def key_buckets(
-        self, schema: str, table: str, key: str | None, kind: str | None, width: int
+        self,
+        schema: str,
+        table: str,
+        key: str | None,
+        kind: str | None,
+        width: int,
+        lo: int | None = None,
+        hi: int | None = None,
     ) -> list[tuple]:
         """``(bucket, rows, key_sum)`` of the table's rows grouped by ``floor(o / width)``,
         ``o`` the key's ordinal: an integer key itself (``kind`` "int"), a date its day number
         from 1970-01-01 ("date"); ``key_sum`` sums ``o``. A NULL key is in no bucket. ``key``
-        None: ``[(0, rows, None)]``, the whole table. Tier 1 of ``reconcile()``."""
+        None: ``[(0, rows, None)]``, the whole table. ``lo``/``hi``: an integer key's rows in
+        ``[lo, hi)`` only (None: open). Tier 1 of ``reconcile()``; a chunked snapshot's
+        integer plan (``plan_chunks``)."""
 
     @abstractmethod
     def iter_table(
@@ -1025,8 +1058,9 @@ class SqlCdcClient(CdcClient):
             self._hex(r["start_lsn"]),
         )
 
-    def key_range(self, schema, table, key):
+    def key_range(self, schema, table, key, lo=None, hi=None):
         t, k = f"[{_check_column(schema)}].[{_check_column(table)}]", f"[{_check_column(key)}]"
+        t += _int_range(k, lo, hi, "WHERE")
         # two scalar subqueries: each is one seek on an index led by the key
         for batch in self._b.batches(
             f"SELECT (SELECT MIN({k}) FROM {t}) AS lo, (SELECT MAX({k}) FROM {t}) AS hi", (), 1
@@ -1086,10 +1120,11 @@ class SqlCdcClient(CdcClient):
             for row in zip(*(c.to_pylist() for c in batch.columns))
         ]
 
-    def key_buckets(self, schema, table, key, kind, width):
-        # One scan, aggregated on the server: one row per bucket crosses the network. T-SQL's
-        # integer division truncates toward zero; the CASE floors a negative ordinal, so a
-        # bucket is the same range Spark computes. The __$ names cannot be a column's.
+    def key_buckets(self, schema, table, key, kind, width, lo=None, hi=None):
+        # One scan (a seek with lo/hi), aggregated on the server: one row per bucket crosses
+        # the network. T-SQL's integer division truncates toward zero; the CASE floors a
+        # negative ordinal, so a bucket is the same range Spark computes. The __$ names cannot
+        # be a column's.
         t = f"[{_check_column(schema)}].[{_check_column(table)}]"
         if key is None:
             sql = (
@@ -1106,8 +1141,8 @@ class SqlCdcClient(CdcClient):
             sql = (
                 "SELECT [__$b] AS b, COUNT_BIG(*) AS n, SUM(CAST([__$o] AS decimal(38,0))) AS s "
                 f"FROM (SELECT {o} AS [__$o], CASE WHEN {o} >= 0 THEN {o} / {w} "
-                f"ELSE ({o} + 1) / {w} - 1 END AS [__$b] FROM {t} WHERE {k} IS NOT NULL) x "
-                "GROUP BY [__$b]"
+                f"ELSE ({o} + 1) / {w} - 1 END AS [__$b] FROM {t} WHERE {k} IS NOT NULL"
+                f"{_int_range(k, lo, hi, 'AND')}) x GROUP BY [__$b]"
             )
         return [
             tuple(row)

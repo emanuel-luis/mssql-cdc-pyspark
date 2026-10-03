@@ -9,9 +9,9 @@ It reproduces the parts of CDC the data source relies on:
   before it deletes the change rows below it;
 * for instances given a key (one column or several), the source table's current rows,
   which a snapshot reads (tiled like NTILE, or in a chunked snapshot's chunks: an exact row
-  estimate, key bounds) and cleanup does not touch; ``commit_before_read`` queues a
-  transaction the next read commits just before it reads them, as a writer does between a
-  chunk's stamp and its SELECT (ADR 0028);
+  estimate, key bounds, rows per slice of a key range) and cleanup does not touch;
+  ``commit_before_read`` queues a transaction the next read commits just before it reads
+  them, as a writer does between a chunk's stamp and its SELECT (ADR 0028);
 * up to two capture instances per source table (ADR 0023): a newer one starts at the next
   commit, and from there every commit lands in both, each with only its own captured
   columns and its own ``__$command_id`` (an update that changes none of an instance's
@@ -241,8 +241,16 @@ class FakeCdcClient(CdcClient):
     def _table(self, table: str) -> list[dict]:
         return list(_read_json(os.path.join(self.path, "tables", f"{table}.json")).values())
 
-    def key_range(self, schema, table, key):
-        keys = [r[key] for r in self._table(table) if r.get(key) is not None]
+    def _key_values(self, table, key, lo=None, hi=None) -> list:
+        """The table's non-NULL values of ``key`` in ``[lo, hi)`` (None: open)."""
+        return [
+            v
+            for v in (r.get(key) for r in self._table(table))
+            if v is not None and (lo is None or v >= lo) and (hi is None or v < hi)
+        ]
+
+    def key_range(self, schema, table, key, lo=None, hi=None):
+        keys = self._key_values(table, key, lo, hi)
         return (min(keys), max(keys)) if keys else (None, None)
 
     def key_types(self, capture_instance, keys):
@@ -297,13 +305,12 @@ class FakeCdcClient(CdcClient):
             db.commit(tx["capture_instance"], [(op, row) for op, row in tx["changes"]], at)
         os.remove(claimed)
 
-    def key_buckets(self, schema, table, key, kind, width):
+    def key_buckets(self, schema, table, key, kind, width, lo=None, hi=None):
         # ponytail: integer keys only; the table's JSON rows keep no date type
-        rows = self._table(table)
         if key is None:
-            return [(0, len(rows), None)]
+            return [(0, len(self._table(table)), None)]
         out = {}  # bucket -> (rows, key sum)
-        for o in (r[key] for r in rows if r.get(key) is not None):
+        for o in self._key_values(table, key, lo, hi):
             n, s = out.get(o // int(width), (0, 0))
             out[o // int(width)] = (n + 1, s + o)
         return [(b, n, Decimal(s)) for b, (n, s) in sorted(out.items())]

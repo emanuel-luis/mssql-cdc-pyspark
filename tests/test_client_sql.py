@@ -873,3 +873,24 @@ def test_key_buckets_count_and_sum_the_key_per_floored_bucket_in_one_query():
         client.key_buckets("sales", "orders", "id]; DROP TABLE x --", "int", 10)
     with pytest.raises(ValueError):
         client.key_buckets("sales", "orders", "id", "int", "10; DROP TABLE x")
+
+
+def test_an_integer_plan_counts_and_seeks_one_slice_of_the_key():
+    rec = Rows([{"b": 0, "n": 2, "s": Decimal(15)}])
+    client = SqlCdcClient(rec, source_timezone="UTC")
+    client.key_buckets("sales", "orders", "id", "int", 10, -5, 30)  # a seek, not a scan
+    assert rec.calls[-1][0].endswith(
+        "FROM [sales].[orders] WHERE [id] IS NOT NULL AND [id] >= -5 AND [id] < 30) x "
+        "GROUP BY [__$b]"
+    )
+    client.key_buckets("sales", "orders", "id", "int", 10, None, 30)
+    assert "WHERE [id] IS NOT NULL AND [id] < 30) x" in rec.calls[-1][0]
+    rec = Rows([{"lo": 3, "hi": 9}])
+    assert SqlCdcClient(rec).key_range("sales", "orders", "id", 0, 10) == (3, 9)
+    t = "[sales].[orders] WHERE [id] >= 0 AND [id] < 10"
+    assert rec.calls[-1] == (
+        f"SELECT (SELECT MIN([id]) FROM {t}) AS lo, (SELECT MAX([id]) FROM {t}) AS hi",
+        (),
+    )
+    with pytest.raises(ValueError):  # bounds are inlined as integers only
+        client.key_buckets("sales", "orders", "id", "int", 10, "0; DROP TABLE x")

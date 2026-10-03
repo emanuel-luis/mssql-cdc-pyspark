@@ -247,15 +247,16 @@ def test_a_chunked_bootstrap_applied_by_wave_reconciles_through_snapshot_chunks(
         keys = sorted(r[o.key] for r in delta_spark.read.format("delta").load(o.silver).collect())
         return result, keys
 
-    run()  # S: the plan is 0..11, chunks of 3 keys
+    run()  # S: the key spans 0..11; the first backfill() plans chunks of 3 keys
     o.commit((1, {"order_id": 3, "status": "new"}), (2, {"order_id": 20, "status": "new"}))
     o.at += timedelta(minutes=1)  # after the wave's stamp, before its read
     o.db.commit_before_read(CI, [(1, {"order_id": 1, "status": "new"})], at=o.at)
     backfill = {"app_id": "orders-v1", "facts_table": facts, "chunk_rows": 3}
     assert cdc.backfill(o.bronze, max_waves=1, **backfill)["chunks_done"] == 2
     run()
-    _, keys = apply()  # wave 0's chunks [-, 3) and [3, 6), and the changes
-    assert keys == [0, 2, 4, 5, 20]
+    # wave 0's chunks [-, 4) and [4, 7), planned after 3 was deleted, and the changes
+    _, keys = apply()
+    assert keys == [0, 2, 4, 5, 6, 20]
     assert cdc.backfill(o.bronze, **backfill)["done"]
     run()
     done, keys = apply()

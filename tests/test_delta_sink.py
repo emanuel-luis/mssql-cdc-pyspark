@@ -237,10 +237,10 @@ def test_facts_table_at_version_0_gains_every_column_and_the_current_comments(de
         "one row per non-empty batch",
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(spark, old, "facts") == 7
+    assert migrations.migrate(spark, old, "facts") == 8
     cols, description = _comments(spark, old)
     assert all(name in cols and cols[name][1] for name, _, _ in added)
-    # migrations 5 to 7 rewrote the comments whose meaning changed: as a new table has them
+    # migrations 5 to 8 rewrote the comments whose meaning changed: as a new table has them
     assert {n: cols[n][1] for n, _, _ in FACTS_COLUMNS} == {n: c for n, _, c in FACTS_COLUMNS}
     assert description == FACTS_COMMENT
 
@@ -1384,6 +1384,15 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
     assert cdc._last_snapshot(target, CI) is None
     assert len(_events(spark, facts, "snapshot_open")) == 1
     assert [d["last"] for d in details] == [False, False, False, True]
+    [planned] = _events(spark, facts, "snapshot_plan")  # by the first call, before its wave
+    assert (planned["min_lsn"], planned["max_lsn"], planned["app_id"]) == (s, s, "chunk-v1")
+    assert json.loads(planned["detail"]) == {
+        "snapshot": s,
+        "kind": "int",
+        "keys": ["order_id"],
+        "chunk_rows": 2,
+        "chunks": [[None, 2], [2, 4], [4, 6], [6, 8]],
+    }
     version = _version(spark, target)
     again = cdc.backfill(target, app_id="chunk-v1", facts_table=facts)
     assert again["done"] and again["chunks_done"] == 4

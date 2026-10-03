@@ -30,8 +30,9 @@ job per stream (ADR 0018).
 
 ``snapshot="chunked"`` (ADR 0028) takes either snapshot next to the stream instead of before
 it, for a table the link cannot read within the CDC retention: ``to_delta`` only opens it at
-an LSN S (a 'snapshot_open' facts row with its plan) and starts the stream generation at S
-at once; ``backfill()``, called repeatedly in its own task, reads the key space in chunks,
+an LSN S (a 'snapshot_open' facts row with the key's extent) and starts the stream generation
+at S at once; ``backfill()``, called repeatedly in its own task, plans the chunks once (a
+'snapshot_plan' row), reads the key space in them,
 each stamped with an LSN at or after S, appends them to the target (``_snapshot`` S,
 ``_chunk``) and records them as 'snapshot_chunk' rows, then writes the snapshot's
 'bootstrap' or 'resnapshot' row. Downstream rebuilds from S: its rows and the changes after
@@ -46,6 +47,7 @@ carry the columns only it captures instead of NULL.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -53,6 +55,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+_log = logging.getLogger(__name__)
 _URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")  # a scheme; a Windows drive has one letter
 _STATE = "_mssql_cdc_generation.json"
 # what backfill() reads of a chunked snapshot's facts rows (ADR 0028)
@@ -134,8 +137,18 @@ def _lost(client, ci: str, lsn: str) -> str | None:
 
 
 def _bounds(chunk: dict) -> dict:
-    """A chunk's place in its plan; ``last``: the plan's final chunk (``next_chunks``)."""
+    """A chunk's place in its plan; ``last``: the plan's final chunk."""
     return {k: chunk.get(k, False) for k in ("chunk", "lo", "hi", "last")}
+
+
+def _plan_of(rows: list, snapshot: str) -> dict | None:
+    """The detail of the 'snapshot_plan' facts row of ``snapshot`` among ``rows``, or None:
+    ``{snapshot, kind, keys, chunk_rows, chunks}``, chunk i from ``chunks[i][0]`` to
+    ``chunks[i][1]`` (``client.plan_chunks``)."""
+    for r in rows:
+        if r["event"] == "snapshot_plan" and (d := json.loads(r["detail"]))["snapshot"] == snapshot:
+            return d
+    return None
 
 
 def _version(spark, target: str) -> int:
@@ -748,16 +761,22 @@ class CdcStream:
         *,
         app_id: str,
         facts_table: str,
-        chunk_rows: int = 1_000_000,
+        chunk_rows: int | None = None,
         max_waves: int | None = None,
         max_seconds: float | None = None,
         min_headroom_hours: float | None = None,
         isolation: str | None = None,
     ) -> dict:
         """Read the newest open chunked snapshot of ``target`` (``to_delta(...,
-        snapshot="chunked")`` opens one) in waves of ``numPartitions`` chunks of about
+        snapshot="chunked")`` opens one) in waves of ``numPartitions`` chunks of at most about
         ``chunk_rows`` rows, next to the running stream; returns how far it got. Run it
         apart from the stream (its own task) and call it again until ``done``.
+
+        The first call plans every chunk (``client.plan_chunks``: an integer key from row
+        counts per slice of its range, other keys ``chunk_rows`` keys at a time) and records
+        the plan in a 'snapshot_plan' facts row; later calls read it, so the chunks never
+        change while the snapshot is open. ``chunk_rows``: 1,000,000 when None; a later call's
+        other value is ignored, with a warning.
 
         Each wave is stamped with ``max_lsn`` before it is read, at or after the snapshot's
         LSN S, appended to ``target`` in one commit (operation 0, ``_snapshot`` S,
@@ -775,32 +794,35 @@ class CdcStream:
         reads under SNAPSHOT isolation, which the database must allow; else READ COMMITTED.
 
         Returns ``{"snapshot", "chunks_done", "chunks_total", "done", "paused", "reason"}``:
-        ``chunks_total`` is an estimate for one integer key column, else None until done.
+        ``chunks_total`` is the plan's, None until a call has planned it.
         """
         from pyspark.sql import functions as F
 
         from . import sink
-        from .client import int_step, make_client, next_chunks
+        from .client import make_client
         from .source import snapshot_lsn
         from .spark import available_cores
         from .tables import delta_table, exists
 
-        chunk_rows = int(chunk_rows)
-        if chunk_rows < 1:
+        if chunk_rows is not None and int(chunk_rows) < 1:
             raise ValueError(f"chunk_rows must be at least 1, not {chunk_rows}")
         ci, t0 = self._capture_instance(), time.monotonic()
         ours = re.compile(re.escape(app_id) + r"(\.g\d+)?")  # the stream's generations
-        kinds = ("snapshot_open", "snapshot_chunk", "bootstrap", "resnapshot")
-        rows = []
-        if exists(self.spark, facts_table):
+        kinds = ("snapshot_open", "snapshot_plan", "snapshot_chunk", "bootstrap", "resnapshot")
+
+        def read_facts() -> list:
+            if not exists(self.spark, facts_table):
+                return []
             facts = delta_table(self.spark, facts_table).toDF()
-            rows = [
+            return [
                 r
                 for r in facts.where((F.col("target") == target) & F.col("event").isin(*kinds))
                 .select(*_SNAPSHOT_FACTS)
                 .collect()
                 if ours.fullmatch(r["app_id"] or "")
             ]
+
+        rows = read_facts()
         opens = [r for r in rows if r["event"] == "snapshot_open"]
         if not opens:
             return {
@@ -813,7 +835,16 @@ class CdcStream:
             }
         top = max(opens, key=lambda r: r["min_lsn"])  # a newer open supersedes an older one
         s, sink_id, info = top["min_lsn"], top["app_id"], json.loads(top["detail"])
-        plan = info["plan"]
+        plan = _plan_of(rows, s)
+        if plan and chunk_rows is not None and int(chunk_rows) != plan["chunk_rows"]:
+            _log.warning(
+                "mssql_cdc: backfill(chunk_rows=%s) ignored: the snapshot at %s of %s was "
+                "planned with chunk_rows=%s, and its chunks do not change while it is open",
+                chunk_rows,
+                s,
+                target,
+                plan["chunk_rows"],
+            )
         chunks = sorted(
             (
                 {**d, "rows": r["rows"], "lsn": r["min_lsn"]}
@@ -849,6 +880,12 @@ class CdcStream:
                 if reason:
                     status.update(paused=True, reason=reason)
                     break
+                if plan is None:
+                    self._plan(
+                        client, ci, source, info, top, target, facts_table, app_id, chunk_rows
+                    )
+                    plan = _plan_of(read_facts(), s)  # a concurrent call's, if Delta skipped ours
+                    assert plan is not None  # written just now
                 last = chunks[-1] if chunks else None
                 lsn = snapshot_lsn(client, source)  # the wave's stamp, before its read
                 if lsn < s:
@@ -856,16 +893,10 @@ class CdcStream:
                         f"sys.fn_cdc_get_max_lsn() is {lsn}, below the snapshot's {s}: is this "
                         "the database the snapshot was opened on (not a readable secondary)?"
                     )
-                planned, final = next_chunks(
-                    client,
-                    ci,
-                    source,
-                    plan,
-                    last["chunk"] + 1 if last else 0,
-                    last["hi"] if last else None,
-                    max(1, k),
-                    chunk_rows,
-                )
+                first = last["chunk"] + 1 if last else 0
+                every = plan["chunks"]
+                planned = [[i, *every[i]] for i in range(first, min(first + max(1, k), len(every)))]
+                final = planned[-1][0] == len(every) - 1
                 wave = last["wave"] + 1 if last else 0
                 chunks += self._backfill_wave(
                     target,
@@ -909,12 +940,39 @@ class CdcStream:
                     }
                 ),
             )
-        total = len(chunks) if done else None
-        if not done and plan["kind"] == "int":
-            start = chunks[-1]["hi"] if chunks else plan["lo"]
-            left = -(-(plan["hi"] - start + 1) // int_step(plan, chunk_rows))
-            total = len(chunks) + max(1, left)
+        total = len(chunks) if done else len(plan["chunks"]) if plan else None
         return {**status, "chunks_done": len(chunks), "chunks_total": total, "done": done}
+
+    def _plan(self, client, ci, source, info, top, target, facts_table, app_id, chunk_rows) -> None:
+        """Plan every chunk of the snapshot opened by facts row ``top`` (``info``, its detail)
+        and record them in its 'snapshot_plan' row, once: Delta skips a rerun's."""
+        from . import sink
+        from .client import plan_chunks
+
+        s, rows = top["min_lsn"], int(chunk_rows or 1_000_000)
+        started_at, t0 = sink._utc_now(), time.monotonic()
+        detail = {
+            "snapshot": s,
+            "kind": info["plan"]["kind"],
+            "keys": source.keys,
+            "chunk_rows": rows,
+            "chunks": plan_chunks(client, ci, source, info["plan"], rows),
+        }
+        sink.write_event(
+            self.spark,
+            facts_table,
+            "snapshot_plan",
+            app_id=top["app_id"],
+            txn_app_id=f"{app_id}#snapplan.{s}",
+            version=0,
+            target=target,
+            lsn=s,
+            commit_ts=_iso(top["min_commit_ts"]),
+            rows=0,
+            started_at=started_at,
+            duration_ms=round((time.monotonic() - t0) * 1000),
+            detail=json.dumps(detail),
+        )
 
     def _throttle(
         self, facts_table: str, sink_id: str, min_headroom_hours: float | None
