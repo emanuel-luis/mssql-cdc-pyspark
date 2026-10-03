@@ -1516,6 +1516,85 @@ def test_a_chunk_waits_under_read_committed_for_a_transaction_holding_locks_in_i
     assert _image(delta_spark, paths["silver"], "id", "v") == table
 
 
+def test_a_chunked_resnapshot_deletes_stale_datetime2_keys_but_not_one_in_a_bounds_microsecond(
+    delta_spark, sqlserver, workdir, monkeypatch
+):
+    """A datetime2(7) key holds 100 ns, Spark microseconds: k = ...02.1234567 is below the bound
+    b1 = ...02.1234568 on SQL Server, so chunk 0 holds it, and reads ...02.123456 in Spark, the
+    microsecond b1 truncates to. Chunk 1, [b1, b2), must not delete it; the keys deleted in the
+    purged gap strictly inside a range (x, and y = ...04.0000001) go with their wave."""
+    from mssql_cdc import client as cdc_client
+    from mssql_cdc import stream
+
+    ci = sqlserver.cdc_table(
+        "ck_dt2", "at DATETIME2(7) NOT NULL PRIMARY KEY, v VARCHAR(5) NOT NULL"
+    )
+    at = {"a": "00.5", "x": "01", "k": "02.1234567", "c": "03", "y": "04.0000001", "z": "07"}
+    for v, s in at.items():
+        sqlserver.run(
+            "INSERT INTO dbo.ck_dt2 VALUES (CAST(? AS datetime2(7)), ?)",
+            (f"2026-09-28T10:00:{s}", v),
+        )
+    sqlserver.wait_for_changes(ci, len(at))
+    options = {
+        "connectionString": _reader(sqlserver, "ck_dt2", ci),
+        "captureInstance": ci,
+        "numPartitions": "1",  # one chunk per wave
+    }
+    paths = {n: os.path.join(workdir, n) for n in ("bronze", "silver", "facts", "control", "ckpt")}
+    cdc = stream(delta_spark, options)
+
+    def run(**kw):
+        cdc.to_delta(
+            paths["bronze"],
+            "ck-dt2",
+            paths["ckpt"],
+            paths["facts"],
+            trigger={"availableNow": True},
+            bootstrap=True,
+            on_data_loss="resnapshot",
+            **kw,
+        ).awaitTermination()
+
+    def values() -> set:
+        return {v for _, v in _image(delta_spark, paths["silver"], "at", "v")}
+
+    run()  # generation 0, a whole snapshot
+    sqlserver.run("INSERT INTO dbo.ck_dt2 VALUES ('2026-09-28T10:00:09', 'm')")
+    sqlserver.wait_for_changes(ci, len(at) + 1)
+    run()  # the checkpoint at that commit
+    _apply(delta_spark, paths, ci, ["at"])
+    assert values() == {*at, "m"}
+    sqlserver.run("DELETE FROM dbo.ck_dt2 WHERE v IN ('x', 'y', 'z')")
+    sqlserver.wait_for_changes(ci, len(at) + 4)
+    sqlserver.run(
+        "DECLARE @lw binary(10) = sys.fn_cdc_get_max_lsn(); "
+        "EXEC sys.sp_cdc_cleanup_change_table @capture_instance = ?, "
+        "@low_water_mark = @lw, @threshold = 5000",
+        (ci,),
+    )
+    run(snapshot="chunked")  # generation 1 opens a chunked re-snapshot
+
+    # bounds with 100 ns digits, as the snapshot reader CASTs them to datetime2(7)
+    b1, b2 = "2026-09-28T10:00:02.1234568", "2026-09-28T10:00:05.0000000"
+    chunks = [[0, None, b1], [1, b1, b2], [2, b2, None]]
+    monkeypatch.setattr(
+        cdc_client, "next_chunks", lambda c, ci, s, plan, i, *_: ([chunks[i]], i == 2)
+    )
+
+    def wave() -> set:
+        cdc.backfill(paths["bronze"], app_id="ck-dt2", facts_table=paths["facts"], max_waves=1)
+        _apply(delta_spark, paths, ci, ["at"])
+        return values()
+
+    assert wave() == {"a", "k", "c", "y", "z", "m"}  # x, inside chunk 0
+    assert wave() == {"a", "k", "c", "z", "m"}  # y, inside chunk 1; k, in b1's microsecond, kept
+    assert wave() == {"a", "k", "c", "m"}  # z, at the completion's rebuild
+    table = {tuple(r) for r in sqlserver.run("SELECT at, v FROM dbo.ck_dt2")}
+    assert _image(delta_spark, paths["silver"], "at", "v") == table
+    assert (datetime(2026, 9, 28, 10, 0, 2, 123456), "k") in table  # the driver truncates
+
+
 def test_a_snapshot_isolation_read_takes_the_committed_rows_without_waiting(sqlserver, backend):
     ci = sqlserver.cdc_table("ck_si", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL")
     sqlserver.run(f"INSERT INTO dbo.ck_si SELECT n, 'old' FROM {_ROWS} WHERE n <= 10")

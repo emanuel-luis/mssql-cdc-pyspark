@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -191,6 +191,34 @@ def test_a_resnapshot_rebuilds_silver_without_the_key_deleted_in_the_purged_gap(
     o.commit((2, _row(7, "new")), minutes=5)
     run()
     assert not o.apply()["rebuilt"] and o.rows() == o.source()
+
+
+def test_a_chunked_resnapshot_deletes_the_keys_lost_in_the_gap_wave_by_wave(delta_spark, workdir):
+    o = Orders(delta_spark, workdir)
+    o.options["numPartitions"] = "1"  # one chunk per wave
+    for i in range(6):
+        o.commit((2, _row(i, "new")))
+
+    def run(**kw):
+        o.run(facts_table=o.facts, bootstrap=True, on_data_loss="resnapshot", **kw)
+
+    run()
+    o.apply()
+    o.commit((1, _row(1, "new")))  # deleted in the gap: in chunk 0, [-, 3)
+    o.commit((1, _row(4, "new")))  # and in chunk 1, [3, 6)
+    o.db.cleanup(CI, o.db.idle(at=o.at + timedelta(minutes=2)))
+    run(snapshot="chunked")  # generation 1 opens a re-snapshot: nothing read yet
+    assert not o.apply()["rebuilt"] and len(o.rows()) == 6
+
+    def wave():
+        stream(o.spark, o.options).backfill(
+            o.bronze, app_id="orders-v1", facts_table=o.facts, chunk_rows=2, max_waves=1
+        )
+        return o.apply()
+
+    assert not wave()["rebuilt"]
+    assert [k for k, _ in o.rows()] == [0, 2, 3, 4, 5]  # 1 gone before the completion
+    assert wave()["rebuilt"] and o.rows() == o.source() == [(i, "new") for i in (0, 2, 3, 5)]
 
 
 def test_a_bootstrap_at_the_lsn_silver_has_applied_still_rebuilds_it(delta_spark, workdir):
@@ -479,20 +507,67 @@ def test_an_open_bootstrap_applies_its_waves_without_resurrecting_deletes_and_ho
     assert not g.apply()["rebuilt"]
 
 
-def test_the_waves_leave_stale_keys_to_the_rebuild_at_completion(delta_spark, workdir):
-    g, S = Log(delta_spark, workdir), 100
-    # silver from changes whose history lost 2's and the NULL key's deletes: a repair
-    g.change(10, *[(2, k, "new") for k in (1, 2, 3, 4, None)])
+def _t(second, micro=0):
+    return datetime(2026, 1, 1, 0, 0, second, micro)
+
+
+# keys k1..k6, the bounds b1 and b2 of chunks [-, b1) [b1, b2) [b2, -), and a stale key no range
+# may delete. A datetime2(7) bound has 100 ns digits; Spark keeps microseconds, so the keys of
+# b1's microsecond fall on either side of it on SQL Server: left to the rebuild.
+RANGES = {
+    "INT": ([1, 2, 3, 4, 5, 6], 3, 5, None),
+    "DATE": ([date(2026, 1, d) for d in range(1, 7)], "2026-01-03", "2026-01-05", None),
+    "TIMESTAMP_NTZ": (
+        [_t(1), _t(2), _t(3, 123457), _t(4), _t(5, 500000), _t(6)],
+        "2026-01-01 00:00:03.1234567",
+        "2026-01-01T00:00:05.0000000",
+        _t(3, 123456),
+    ),
+    "STRING": (["a", "b", "c", "d", "e", "f"], "c", "e", None),  # Spark orders bytes, SQL not
+}
+
+
+@pytest.mark.parametrize(
+    ("key_type", "mode"),
+    [(k, "resnapshot") for k in RANGES] + [("INT", "bootstrap")],
+)
+def test_each_wave_deletes_the_stale_keys_of_its_ranges_and_completion_any_absent_key(
+    delta_spark, workdir, key_type, mode
+):
+    from mssql_cdc.silver import _record
+
+    g, S = Log(delta_spark, workdir, key_type), 100
+    (k1, k2, k3, k4, k5, k6), b1, b2, odd = RANGES[key_type]
+    by_range = key_type != "STRING"
+    # silver from changes whose history lost the deletes of 2, 6, the NULL key and the odd one
+    stale = [k2, k6, None] + ([odd] if odd else [])
+    g.change(10, *[(2, k, "new") for k in [k1, k3, k4, k5, *stale]])
     g.apply()
-    g.open(S)
-    g.change(112, (1, 4, "new"))
-    g.change(113, (2, 4, "again"))  # chunk 1 read in between: no 4; this outranks its delete
-    g.wave(S, 0, 110, [(0, None, 3, [(1, "new")]), (1, 3, 5, [(3, "new")])])
+    g.open(S, mode)
+    g.change(112, (1, k4, "new"))
+    g.change(113, (2, k4, "again"))  # chunk 1 read in between: no k4; this outranks its delete
+    g.wave(S, 0, 110, [(0, None, b1, [(k1, "snap")]), (1, b1, b2, [(k3, "snap")])])
+    g.verdict(113)
+    first = g.apply()
+    live = [(k1, "snap"), (k3, "snap"), (k4, "again")]
+    # k5 and k6 wait for chunk 2; the NULL key sorts first, but in no range unless one is whole
+    gone = [k2] if by_range else []
+    assert g.rows() == _ordered(live + [(k5, "new")] + [(k, "new") for k in stale if k not in gone])
+    assert first["finalized_until"] is None  # held while the snapshot is open
+    at, rows = g.position(), g.rows()
+    _record(delta_spark, g.control, g.silver, at[0], at[1], _lsn(S), None)  # a crash before it
+    assert g.apply()["applied_lsn"] == at[0] and g.rows() == rows and g.position() == at
+
+    g.wave(S, 1, 120, [(2, b2, None, [(k5, "snap")])])
     g.apply()
-    kept = [(1, "new"), (3, "new"), (4, "again")]
-    assert g.rows() == _ordered(kept + [(None, "new"), (2, "new")])  # 2 and NULL: stale
-    g.fact("bootstrap", S, {"snapshot": _lsn(S)})
-    assert g.apply()["rebuilt"] and g.rows() == _ordered(kept)  # absent from both: deleted
+    gone += [k6] if by_range else []
+    assert g.rows() == _ordered(
+        live + [(k5, "snap")] + [(k, "new") for k in stale if k not in gone]
+    )
+    g.fact(mode, S, {"snapshot": _lsn(S)})
+    done = g.apply()
+    assert done["rebuilt"] and done["finalized_until"] is not None
+    assert g.rows() == _ordered(live + [(k5, "snap")])  # absent from both: deleted
 
 
 def test_a_legacy_snapshot_rebuilds_and_an_open_resnapshot_holds_the_verdict_until_complete(
@@ -515,11 +590,12 @@ def test_a_legacy_snapshot_rebuilds_and_an_open_resnapshot_holds_the_verdict_unt
     with pytest.raises(ValueError, match="pass facts_table"):
         g.apply(facts=False)
     held = g.apply()
-    # the chunk rows, stamped above applied_lsn, are no complete snapshot yet: the legacy
-    # rows (NULL _snapshot now) still are the newest one, and only changes apply
+    # the chunk rows are no complete snapshot yet: the legacy rows (NULL _snapshot now) still
+    # are the newest one. The wave applies, and 2, in its range (the whole table) without a
+    # row and older than its stamp, goes before the completion
     assert not held["rebuilt"] and held["finalized_until"] == before
-    assert g.rows() == [(1, "new"), (2, "new"), (3, "paid"), (4, "new")]
-    assert g.position() == (_lsn(51), _lsn(10), None, None)
+    assert g.rows() == [(1, "new"), (3, "paid"), (4, "new")]
+    assert g.position() == (_lsn(51), _lsn(10), _lsn(50), 0)
 
     g.fact("resnapshot", 50, {"snapshot": _lsn(50)})
     released = g.verdict(62)

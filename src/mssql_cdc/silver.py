@@ -31,12 +31,16 @@ Run it after the stream, in the same job or another; one job per silver table.
   table, as its verdict already requires.
 * Chunked snapshots (``_chunk`` set) arrive in waves after their 'snapshot_open' facts row,
   stamped at or above S, and are complete at their completion row: ``facts_table`` is
-  required. While a bootstrap is open (a 'snapshot_open' newer than every complete
-  snapshot), each call applies the waves its 'snapshot_chunk' rows announce, tracked by
-  ``open_snapshot_lsn`` and ``snapshot_wave`` (the chunks land below ``applied_lsn``), with
-  every change after S of their keys: a chunk row never brings back a key deleted since.
-  An open re-snapshot only keeps applying changes. Either way, the rebuild comes at
-  completion, and deletes the keys absent from the snapshot and the changes after it.
+  required. While one is open (a 'snapshot_open' newer than every complete snapshot), a
+  bootstrap or a re-snapshot, each call applies the waves its 'snapshot_chunk' rows announce,
+  tracked by ``open_snapshot_lsn`` and ``snapshot_wave`` (the chunks land below
+  ``applied_lsn``), with every change after S of their keys: a chunk row never brings back a
+  key deleted since. With one key of an integer, date or timestamp type, the one the chunks
+  are cut on, a chunk also deletes the silver keys of its range [lo, hi) it does not hold
+  whose image is older than its stamp L: it saw every commit up to L. So the keys deleted in
+  a re-snapshot's purged gap go wave by wave. A datetime2(7) bound with digits below the
+  microsecond Spark keeps leaves the keys of that microsecond alone. Either way, the rebuild
+  comes at completion, and deletes the keys absent from the snapshot and the changes after it.
 * Verdict: silver's ``finalized_until`` advances to the bronze verdict read before bronze
   itself. Bronze commits its rows before its verdict (ADR 0005), so the rows applied hold
   every commit up to it: silver never claims more than it has applied. While a snapshot is
@@ -50,6 +54,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from contextlib import closing
+from datetime import date, datetime, timedelta
 
 from . import finalization, migrations
 from .sink import BRONZE_COLUMN_COMMENTS
@@ -124,15 +129,9 @@ def _record(
     )
 
 
-def _resnapshot(opened) -> bool:
-    """A 'snapshot_open' facts row of a re-snapshot (ADR 0018), not of a bootstrap: the kind
-    the stream opened it as, which its completion row is named after."""
-    return json.loads(opened["detail"] or "{}").get("kind") == "resnapshot"
-
-
-def _chunks(facts, snapshot: str) -> dict[int, int]:
-    """The wave of each chunk of ``snapshot`` its 'snapshot_chunk' facts rows announce, by
-    index. They are written after the chunks' bronze rows."""
+def _chunks(facts, snapshot: str) -> dict[int, tuple]:
+    """The chunks of ``snapshot`` its 'snapshot_chunk' facts rows announce, by index:
+    ``(wave, lo, hi, stamp)``. They are written after the chunks' bronze rows."""
     from pyspark.sql import functions as F
 
     rows = (
@@ -140,10 +139,14 @@ def _chunks(facts, snapshot: str) -> dict[int, int]:
             (F.col("event") == "snapshot_chunk")
             & (F.get_json_object("detail", "$.snapshot") == snapshot)
         )
-        .select("detail")
+        .select("detail", "min_lsn")
         .collect()
     )  # ponytail: every chunk of the snapshot on each call; filter by wave if it shows up
-    return {int(d["chunk"]): int(d["wave"]) for d in (json.loads(r["detail"]) for r in rows)}
+    chunks: dict[int, tuple] = {}
+    for row in rows:
+        d = json.loads(row["detail"])
+        chunks[int(d["chunk"])] = (int(d["wave"]), d.get("lo"), d.get("hi"), row["min_lsn"])
+    return chunks
 
 
 def _by_key(df, other, keys: Sequence[str], how: str):
@@ -153,6 +156,66 @@ def _by_key(df, other, keys: Sequence[str], how: str):
 
     a, b = df.alias("a"), other.alias("b")
     return a.join(b, [F.col(f"a.{_q(k)}").eqNullSafe(F.col(f"b.{_q(k)}")) for k in keys], how)
+
+
+def _bound(v, key_type, lower: bool):
+    """A chunk bound of the facts as a value of ``key_type`` that puts each Spark key on the
+    side SQL Server put it, or past the keys it cannot; None: open. A datetime2(7) bound has
+    100 ns digits, a key in Spark only microseconds (drivers truncate them): the keys of a
+    bound's microsecond fall on either side when it has digits below it. A ``lower`` bound
+    then moves up past them; an upper one, truncated, already excludes them (``<``)."""
+    if v is None:
+        return None
+    from pyspark.sql.types import DateType, IntegralType
+
+    if isinstance(key_type, IntegralType):
+        return int(v)
+    if isinstance(key_type, DateType):
+        return date.fromisoformat(str(v)[:10])
+    whole, _, digits = str(v).replace(" ", "T").partition(".")
+    t = datetime.fromisoformat(whole) + timedelta(microseconds=int(digits[:6].ljust(6, "0")))
+    return t + timedelta(microseconds=1) if lower and digits[6:].strip("0") else t
+
+
+def _absent(spark, target: str, key: str, key_type, chunks: dict, held):
+    """Synthetic deletes at each chunk's stamp L of the silver keys in its range [lo, hi)
+    that it does not hold (``held``: its rows' keys), when their image is older than L. The
+    chunk saw every commit up to L, so those keys were gone by then. Only for an integer,
+    date or timestamp key, which Spark orders as SQL Server does; None for other keys. A
+    NULL key is in no range here unless the range is the whole table (lo and hi open)."""
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import (
+        DateType,
+        IntegralType,
+        StringType,
+        StructField,
+        StructType,
+        TimestampNTZType,
+    )
+
+    if not isinstance(key_type, (IntegralType, DateType, TimestampNTZType)):
+        return None
+    ranges = []
+    for _, lo, hi, stamp in chunks.values():
+        try:
+            ranges.append((_bound(lo, key_type, True), _bound(hi, key_type, False), stamp))
+        except OverflowError:  # a lower bound past the last microsecond: no key surely inside
+            continue
+    schema = StructType(
+        [StructField("lo", key_type), StructField("hi", key_type), StructField("l", StringType())]
+    )
+    r = F.broadcast(spark.createDataFrame(ranges, schema)).alias("r")
+    t = delta_table(spark, target).toDF().alias("t")
+    k = F.col(f"t.{_q(key)}")
+    inside = (
+        (F.col("r.lo").isNull() | (k >= F.col("r.lo")))
+        & (F.col("r.hi").isNull() | (k < F.col("r.hi")))
+        & (F.col("t._start_lsn") < F.col("r.l"))
+    )
+    gone = t.join(r, inside).select(
+        k.alias(key), F.col("r.l").alias("_start_lsn"), F.lit(1).alias("_operation")
+    )
+    return _by_key(gone, held, [key], "left_anti")
 
 
 def apply_changes(
@@ -244,7 +307,6 @@ def apply_changes(
     snapshot = max((p for p in points if p), default=None)
     s_open = opened["max_lsn"] if opened else None
     is_open = s_open is not None and (snapshot is None or s_open > snapshot)
-    bootstrap_open = is_open and not _resnapshot(opened)
     # against the snapshot last rebuilt from, not applied_lsn: a bootstrap added to a stream
     # on a quiet database is stamped with the LSN silver has already applied
     rebuild = (applied is None and open_from is None) or (
@@ -258,9 +320,9 @@ def apply_changes(
     else:
         base = change & (F.col("_start_lsn") > applied)
     after = wave_from if not rebuild and open_from == s_open and wave_from is not None else -1
-    new = {c: w for c, w in chunks.items() if w > after} if bootstrap_open else {}
+    new = {c: v for c, v in chunks.items() if v[0] > after} if is_open else {}
     rows = pinned.where(base)
-    if new:  # the open bootstrap's waves that arrived since the last call
+    if new:  # the open snapshot's waves that arrived since the last call
         waves = pinned.where(
             (op == 0) & (F.col("_snapshot") == s_open) & F.col("_chunk").isin(*new)
         )
@@ -307,6 +369,13 @@ def apply_changes(
                     "left_semi",
                 )
             )
+            # bounds are cut on the snapshot's key columns: by range only on those (ADR 0028)
+            cut = json.loads(opened["detail"] or "{}").get("keys") if opened else None
+            if len(keys) == 1 and cut == keys:
+                key_type = pinned.schema[keys[0]].dataType
+                gone = _absent(spark, target, keys[0], key_type, new, held)
+                if gone is not None:
+                    rows = rows.unionByName(gone, allowMissingColumns=True)
         columns_out = [*names, "_start_lsn", "_commit_ts"]
         last = Window.partitionBy(*[F.col(_q(k)) for k in keys]).orderBy(
             F.col("_start_lsn").desc(),
@@ -337,8 +406,8 @@ def apply_changes(
     position = max((p for p in (applied, snapshot, top) if p), default=None)
     rebuilt = snapshot if rebuild else rebuilt_from
     progress: tuple = (None, None)
-    if bootstrap_open:
-        wave = max([after, *new.values()])
+    if is_open:
+        wave = max([after, *(v[0] for v in new.values())])
         progress = (s_open, wave if wave >= 0 else None)
     if (position, rebuilt, *progress) != (applied, rebuilt_from, open_from, wave_from):
         _record(spark, control_table, target, position, rebuilt, *progress)
