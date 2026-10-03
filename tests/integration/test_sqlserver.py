@@ -1657,6 +1657,34 @@ def test_chunk_planning_needs_only_select_on_the_table(sqlserver, grant, backend
     ]
 
 
+def test_a_datetime2_plan_reads_the_keys_in_maxs_microsecond(sqlserver, backend):
+    """The driver truncates datetime2(7) to the microsecond: MAX ...00.1234707 and the key
+    before it, ...00.1234700, both read back as ...00.123470. A last chunk ending at the key
+    after MAX, as its truncated text, would read neither: it is open instead."""
+    from mssql_cdc.client import _key_tuple, plan_chunks, snapshot_plan
+
+    ci = sqlserver.cdc_table("ck_dt2_top", "at DATETIME2(7) NOT NULL PRIMARY KEY, v INT")
+    sqlserver.run(  # 20 keys 700 ns apart, from ...00.1234574 to ...00.1234707
+        "INSERT INTO dbo.ck_dt2_top SELECT DATEADD(ns, 700 * n, "
+        f"CAST('2026-09-28T10:00:00.1234567' AS datetime2(7))), n FROM {_ROWS} WHERE n <= 20"
+    )
+    options = {"connectionString": _reader(sqlserver, "ck_dt2_top", ci), "backend": backend}
+    with closing(make_client(options)) as client:
+        source = client.source_table(ci)
+        types = client.key_types(ci, source.keys)
+        plan = plan_chunks(client, ci, source, snapshot_plan(client, ci, source), 6)
+        read = [
+            r["v"]
+            for lo, hi in plan
+            for b in client.iter_table(
+                "dbo", "ck_dt2_top", ["at", "v"], ["at"], types, _key_tuple(lo), _key_tuple(hi), 100
+            )
+            for r in b.to_pylist()
+        ]
+    assert sorted(read) == list(range(1, 21))
+    assert plan[-1][1] is None
+
+
 def test_an_integer_plan_counts_a_skewed_key_on_the_server_and_backfills_it(
     delta_spark, sqlserver, workdir
 ):

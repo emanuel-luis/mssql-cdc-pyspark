@@ -298,7 +298,8 @@ def plan_chunks(
     ``extent``, of at most about ``chunk_rows`` rows each, planned once before its first wave
     (ADR 0028). They tile the key space up to MAX: the first is open below (NULL first), each
     starts where the previous ends, and the last ends just above MAX, at MAX + 1 or at the
-    first key after it (None, open, when there is none): the keys after MAX were inserted
+    first key after it (None, open, when there is none or it reads back as MAX, a truncated
+    datetime2(7) in MAX's microsecond): the keys after MAX were inserted
     after S and come from the stream, so a table written while it is read does not pile them
     into the last chunk.
 
@@ -321,7 +322,11 @@ def plan_chunks(
         out.append([lo, _json_key(bound, types)])
         lo = out[-1][1]
     after = client.key_bound(s, t, keys, types, top, None, 1)  # the first after MAX, if it exists
-    return [*out, [lo, None if after is None else _json_key(after, types)]]
+    end = None if after is None else _json_key(after, types)
+    # A datetime2(7) last key column comes back truncated to the microsecond (key_types): when
+    # the key after MAX shares MAX's microsecond, its bound reads back as MAX's, at or below
+    # MAX, and would leave the keys of that microsecond in no chunk. Then the last is open.
+    return [*out, [lo, None if end == extent["max"] else end]]
 
 
 def _int_chunks(
