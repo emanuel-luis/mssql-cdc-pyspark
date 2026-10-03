@@ -1462,6 +1462,68 @@ def test_backfill_resumes_after_a_crash_between_the_append_and_its_facts(
     assert _rebuilt(bronze, "order_id", "status", s) == _source(db)  # order -1 by the stream
 
 
+def test_backfill_keeps_its_plan_and_rebuilds_a_waves_facts_from_bronze_without_its_commit(
+    delta_spark, workdir, monkeypatch, caplog
+):
+    from mssql_cdc import pipeline, sink, stream
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=6)
+    options["numPartitions"] = "2"
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        cdc.to_delta(
+            target,
+            "lost-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    run()
+    s = _events(spark, facts, "snapshot_open")[0]["min_lsn"]
+    write_facts = sink.write_facts
+
+    def crash(spark, table, rows, txn_app_id, version):
+        if rows[0]["event"] == "snapshot_chunk":
+            raise RuntimeError("the job died after the wave's append")
+        write_facts(spark, table, rows, txn_app_id, version)
+
+    monkeypatch.setattr(sink, "write_facts", crash)
+    with pytest.raises(RuntimeError, match="the job died"):
+        cdc.backfill(target, app_id="lost-v1", facts_table=facts, chunk_rows=2, max_waves=1)
+    monkeypatch.setattr(sink, "write_facts", write_facts)
+    # log cleanup dropped the wave's commit: its facts rows come from its rows in bronze
+    monkeypatch.setattr(pipeline, "_earlier_wave", lambda *args: None)
+    db.commit(CI, [(2, {"order_id": -1, "status": "new"})], at=T0 + timedelta(minutes=9))
+    with caplog.at_level("WARNING", logger="mssql_cdc.pipeline"):
+        status = cdc.backfill(
+            target, app_id="lost-v1", facts_table=facts, chunk_rows=5, max_waves=1
+        )
+    assert "backfill(chunk_rows=5) ignored" in caplog.text  # planned with 2: three chunks
+    assert (status["chunks_done"], status["chunks_total"], status["done"]) == (2, 3, False)
+    stamp = spark.read.format("delta").load(target).where("_operation = 0").first()["_start_lsn"]
+    chunks = _events(spark, facts, "snapshot_chunk")
+    assert {json.loads(r["detail"])["chunk"]: r["rows"] for r in chunks} == {0: 2, 1: 2}
+    assert {(r["min_lsn"], r["max_lsn"], r["read_seconds"], r["read_mb"]) for r in chunks} == {
+        (stamp, stamp, None, None)
+    }
+    assert stamp >= s
+    assert cdc.backfill(target, app_id="lost-v1", facts_table=facts)["done"]
+    [planned] = _events(spark, facts, "snapshot_plan")
+    assert json.loads(planned["detail"])["chunks"] == [[None, 2], [2, 4], [4, 6]]
+    run()
+    bronze = spark.read.format("delta").load(target)
+    snap = bronze.where("_operation = 0").select("order_id").collect()
+    assert len(snap) == len({r["order_id"] for r in snap}) == 6  # no key twice
+    assert sum(r["rows"] for r in _events(spark, facts, "snapshot_chunk")) == 6
+    assert _rebuilt(bronze, "order_id", "status", s) == _source(db)  # order -1 by the stream
+
+
 def test_backfill_pauses_while_the_stream_lags_or_has_stopped(delta_spark, workdir, monkeypatch):
     from mssql_cdc import sink, stream
 

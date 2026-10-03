@@ -151,6 +151,21 @@ def _plan_of(rows: list, snapshot: str) -> dict | None:
     return None
 
 
+def _earlier_wave(spark, target: str, key: str, wave: int) -> dict | None:
+    """The userMetadata of the commit that appended wave ``wave`` of ``key`` to ``target``,
+    from its history; None once log cleanup has dropped it."""
+    from pyspark.sql import functions as F
+
+    from .tables import delta_table
+
+    found = delta_table(spark, target).history().where(F.col("userMetadata").contains(key))
+    for (meta,) in found.select("userMetadata").collect():
+        earlier = json.loads(meta)
+        if earlier.get("backfill") == key and earlier.get("wave") == wave:
+            return earlier
+    return None
+
+
 def _version(spark, target: str) -> int:
     from .tables import delta_table
 
@@ -784,7 +799,8 @@ class CdcStream:
         last chunk comes the snapshot's 'bootstrap' or 'resnapshot' row, which tells
         downstream to rebuild from S. After a crash between a wave's append and its facts
         rows, the rerun's append is skipped by Delta and its rows are rebuilt from the one
-        committed: nothing is appended twice.
+        committed (from its commit's userMetadata or, once log cleanup dropped that, from its
+        rows in ``target``): nothing is appended twice.
 
         ``app_id``: the stream's, as given to ``to_delta``. ``max_waves`` and ``max_seconds``
         bound one call. ``min_headroom_hours``: pause before a wave while the stream's
@@ -1080,7 +1096,7 @@ class CdcStream:
                 ],
             }
             if counts:  # an empty wave writes no commit
-                tag = self._append_wave(target, rows, tag)
+                tag = self._append_wave(target, snapshot, rows, tag)
         finally:
             rows.unpersist()
         times: dict = {}
@@ -1125,11 +1141,12 @@ class CdcStream:
             for c in tag["chunks"]
         ]
 
-    def _append_wave(self, target: str, rows, tag: dict) -> dict:
+    def _append_wave(self, target: str, snapshot: str, rows, tag: dict) -> dict:
         """Append a wave's ``rows`` to ``target`` in one commit with ``tag`` as its
         userMetadata, once per (snapshot, wave). Returns the tag of the commit that holds
         them: this one's or, when Delta skipped the append, the one an earlier attempt of the
-        wave committed before it stopped short of its facts rows."""
+        wave committed before it stopped short of its facts rows (``_earlier_wave``), else
+        rebuilt from that attempt's rows in ``target``."""
         from pyspark.sql import functions as F
 
         from . import migrations
@@ -1154,15 +1171,29 @@ class CdcStream:
         new = _version(self.spark, target) - before
         if new and table.history(new).where(F.col("userMetadata") == text).first():
             return tag
-        found = table.history().where(F.col("userMetadata").contains(key)).select("userMetadata")
-        for (meta,) in found.collect():
-            earlier = json.loads(meta)
-            if earlier.get("backfill") == key and earlier.get("wave") == wave:
-                return earlier
-        raise RuntimeError(
-            f"{target} holds wave {wave} of {key} (Delta skipped its append), but its commit is "
-            "no longer in the table's history: take a new snapshot"
-        )
+        earlier = _earlier_wave(self.spark, target, key, wave)
+        if earlier:
+            return earlier
+        # log cleanup dropped that commit: its chunks' rows are in target, at their stamp
+        ids = [c["chunk"] for c in tag["chunks"]]
+        held = {
+            i: (n, high, low)
+            for i, n, high, low in table.toDF()
+            .where(
+                (F.col("_operation") == 0)
+                & (F.col("_snapshot") == snapshot)
+                & F.col("_chunk").isin(ids)
+            )
+            .groupBy("_chunk")
+            .agg(F.count(F.lit(1)), F.max("_start_lsn"), F.min("_start_lsn"))
+            .collect()
+        }
+        lsn = min((low for _, _, low in held.values()), default=tag["lsn"])
+        chunks = []
+        for c in tag["chunks"]:
+            n, high, _ = held.get(c["chunk"], (0, lsn, lsn))
+            chunks.append({**c, "rows": n, "high_lsn": high, "read_seconds": None, "read_mb": None})
+        return {**tag, "lsn": lsn, "chunks": chunks}
 
 
 def _snapshot_after_switch(sink, options: dict, ci: str, target: str, metrics: str):
