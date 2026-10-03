@@ -99,16 +99,43 @@ WHERE table_name IN ('bronze.orders', 'silver.orders');
 A [chunked snapshot](bootstrap.md#chunked-snapshots) arrives in waves over days, so pass
 `facts_table`: a call that finds chunk rows without it raises `ValueError`.
 
-- While a chunked bootstrap is open, each call applies the waves that arrived since the
-  last one, tracked by `open_snapshot_lsn` and `snapshot_wave` in the control table. A
-  chunk row is ranked with every later change of its key in bronze, so it never brings back
-  a key the stream deleted after the chunk's stamp.
+- While a chunked snapshot is open, a bootstrap or a re-snapshot, each call applies the
+  waves that arrived since the last one, tracked by `open_snapshot_lsn` and `snapshot_wave`
+  in the control table. A chunk row is ranked with every later change of its key in bronze,
+  so it never brings back a key the stream deleted after the chunk's stamp.
+- Each wave also removes the keys its chunks prove gone (range deletes, below).
 - At the snapshot's `bootstrap` or `resnapshot` row, silver is rebuilt from its rows and
   the changes after S, and every key absent from both is deleted, whatever the key type.
-- While a chunked re-snapshot is open, the calls only apply changes, as before it.
 - Silver's `finalized_until` stays where it was while a snapshot is open: silver lacks
-  keys, or still holds deleted ones, until the rebuild. A silver table built before the
-  snapshot keeps its stale keys until then too.
+  keys, or still holds deleted ones, until the rebuild.
+
+#### Range deletes
+
+A silver table built before a chunked re-snapshot holds keys that were deleted in the purged
+gap, and no delete row for them ever reaches bronze. Each wave removes the ones in its
+chunks' ranges: a chunk stamped L saw every commit up to L, so a silver key inside its range
+`[lo, hi)` that the chunk does not hold, and whose image is older than L, was gone by L. The
+call deletes it as a change at L, ranked with the rest, so a later change of the key in
+bronze still wins. The gap's deleted keys leave silver wave by wave instead of at the
+completion, which on a large table can be weeks later.
+
+- Which keys: silver's key must be the snapshot's own (the key its chunks are cut on, the
+  table's unique index) and a single column of an integer type, `date`, or a timestamp
+  (`datetime2`, `datetime`, `smalldatetime`), which Spark orders as SQL Server does. A
+  string key (SQL Server orders it by its collation, Spark by bytes), a composite key or
+  another type gets no range deletes: its stale keys go at the completion's rebuild.
+- Integer bounds are compared as `BIGINT`; the last chunk's end, MAX + 1, counts as open
+  when it does not fit (a `BIGINT` key at its maximum).
+- The microsecond rule: SQL Server keeps a `datetime2(7)` value to 100 ns, while Spark,
+  through the drivers, holds the key to the microsecond, truncated. The plan writes its
+  bounds to the microsecond, so they fall between two microseconds and every key lands on
+  the same side of them in both. A bound with a seventh digit would not: Spark could not
+  tell on which side the keys of that microsecond fall in SQL Server, so no chunk deletes
+  them (a lower bound moves up to the next microsecond, an upper one is truncated), and
+  those keys, if stale, go at the rebuild.
+
+The same applies during a chunked bootstrap, where a silver table that is new at the open
+has no stale keys to remove.
 
 ### After a switch to a new capture instance
 

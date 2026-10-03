@@ -2,7 +2,8 @@
 
 **Status:** accepted  
 **Date:** 2026-09-30T11:07:22-03:00  
-**Amended:** 2026-10-02T20:30:12-03:00, chunked snapshots, snapshots named by `_snapshot` and completion events, operation 3 deletes its own key (see the Amendment, ADR 0028)
+**Amended:** 2026-10-02T20:30:12-03:00, chunked snapshots, snapshots named by `_snapshot` and completion events, operation 3 deletes its own key (see the Amendment, ADR 0028)  
+**Amended:** 2026-10-03T14:30:38-03:00, an open re-snapshot's waves applied, and per-wave range deletes on one integer, date or timestamp key (see Amendment 2, ADR 0028)
 
 ## Context
 Bronze is an append-only change log: one row per change, updates as two rows, the snapshot
@@ -102,13 +103,15 @@ snapshot's `'snapshot_open'` row, so the rebuild point and the apply change:
   with `whenNotMatchedBySourceDelete` as before.
 * `facts_table` is required once bronze holds chunk rows: the facts say which chunks are in
   and when the snapshot is complete.
-* While a bootstrap is open (a `'snapshot_open'` newer than every complete snapshot, its
-  `mode` `'bootstrap'`), each call applies the waves its `'snapshot_chunk'` rows announced
-  since the last call, tracked by `open_snapshot_lsn` and `snapshot_wave` (control migration
-  2): the chunks land below `applied_lsn`, so the position alone cannot track them. Each
-  chunk's rows are ranked with every bronze change of their keys after S: a chunk row never
-  outranks a delete the stream committed after its stamp. Stale keys wait for the rebuild.
-* An open re-snapshot keeps applying changes; the rebuild comes at its completion row.
+* While a bootstrap is open (a chunked `'snapshot_open'` newer than every complete
+  snapshot, its `kind` `'bootstrap'`), each call applies the waves its `'snapshot_chunk'` rows
+  announced since the last call, tracked by `open_snapshot_lsn` and `snapshot_wave` (control
+  migration 2): the chunks land below `applied_lsn`, so the position alone cannot track them.
+  Each chunk's rows are ranked with every bronze change of their keys after S: a chunk row
+  never outranks a delete the stream committed after its stamp. Stale keys wait for the
+  rebuild (superseded for some keys by Amendment 2).
+* An open re-snapshot keeps applying changes; the rebuild comes at its completion row
+  (superseded by Amendment 2: its waves are applied too).
 * Silver's verdict is held while a snapshot is open: silver lacks keys or holds stale ones.
   Without `facts_table` it is never advanced: a chunked snapshot shows in the facts alone
   until its first wave, and so does an emptied table's re-snapshot.
@@ -116,3 +119,29 @@ snapshot's `'snapshot_open'` row, so the rebuild point and the apply change:
   (`_operation` descending), so only a 3 whose update moved the row to another key is the
   latest row. SQL Server records a primary-key update as 1 and 2 (`tests/integration`), but
   a key update recorded as 3 and 4 would have left the old key in silver forever.
+
+## Amendment 2: range deletes per wave
+The first amendment left a silver table's stale keys to the rebuild at a chunked
+snapshot's completion, and applied only the changes while a re-snapshot was open. For a
+large re-snapshot that leaves the keys deleted in the purged gap in silver for weeks. Now
+([ADR 0028](0028-chunked-snapshot-next-to-the-stream.md)'s Amendment):
+
+* An open re-snapshot's waves are applied as a bootstrap's are, tracked by
+  `open_snapshot_lsn` and `snapshot_wave`; the verdict stays held until its completion row.
+* Each wave deletes, at each chunk's stamp L, the silver keys of the chunk's range [lo, hi)
+  that the chunk does not hold and whose `_start_lsn` is below L. They join the ranking as
+  operation-1 rows stamped L, so a later change of the key outranks them, and a key whose
+  image is already newer than L is not touched.
+* Only when silver's key is the snapshot's own (the `keys` of its `'snapshot_open'` row) and
+  one column of an integer, date or timestamp type (`datetime2`, `datetime`,
+  `smalldatetime`): Spark compares those as SQL Server does. Strings (byte order against the
+  column's collation), composite keys and other types leave stale keys to the rebuild, as
+  before. Integer bounds are compared as BIGINT, and the plan's last bound (MAX + 1) is open
+  when it does not fit.
+* The microsecond rule: SQL Server keeps `datetime2(7)` to 100 ns, Spark to the microsecond
+  (the drivers truncate). The plan's bounds are truncated too, so they sit on a microsecond
+  and Spark places every key as SQL Server does. A bound with digits below the microsecond
+  would not: a lower one moves up one microsecond and an upper one is truncated, so the keys
+  in its microsecond are deleted by no chunk and left to the rebuild.
+* The rebuild at completion is unchanged: it still removes every key absent from the
+  snapshot and the changes after it, whatever the key type.

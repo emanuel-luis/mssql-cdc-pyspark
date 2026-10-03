@@ -237,7 +237,7 @@ For `mssql_cdc_snapshot` only: read only these chunks of the table, one partitio
 its first key (inclusive) and the key it ends before (exclusive). A key is a value for a
 one-column key and a list for a composite one, `null` for an open end; a value JSON has no
 type for is the text `CAST` reads back (a datetime in ISO 8601, binary as `0x` hex), as
-`client.next_chunks` plans them. With it, the rows gain a `_chunk INT` column with the
+`client.plan_chunks` plans them. With it, the rows gain a `_chunk INT` column with the
 chunk's number, and with [metricsPath](#metricspath) each chunk leaves
 `chunk-<chunk>.json` (rows, bytes, seconds, `max_lsn` after the read). Key bounds on a table
 whose key cannot be read in ranges (no unique index, a type no bound can be bound as) are a
@@ -360,14 +360,18 @@ captures instead of NULL. It reads the whole table. With a URI checkpoint it nee
 How `bootstrap=True` and `on_data_loss="resnapshot"` take a snapshot.
 
 * `"full"`: read the whole table before the query starts, as above.
-* `"chunked"`: only open one: record its LSN S, plan the chunks and write a
-  `snapshot_open` facts row, then start the stream (the new generation, after a loss) at S
-  at once. [backfill()](#backfill-parameters), run in a task of its own, reads the table in
-  chunks next to the stream and writes the `bootstrap` or `resnapshot` row at the end.
-  Requires `facts_table` (`ValueError`). A rerun finds the snapshot it opened and opens no
-  second one.
+* `"chunked"`: only open one: record its LSN S and the key's extent in a `snapshot_open`
+  facts row, then start the stream (the new generation, after a loss) at S at once.
+  [backfill()](#backfill-parameters), run in a task of its own, plans the chunks, reads the
+  table in chunks next to the stream and writes the `bootstrap` or `resnapshot` row at the
+  end. Requires `facts_table` (`ValueError`). A rerun finds the snapshot it opened and opens
+  no second one.
 
-Anything else is a `ValueError`. See
+Anything else is a `ValueError`. The mode holds for the whole run, its bootstrap and its
+re-snapshot, and may change between runs. With a `facts_table`, both modes record the
+snapshot as open before reading, and a run in one mode raises `ValueError` while a snapshot
+of the other mode is still open, saying how to finish it
+([One mode per run](../guides/bootstrap.md#one-mode-per-run)). See
 [Bootstrap](../guides/bootstrap.md#chunked-snapshots) and
 [ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md).
 
@@ -383,20 +387,25 @@ status = stream(spark, options).backfill(
 #  "paused": False, "reason": None}
 ```
 
-`backfill(target, *, app_id, facts_table, chunk_rows=1_000_000, max_waves=None,
+`backfill(target, *, app_id, facts_table, chunk_rows=None, max_waves=None,
 max_seconds=None, min_headroom_hours=None, isolation=None)` reads the newest chunked
 snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in waves of
 [numPartitions](#numpartitions) chunks, and returns how far it got. Call it again until
 `done`.
 
 * `target`, `app_id`, `facts_table`: as passed to `to_delta`; the stream's generations
-  (`<app_id>.g<n>`) are found from `app_id`. Without an open snapshot it returns at once,
-  `paused` with a `reason`.
-* `chunk_rows`: about how many rows a chunk holds (at least 1). One integer key steps over
-  its MIN..MAX from a row estimate, so chunks vary with the key's gaps; a sparser one (more
-  than 4 values per row) and other keys are cut at exactly that many rows when the chunk is
-  planned. The last chunk ends just above the MAX recorded at the open: rows inserted above
-  it come from the stream.
+  (`<app_id>.g<n>`) are found from `app_id`. Without an open chunked snapshot it returns at
+  once, `paused` with a `reason`. With a full snapshot of the stream still open it raises
+  `ValueError` ([One mode per run](../guides/bootstrap.md#one-mode-per-run)).
+* `chunk_rows`: the most rows a chunk holds when planned (at least 1; `None` is
+  1,000,000). It counts on the first call only, which plans every chunk and records the plan
+  in a `snapshot_plan` facts row; later calls keep the plan's value and log a warning when
+  given another. One integer key is counted per slice on the server and the slices packed
+  into chunks of at most `chunk_rows` rows, each but the last short of it by less than one
+  slice (about a sixteenth of `chunk_rows` on an even key); other keys are cut every
+  `chunk_rows` keys. The last chunk ends just above the MAX recorded at the open: rows
+  inserted above it come from the stream
+  ([How chunks are sized](../guides/bootstrap.md#how-chunks-are-sized)).
 * `max_waves`, `max_seconds`: stop after that many waves, or before a wave once that many
   seconds have passed. `None`: until the snapshot is done.
 * `min_headroom_hours`: before each wave, pause while the stream's newest facts row has
@@ -404,8 +413,8 @@ snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in waves 
 * `isolation`: `"snapshot"` sets [isolationLevel](#isolationlevel); `None` reads READ
   COMMITTED.
 
-The result: `snapshot` (its LSN S), `chunks_done`, `chunks_total` (an estimate for one
-integer key, `None` for other keys until done), `done`, and `paused` with its `reason`.
+The result: `snapshot` (its LSN S), `chunks_done`, `chunks_total` (the plan's count, `None`
+until a call has planned it), `done`, and `paused` with its `reason`.
 Each wave is one commit to `target` and one `snapshot_chunk` facts row per chunk
 ([Tables](tables.md#facts)).
 
@@ -416,10 +425,13 @@ offset = stream(spark, options).snapshot("bronze.orders")
 # {"lsn": "0x...", "commit_ts": "2026-09-28T14:03:12.117"}
 ```
 
-`snapshot(target, resnapshot=False)` appends the source table's current rows to `target` as
-operation 0 and returns the offset they are stamped with, to start a stream from
-([startingLsn](#startinglsn)). When `target` already holds a snapshot of the table, it returns
-that one's offset and reads nothing. `resnapshot=True` always takes a new one.
+`snapshot(target, resnapshot=False, *, app_id=None, facts_table=None)` appends the source
+table's current rows to `target` as operation 0 and returns the offset they are stamped
+with, to start a stream from ([startingLsn](#startinglsn)). When `target` already holds a
+snapshot of the table, it returns that one's offset and reads nothing. `resnapshot=True`
+always takes a new one. With `facts_table` (and the stream's `app_id`, else `ValueError`), a
+chunked snapshot of that stream still open in `target` raises `ValueError`: this one is
+full ([One mode per run](../guides/bootstrap.md#one-mode-per-run)).
 `to_delta(bootstrap=True)` and `on_data_loss="resnapshot"` call it for you.
 
 ## seed parameters
@@ -438,7 +450,8 @@ then starts from it.
 * `as_of`: when the copy started being read, as a UTC `datetime` (an aware one is converted),
   or an LSN recorded before that. Every commit at or before it must be in the copy.
 * `app_id`, `facts_table`: with a facts table, the stream's `app_id`; the seed writes the
-  `bootstrap` facts row `to_delta` would.
+  `bootstrap` facts row `to_delta` would, and raises `ValueError` while a snapshot of that
+  stream, full or chunked, is open in `target`.
 * `allow_missing_columns`: a captured column `df` lacks reads NULL instead of raising
   `ValueError`.
 * `reseed`: append a copy newer than the snapshot already in `target`, after a

@@ -43,7 +43,9 @@ the target and read nothing again.
 
 1. Before reading anything, it records the LSN `L`: `sys.fn_cdc_get_max_lsn()`, or the
    capture instance's first LSN minus one when capture has not reached a new instance yet.
-   Every commit up to `L` is already in the table when the read starts.
+   Every commit up to `L` is already in the table when the read starts. With a facts table
+   it first writes a `snapshot_open` facts row in mode `full`, which keeps a chunked run
+   from opening another snapshot until this one ends ([One mode per run](#one-mode-per-run)).
 2. It reads the table's current rows in the stream's schema, READ COMMITTED and never with
    `NOLOCK`. Each row has `_operation = 0`, `_start_lsn = L` and `_commit_ts` the commit
    time of `L`; `_seqval`, `_command_id` and `_batch_id` are NULL.
@@ -154,32 +156,30 @@ while True:
 
 How it behaves ([ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md)):
 
-1. The first `to_delta` records S, `sys.fn_cdc_get_max_lsn()` as for a full snapshot,
-   plans the chunks and writes a `snapshot_open` facts row with the plan. It reads nothing
-   from the table and starts the stream at S at once. Later runs find that row and start
-   from S again until the checkpoint has offsets.
-2. Each `backfill()` call finds the newest open snapshot of the target and reads it in
-   waves of [numPartitions](../reference/options.md#numpartitions) chunks of about
-   `chunk_rows` rows, one connection each. Before a wave is read, its stamp L is recorded,
-   `max_lsn` again, at or after S. The wave is appended to the target in one Delta commit:
-   operation 0, `_start_lsn` = L, `_snapshot` = S and the chunk in `_chunk`. Then one
-   `snapshot_chunk` facts row per chunk: its rows, L and its key range.
-3. After the last chunk, which ends just above the MAX recorded at the open, it writes the snapshot's `bootstrap` facts row, with min = max = S
-   and the rows of every chunk, and returns `done`. Downstream rebuilds from S: its rows and
-   every change after S.
+1. The first `to_delta` records S, `sys.fn_cdc_get_max_lsn()` as for a full snapshot, then
+   the key's MIN and MAX, and writes them in a `snapshot_open` facts row (mode `chunked`). It
+   reads nothing else from the table and starts the stream at S at once. Later runs find
+   that row and start from S again until the checkpoint has offsets.
+2. The first `backfill()` call plans every chunk ([below](#how-chunks-are-sized)) and records
+   the plan in a `snapshot_plan` facts row. Each call then reads the next chunks of the plan
+   in waves of [numPartitions](../reference/options.md#numpartitions) chunks, one connection
+   each. Before a wave is read, its stamp L is recorded, `max_lsn` again, at or after S. The
+   wave is appended to the target in one Delta commit: operation 0, `_start_lsn` = L,
+   `_snapshot` = S and the chunk in `_chunk`. Then one `snapshot_chunk` facts row per chunk:
+   its rows, L and its key range.
+3. After the last chunk, which ends just above the MAX recorded at the open, it writes the
+   snapshot's `bootstrap` facts row, with min = max = S and the rows of every chunk, and
+   returns `done`. Downstream rebuilds from S: its rows and every change after S.
 
 A commit that lands between a chunk's stamp and its read can show in the chunk and again as
 a change after S; the latest image per key absorbs it, as with a full snapshot. A key that
 moves between chunks while they are read is a change after S, which the stream carries, and
 so is every row inserted above the MAX: no chunk reads those.
 
-- Chunks: one integer key steps over its MIN..MAX from a row estimate
-  (`sys.sp_spaceused`), so `chunks_total` is an estimate; a sparse one (more than 4 values
-  per row, as with a sentinel far above the ids) and any other key are cut by seeking the
-  key `chunk_rows` rows after the previous chunk's end, wave by wave (`chunks_total` is
-  None until done). Both need only the stream's grants ([Permissions](permissions.md)).
 - A crash between a wave's append and its facts rows reruns that wave: Delta skips the
-  append and the facts rows are rebuilt from the commit, so nothing is appended twice.
+  append and the facts rows are rebuilt from the commit that holds the wave or, once Delta's
+  log cleanup has dropped that commit, from the wave's rows in the target (without its read
+  time and size). Nothing is appended twice.
 - `min_headroom_hours` pauses before a wave while the stream's newest facts row shows less
   [retention headroom](monitoring.md), or the stream has written none: the chunks share the
   link with the stream, and a stream that falls behind the retention loses the snapshot too.
@@ -187,12 +187,58 @@ so is every row inserted above the MAX: no chunk reads those.
   `ALLOW_SNAPSHOT_ISOLATION`: a chunk then does not wait for writers' locks, at the cost of
   the version store. By default it reads READ COMMITTED, where a chunk waits for a
   transaction holding locks in its range; never `NOLOCK`.
-- `max_waves` and `max_seconds` bound one call; the result also has `chunks_done` and the
-  snapshot's LSN.
+- `max_waves` and `max_seconds` bound one call; the result also has `chunks_done`,
+  `chunks_total` (the plan's, from the first call on) and the snapshot's LSN.
 
 [`apply_changes`](silver.md#chunked-snapshots) applies the waves as they arrive, when given
 the facts table. [`reconcile`](validation.md) checks the chunks against the facts and the
 result against the table.
+
+### How chunks are sized
+
+The first `backfill()` call plans every chunk of the snapshot, after S, and the plan never
+changes while the snapshot is open: a later call with another `chunk_rows` logs a warning
+and keeps the plan's. Each chunk is a fixed key range `[lo, hi)`; the first is open below,
+each starts where the previous ends, and the last ends just above the MAX.
+
+- One integer key: the rows are counted per slice of the key, about 16 slices per
+  `chunk_rows`, in one `GROUP BY` on the server. A slice holding more than `chunk_rows` rows
+  is counted again in finer slices. Consecutive slices are then joined into chunks of at
+  most `chunk_rows` rows. So the sizes follow where the rows are, not the key's spread: a
+  dense cluster of ids is split, and a sparse region or a sentinel far above the ids joins
+  its neighbours instead of making a chunk of its own. When planned, every chunk but the
+  last holds at most `chunk_rows` rows and loses less than one slice to the next; rows
+  written while the snapshot is read change that a little.
+- Any other key (composite, string, date): each chunk ends `chunk_rows` keys after the
+  previous one, found by seeking the key on the server.
+
+Planning reads the whole key once before the first wave, under READ COMMITTED: on a table of
+billions of rows that is a full scan of the narrowest index on the key, at the start of the
+first call. It needs only the stream's grants ([Permissions](permissions.md)), and reads no
+row over the network but the counts and the bounds.
+
+### One mode per run
+
+A run, one `to_delta` call with its bootstrap and its re-snapshot, takes its snapshots in
+one `snapshot` mode. The next run may use the other mode, but not while a snapshot of the
+other mode is still open. Both modes write a `snapshot_open` facts row before they read the
+table, and the snapshot's `bootstrap` or `resnapshot` row closes it. With a facts table,
+`to_delta` (with `bootstrap=True` or `on_data_loss="resnapshot"`),
+`snapshot(app_id=..., facts_table=...)` and `backfill()` raise `ValueError` when
+the stream has an open snapshot of the other mode, and `seed(app_id=..., facts_table=...)`
+when it has one of either mode.
+
+To finish an open snapshot and free the mode:
+
+- a chunked one: call `backfill()` until it returns `done` (or rerun `to_delta` with
+  `snapshot="chunked"` and keep calling it);
+- a full one, left open by a run that stopped while reading: rerun `to_delta` with
+  `snapshot="full"`, which reads the table again and writes its `bootstrap` or `resnapshot`
+  row.
+
+The error names the snapshot's LSN and generation. A full re-snapshot that cannot finish
+within the CDC retention never closes, so the stream stays in full mode until one does;
+moving it to chunked then takes a new checkpoint and `app_id`.
 
 ## Tables too big to snapshot
 
@@ -276,8 +322,9 @@ whole. With `snapshot="chunked"` the re-snapshot is chunked too
 - A chunked snapshot needs the stream running while it is read: a gap after S (data loss,
   `failOnDataLoss=false`) abandons it. Leave `snapshotLsn` unset: a stamp below S breaks it.
 - `to_delta(bootstrap=True)` with either `snapshot` mode, and `snapshot()`, return the S of
-  a chunked snapshot of the target, open or complete, instead of reading the table again;
-  `seed()` refuses a target that holds one. To take another kind, start a new target, or a
+  a chunked snapshot of the target, open or complete, instead of reading the table again
+  (given the facts table, a full run raises while it is open:
+  [One mode per run](#one-mode-per-run)); `seed()` refuses a target that holds one. To take another kind, start a new target, or a
   new checkpoint and `app_id`. Before the first wave lands only the facts show it, so
   `snapshot()` and `seed()`, which do not read them, would not see it then.
 

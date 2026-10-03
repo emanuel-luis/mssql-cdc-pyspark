@@ -922,11 +922,13 @@ class CdcStream:
         ``chunk_rows`` rows, next to the running stream; returns how far it got. Run it
         apart from the stream (its own task) and call it again until ``done``.
 
-        The first call plans every chunk (``client.plan_chunks``: an integer key from row
-        counts per slice of its range, other keys ``chunk_rows`` keys at a time) and records
-        the plan in a 'snapshot_plan' facts row; later calls read it, so the chunks never
-        change while the snapshot is open. ``chunk_rows``: 1,000,000 when None; a later call's
-        other value is ignored, with a warning.
+        The first call plans every chunk (``client.plan_chunks``: one integer key from row
+        counts per slice of its range, the slices packed into chunks of at most ``chunk_rows``
+        rows whatever the skew; other keys ``chunk_rows`` keys at a time) and records the plan
+        in a 'snapshot_plan' facts row; later calls read it, so the chunks never change while
+        the snapshot is open. ``chunk_rows``: 1,000,000 when None; a later call's other value
+        is ignored, with a warning. A full snapshot of the stream still open raises (one mode
+        while a snapshot is open).
 
         Each wave is stamped with ``max_lsn`` before it is read, at or after the snapshot's
         LSN S, appended to ``target`` in one commit (operation 0, ``_snapshot`` S,

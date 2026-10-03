@@ -134,17 +134,36 @@ cdc.backfill("bronze.orders", app_id="orders-v1", facts_table="ops.ingestion_fac
 1. As above, it records where the stream was, and the interval between re-snapshots still
    applies.
 2. It writes a `snapshot_open` facts row for the next generation (`app_id` `<app_id>.g<n>`)
-   with `mode` `resnapshot` and the gap in `lost_from_ts` and `lost_to_ts`, then the
-   generation's state with S as its snapshot LSN.
-3. `backfill()`, called with the same `app_id`, reads the chunks of the newest open
-   snapshot and, after the last one, writes the `resnapshot` row with min = max = S.
+   whose detail has `mode` `chunked` and `kind` `resnapshot`, with the gap in
+   `lost_from_ts` and `lost_to_ts`, then the generation's state with S as its snapshot LSN.
+3. `backfill()`, called with the same `app_id`, plans the chunks on its first call, reads
+   them and, after the last one, writes the `resnapshot` row with min = max = S.
 
 The table no longer has to be read within the retention: the stream reads every change
 from S while the chunks are read, so a re-snapshot cannot outlive its own LSN, and the
 failed attempt described in [the interval](#the-interval-between-re-snapshots) does not
 happen to it. Another loss while one is still open opens a newer one in the next
-generation, and the older one is abandoned. Downstream keeps applying changes while it is
-open and rebuilds from S once its `resnapshot` row is in ([Silver](silver.md#chunked-snapshots)).
+generation, and the older one is abandoned.
+
+A run keeps one `snapshot` mode for its bootstrap and its re-snapshot, and a recovery in
+the other mode raises while a snapshot of the stream is still open
+([One mode per run](bootstrap.md#one-mode-per-run)): finish the open one first.
+
+### Downstream during a chunked re-snapshot
+
+A silver table built before the loss still holds the rows the gap deleted, and those
+deletes never reach bronze. While the re-snapshot is open,
+[`apply_changes`](silver.md#chunked-snapshots) applies its waves as they land, with the
+changes after S, and keeps silver's `finalized_until` where it was:
+
+- With a single integer, `date` or timestamp key, the one the chunks are cut on, each wave
+  also deletes the silver keys of its chunks' ranges that the chunks do not hold and whose
+  image is older than the chunk's stamp ([range deletes](silver.md#range-deletes)). The
+  keys the gap deleted leave silver chunk by chunk, as the backfill goes.
+- With any other key, they stay until the `resnapshot` row is in.
+
+Either way, at the `resnapshot` row silver is rebuilt from S, and every key absent from
+the snapshot and the changes after it is deleted.
 
 ## Generations
 

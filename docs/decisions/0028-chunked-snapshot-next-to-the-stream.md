@@ -1,7 +1,8 @@
 # 0028: Chunked snapshots read next to the running stream
 
 **Status:** accepted  
-**Date:** 2026-10-02T20:30:12-03:00
+**Date:** 2026-10-02T20:30:12-03:00  
+**Amended:** 2026-10-03T14:30:38-03:00, chunks planned once from per-slice counts and fixed in a `'snapshot_plan'` row; a wave's facts rebuilt from bronze; one snapshot mode per run, locked while a snapshot is open; per-wave range deletes in silver, in re-snapshots and on datetime2 keys (see the Amendment)
 
 ## Context
 A snapshot taken before the stream starts (ADR 0016) has to be read within the CDC
@@ -65,9 +66,10 @@ silver's rebuild point), which chunk stamps break.
 ## Decision
 1. **Execution: `CdcStream.backfill()`, a batch call in waves, called again until done.**
    `to_delta(..., snapshot="chunked")` (with `bootstrap=True` or
-   `on_data_loss="resnapshot"`) only opens a snapshot: it records S, plans the chunks and
-   starts the stream generation at S at once, reading nothing from the table.
-   `backfill(target, *, app_id, facts_table, chunk_rows=1_000_000, max_waves=None,
+   `on_data_loss="resnapshot"`) only opens a snapshot: it records S and the key's extent and
+   starts the stream generation at S at once, reading nothing from the table; the first
+   `backfill()` call plans the chunks (Amendment).
+   `backfill(target, *, app_id, facts_table, chunk_rows=None, max_waves=None,
    max_seconds=None, min_headroom_hours=None, isolation=None)` reads the newest open
    snapshot in waves of `numPartitions` chunks, in its own task next to the stream task, and
    returns `{snapshot, chunks_done, chunks_total, done, paused, reason}`.
@@ -79,15 +81,17 @@ silver's rebuild point), which chunk stamps break.
 2. **State: facts event rows and two bronze columns; no new table.** Bronze gains
    `_snapshot` (S of the snapshot a row belongs to; NULL on change rows; on rows written
    before it, `_start_lsn` stands in) and `_chunk` (bronze migration 2). The facts carry
-   `'snapshot_open'` (min = max = S, detail: mode, keys, plan, generation, the gap),
-   one `'snapshot_chunk'` row per chunk (rows, min = its stamp L, max = `max_lsn` after the
-   read, detail: snapshot, chunk, wave, bounds, last) and, once the last chunk is in, the usual
-   `'bootstrap'` or `'resnapshot'` row with min = max = S (facts migration 7 rewrites the
-   comments). Only those two remain snapshots (invariant 14). The chunked mode requires
-   `facts_table`. A wave is one bronze append (`txnAppId <app_id>#snap.<S>`, `txnVersion`
-   the wave, its chunks in `userMetadata`), then its facts rows
-   (`<app_id>#snapchunks.<S>`, the wave): a crash between the two reruns the wave, Delta
-   skips the append and the facts rows are rebuilt from the commit that holds it. Every
+   `'snapshot_open'` (min = max = S, detail: mode, kind, keys, the key's extent, generation,
+   the gap; a full snapshot writes one too since the Amendment), `'snapshot_plan'` with every
+   chunk (Amendment), one `'snapshot_chunk'` row per chunk (rows, min = its stamp L, max =
+   `max_lsn` after the read, detail: snapshot, chunk, wave, bounds, last) and, once the last
+   chunk is in, the usual `'bootstrap'` or `'resnapshot'` row with min = max = S (facts
+   migrations 7 and 8 rewrite the comments). Only those two remain snapshots (invariant 14).
+   The chunked mode requires `facts_table`. A wave is one bronze append (`txnAppId
+   <app_id>#snap.<S>`, `txnVersion` the wave, its chunks in `userMetadata`), then its facts
+   rows (`<app_id>#snapchunks.<S>`, the wave): a crash between the two reruns the wave, Delta
+   skips the append and the facts rows are rebuilt from the commit that holds it, or from
+   the wave's rows in bronze once log cleanup has dropped that commit (Amendment). Every
    reader of "the snapshot" now uses `coalesce(_snapshot, _start_lsn)` and the completion
    events, never the largest operation-0 `_start_lsn`.
    - Considered: a state table of its own. Another kind to migrate, and a third table to
@@ -97,22 +101,26 @@ silver's rebuild point), which chunk stamps break.
 3. **Silver: waves applied as they arrive, rebuild at completion by absence.**
    At the completion row silver is rebuilt from the rows of S and the changes after S, with
    `whenNotMatchedBySourceDelete`: absence from the snapshot deletes, whatever the key type.
-   While a bootstrap is open, its waves are applied as their `'snapshot_chunk'` rows arrive
-   (position `open_snapshot_lsn` and `snapshot_wave`, control migration 2), each chunk row
-   with every bronze change of its key after S, so a chunk row never brings back a key the
-   stream deleted after its stamp. An open re-snapshot keeps applying changes and rebuilds
-   at completion; silver's verdict is held while a snapshot is open, and never advanced
-   without `facts_table`, the only place a snapshot shows before its first wave.
+   While a snapshot is open, a bootstrap or (since the Amendment) a re-snapshot, its waves
+   are applied as their `'snapshot_chunk'` rows arrive (position `open_snapshot_lsn` and
+   `snapshot_wave`, control migration 2), each chunk row with every bronze change of its key
+   after S, so a chunk row never brings back a key the stream deleted after its stamp. With
+   one integer, date or timestamp key that the chunks are cut on, each wave also deletes the
+   silver keys of its chunks' ranges that the chunks lack (Amendment). Silver's verdict is
+   held while a snapshot is open, and never advanced without `facts_table`, the only place a
+   snapshot shows before its first wave.
    Operation 3 now deletes its own key, outranked by the 4 of the
    same key and commit: a key update SQL Server records as 3 and 4 no longer leaves the
    old key behind.
    - Considered: only the rebuild at completion. A weeks-long bootstrap would leave silver
      without most rows for weeks.
-   - Considered: each chunk deleting the silver keys of its range it lacks. A silver table
-     fresh at the open only gets keys from chunk rows and changes after S, whose removals
-     reach bronze (P5); the rest are stale keys of a silver built before a lost history,
-     which the rebuild removes for every key type while the verdict is held. Spark also
-     orders strings by bytes, SQL Server by the column's collation.
+   - Considered at first and rejected, then taken by the Amendment for the keys Spark
+     orders as SQL Server does: each chunk deleting the silver keys of its range it lacks. A
+     silver table fresh at the open only gets keys from chunk rows and changes after S,
+     whose removals reach bronze (P5); the rest are stale keys of a silver built before a
+     lost history, which the rebuild removes for every key type while the verdict is held,
+     but only at the completion, weeks away for a large re-snapshot. Spark also orders
+     strings by bytes, SQL Server by the column's collation.
 4. **Isolation: READ COMMITTED, optionally SNAPSHOT, never `NOLOCK`.** A chunk reads as a
    whole snapshot does. `isolation="snapshot"` (reader option `isolationLevel=snapshot`)
    prefixes `SET TRANSACTION ISOLATION LEVEL SNAPSHOT` where the DBA set
@@ -135,14 +143,16 @@ silver's rebuild point), which chunk stamps break.
    - Considered: server-side `HASHBYTES` per bucket (a later tier, not now); never
      `CHECKSUM_AGG` or `BINARY_CHECKSUM`, which XOR and collide.
 
-Planning, in `client.snapshot_plan` and `client.next_chunks`, after S: one integer key gets
-arithmetic chunks over [MIN, MAX] with a step from a row estimate (`sys.sp_spaceused`,
-public), while it spans at most 4 values per row; a sparser one (a sentinel far above the ids
-would put every row in the first step) and any other key get keyset bounds found per wave,
-the key `chunk_rows` rows after the previous bound (`key_bound`: a `TOP (n + 1)` per seekable
-piece of the range), below the MAX recorded at the open. The final chunk ends at MAX + 1, or
-at the first key after MAX (open when there is none): a table written while it is read does
-not pile the rows inserted since S into the last chunk. Facts mark it `last`, which is what
+Planning, after S: the open records the key's extent (`client.snapshot_plan`) and the first
+`backfill()` call plans every chunk (`client.plan_chunks`) into a `'snapshot_plan'` row that
+no later call changes. One integer key gets chunks packed from row counts per slice of a
+fixed grid; any other key gets keyset bounds, the key `chunk_rows` rows after the previous
+bound (`key_bound`: a `TOP (n + 1)` per seekable piece of the range), walked up front below
+the MAX recorded at the open. This supersedes arithmetic steps over [MIN, MAX] from a
+`sys.sp_spaceused` estimate and keyset bounds found wave by wave (Amendment). The final
+chunk ends at MAX + 1, or at the first key after MAX (open when there is none, or when it
+reads back as MAX: Amendment): a table written while it is read does not pile the rows
+inserted since S into the last chunk. Facts mark it `last`, which is what
 completes the snapshot. Each wave is stamped with `snapshot_lsn()` before it is read and
 fails if that is below S (a readable secondary). `min_headroom_hours` pauses `backfill()`
 while the stream's newest facts row has less retention headroom, or there is none. A loss
@@ -163,11 +173,12 @@ read ends no longer exists for it.
   Also with a stamp below S (a manual `snapshotLsn`), `NOLOCK`, chunks read from a readable
   secondary with S from the primary, and a type change during a weeks-long snapshot, which
   fails the chunk's cast like the stream's (ADR 0023).
-* State: bronze migration 2, facts migration 7, control migration 2 and the `reconcile`
-  kind; existing tables migrate when next opened, and the legacy snapshots read
+* State: bronze migration 2, facts migrations 7 and 8, control migration 2 and the
+  `reconcile` kind; existing tables migrate when next opened, and the legacy snapshots read
   `coalesce(_snapshot, _start_lsn)`.
 * `to_delta(bootstrap=True)` in either `snapshot` mode, and `snapshot()`, return the S of a
-  chunked snapshot opened for the stream instead of reading the table again; seeding refuses
+  chunked snapshot opened for the stream instead of reading the table again (with the facts
+  table, a full run only once it is complete: the Amendment's lock); seeding refuses
   a target that holds one. A recovery that opened a chunked re-snapshot and stopped before
   writing its state reuses it, unless cleanup has passed it too: then it opens a newer one, a
   generation on.
@@ -181,10 +192,11 @@ read ends no longer exists for it.
   table; keyset chunks on a composite key (case-insensitive leading values) and a varchar key
   under changes; a chunk that waits under READ COMMITTED (`LCK_M_S`) for a transaction
   holding locks in its range; SNAPSHOT isolation refused until allowed, then reading the
-  committed rows without waiting; `sp_spaceused`, `key_max` and `key_bound` with a table
-  grant or column grants only; `key_bound` reading at most `n + 1` rows per piece; reconcile
-  matching a quiet table and classifying injected differences. Lab check t10 runs it under a
-  continuous writer and a held range, and `--resnapshot` through a purged gap.
+  committed rows without waiting; `sp_spaceused`, `key_max`, `key_bound` and a keyset plan
+  with a table grant or column grants only; `key_bound` reading at most `n + 1` rows per
+  piece; reconcile matching a quiet table and classifying injected differences; and, since
+  the Amendment, the tests listed there. Lab check t10 runs it under a continuous writer and
+  a held range, and `--resnapshot` through a purged gap.
 * Not verified: the RCSI-versus-capture visibility window behind P1 (theoretical,
   microseconds; the tests run under locking READ COMMITTED and SNAPSHOT); key updates on SQL
   Server 2017 (t9 covers 2017 for switches only); readable secondaries; Databricks, the
@@ -193,3 +205,114 @@ read ends no longer exists for it.
   metadata conflict).
 * ponytail: `backfill()` and `apply_changes` read the snapshot's facts rows on every call;
   filter by wave if that shows up.
+
+## Amendment: a fixed plan, one mode per run, range deletes
+The first version cut an integer key in equal steps over [MIN, MAX], so chunks were as
+uneven as the key, and re-planned keyset chunks on every call, so a later `backfill()` with
+another `chunk_rows` changed an open snapshot's chunks. A full and a chunked snapshot could
+both open on one generation, and silver kept the keys a re-snapshot's purged gap deleted
+until the completion, weeks away for a large table. Four changes, each superseding the
+passage of the Decision that points here.
+
+### Chunks planned once, sized by row counts
+* The first `backfill()` call plans every chunk (`client.plan_chunks`) and records them in a
+  `'snapshot_plan'` facts row (`txnAppId <app_id>#snapplan.<S>`, version 0; detail
+  `{snapshot, kind, keys, chunk_rows, chunks}`). Later calls read it: their `chunk_rows` is
+  ignored with a warning, `chunks_total` is exact from the first call on, and when two calls
+  plan at once Delta keeps the first row, which both then read. The open still records only
+  the key's extent (the `plan` of `'snapshot_open'`), so the stream starts at S without
+  waiting for the planning.
+* One integer key: its rows are counted per slice of a fixed grid over [MIN, MAX] in one
+  server-side `GROUP BY` (`key_buckets`, about 16 slices per `chunk_rows`, at most 100,000 in
+  one query); a slice holding more than `chunk_rows` is counted again on a finer grid over
+  its own MIN..MAX (`key_range`), down to one value. Consecutive slices are then packed, in
+  key order, into chunks of at most `chunk_rows`. The ranges stay fixed and the sizes follow
+  the counts, not the key's spread: a dense cluster is split, a sparse region or a sentinel
+  far above the ids joins its neighbours, and no chunk starts on an empty slice. When
+  planned, every chunk but the last holds at most `chunk_rows` rows and more than
+  `chunk_rows` less the slice after it (on an even key a slice is about a sixteenth of
+  `chunk_rows`); rows written since then change that a little. The `sys.sp_spaceused`
+  estimate only sizes the first grid.
+* Other keys keep keyset bounds, `chunk_rows` rows apart when planned, now all found before
+  the first wave. The drivers return a `datetime2(7)` key truncated to the microsecond (only
+  the last key column may be one, `key_types`), so its bounds sit on a microsecond, and when
+  the key after MAX shares MAX's microsecond its bound reads back as MAX's, at or below MAX:
+  the last chunk is then open, or the keys of that microsecond would be in no chunk (found
+  while amending, `tests/integration`).
+* Cost: planning reads the whole key once before the first wave (one `GROUP BY` over the
+  narrowest index on the key plus the recounts, or one `TOP (n + 1)` seek per chunk), under
+  READ COMMITTED even with `isolation="snapshot"`, so a writer holding locks delays it as it
+  delays a chunk read.
+* Considered: equal steps over [MIN, MAX] (the first version). One dense cluster or a
+  sentinel puts nearly every row in one chunk, and the switch to keyset bounds past 4
+  values per row was a guess.
+* Considered: planning wave by wave from the last bound. Cheaper up front, but the chunks
+  of an open snapshot then depend on each call's arguments, and `chunks_total` is unknown.
+
+### A wave's facts rebuilt from bronze
+When a rerun's append is skipped and the commit that holds the wave is no longer in the
+target's history (Delta log cleanup), its `'snapshot_chunk'` rows are rebuilt from its rows
+in bronze: rows per `_chunk` of `_snapshot` = S, bounds from the plan, the stamp from the
+rows' `_start_lsn` (the rerun's own stamp when none of the wave's chunks has rows), and
+`read_seconds` and `read_mb` NULL. Before, `backfill()` raised and the snapshot had to be
+taken again, though all its rows were in bronze. The history lookup stays the first try.
+
+### One snapshot mode per run, locked while a snapshot is open
+* A run (one `to_delta` call: its bootstrap and its re-snapshot) takes its snapshots in one
+  `snapshot` mode. The mode may change from one run to the next, never while a snapshot of
+  the other mode is open: a full read over a chunked snapshot still being backfilled, or a
+  chunked open over an unfinished full one, would put two snapshots in one generation.
+* A full snapshot now writes `'snapshot_open'` too, before it reads the table, under the
+  chunked open's `txnAppId` (`<app_id>#snapshots`, the generation). Its detail `mode` is
+  `'full'` or `'chunked'`, and `kind` holds `'bootstrap'` or `'resnapshot'` (the first
+  version, unreleased, put the kind in `mode`). A snapshot is open until a `'bootstrap'` or
+  `'resnapshot'` row of the same stream, any generation, has `max_lsn` at or after its S.
+* With a facts table, `to_delta` (with `bootstrap=True` or `on_data_loss="resnapshot"`),
+  `snapshot(app_id=, facts_table=)` and `backfill()` raise on an open snapshot of the other
+  mode, and `seed(app_id=, facts_table=)` on one of either mode. The error says how to
+  finish it: `backfill()` until done for a chunked one, a rerun with `snapshot="full"`
+  (which reads the table again) for a full one. Two runs opening one generation in
+  different modes: Delta keeps the first open row, the second reads it back and raises.
+  `backfill()` checks once per call, so a full open made during a call stops the next one.
+* Considered: no lock, the newest open wins. Silver's rebuild point and reconcile's chunk
+  checks would then mix two snapshots.
+* Considered: one mode for the stream's lifetime. A table that grows past what the
+  retention allows needs to move to chunked without a new checkpoint.
+* Consequence: a full re-snapshot that cannot finish within the retention never writes its
+  completion row, so the lock refuses `snapshot="chunked"` until a full run completes or the
+  stream starts over with a new checkpoint and `app_id`.
+
+### Range deletes per wave, in re-snapshots and on datetime2 keys
+* An open re-snapshot's waves are applied as a bootstrap's are: chunk rows with every later
+  change of their keys, tracked by `open_snapshot_lsn` and `snapshot_wave`, the verdict held
+  until the completion. Before, it applied changes only and waited for the rebuild.
+* Each wave also deletes, at each chunk's stamp L, the silver keys of its range [lo, hi)
+  that the chunk does not hold and whose image is older than L: the chunk saw every commit
+  up to L, so those keys were gone by then. They are ranked as delete rows stamped L, so a
+  later change of the key still wins. The keys a re-snapshot's purged gap deleted leave
+  silver wave by wave instead of at the completion.
+* Only when silver's key is the snapshot's own (the open row's `keys`: the bounds are cut on
+  it) and is one column of an integer, date or timestamp type (`datetime2`, `datetime`,
+  `smalldatetime`), which Spark orders as SQL Server does. Other keys (strings, whose
+  collation Spark ignores, composite keys, other types) keep leaving stale keys to the
+  rebuild at the completion.
+* Integer bounds are read as BIGINT; the plan's last bound, MAX + 1, counts as open when it
+  is past BIGINT's range.
+* A `datetime2(7)` key holds 100 ns, Spark only microseconds (the drivers truncate). The
+  plan's bounds are truncated the same way, so each key falls on the same side of them in
+  Spark as on SQL Server. A bound with digits below the microsecond would not place the keys
+  of its microsecond: a lower one moves up one microsecond and an upper one is truncated, so
+  no chunk deletes those keys and the rebuild does, never the wrong chunk.
+
+### Tests
+`tests/test_source_fake.py`: an integer plan packing counted slices whatever the skew.
+`tests/test_delta_sink.py`: the plan kept across calls and a wave's facts rebuilt from
+bronze without its commit; a full snapshot a crash left open holding its mode until a full
+run completes it; two runs opening one generation in different modes. `tests/test_silver.py`:
+each wave deleting the stale keys of its ranges, a chunked re-snapshot deleting the gap's
+keys wave by wave, an integer plan's last bound past BIGINT. `tests/test_client_sql.py`: the
+counting and seeking SQL. `tests/integration`: an integer plan counted on the server for a
+skewed BIGINT key (a dense cluster, a sparse region, a key at BIGINT's maximum) and
+backfilled; a `datetime2(7)` plan reading the keys in MAX's microsecond; a chunked
+re-snapshot deleting stale `datetime2(7)` keys wave by wave but not one in a bound's
+microsecond. Lab check t10 passes in both modes with the plan (LAB.md).
