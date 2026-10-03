@@ -9,8 +9,8 @@ retention: the stream starts at its LSN, and whatever cleanup purges after that 
 the table is still being read is lost, which an automatic re-snapshot can only repeat
 (ADR 0018). The read time is the table's size over the link: runs against a production
 source moved 1.8 to 5.9 MB/s of source data over four connections, 18,000 to 105,000 rows
-per second depending on the row width. At those rates a table of 13.7 billion rows takes 1.5
-to 9 days, against a default retention of 3 days, and longer for wider rows or a slower link
+per second depending on the row width. At those rates a table of ten billion rows takes 1 to 6
+days, against a default retention of 3 days, and longer for wider rows or a slower link
 shared with the stream. Seeding from a copy (ADR 0025) needs a copy someone already has.
 A long snapshot also shows no progress until its one Delta
 commit at the end, and a failed task reads its whole range again.
