@@ -189,7 +189,10 @@ notes/             Local only, gitignored: research notes in Portuguese (context
 * `lab/checks` prove SQL Server behaviour; CI (`.github/workflows/ci.yml`) runs them
   against `mcr.microsoft.com/mssql/server:2022-latest`.
 * Claims in docs or write-ups must be backed by a check result in `lab/results/` or a
-  passing test in `tests/integration`.
+  passing test in `tests/integration`. The one exception is a measurement taken outside
+  the repo against a real source (throughput over a real link, for instance): state it as
+  such ("measured against a production source", with the setup), never with names of the
+  source, its tables or its owner.
 
 ## Settled by the lab
 
