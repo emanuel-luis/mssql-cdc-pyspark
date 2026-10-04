@@ -1621,6 +1621,75 @@ def test_a_snapshot_isolation_read_takes_the_committed_rows_without_waiting(sqls
         sqlserver.run("ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION OFF")
 
 
+@pytest.mark.parametrize("keys", ["a", "a, b"])  # rows counted per slice; keyset seeks
+def test_a_snapshot_isolation_plan_does_not_wait_for_a_writers_locks(sqlserver, backend, keys):
+    from mssql_cdc.client import plan_chunks, snapshot_plan
+
+    table = "ck_plan_si_int" if keys == "a" else "ck_plan_si_keyset"
+    ci = sqlserver.cdc_table(
+        table, f"a INT NOT NULL, b VARCHAR(5) NOT NULL, v VARCHAR(10), PRIMARY KEY ({keys})"
+    )
+    sqlserver.run(
+        f"INSERT INTO dbo.{table} SELECT n, CONCAT('b', n), 'old' FROM {_ROWS} WHERE n <= 40"
+    )
+    options = {"connectionString": _reader(sqlserver, table, ci), "backend": backend}
+    with closing(make_client(options)) as client:  # recorded at the open, before the lock
+        source = client.source_table(ci)
+        extent = snapshot_plan(client, ci, source)
+
+    def plan(isolation, out: dict) -> None:
+        try:
+            with closing(make_client(options)) as client:
+                out["plan"] = plan_chunks(client, ci, source, extent, 10, isolation)
+                out["level"] = client._b.scalar(
+                    "SELECT transaction_isolation_level FROM sys.dm_exec_sessions "
+                    "WHERE session_id = @@SPID"
+                )
+        except Exception as exc:  # noqa: BLE001 - the assertion shows it
+            out["plan"] = exc
+
+    def start(isolation) -> tuple[threading.Thread, dict]:
+        out: dict = {}
+        thread = threading.Thread(target=plan, args=(isolation, out), daemon=True)
+        thread.start()
+        return thread, out
+
+    expected: dict = {}
+    plan(None, expected)
+    sqlserver.run("ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION ON")
+    holder = sqlserver.connect()
+    try:
+        held = holder.cursor()
+        held.execute("SELECT @@SPID")
+        spid = held.fetchone()[0]
+        held.execute(f"BEGIN TRAN; UPDATE dbo.{table} SET v = 'held' WHERE a BETWEEN 21 AND 25")
+        snap, snapped = start("snapshot")
+        snap.join(10)
+        fast = not snap.is_alive()
+        committed, waited = start(None)
+        # READ COMMITTED: the GROUP BY or the seeks wait on the holder's locks
+        sqlserver.wait_for(
+            "SELECT COUNT(*) FROM sys.dm_exec_requests WHERE blocking_session_id = ?",
+            (spid,),
+            timeout=60,
+        )
+        assert committed.is_alive()
+        held.execute("COMMIT")
+        committed.join(60)
+        snap.join(60)
+    finally:
+        holder.close()
+        sqlserver.run("ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION OFF")
+    assert fast and snapped["plan"] == expected["plan"]  # the committed versions, no wait
+    assert waited["plan"] == expected["plan"]
+    assert len(expected["plan"]) == 4
+    # the integer plan's last count, a batch without parameters, leaves its session at SNAPSHOT
+    # (sys.dm_exec_sessions: 2 is READ COMMITTED, 5 SNAPSHOT); a client of its own each time
+    assert (expected["level"], waited["level"]) == (2, 2)
+    if keys == "a":
+        assert snapped["level"] == 5
+
+
 @pytest.mark.parametrize("grant", ["table", "columns"])
 def test_chunk_planning_needs_only_select_on_the_table(sqlserver, grant, backend):
     from mssql_cdc.client import plan_chunks, snapshot_plan

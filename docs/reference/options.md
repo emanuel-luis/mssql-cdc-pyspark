@@ -413,8 +413,10 @@ snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in waves 
   seconds have passed. `None`: until the snapshot is done.
 * `min_headroom_hours`: before each wave, pause while the stream's newest facts row has
   less retention headroom (less that row's age), or there is none. `None`: never pause.
-* `isolation`: `"snapshot"` sets [isolationLevel](#isolationlevel); `None` reads READ
-  COMMITTED.
+* `isolation`: `"snapshot"` sets [isolationLevel](#isolationlevel) and plans the chunks
+  under SNAPSHOT isolation too (the counts and seeks of the first call, and the search for
+  the first key after MAX before each wave), so neither waits for writers' locks; `None`
+  reads and plans READ COMMITTED.
 
 The result: `snapshot` (its LSN S), `chunks_done`, `chunks_total` (the plan's count, `None`
 until a call has planned it), `done`, and `paused` with its `reason`.

@@ -4,6 +4,7 @@
 **Date:** 2026-10-02T20:30:12-03:00  
 **Amended:** 2026-10-03T14:30:38-03:00, chunks planned once from per-slice counts and fixed in a `'snapshot_plan'` row; a wave's facts rebuilt from bronze; one snapshot mode per run, locked while a snapshot is open; per-wave range deletes in silver, in re-snapshots and on datetime2 keys (see the Amendment)
 **Amended:** 2026-10-03T18:10:05-03:00, a full snapshot opens once per run and stops holding the mode once CDC cleanup passes it; a wave rebuilt from the chunks bronze holds; a keyset plan's open last chunk closed when read (see the Amendment)
+**Amended:** 2026-10-04T17:20:07-03:00, the plan counted and sought under the backfill's isolation, so `isolation="snapshot"` planning does not wait for writers' locks (see the Amendment)
 
 ## Context
 A snapshot taken before the stream starts (ADR 0016) has to be read within the CDC
@@ -249,8 +250,10 @@ passage of the Decision that points here.
   `uniqueidentifier`). Every other bound stays as planned.
 * Cost: planning reads the whole key once before the first wave (one `GROUP BY` over the
   narrowest index on the key plus the recounts, or one `TOP (n + 1)` seek per chunk), under
-  READ COMMITTED even with `isolation="snapshot"`, so a writer holding locks delays it as it
-  delays a chunk read.
+  the backfill's isolation: READ COMMITTED by default, where a writer holding locks delays
+  it as it delays a chunk read. With `isolation="snapshot"` the counts, the seeks and
+  `last_bound`'s search before each wave read under SNAPSHOT too, as the chunks do, and do
+  not wait (the first version planned under READ COMMITTED whatever the isolation).
 * Considered: equal steps over [MIN, MAX] (the first version). One dense cluster or a
   sentinel puts nearly every row in one chunk, and the switch to keyset bounds past 4
   values per row was a guess.
@@ -344,4 +347,6 @@ counting and seeking SQL. `tests/integration`: an integer plan counted on the se
 skewed BIGINT key (a dense cluster, a sparse region, a key at BIGINT's maximum) and
 backfilled; a `datetime2(7)` plan reading the keys in MAX's microsecond; a chunked
 re-snapshot deleting stale `datetime2(7)` keys wave by wave but not one in a bound's
-microsecond. Lab check t10 passes in both modes with the plan (LAB.md).
+microsecond; integer and keyset plans under SNAPSHOT isolation not waiting for the locks a
+writer holds, which a READ COMMITTED plan waits on. Lab check t10 passes in both modes with
+the plan (LAB.md).

@@ -981,7 +981,9 @@ class CdcStream:
         retention headroom (of its newest facts row, less that row's age) is below it, or
         the stream has written none: the snapshot shares the link with the stream, and a
         stream the retention passes loses the snapshot too. ``isolation``: ``"snapshot"``
-        reads under SNAPSHOT isolation, which the database must allow; else READ COMMITTED.
+        reads the chunks and plans them (the counts and seeks of ``plan_chunks``, the first
+        key after MAX of ``last_bound``) under SNAPSHOT isolation, which the database must
+        allow; else READ COMMITTED.
 
         Returns ``{"snapshot", "chunks_done", "chunks_total", "done", "paused", "reason"}``:
         ``chunks_total`` is the plan's, None until a call has planned it.
@@ -1076,7 +1078,16 @@ class CdcStream:
                     break
                 if plan is None:
                     self._plan(
-                        client, ci, source, info, top, target, facts_table, app_id, chunk_rows
+                        client,
+                        ci,
+                        source,
+                        info,
+                        top,
+                        target,
+                        facts_table,
+                        app_id,
+                        chunk_rows,
+                        isolation,
                     )
                     plan = _plan_of(read_facts(), s)  # a concurrent call's, if Delta skipped ours
                     assert plan is not None  # written just now
@@ -1093,7 +1104,7 @@ class CdcStream:
                     # a keyset plan's last chunk ends at the first key after MAX, and there was
                     # none at planning: sought again, so that rows inserted above MAX since,
                     # the stream's, do not pile up in the last chunk
-                    end = last_bound(client, ci, source, info["plan"]["max"])
+                    end = last_bound(client, ci, source, info["plan"]["max"], isolation)
                     every = [*every[:-1], [every[-1][0], end]]
                 planned = [[i, *every[i]] for i in range(first, min(first + max(1, k), len(every)))]
                 wave = last["wave"] + 1 if last else 0
@@ -1142,9 +1153,12 @@ class CdcStream:
         total = len(chunks) if done else len(plan["chunks"]) if plan else None
         return {**status, "chunks_done": len(chunks), "chunks_total": total, "done": done}
 
-    def _plan(self, client, ci, source, info, top, target, facts_table, app_id, chunk_rows) -> None:
-        """Plan every chunk of the snapshot opened by facts row ``top`` (``info``, its detail)
-        and record them in its 'snapshot_plan' row, once: Delta skips a rerun's."""
+    def _plan(
+        self, client, ci, source, info, top, target, facts_table, app_id, chunk_rows, isolation
+    ) -> None:
+        """Plan every chunk of the snapshot opened by facts row ``top`` (``info``, its detail),
+        under ``isolation``, and record them in its 'snapshot_plan' row, once: Delta skips a
+        rerun's."""
         from . import sink
         from .client import plan_chunks
 
@@ -1155,7 +1169,7 @@ class CdcStream:
             "kind": info["plan"]["kind"],
             "keys": source.keys,
             "chunk_rows": rows,
-            "chunks": plan_chunks(client, ci, source, info["plan"], rows),
+            "chunks": plan_chunks(client, ci, source, info["plan"], rows, isolation),
         }
         sink.write_event(
             self.spark,

@@ -826,6 +826,53 @@ def test_a_chunk_reads_under_read_committed_or_snapshot_never_nolock():
     assert not any("NOLOCK" in sql or "UNCOMMITTED" in sql for sql, _ in rec.calls)
 
 
+def test_chunk_planning_counts_and_seeks_under_the_backfills_isolation():
+    from mssql_cdc.client import SourceTable, plan_chunks
+
+    rec = Recorder()
+    client = SqlCdcClient(rec, source_timezone="UTC")
+    t = "[sales].[orders] WHERE [id] >= 0 AND [id] < 10"
+    o, w = "CAST([id] AS bigint)", "CAST(10 AS bigint)"
+    planning = [
+        (
+            lambda *i: client.key_range("sales", "orders", "id", 0, 10, *i),
+            f"SELECT (SELECT MIN([id]) FROM {t}) AS lo, (SELECT MAX([id]) FROM {t}) AS hi",
+        ),
+        (
+            lambda *i: client.key_buckets("sales", "orders", "id", "int", 10, 0, 10, *i),
+            (
+                "SELECT [__$b] AS b, COUNT_BIG(*) AS n, SUM(CAST([__$o] AS decimal(38,0))) AS s "
+                f"FROM (SELECT {o} AS [__$o], CASE WHEN {o} >= 0 THEN {o} / {w} "
+                f"ELSE ({o} + 1) / {w} - 1 END AS [__$b] FROM [sales].[orders] "
+                "WHERE [id] IS NOT NULL AND [id] >= 0 AND [id] < 10) x GROUP BY [__$b]"
+            ),
+        ),
+        (
+            lambda *i: client.key_bound("sales", "orders", ["id"], None, None, (9,), 5, *i),
+            (
+                "SELECT [id] FROM (SELECT * FROM (SELECT TOP (6) [id] FROM [sales].[orders] WHERE "
+                "([id] < 9 OR [id] IS NULL) ORDER BY [id]) p) u ORDER BY [id] "
+                "OFFSET 5 ROWS FETCH NEXT 1 ROWS ONLY"
+            ),
+        ),
+    ]
+    for plan, sql in planning:
+        plan()
+        assert rec.calls[-1][0] == sql  # READ COMMITTED: as before
+        plan(None)
+        assert rec.calls[-1][0] == sql
+        plan("snapshot")  # as the chunks read
+        assert rec.calls[-1][0] == "SET TRANSACTION ISOLATION LEVEL SNAPSHOT; " + sql
+        with pytest.raises(ValueError, match="isolation"):
+            plan("uncommitted")
+    assert not any("NOLOCK" in sql or "UNCOMMITTED" in sql for sql, _ in rec.calls)
+    # plan_chunks hands it down: an integer plan's count
+    source = SourceTable("sales", "orders", ["id"], None)
+    extent = {"kind": "int", "lo": 0, "hi": 9, "rows": 0}
+    assert plan_chunks(client, "dbo_orders", source, extent, 10, "snapshot") == [[None, 10]]
+    assert rec.calls[-1][0].startswith("SET TRANSACTION ISOLATION LEVEL SNAPSHOT; SELECT [__$b]")
+
+
 def test_chunk_bounds_cross_json_as_text_cast_reads_back():
     from mssql_cdc.client import _json_key, _key_select, _key_tuple
 

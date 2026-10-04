@@ -249,7 +249,7 @@ class FakeCdcClient(CdcClient):
             if v is not None and (lo is None or v >= lo) and (hi is None or v < hi)
         ]
 
-    def key_range(self, schema, table, key, lo=None, hi=None):
+    def key_range(self, schema, table, key, lo=None, hi=None, isolation=None):
         keys = self._key_values(table, key, lo, hi)
         return (min(keys), max(keys)) if keys else (None, None)
 
@@ -286,7 +286,7 @@ class FakeCdcClient(CdcClient):
         found = self._keys_in(table, keys, None, None)
         return found[-1] if found else None
 
-    def key_bound(self, schema, table, keys, types, lo, hi, n):
+    def key_bound(self, schema, table, keys, types, lo, hi, n, isolation=None):
         found = self._keys_in(table, keys, lo, hi)
         return found[int(n)] if len(found) > int(n) else None
 
@@ -305,7 +305,7 @@ class FakeCdcClient(CdcClient):
             db.commit(tx["capture_instance"], [(op, row) for op, row in tx["changes"]], at)
         os.remove(claimed)
 
-    def key_buckets(self, schema, table, key, kind, width, lo=None, hi=None):
+    def key_buckets(self, schema, table, key, kind, width, lo=None, hi=None, isolation=None):
         # ponytail: integer keys only; the table's JSON rows keep no date type
         if key is None:
             return [(0, len(self._table(table)), None)]

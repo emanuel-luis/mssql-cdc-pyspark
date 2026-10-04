@@ -184,9 +184,9 @@ so is every row inserted above the MAX: no chunk reads those.
   [retention headroom](monitoring.md), or the stream has written none: the chunks share the
   link with the stream, and a stream that falls behind the retention loses the snapshot too.
 - `isolation="snapshot"` reads under SNAPSHOT isolation, where the DBA has set
-  `ALLOW_SNAPSHOT_ISOLATION`: a chunk then does not wait for writers' locks, at the cost of
-  the version store. By default it reads READ COMMITTED, where a chunk waits for a
-  transaction holding locks in its range; never `NOLOCK`.
+  `ALLOW_SNAPSHOT_ISOLATION`: neither a chunk nor the planning then waits for writers'
+  locks, at the cost of the version store. By default it reads READ COMMITTED, where a chunk
+  or the plan waits for a transaction holding locks in its range; never `NOLOCK`.
 - `max_waves` and `max_seconds` bound one call; the result also has `chunks_done`,
   `chunks_total` (the plan's, from the first call on) and the snapshot's LSN.
 

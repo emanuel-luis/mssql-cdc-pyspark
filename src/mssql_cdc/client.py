@@ -244,6 +244,19 @@ def _int_range(k: str, lo, hi, joiner: str) -> str:
     return f" {joiner} " + " AND ".join(parts) if parts else ""
 
 
+def _isolated(sql: str, isolation: str | None) -> str:
+    """``sql`` read under ``isolation``: None (READ COMMITTED) or ``"snapshot"``; never READ
+    UNCOMMITTED, whose dirty reads a rollback can leave in a snapshot or a plan."""
+    if isolation not in (None, "snapshot"):
+        raise ValueError(f"isolation must be None or 'snapshot', not {isolation!r}")
+    # SNAPSHOT reads the versions committed when the SELECT starts, without the writers' locks;
+    # SQL Server refuses it unless the DBA set ALLOW_SNAPSHOT_ISOLATION. Sent without
+    # parameters, the batch leaves the session at SNAPSHOT (tests/integration): after an
+    # integer plan, backfill's client only reads CDC metadata (max_lsn, commit times) and seeks
+    # the first key after MAX under SNAPSHOT anyway.
+    return "SET TRANSACTION ISOLATION LEVEL SNAPSHOT; " + sql if isolation else sql
+
+
 def _json_key(values: Sequence, types) -> object:
     """A key as JSON, for a chunk bound (``snapshotChunks``, the facts' detail): a scalar for
     one column, a list for several. A value JSON has no type for becomes the text ``CAST``
@@ -292,7 +305,12 @@ _MAX_SLICES = 100_000
 
 
 def plan_chunks(
-    client: CdcClient, capture_instance: str, source: SourceTable, extent: dict, chunk_rows: int
+    client: CdcClient,
+    capture_instance: str,
+    source: SourceTable,
+    extent: dict,
+    chunk_rows: int,
+    isolation: str | None = None,
 ) -> list[list]:
     """Every chunk ``[lo, hi)`` (JSON bounds) of a chunked snapshot whose ``snapshot_plan`` is
     ``extent``, of at most about ``chunk_rows`` rows each, planned once before its first wave
@@ -305,10 +323,11 @@ def plan_chunks(
 
     One integer key: rows counted per slice of a fixed grid (``_int_chunks``), so a sparse
     region or a sentinel far above the ids neither empties nor overfills a chunk. Other keys:
-    the key ``chunk_rows`` rows after the previous bound (``key_bound``), walked up front."""
+    the key ``chunk_rows`` rows after the previous bound (``key_bound``), walked up front.
+    ``isolation``: the counts and seeks read as ``iter_table``'s, as the chunks will be."""
     s, t, keys = source.schema, source.table, source.keys
     if extent["kind"] == "int":
-        return _int_chunks(client, s, t, keys[0], extent, chunk_rows)
+        return _int_chunks(client, s, t, keys[0], extent, chunk_rows, isolation)
     if extent["max"] is None:
         return [[None, None]]
     types: list = client.key_types(capture_instance, keys)  # all set: the extent has a MAX
@@ -316,20 +335,27 @@ def plan_chunks(
     out: list[list] = []
     lo = None
     while True:
-        bound = client.key_bound(s, t, keys, types, _key_tuple(lo), top, chunk_rows)
+        bound = client.key_bound(s, t, keys, types, _key_tuple(lo), top, chunk_rows, isolation)
         if bound is None:
             break
         out.append([lo, _json_key(bound, types)])
         lo = out[-1][1]
-    return [*out, [lo, last_bound(client, capture_instance, source, extent["max"])]]
+    end = last_bound(client, capture_instance, source, extent["max"], isolation)
+    return [*out, [lo, end]]
 
 
-def last_bound(client: CdcClient, capture_instance: str, source: SourceTable, top) -> object:
+def last_bound(
+    client: CdcClient,
+    capture_instance: str,
+    source: SourceTable,
+    top,
+    isolation: str | None = None,
+) -> object:
     """The end of a keyset plan's last chunk: the first key after MAX (``top``, as JSON) now,
-    as JSON; None (open) when there is none."""
+    as JSON; None (open) when there is none. ``isolation``: as ``iter_table``'s."""
     types: list = client.key_types(capture_instance, source.keys)  # all set: there is a MAX
     after = client.key_bound(
-        source.schema, source.table, source.keys, types, _key_tuple(top), None, 1
+        source.schema, source.table, source.keys, types, _key_tuple(top), None, 1, isolation
     )
     end = None if after is None else _json_key(after, types)
     # A datetime2(7) last key column comes back truncated to the microsecond (key_types): when
@@ -339,7 +365,13 @@ def last_bound(client: CdcClient, capture_instance: str, source: SourceTable, to
 
 
 def _int_chunks(
-    client: CdcClient, schema: str, table: str, key: str, extent: dict, chunk_rows: int
+    client: CdcClient,
+    schema: str,
+    table: str,
+    key: str,
+    extent: dict,
+    chunk_rows: int,
+    isolation: str | None = None,
 ) -> list[list]:
     """An integer key's chunks: its rows counted per slice of a fixed grid in one GROUP BY
     (``key_buckets``, about ``_SLICES`` slices per ``chunk_rows``), then consecutive slices
@@ -353,11 +385,12 @@ def _int_chunks(
         n = min(_MAX_SLICES, max(1, -(-_SLICES * rows // chunk_rows)))
         w = max(1, -(-(hi - lo + 1) // n))
         out: list[tuple[int, int]] = []
-        for i, count, _ in sorted(client.key_buckets(schema, table, key, "int", w, a, b)):
+        buckets = client.key_buckets(schema, table, key, "int", w, a, b, isolation)
+        for i, count, _ in sorted(buckets):
             x = i * w if a is None else max(i * w, a)
             y = (i + 1) * w if b is None else min((i + 1) * w, b)
             big = count > chunk_rows and w > 1
-            inner = client.key_range(schema, table, key, x, y) if big else (None,)
+            inner = client.key_range(schema, table, key, x, y, isolation) if big else (None,)
             if inner[0] is not None:
                 out += cut(x, y, inner[0], inner[1], count)
             else:
@@ -431,9 +464,12 @@ class CdcClient(ABC):
         """The table ``capture_instance`` tracks, its key and the instance's first LSN."""
 
     @abstractmethod
-    def key_range(self, schema: str, table: str, key: str, lo=None, hi=None) -> tuple:
+    def key_range(
+        self, schema: str, table: str, key: str, lo=None, hi=None, isolation: str | None = None
+    ) -> tuple:
         """(MIN, MAX) of ``key`` in the table; (None, None) when it is empty. ``lo``/``hi``:
-        an integer key's rows in ``[lo, hi)`` only (None: open)."""
+        an integer key's rows in ``[lo, hi)`` only (None: open). ``isolation``: as
+        ``iter_table``'s."""
 
     @abstractmethod
     def key_types(self, capture_instance: str, keys: Sequence[str]) -> list[str | None]:
@@ -455,13 +491,14 @@ class CdcClient(ABC):
         width: int,
         lo: int | None = None,
         hi: int | None = None,
+        isolation: str | None = None,
     ) -> list[tuple]:
         """``(bucket, rows, key_sum)`` of the table's rows grouped by ``floor(o / width)``,
         ``o`` the key's ordinal: an integer key itself (``kind`` "int"), a date its day number
         from 1970-01-01 ("date"); ``key_sum`` sums ``o``. A NULL key is in no bucket. ``key``
         None: ``[(0, rows, None)]``, the whole table. ``lo``/``hi``: an integer key's rows in
-        ``[lo, hi)`` only (None: open). Tier 1 of ``reconcile()``; a chunked snapshot's
-        integer plan (``plan_chunks``)."""
+        ``[lo, hi)`` only (None: open). ``isolation``: as ``iter_table``'s. Tier 1 of
+        ``reconcile()``; a chunked snapshot's integer plan (``plan_chunks``)."""
 
     @abstractmethod
     def iter_table(
@@ -501,9 +538,11 @@ class CdcClient(ABC):
         lo: tuple | None,
         hi: tuple | None,
         n: int,
+        isolation: str | None = None,
     ) -> tuple | None:
         """The key that leaves ``n`` rows in ``[lo, key)``: the (n + 1)-th of the rows with
-        ``lo <= (keys) < hi`` in ORDER BY's order. None when they are ``n`` or fewer."""
+        ``lo <= (keys) < hi`` in ORDER BY's order. None when they are ``n`` or fewer.
+        ``isolation``: as ``iter_table``'s."""
 
     # -- schema changes and capture instance switches (ADR 0023) ----------------
     @abstractmethod
@@ -1072,13 +1111,12 @@ class SqlCdcClient(CdcClient):
             self._hex(r["start_lsn"]),
         )
 
-    def key_range(self, schema, table, key, lo=None, hi=None):
+    def key_range(self, schema, table, key, lo=None, hi=None, isolation=None):
         t, k = f"[{_check_column(schema)}].[{_check_column(table)}]", f"[{_check_column(key)}]"
         t += _int_range(k, lo, hi, "WHERE")
         # two scalar subqueries: each is one seek on an index led by the key
-        for batch in self._b.batches(
-            f"SELECT (SELECT MIN({k}) FROM {t}) AS lo, (SELECT MAX({k}) FROM {t}) AS hi", (), 1
-        ):
+        sql = f"SELECT (SELECT MIN({k}) FROM {t}) AS lo, (SELECT MAX({k}) FROM {t}) AS hi"
+        for batch in self._b.batches(_isolated(sql, isolation), (), 1):
             if batch.num_rows:
                 row = batch.to_pylist()[0]
                 return row["lo"], row["hi"]
@@ -1134,7 +1172,7 @@ class SqlCdcClient(CdcClient):
             for row in zip(*(c.to_pylist() for c in batch.columns))
         ]
 
-    def key_buckets(self, schema, table, key, kind, width, lo=None, hi=None):
+    def key_buckets(self, schema, table, key, kind, width, lo=None, hi=None, isolation=None):
         # One scan (a seek with lo/hi), aggregated on the server: one row per bucket crosses
         # the network. T-SQL's integer division truncates toward zero; the CASE floors a
         # negative ordinal, so a bucket is the same range Spark computes. The __$ names cannot
@@ -1160,15 +1198,13 @@ class SqlCdcClient(CdcClient):
             )
         return [
             tuple(row)
-            for batch in self._b.batches(sql, (), 1000)
+            for batch in self._b.batches(_isolated(sql, isolation), (), 1000)
             for row in zip(*(c.to_pylist() for c in batch.columns))
         ]
 
     def iter_table(self, schema, table, columns, keys, types, lo, hi, batch_size, isolation=None):
         # READ COMMITTED, never NOLOCK: a dirty read can keep a row that a rollback then
         # removes, and no change row would ever correct it downstream.
-        if isolation not in (None, "snapshot"):
-            raise ValueError(f"isolation must be None or 'snapshot', not {isolation!r}")
         cols = ", ".join(f"[{_check_column(c)}]" for c in columns)
         sql, params = _key_select(
             f"SELECT {cols} FROM [{_check_column(schema)}].[{_check_column(table)}]",
@@ -1177,11 +1213,7 @@ class SqlCdcClient(CdcClient):
             lo,
             hi,
         )
-        if isolation:
-            # SNAPSHOT reads the versions committed when the SELECT starts, without the
-            # writers' locks; SQL Server refuses it unless the DBA set ALLOW_SNAPSHOT_ISOLATION
-            sql = "SET TRANSACTION ISOLATION LEVEL SNAPSHOT; " + sql
-        yield from self._b.batches(sql, params, batch_size)
+        yield from self._b.batches(_isolated(sql, isolation), params, batch_size)
 
     def row_estimate(self, schema, table):
         # sys.sp_spaceused: public, and a lookup of the partitions' row counts, not a scan
@@ -1200,7 +1232,7 @@ class SqlCdcClient(CdcClient):
                 return tuple(c[0].as_py() for c in batch.columns)
         return None
 
-    def key_bound(self, schema, table, keys, types, lo, hi, n):
+    def key_bound(self, schema, table, keys, types, lo, hi, n, isolation=None):
         # Each seekable piece of [lo, hi) takes its first n + 1 keys (TOP ends its seek there)
         # and the (n + 1)-th of their union is the bound: at most a few times n keys read,
         # never the range itself.
@@ -1216,7 +1248,7 @@ class SqlCdcClient(CdcClient):
             lambda sql: f"SELECT * FROM ({sql} ORDER BY {k}) p",
         )
         sql = f"SELECT {k} FROM ({union}) u ORDER BY {k} OFFSET {n} ROWS FETCH NEXT 1 ROWS ONLY"
-        for batch in self._b.batches(sql, params, 1):
+        for batch in self._b.batches(_isolated(sql, isolation), params, 1):
             if batch.num_rows:
                 return tuple(c[0].as_py() for c in batch.columns)
         return None

@@ -130,6 +130,11 @@ migrations ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/decision
   outlived the retention can be retried with `snapshot="chunked"` in the same generation. `snapshot()` takes new keyword arguments `app_id` and
   `facts_table` for the check
   ([ADR 0028](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0028-chunked-snapshot-next-to-the-stream/) amended).
+- `backfill(isolation="snapshot")` plans the chunks under SNAPSHOT isolation too: the
+  counts and seeks of the first call and the search for the first key after MAX before each
+  wave no longer wait for a writer's locks under READ COMMITTED. `plan_chunks`, `last_bound`
+  and the client's `key_buckets`, `key_range` and `key_bound` take an optional `isolation`
+  ([ADR 0028](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0028-chunked-snapshot-next-to-the-stream/) amended).
 - The file-backed fake gives an update's 3 and 4 rows one `__$seqval` and `__$command_id`,
   as SQL Server does, so the unit tests rank them by `__$operation` alone.
 - A snapshot in bronze is named by its `_snapshot` column, never by the largest
