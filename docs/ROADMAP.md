@@ -78,3 +78,10 @@
 - [ ] Scala/Java DSv2 `Changelog` (`TableCatalog.loadChangelog`) so
       `SELECT ... CHANGES FROM VERSION ...` works over SQL Server (Spark 4.2+). Deferred
       until the API settles (ADR 0022).
+- [ ] Report to Spark: stopping a PySpark `foreachBatch` query mid-batch (as `to_delta` does)
+      prints a `StackOverflowError` from the stream execution thread. `StreamExecution`'s
+      `isInterruptionException` runs the regex `PROXY_ERROR`, whose `(.|\r\n|\r|\n)*` recurses
+      once per character, over the Py4J error message (~16 KB with the embedded Java stack
+      trace). The query has already terminated, so nothing is lost; Spark's built-in `rate`
+      source hits it too, and `spark.driver.extraJavaOptions=-Xss16m` silences it. Found in
+      v4.2.0, unchanged on master; no JIRA yet.
