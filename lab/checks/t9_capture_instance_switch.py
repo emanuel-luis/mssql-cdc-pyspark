@@ -317,8 +317,8 @@ def main(argv=None) -> bool:
     kinds = sorted(e["event"] for e in events)
     checks.append(
         (
-            "facts events: one bootstrap, the ADD, one switch",
-            kinds == ["bootstrap", "capture_instance_switched", "schema_change"],
+            "facts events: one snapshot (open, bootstrap), the ADD, one switch",
+            kinds == ["bootstrap", "capture_instance_switched", "schema_change", "snapshot_open"],
             str(kinds),
         )
     )
