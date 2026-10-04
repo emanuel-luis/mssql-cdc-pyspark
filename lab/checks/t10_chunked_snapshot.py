@@ -307,6 +307,7 @@ def main(argv=None) -> bool:
         first = cdc.backfill(bronze, app_id=APP, facts_table=facts, chunk_rows=a.chunk_rows)
         start(availableNow=True).awaitTermination()
         apply()
+        read = normalize(max_lsn(conn))  # the stream has read up to here: the gap starts after
         gap_deleted = [
             r[0] for r in rows(conn, f"DELETE FROM dbo.{TABLE} OUTPUT deleted.id WHERE id % 50 = 0")
         ]
@@ -326,12 +327,21 @@ def main(argv=None) -> bool:
         purged = normalize(
             scalar(conn, "SELECT CONVERT(varchar(22), sys.fn_cdc_get_min_lsn(?), 1)", (CI,))
         )
+        # The cleanup may leave min_lsn below the low water mark asked for (CI saw it one
+        # commit lower), so the check is what the stream needs: min_lsn past what it read, and
+        # no delete row of the gap left in the change table.
+        left = scalar(
+            conn, f"SELECT COUNT_BIG(*) FROM cdc.[{CI}_CT] WHERE [__$operation] = 1 AND id % 50 = 0"
+        )
         extra |= {"first_snapshot": first["snapshot"], "gap_deleted": len(gap_deleted)}
         checks.append(
             (
                 "cleanup purged the gap the stream had not read",
-                bool(gap_deleted) and purged >= low,
-                f"{len(gap_deleted)} keys deleted in the gap; min_lsn {purged}, low water {low}",
+                bool(gap_deleted) and purged > read and left == 0,
+                (
+                    f"{len(gap_deleted)} keys deleted in the gap, {left} delete rows left; "
+                    f"min_lsn {purged}, read up to {read}, low water {low}"
+                ),
             )
         )
 
