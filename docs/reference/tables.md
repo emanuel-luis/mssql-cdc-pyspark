@@ -251,6 +251,11 @@ come after `written_at` (facts), `updated_at` (control) or `_batch_id` and the c
 columns (bronze): select columns by name. The
 library sets no other table property; type widening is yours to enable.
 
+Jobs that share a table can upgrade one at a time: a job on an older release keeps writing
+a table a newer release migrated, and logs a WARNING. A future migration that older
+releases would misread will set `mssql_cdc.min_version`, and releases that know fewer
+migrations than it names refuse the table with a `ValueError`; no migration sets it yet.
+
 ```sql
 SHOW TBLPROPERTIES ops.ingestion_facts ('mssql_cdc.schema_version');
 ```

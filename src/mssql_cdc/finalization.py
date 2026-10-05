@@ -27,10 +27,8 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 import threading
 import time
-from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
@@ -38,7 +36,7 @@ from pyspark.sql.streaming import StreamingQueryListener
 
 from . import migrations
 from .migrations.control import APPLIED_COLUMNS, OPEN_COMMENTS, VERDICT_COMMENTS, WAVE_COLUMNS
-from .tables import delta_table, table_ref  # noqa: F401 - table_ref re-exported
+from .tables import delta_table, retrying, table_ref  # noqa: F401 - table_ref re-exported
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -51,47 +49,12 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 Granularity = Literal["minute", "hour", "day"]
 _GRANULARITIES = get_args(Granularity)
-_RETRY_SECONDS = 60  # how long a control-table MERGE retries concurrent commits
 _REPEAT_SECONDS = 600  # a tracker's failure streak: one WARNING at most this often
-# Delta's concurrent-modification errors: by class on classic PySpark, by error class in the
-# message on Spark Connect, which raises its own exception types
-_CONFLICTS = {
-    "ConcurrentAppendException",
-    "ConcurrentDeleteReadException",
-    "ConcurrentDeleteDeleteException",
-    "ConcurrentTransactionException",
-    "MetadataChangedException",
-}
-_CONFLICT_CODES = ("DELTA_CONCURRENT", "DELTA_METADATA_CHANGED")
 
 
 def _check_granularity(granularity: str) -> None:
     if granularity.lower() not in _GRANULARITIES:
         raise ValueError(f"granularity must be one of {_GRANULARITIES}")
-
-
-def _conflict(exc: BaseException) -> bool:
-    if _CONFLICTS.intersection(c.__name__ for c in type(exc).__mro__):
-        return True
-    return any(code in str(exc) for code in _CONFLICT_CODES)
-
-
-def _retrying(merge: Callable[[], object]) -> None:
-    """Run ``merge``, a MERGE into the control table, again while it loses to a concurrent
-    commit: in OSS Delta two MERGEs on the small table conflict even when they change other
-    rows (ADR 0026), and every tracker and silver job shares it. Exponential backoff with
-    full jitter, for up to ``_RETRY_SECONDS``; then, or on any other error, it raises."""
-    deadline, attempt = time.monotonic() + _RETRY_SECONDS, 0
-    while True:
-        try:
-            merge()
-            return
-        except Exception as exc:
-            left = deadline - time.monotonic()
-            if not _conflict(exc) or left <= 0:
-                raise
-            time.sleep(min(left, random.uniform(0, min(10.0, 0.5 * 2**attempt))))
-            attempt += 1
 
 
 def truncate(ts: datetime, granularity: str = "hour") -> datetime:
@@ -201,7 +164,7 @@ def advance(
             "end_commit_ts": "s.end_ts",
             "updated_at": "s.now",
         }
-        _retrying(
+        retrying(  # every tracker and silver job shares the control table
             lambda: (
                 delta_table(spark, control_table)
                 .alias("t")

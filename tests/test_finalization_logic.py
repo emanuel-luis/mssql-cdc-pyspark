@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mssql_cdc import finalization
+from mssql_cdc import finalization, tables
 from mssql_cdc.finalization import candidate, end_offset_from_progress, table_ref, truncate
 
 
@@ -128,20 +128,20 @@ def test_a_control_merge_retries_only_concurrent_commits_until_its_deadline(monk
         return run
 
     lost = ConcurrentAppendException("[DELTA_CONCURRENT_APPEND] files were added")
-    finalization._retrying(merge(lost, ConcurrentAppendException("again")))
+    tables.retrying(merge(lost, ConcurrentAppendException("again")))
     assert len(calls) == 3 and len(sleeps) == 2 and all(0 <= s <= 10 for s in sleeps)
     # Spark Connect raises its own types: the error class in the message counts too
-    assert finalization._conflict(RuntimeError("[DELTA_METADATA_CHANGED] metadata changed"))
+    assert tables.is_conflict(RuntimeError("[DELTA_METADATA_CHANGED] metadata changed"))
 
     calls.clear()
     with pytest.raises(ValueError):
-        finalization._retrying(merge(ValueError("not a conflict")))
+        tables.retrying(merge(ValueError("not a conflict")))
     assert calls == [1] and len(sleeps) == 2  # at once
 
     calls.clear()
-    monkeypatch.setattr(finalization, "_RETRY_SECONDS", 0)
+    monkeypatch.setattr(tables, "_RETRY_SECONDS", 0)
     with pytest.raises(ConcurrentAppendException):
-        finalization._retrying(merge(lost, lost))
+        tables.retrying(merge(lost, lost))
     assert calls == [1]  # past the deadline: raised
 
 

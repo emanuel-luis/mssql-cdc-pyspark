@@ -16,9 +16,16 @@ To change a table kind:
    comment.
 
 Never edit, reorder or remove a migration that has shipped: its position is its version.
+
+An older release keeps writing a table a newer one migrated (it logs a WARNING), so jobs that
+share a table can upgrade one at a time. A migration after which an older release would
+misread or miswrite the rows must also set ``mssql_cdc.min_version`` to its own number, both
+when it runs and on the tables created afterwards: releases that know fewer migrations then
+refuse the table instead (ADR 0013).
 """
 
 from .base import (
+    MIN_VERSION_PROPERTY,
     SCHEMA_VERSION_PROPERTY,
     Migration,
     add_columns,
@@ -29,6 +36,7 @@ from .base import (
 )
 
 __all__ = [
+    "MIN_VERSION_PROPERTY",
     "SCHEMA_VERSION_PROPERTY",
     "Migration",
     "add_columns",

@@ -3,7 +3,47 @@ and create one with typed, commented columns."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import random
+import time
+from collections.abc import Callable, Iterable
+from typing import TypeVar
+
+T = TypeVar("T")
+_RETRY_SECONDS = 60  # how long a commit that loses to concurrent ones is retried
+# Delta's concurrent-modification errors: by class on classic PySpark, by error class in the
+# message on Spark Connect, which raises its own exception types
+_CONFLICTS = {
+    "ConcurrentAppendException",
+    "ConcurrentDeleteReadException",
+    "ConcurrentDeleteDeleteException",
+    "ConcurrentTransactionException",
+    "MetadataChangedException",
+}
+_CONFLICT_CODES = ("DELTA_CONCURRENT", "DELTA_METADATA_CHANGED")
+
+
+def is_conflict(exc: BaseException) -> bool:
+    if _CONFLICTS.intersection(c.__name__ for c in type(exc).__mro__):
+        return True
+    return any(code in str(exc) for code in _CONFLICT_CODES)
+
+
+def retrying(commit: Callable[[], T]) -> T:
+    """``commit()``, run again while it loses to a concurrent Delta commit: in OSS Delta two
+    MERGEs on the small control table conflict even when they change other rows (ADR 0026),
+    and every job sharing a table runs its migrations on the same upgrade. Safe only for an
+    idempotent ``commit``. Exponential backoff with full jitter, for up to
+    ``_RETRY_SECONDS``; then, or on any other error, it raises."""
+    deadline, attempt = time.monotonic() + _RETRY_SECONDS, 0
+    while True:
+        try:
+            return commit()
+        except Exception as exc:
+            left = deadline - time.monotonic()
+            if not is_conflict(exc) or left <= 0:
+                raise
+            time.sleep(min(left, random.uniform(0, min(10.0, 0.5 * 2**attempt))))
+            attempt += 1
 
 
 def is_path(name_or_path: str) -> bool:

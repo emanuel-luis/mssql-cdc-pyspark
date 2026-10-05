@@ -64,7 +64,7 @@ from typing import TYPE_CHECKING
 
 from . import finalization, migrations
 from .sink import BRONZE_COLUMN_COMMENTS
-from .tables import delta_table, exists, table_ref
+from .tables import delta_table, exists, retrying, table_ref
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -137,7 +137,7 @@ def _record(
     )
     names = ("applied_lsn", "snapshot_lsn", "open_snapshot_lsn", "snapshot_wave")
     values = {n: f"s.{n}" for n in names}
-    finalization._retrying(  # trackers and other silver jobs MERGE into it too
+    retrying(  # trackers and other silver jobs MERGE into it too
         lambda: (
             delta_table(spark, control_table)
             .alias("t")

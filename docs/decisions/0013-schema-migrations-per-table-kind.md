@@ -1,7 +1,8 @@
 # 0013: Schema migrations per table kind
 
 **Status:** accepted  
-**Date:** 2026-09-28T21:26:25-03:00
+**Date:** 2026-09-28T21:26:25-03:00  
+**Amended:** 2026-10-05T06:01:09-03:00, an older release keeps writing a table a newer one migrated unless `mssql_cdc.min_version` asks for more; migrations retry concurrent commits (see Amendment)
 
 ## Context
 ADR 0012 creates the control, facts and bronze tables in a fixed shape and leaves
@@ -32,3 +33,23 @@ tables that already exist in users' catalogs.
   properties; here it only happens while migrating.
 * `tests/test_delta_sink.py` injects a migration and checks it runs once and stamps the
   table; new tables are born at version 0.
+
+## Amendment: older releases keep writing, unless a migration says otherwise
+Many jobs share a facts or control table: every stream of a fan-out, every tracker and
+silver job (ADR 0026, ADR 0027). They upgrade one at a time, and a job rolled back to the
+previous release must still run. So:
+
+* A release that finds a table stamped with a schema version above its own count of
+  migrations writes it as it is and logs one WARNING per table and version. The migrations
+  so far only add nullable columns or change comments: an append without the new columns
+  reads NULL in them, like the rows written before the migration, and a MERGE leaves them
+  alone.
+* A migration after which an older release would misread or miswrite the rows sets the
+  table property `mssql_cdc.min_version` to its own number, when it runs and on the tables
+  created from then on. A release that knows fewer migrations of the kind than that number
+  raises `ValueError` instead of writing. No migration sets it yet; the check ships first,
+  since a release cannot learn it later.
+* Every job migrates a shared table on the same upgrade, and a migration's commit can lose
+  to another job's (Delta's `MetadataChangedException`, `ConcurrentTransactionException`).
+  `migrate` runs again on such a conflict, with the control table MERGE's backoff, for up to
+  a minute: re-running a migration changes nothing.
