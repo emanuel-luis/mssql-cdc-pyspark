@@ -199,6 +199,14 @@ def test_a_string_key_is_counted_whole_and_compared_from_the_source_rows(delta_s
     }
 
 
+def test_a_report_row_with_a_key_that_is_no_column_fails_rather_than_write_null():
+    from mssql_cdc.reconcile import _report_row
+
+    with pytest.raises(ValueError, match=r"\['source_row'\]"):
+        _report_row({"run_id": "r", "source_row": 3})  # a typo of source_rows
+    assert _report_row({"run_id": "r", "source_rows": 3})[:1] == ("r",)
+
+
 def test_a_date_buckets_ends_past_the_date_range_stay_in_it():
     from mssql_cdc.reconcile import _bound
 

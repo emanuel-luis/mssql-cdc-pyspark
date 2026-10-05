@@ -6,8 +6,9 @@
                        report_table="ops.reconcile_report")
 
 ``options`` are the stream's; ``silver`` is the table ``apply_changes`` builds from ``bronze``.
-Nothing is written to SQL Server, and the reads are the snapshot's (READ COMMITTED, never
-NOLOCK).
+Nothing is written to SQL Server, and nothing is read with NOLOCK: Tier 1 counts under READ
+COMMITTED, Tier 2 reads through the snapshot reader under the ``isolationLevel`` option
+(READ COMMITTED by default).
 
 * Tier 1, every row: one scan on SQL Server counts the rows and sums the keys (``COUNT_BIG``,
   ``SUM`` as ``decimal(38,0)``) per bucket of the key's range, and Spark the same over silver;
@@ -57,7 +58,7 @@ from decimal import Decimal
 from itertools import pairwise
 
 from . import migrations
-from .silver import _one, _q, _source_keys
+from .silver import _by_key, _one, _q, _source_keys
 from .tables import delta_table, table_ref
 
 REPORT_COMMENT = (
@@ -165,6 +166,7 @@ REPORT_COLUMNS = [
     ),
 ]
 _SCHEMA = ", ".join(f"`{n}` {t}" for n, t, _ in REPORT_COLUMNS)
+_NAMES = [n for n, _, _ in REPORT_COLUMNS]
 _EPOCH = date(1970, 1, 1)
 _DAYS = ((date.min - _EPOCH).days, (date.max - _EPOCH).days)  # a date key's ordinals
 # ponytail: about this many buckets come back from the count query (and from silver's), merged
@@ -207,6 +209,15 @@ def _after(bronze, lower: str):
     return bronze.where((F.col("_operation") != 0) & (F.col("_start_lsn") > lower))
 
 
+def _report_row(row: dict) -> tuple:
+    """``row`` as a tuple in REPORT_COLUMNS order; a key that is no column fails, rather
+    than leave its column NULL."""
+    unknown = row.keys() - set(_NAMES)
+    if unknown:
+        raise ValueError(f"unknown report columns: {sorted(unknown)}")
+    return tuple(row.get(n) for n in _NAMES)
+
+
 def _sample(rng: random.Random, items: list[int], fraction: float) -> list[int]:
     return rng.sample(items, math.ceil(fraction * len(items)))
 
@@ -221,8 +232,9 @@ def _range_buckets(spark, client, source, key, kind, target, bronze, lower, buck
     sql = _ordinal_sql(kind, key)
     o = F.expr(sql)
     lo, hi = client.key_range(source.schema, source.table, key)
-    ends = [v if kind == "int" else (v - _EPOCH).days for v in (lo, hi) if v is not None]
-    ends += [v for v in target.agg(F.min(o), F.max(o)).first() if v is not None]
+    # silver's of the raw column, which Delta can answer from its file stats
+    low, high = target.agg(F.min(F.col(_q(key))), F.max(F.col(_q(key)))).first()
+    ends = [v if kind == "int" else (v - _EPOCH).days for v in (lo, hi, low, high) if v is not None]
     if not ends:  # both empty
         return [], F.lit(None)
     width = max(1, -(-(max(ends) - min(ends) + 1) // _FINE))
@@ -368,19 +380,18 @@ def reconcile(
                 [(i, json_or_null(parts[i][0]), json_or_null(parts[i][1])) for i in chosen],
                 "_rc_idx INT, bucket_lo STRING, bucket_hi STRING",
             )
+            ours = rows_read.withColumnRenamed("_chunk", "_rc_idx")  # the chunk is the bucket
             if kind:  # silver's rows of the chosen buckets, by their fine buckets
                 fines = spark.createDataFrame(
                     [(b, i) for i in chosen for b in found[i]["fine"]],
                     "_rc_fine BIGINT, _rc_idx INT",
                 )
-
-                def label(df):
-                    return df.withColumn("_rc_fine", fine).join(F.broadcast(fines), "_rc_fine")
-
-                theirs, how = target.transform(label), "full_outer"
-            else:
-                theirs, how = target.withColumn("_rc_idx", F.lit(None).cast("int")), "left"
-            ours = rows_read.withColumnRenamed("_chunk", "_rc_idx")  # the chunk is the bucket
+                theirs = target.withColumn("_rc_fine", fine).join(F.broadcast(fines), "_rc_fine")
+                how = "full_outer"
+            else:  # left-joined: only silver's rows of the source rows' keys, before hashing
+                held = ours.select(*[F.col(_q(k)) for k in keys])
+                theirs = _by_key(target, held, keys, "left_semi")
+                theirs, how = theirs.withColumn("_rc_idx", F.lit(None).cast("int")), "left"
             failures = _differences(
                 ours, theirs, keys, columns, how, changes, min(read_lsn, silver_lsn or ZERO_LSN)
             ).join(F.broadcast(labels), "_rc_idx", "left")
@@ -401,9 +412,9 @@ def reconcile(
             "status": b["status"],
             "hashed": i in chosen if kind else bool(chosen),
         }
-        rows_out.append(tuple(row.get(n) for n, _, _ in REPORT_COLUMNS))
+        rows_out.append(_report_row(row))
     chunks = _chunk_checks(spark, bronze, facts_table) if facts_table else []
-    rows_out += [tuple((common | c).get(n) for n, _, _ in REPORT_COLUMNS) for c in chunks]
+    rows_out += [_report_row(common | c) for c in chunks]
     report = spark.createDataFrame(rows_out, _SCHEMA)
     counts: dict = {}
     for c in chunks:
@@ -415,7 +426,8 @@ def reconcile(
             values.get(n, F.col(n) if n in failures.columns else F.lit(None)).cast(t).alias(n)
             for n, t, _ in REPORT_COLUMNS
         ]
-        failures = failures.select(*typed)
+        # computed once: the counts, the report write and the caller's report all read it
+        failures = failures.select(*typed).localCheckpoint()
         counts |= dict(failures.groupBy("failure_type").count().collect())
         report = report.unionByName(failures)
     if report_table:
