@@ -232,6 +232,19 @@ def test_least_privilege_login_needs_one_grant_on_the_change_table(spark, sqlser
         client.close()
 
 
+def test_a_table_with_an_accented_name_streams_under_its_default_instance(
+    spark, sqlserver, backend
+):
+    ci = sqlserver.cdc_table("Situação", "id INT NOT NULL PRIMARY KEY, nome NVARCHAR(20)")
+    assert ci == "dbo_Situação"  # SQL Server's default name: <schema>_<table>
+    sqlserver.run("INSERT INTO dbo.[Situação] VALUES (1, N'ativa')")
+    sqlserver.wait_for_changes(ci, 1)
+    df, _ = _read(spark, sqlserver, ci, backend=backend)
+    assert [(r["id"], r["nome"], r["_capture_instance"]) for r in df.collect()] == [
+        (1, "ativa", ci)
+    ]
+
+
 def test_purged_range_stops_the_stream(spark, sqlserver, workdir, backend):
     ci = sqlserver.cdc_table("purge_probe", "id INT NOT NULL PRIMARY KEY")
     sqlserver.run("INSERT INTO dbo.purge_probe VALUES (1)")

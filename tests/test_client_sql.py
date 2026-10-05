@@ -170,11 +170,38 @@ def test_timezone_detected_names_are_validated():
 def test_injection_is_rejected():
     client = SqlCdcClient(Recorder())
     with pytest.raises(ValueError):
-        list(client.iter_changes("dbo_orders; DROP TABLE x", "0x01", "0x02", [], True, 10))
+        list(client.iter_changes("dbo_orders]; DROP TABLE x --", "0x01", "0x02", [], True, 10))
     with pytest.raises(ValueError):
         list(client.iter_changes("dbo_orders", "0x01", "0x02", ["a]; --"], True, 10))
     with pytest.raises(ValueError):
         SqlCdcClient(Recorder(), source_timezone="UTC'; DROP")
+
+
+def test_a_capture_instance_takes_any_letter_but_no_bracket_or_control_character():
+    from mssql_cdc.client import _check_ident, _check_type
+
+    rec = Recorder()
+    client = SqlCdcClient(rec, source_timezone="UTC")
+    ci = "dbo_Situação"  # SQL Server's default name for dbo.Situação
+    client.split_points(ci, "0x01", "0x02", 2)
+    assert "FROM cdc.[dbo_Situação_CT]" in rec.calls[-1][0]
+    list(client.iter_changes(ci, "0x01", "0x02", ["id"], True, 10))
+    assert "FROM cdc.[dbo_Situação_CT] c " in rec.calls[-1][0]
+    client.min_lsn(ci)
+    assert rec.calls[-1][1] == (ci,)  # a parameter where T-SQL takes one
+    for bad in ("dbo_x]; DROP TABLE y --", "dbo_orders\n", "dbo\x00orders", "", "a" * 101):
+        with pytest.raises(ValueError, match="Invalid capture instance"):
+            list(client.iter_changes(bad, "0x01", "0x02", [], True, 10))
+        with pytest.raises(ValueError, match="Invalid capture instance"):
+            client.min_lsn(bad)
+    for bad in ("int]", "int\n"):
+        with pytest.raises(ValueError, match="Invalid SQL type"):
+            _check_type(bad)
+    for bad in ("UTC]", "UTC\n"):
+        with pytest.raises(ValueError, match="Invalid sourceTimeZone"):
+            SqlCdcClient(rec, source_timezone=bad)
+    with pytest.raises(ValueError, match="Invalid collation"):  # inlined unquoted: ASCII only
+        _check_ident("Greek_CI_AS\n", "collation")
 
 
 def test_min_lsn_zero_means_missing_instance():
@@ -252,7 +279,7 @@ def test_captured_columns_errors_point_to_columns_option():
     with pytest.raises(ValueError, match="not found"):
         SqlCdcClient(Rows([])).captured_columns("dbo_orders")
     with pytest.raises(ValueError):
-        SqlCdcClient(Rows([])).captured_columns("dbo_orders; DROP TABLE x")
+        SqlCdcClient(Rows([])).captured_columns("dbo_orders]; DROP TABLE x --")
 
     class Denied(Recorder):
         def batches(self, sql, params, batch_size):
@@ -368,7 +395,7 @@ def test_capture_instances_lists_the_table_s_instances_oldest_first():
     names = [i.name for i in SqlCdcClient(Cdc(tied, CAPTURED)).capture_instances("dbo_orders")]
     assert names == ["dbo_orders", "dbo_orders_v2"]
     with pytest.raises(ValueError):
-        SqlCdcClient(rec).capture_instances("dbo_orders; DROP TABLE x")
+        SqlCdcClient(rec).capture_instances("dbo_orders]; DROP TABLE x --")
 
 
 def test_a_disabled_capture_instance_is_followed_to_its_table():
@@ -429,7 +456,7 @@ def test_ddl_history_keeps_the_batch_range():
     assert (commit_time, ("0x0000002A000001000200",)) in rec.calls
     assert ("EXEC sys.sp_cdc_get_ddl_history @capture_instance = ?", ("dbo_orders",)) in rec.calls
     with pytest.raises(ValueError):
-        client.ddl_history("dbo_orders; DROP TABLE x", "0x01", "0x02")
+        client.ddl_history("dbo_orders]; DROP TABLE x --", "0x01", "0x02")
 
 
 def test_present_columns_match_the_source_table_by_column_id():

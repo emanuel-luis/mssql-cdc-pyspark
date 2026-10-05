@@ -20,6 +20,7 @@ server, other keys from seeks on the table's key; no row crosses the network.
 from __future__ import annotations
 
 import re
+import unicodedata
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sequence
 from datetime import datetime
@@ -72,8 +73,23 @@ class DdlChange(NamedTuple):
 
 
 def _check_ident(name: str, what: str) -> str:
-    if not _IDENT_RE.match(name):
+    if not _IDENT_RE.fullmatch(name):
         raise ValueError(f"Invalid {what}: {name!r}")
+    return name
+
+
+def _check_capture_instance(name: str) -> str:
+    """A capture instance name: a sysname of at most 100 characters, which SQL Server derives
+    as ``<schema>_<table>`` and so may hold any letter (``dbo_Situação``). It is bound as a
+    parameter, or bracket-quoted in ``cdc.[<name>_CT]``: no ``]``, no control character."""
+    if (
+        not isinstance(name, str)
+        or not name
+        or len(name) > 100
+        or "]" in name
+        or any(unicodedata.category(c)[0] == "C" for c in name)
+    ):
+        raise ValueError(f"Invalid capture instance: {name!r}")
     return name
 
 
@@ -143,7 +159,7 @@ def _sql_type(col: dict) -> str | None:
 
 
 def _check_type(sql_type: str) -> str:
-    if not isinstance(sql_type, str) or not _TYPE_RE.match(sql_type):
+    if not isinstance(sql_type, str) or not _TYPE_RE.fullmatch(sql_type):
         raise ValueError(f"Invalid SQL type: {sql_type!r}")
     return sql_type
 
@@ -691,7 +707,7 @@ class ArrowOdbcBackend(Backend):
 # T-SQL implementation
 # --------------------------------------------------------------------------- #
 def _check_tz(name) -> str:
-    if not isinstance(name, str) or not _TZ_RE.match(name):
+    if not isinstance(name, str) or not _TZ_RE.fullmatch(name):
         raise ValueError(f"Invalid sourceTimeZone: {name!r}")
     return name
 
@@ -776,7 +792,7 @@ class SqlCdcClient(CdcClient):
         value = self._hex(
             self._b.scalar(
                 "SELECT CONVERT(varchar(22), sys.fn_cdc_get_min_lsn(?), 1)",
-                (_check_ident(capture_instance, "capture instance"),),
+                (_check_capture_instance(capture_instance),),
             )
         )
         if value in (None, _lsn.ZERO_LSN):
@@ -864,7 +880,7 @@ class SqlCdcClient(CdcClient):
         # are database-wide, and on a real table they left the largest range with ~2x the
         # mean rows (ADR 0015). Each bound is the last commit LSN of its tile, so a commit
         # whose rows straddle two tiles stays whole in the first range.
-        ci = _check_ident(capture_instance, "capture instance")
+        ci = _check_capture_instance(capture_instance)
         n = int(n)
         sql = (
             "SELECT CONVERT(varchar(22), MAX(__$start_lsn), 1) AS b FROM ("
@@ -903,7 +919,7 @@ class SqlCdcClient(CdcClient):
     def _captured_rows(self, ci: str) -> list[dict]:
         # The documented API, not cdc.captured_columns: it needs only what the query
         # functions need (SELECT on the source columns, gating role if any).
-        ci = _check_ident(ci, "capture instance")
+        ci = _check_capture_instance(ci)
         not_found = (
             f"Capture instance {ci!r} not found, or the login lacks SELECT on its source "
             "columns (or membership in its gating role). Pass 'columns' explicitly."
@@ -963,7 +979,7 @@ class SqlCdcClient(CdcClient):
         # The documented API, not cdc.ddl_history (invariant 11): it needs what
         # sp_cdc_get_captured_columns needs. Its ddl_lsn comes back binary, like start_lsn in
         # source_table; the few rows (one per DDL) are filtered here.
-        ci = _check_ident(capture_instance, "capture instance")
+        ci = _check_capture_instance(capture_instance)
         rows = [
             r
             for batch in self._b.batches(
@@ -1021,7 +1037,7 @@ class SqlCdcClient(CdcClient):
         # The change table itself, not cdc.fn_cdc_get_all_changes_<ci>: the function does
         # not return __$command_id (ADR 0009). Unlike the function, the table does not
         # reject a range that cleanup purged; the reader re-checks min_lsn after reading.
-        ci = _check_ident(capture_instance, "capture instance")
+        ci = _check_capture_instance(capture_instance)
         cols = ", ".join(f"c.[{_check_column(c)}]" for c in columns)
         cmd_select = "c.[__$command_id] AS _command_id, " if include_command_id else ""
         cmd_order = "c.[__$command_id], " if include_command_id else ""
@@ -1050,7 +1066,7 @@ class SqlCdcClient(CdcClient):
         the query functions already require. @source_schema/@source_name applies the same
         check to one table, so this one listing already holds every instance of it.
         """
-        ci = _check_ident(capture_instance, "capture instance")
+        ci = _check_capture_instance(capture_instance)
         listed = [
             r
             for batch in self._b.batches("EXEC sys.sp_cdc_help_change_data_capture", (), 1000)
