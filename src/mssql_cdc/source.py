@@ -90,6 +90,11 @@ RESERVED_COLUMNS = frozenset(
 # 1-4 are SQL Server's __$operation codes; 0 marks a snapshot row (ADR 0016)
 OPERATIONS = {0: "snapshot", 1: "delete", 2: "insert", 3: "update_before", 4: "update_after"}
 SCHEMA_CHANGE_POLICIES = ("classify", "fail")
+# A batch's ranges hold at least this many change rows, so a small batch is one range: each
+# range is a task with its own login and metadata queries, which on a slow link cost more than
+# its rows (ADR 0015 Amendment). ponytail: one floor for every table and link; an option if a
+# workload needs finer splits of batches below 2x this.
+MIN_ROWS_PER_PARTITION = 50_000
 
 _log = logging.getLogger(__name__)
 
@@ -331,6 +336,31 @@ def _write_event(path: str, kind: str, ci: str, lsn: str, commit_ts, detail: str
         _log.warning("mssql_cdc: could not write the %s event file in %s: %s", kind, path, exc)
 
 
+def _position(client, min_lsn: str, to_lsn: str) -> dict:
+    """Where the stream is once the batch's last range is read, each value best effort: what
+    cleanup has deleted up to (ADR 0017), how far capture had got and how old that was when
+    seen here (ADR 0020), and the commit time of the batch's end offset (ADR 0014)."""
+
+    def at(lsn):
+        try:
+            return client.lsn_to_time(lsn)
+        except Exception:  # noqa: BLE001 - a metric must never fail a read
+            return None
+
+    try:
+        source_max = client.lsn_to_time(client.max_lsn())
+        seen = datetime.now(timezone.utc).replace(tzinfo=None)  # commit times are UTC
+        lag = (seen - datetime.fromisoformat(source_max)).total_seconds() if source_max else None
+    except Exception:  # noqa: BLE001 - a metric must never fail a read
+        source_max = lag = None
+    return {
+        "retention_watermark_ts": at(min_lsn),
+        "source_max_commit_ts": source_max,
+        "capture_lag_seconds": lag,
+        "to_commit_ts": at(to_lsn),
+    }
+
+
 _DTO = re.compile(r"(.{19})(?:\.(\d{1,7}))? ([+-]\d\d:\d\d)")
 
 
@@ -365,6 +395,8 @@ class LsnRange(InputPartition):
     # the driver client's clock(), so a task converts commit times as the offsets were
     zone: str | None = None
     offset_min: int | None = None
+    # the batch's last range: it alone measures the stream's position for the facts (ADR 0020)
+    last: bool = False
 
 
 class MssqlCdcDataSource(DataSource):
@@ -633,6 +665,8 @@ class _BaseReader(_Common, DataSourceStreamReader):
                     self._check_switch(inst)
                     self._checked.add(inst.name.lower())
                 ranges += self._split(client, inst, lo, hi)
+        if ranges:  # it ends at the batch's end offset, unless cleanup left nothing up to it
+            ranges[-1].last = True
         for kind, ci, lsn, ts, detail in events:
             _log.warning("mssql_cdc: %s on %s at %s: %s", kind, ci, lsn, detail)
             if self.metrics_path:  # for the sink to fold into the facts
@@ -655,14 +689,21 @@ class _BaseReader(_Common, DataSourceStreamReader):
         return pieces
 
     def _split(self, client, inst, lo: str, hi: str) -> list[LsnRange]:
-        """[lo, hi] of one instance in up to numPartitions ranges of about the same rows."""
+        """[lo, hi] of one instance in up to numPartitions ranges of about the same rows:
+        adjacent tiles merged until each holds MIN_ROWS_PER_PARTITION, so a batch with fewer
+        rows than twice that is one range."""
         cols, clock = self._columns_of(inst), client.clock()
-        ranges = []
+        ranges, rows = [], 0
         if self.num_partitions > 1:
-            for b, after in client.split_points(inst.name, lo, hi, self.num_partitions):
-                if lo <= b < hi:  # a bound two tiles share comes twice: once
+            for b, after, n in client.split_points(inst.name, lo, hi, self.num_partitions):
+                if b < lo:  # a bound two tiles share: its rows are in the range cut there
+                    continue
+                rows += n
+                if b < hi and rows >= MIN_ROWS_PER_PARTITION:
                     ranges.append(LsnRange(inst.name, lo, b, cols, *clock))
-                    lo = after
+                    lo, rows = after, 0
+            if ranges and rows < MIN_ROWS_PER_PARTITION:  # a short tail joins the range before
+                lo = ranges.pop().from_lsn
         return [*ranges, LsnRange(inst.name, lo, hi, cols, *clock)]
 
     def _columns_of(self, inst) -> list[str] | None:
@@ -717,6 +758,11 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 "delta.enableTypeWidening on bronze for a widening); the replayed batch holds "
                 "the same DDL, so restart with schemaChangePolicy=classify to go past it."
             )
+        # the captured types as they are now, not as the client cached them at an earlier
+        # planning: ALTER COLUMN changes them
+        client.forget_columns()
+        now = {i.name.lower(): i for i in self._instances(client)}
+        used = [now.get(i.name.lower(), i) for i in used]
         wanted = {c.lower() for c in self.source_columns}
         changed = {
             f"{c} {t} (read as {expected[c.lower()]})"
@@ -850,45 +896,23 @@ class _BaseReader(_Common, DataSourceStreamReader):
             min_lsn = self._guard_retention(client, partition.capture_instance, partition.from_lsn)
             if self.metrics_path:  # rows or not: a batch that read none writes its facts row too
                 wait_after = client.network_wait_ms()
-                try:
-                    watermark = client.lsn_to_time(min_lsn)
-                except Exception:  # noqa: BLE001 - a metric must never fail a read
-                    watermark = None
-                try:  # how far capture had got, and how old that was when seen here (ADR 0020)
-                    source_max = client.lsn_to_time(client.max_lsn())
-                    seen = datetime.now(timezone.utc).replace(tzinfo=None)  # commit times are UTC
-                    capture_lag = (
-                        (seen - datetime.fromisoformat(source_max)).total_seconds()
-                        if source_max
-                        else None
-                    )
-                except Exception:  # noqa: BLE001 - a metric must never fail a read
-                    source_max = capture_lag = None
-                try:  # the batch's last partition ends at its end offset: where the stream is
-                    to_commit_ts = client.lsn_to_time(partition.to_lsn)
-                except Exception:  # noqa: BLE001 - a metric must never fail a read
-                    to_commit_ts = None
+                metrics = {
+                    "from_lsn": partition.from_lsn,
+                    "to_lsn": partition.to_lsn,
+                    "rows": rows,
+                    "bytes": nbytes,
+                    "seconds": time.perf_counter() - started,
+                    "rtt_ms": rtt[0] if rtt else None,
+                    "network_wait_ms": (
+                        None
+                        if wait_before is None or wait_after is None
+                        else wait_after - wait_before
+                    ),
+                }
+                if partition.last:  # the batch's position: four queries once, not in every range
+                    metrics.update(_position(client, min_lsn, partition.to_lsn))
                 _write_metrics(
-                    self.metrics_path,
-                    f"{partition.from_lsn}-{partition.to_lsn}",
-                    {
-                        "from_lsn": partition.from_lsn,
-                        "to_lsn": partition.to_lsn,
-                        "rows": rows,
-                        "bytes": nbytes,
-                        "seconds": time.perf_counter() - started,
-                        "rtt_ms": rtt[0] if rtt else None,
-                        "network_wait_ms": (
-                            None
-                            if wait_before is None or wait_after is None
-                            else wait_after - wait_before
-                        ),
-                        # what cleanup has deleted up to, as a commit time (ADR 0017)
-                        "retention_watermark_ts": watermark,
-                        "source_max_commit_ts": source_max,
-                        "capture_lag_seconds": capture_lag,
-                        "to_commit_ts": to_commit_ts,
-                    },
+                    self.metrics_path, f"{partition.from_lsn}-{partition.to_lsn}", metrics
                 )
         finally:
             client.close()

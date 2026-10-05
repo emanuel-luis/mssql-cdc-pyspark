@@ -436,29 +436,59 @@ def test_the_fake_retries_a_replace_that_a_reader_holds_up(tmp_path, monkeypatch
 
 
 # -- planning ----------------------------------------------------------------------------
-def test_split_starts_each_range_after_its_bound_without_a_query():
+class Points:
+    """split_points answers ``points``: (bound, the LSN after it, the tile's rows)."""
+
+    def __init__(self, *points):
+        self.points = [(_lsn(b), _lsn(b + 1), rows) for b, rows in points]
+
+    def clock(self):
+        return None, None
+
+    def split_points(self, ci, lo, hi, n):
+        return self.points
+
+    def increment_lsn(self, lsn):
+        raise AssertionError("a round trip per bound")
+
+
+def _split(points, hi, n=3):
     from mssql_cdc.client import CaptureInstance
 
-    class Points:
-        def clock(self):
-            return None, None
+    ranges = _reader(numPartitions=n)._split(points, CaptureInstance(CI, None, [], []), _lsn(1), hi)
+    return [(r.from_lsn, r.to_lsn) for r in ranges]
 
-        def split_points(self, ci, lo, hi, n):  # a bound two tiles share, and one at hi
-            return [(_lsn(5), _lsn(6)), (_lsn(5), _lsn(6)), (_lsn(9), _lsn(10))]
 
-        def increment_lsn(self, lsn):
-            raise AssertionError("a round trip per bound")
+def test_split_starts_each_range_after_its_bound_without_a_query(monkeypatch):
+    from mssql_cdc import source
 
-    ranges = _reader(numPartitions=3)._split(
-        Points(), CaptureInstance(CI, None, [], []), _lsn(1), _lsn(9)
-    )
-    assert [(r.from_lsn, r.to_lsn) for r in ranges] == [(_lsn(1), _lsn(5)), (_lsn(6), _lsn(9))]
+    monkeypatch.setattr(source, "MIN_ROWS_PER_PARTITION", 1)
+    # a bound two tiles share, and one at hi
+    ranges = _split(Points((5, 1), (5, 1), (9, 1)), _lsn(9))
+    assert ranges == [(_lsn(1), _lsn(5)), (_lsn(6), _lsn(9))]
+
+
+def test_tiles_merge_until_each_range_holds_the_floor(monkeypatch):
+    from mssql_cdc import source
+
+    monkeypatch.setattr(source, "MIN_ROWS_PER_PARTITION", 10)
+    tiles = Points((2, 4), (4, 4), (6, 4), (8, 4), (10, 4), (11, 4))
+    # 12 rows up to 6, 12 up to 11; then an idle tail up to 12, 0 rows: joins the range before
+    assert _split(tiles, _lsn(12), 6) == [(_lsn(1), _lsn(6)), (_lsn(7), _lsn(12))]
+    # a tail of tiles short of the floor joins the range before too
+    assert _split(Points((2, 6), (4, 6), (6, 3)), _lsn(6)) == [(_lsn(1), _lsn(6))]
+    # the default floor: a batch of a few rows is one range, whatever numPartitions says
+    monkeypatch.undo()
+    assert _split(Points((2, 4000), (4, 4000), (6, 4000)), _lsn(6)) == [(_lsn(1), _lsn(6))]
 
 
 # -- the driver's clock in every task -------------------------------------------------
 def test_planned_ranges_carry_the_drivers_clock(tmp_path, monkeypatch):
+    from mssql_cdc import source
+
     zone = "E. South America Standard Time"
     monkeypatch.setattr(FakeCdcClient, "clock", lambda self: (zone, None))
+    monkeypatch.setattr(source, "MIN_ROWS_PER_PARTITION", 1)
     _, lsns = _db(str(tmp_path), n_tx=4)
     for n in (1, 2):  # one range, and ranges cut at split points
         reader = _reader(str(tmp_path), numPartitions=n)
@@ -478,3 +508,40 @@ def test_a_task_converts_commit_times_with_the_drivers_clock():
         "CAST(DATEADD(minute, 180, m.tran_end_time) AS datetime2(3))" in s for s in server.sql
     )
     assert reader._client is None  # closed: executors are stateless
+
+
+def test_only_the_batch_s_last_range_measures_the_position(tmp_path, monkeypatch):
+    import json
+
+    from mssql_cdc import source
+    from mssql_cdc.source import LsnRange
+
+    monkeypatch.setattr(source, "MIN_ROWS_PER_PARTITION", 1)
+    _, lsns = _db(str(tmp_path), n_tx=4)
+    reader = _reader(str(tmp_path), numPartitions=2)
+    planned = reader.partitions({"lsn": lsns[0], "commit_ts": ""}, {"lsn": lsns[-1]})
+    assert [r.last for r in planned] == [False, True] and planned[-1].to_lsn == lsns[-1]
+
+    class Timed(Server):  # commit times and the wait counter as a server answers them
+        def scalar(self, sql, params=()):
+            if "dm_exec_session_wait_stats" in sql or "varchar(23)" in sql:
+                self.sql.append(sql)
+                return 0 if "wait_stats" in sql else "2026-09-28T13:50:00"
+            return super().scalar(sql, params)
+
+    metrics = tmp_path / "metrics"
+    reader, trips = _reader(str(tmp_path), metricsPath=str(metrics)), []
+    for last in (False, True):
+        server = Timed()
+        reader._client = SqlCdcClient(server, "UTC")
+        list(reader.read(LsnRange(CI, _lsn(16 + last), _lsn(16 + last), None, None, None, last)))
+        trips.append(len(server.sql))
+    # each range: a ping, the wait counter, the read, the retention guard, the wait counter;
+    # the last also max_lsn and the commit times of min_lsn, max_lsn and its end
+    assert trips == [5, 9]
+    files = {f.name: json.loads(f.read_text()) for f in metrics.iterdir()}
+    other, last = files[f"{_lsn(16)}-{_lsn(16)}.json"], files[f"{_lsn(17)}-{_lsn(17)}.json"]
+    position = ("retention_watermark_ts", "source_max_commit_ts", "capture_lag_seconds")
+    assert not {*position, "to_commit_ts"} & other.keys()  # the sink takes the last's
+    assert last["to_commit_ts"] == last["source_max_commit_ts"] == "2026-09-28T13:50:00.000"
+    assert last["retention_watermark_ts"] and last["capture_lag_seconds"] > 0

@@ -139,6 +139,7 @@ def _resolve(path: str, ci: str) -> tuple[str | None, list[tuple[str, dict]]]:
 class FakeCdcClient(CdcClient):
     def __init__(self, path: str):
         self.path = path
+        self._columns: dict[tuple, list] = {}  # capture_instances' cache, as SqlCdcClient's
 
     # -- state ----------------------------------------------------------------
     def _mapping(self) -> list[dict]:
@@ -198,7 +199,8 @@ class FakeCdcClient(CdcClient):
         return after[: int(n)][-1] if after else None
 
     def split_points(self, capture_instance, from_lsn, to_lsn, n):
-        # like SqlCdcClient: tiles of the capture instance's change rows, bound = last LSN
+        # like SqlCdcClient: tiles of the capture instance's change rows, bound = last LSN,
+        # with the tile's rows
         lsns = sorted(
             r["start_lsn"]
             for r in self._changes(capture_instance)
@@ -210,8 +212,9 @@ class FakeCdcClient(CdcClient):
         size, rem = divmod(len(lsns), n)
         points, idx = [], 0
         for i in range(n):
-            idx += size + (1 if i < rem else 0)
-            points.append((lsns[idx - 1], self.increment_lsn(lsns[idx - 1])))
+            rows = size + (1 if i < rem else 0)
+            idx += rows
+            points.append((lsns[idx - 1], self.increment_lsn(lsns[idx - 1]), rows))
         return points
 
     def _keys(self) -> dict:
@@ -229,7 +232,9 @@ class FakeCdcClient(CdcClient):
         computed = self._computed(same[0][1]["table"])
         out = []
         for name, meta in same:
-            every = meta.get("columns") or []
+            # cached per instance and creation like SqlCdcClient's, so that a type change the
+            # reader checks without forget_columns() fails the tests as it would on a server
+            every = self._columns.setdefault((name, meta["created"]), meta.get("columns") or [])
             cols = [(c, t) for c, t in every if c.lower() not in computed]
             out.append(
                 CaptureInstance(
@@ -241,6 +246,9 @@ class FakeCdcClient(CdcClient):
                 )
             )
         return out
+
+    def forget_columns(self):
+        self._columns.clear()
 
     def ddl_history(self, capture_instance, from_lsn, to_lsn):
         rows = _read_jsonl(os.path.join(self.path, "ddl", f"{self._name(capture_instance)}.jsonl"))

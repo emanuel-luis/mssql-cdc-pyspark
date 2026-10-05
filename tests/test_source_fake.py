@@ -191,12 +191,18 @@ def test_metadata_columns_and_types(spark, workdir):
     assert rows[0]["_start_lsn"].startswith("0x") and len(rows[0]["_start_lsn"]) == 22
 
 
-def test_num_partitions_splits_without_duplicates(spark, workdir):
+def test_num_partitions_splits_without_duplicates(workdir, monkeypatch):
+    from pyspark.sql.streaming.datasource import ReadAllAvailable
+
+    from mssql_cdc import source
+
+    monkeypatch.setattr(source, "MIN_ROWS_PER_PARTITION", 1)  # these few rows in ranges too
     _db(workdir, n_tx=9, rows_per_tx=2)
-    _run(spark, workdir, numPartitions=3)
-    df = _read(spark, os.path.join(workdir, "out"))
-    assert df.count() == 18
-    assert df.select("order_id").distinct().count() == 18
+    reader = _reader(workdir, numPartitions=3)
+    start = reader.initialOffset()
+    ranges = reader.partitions(start, reader.latestOffset(start, ReadAllAvailable()))
+    ids = _order_ids(reader, ranges)
+    assert len(ranges) == 3 and len(ids) == len(set(ids)) == 18
 
 
 def test_starting_latest_skips_history(spark, workdir):
@@ -278,7 +284,7 @@ def test_num_partitions_precedence():
     assert MssqlCdcStreamReader(opts, schema, None).num_partitions == max(1, os.cpu_count() or 1)
 
 
-def test_num_partitions_defaults_to_the_session_cores(spark, workdir):
+def test_a_small_batch_reads_in_one_partition_whatever_the_cores(spark, workdir):
     from pyspark.sql import functions as F
 
     _db(workdir, n_tx=10, rows_per_tx=1)
@@ -300,15 +306,19 @@ def test_num_partitions_defaults_to_the_session_cores(spark, workdir):
     )
     q.awaitTermination()
     pids = {r[0] for r in spark.sql(f"SELECT DISTINCT pid FROM {name}").collect()}
-    assert len(pids) == spark.sparkContext.defaultParallelism  # conftest: local[2], via register()
+    # numPartitions=auto is 2 here (conftest: local[2], via register()), but ten rows are far
+    # below the rows a range must hold (MIN_ROWS_PER_PARTITION): one range, one task
+    assert spark.sparkContext.defaultParallelism == 2 and len(pids) == 1
 
 
-def test_partitions_hold_the_same_rows_even_when_commits_differ_in_size(workdir):
+def test_partitions_hold_the_same_rows_even_when_commits_differ_in_size(workdir, monkeypatch):
     from pyspark.sql.streaming.datasource import ReadAllAvailable
     from pyspark.sql.types import IntegerType, StructField, StructType
 
+    from mssql_cdc import source
     from mssql_cdc.source import MssqlCdcStreamReader
 
+    monkeypatch.setattr(source, "MIN_ROWS_PER_PARTITION", 1)  # these few rows in ranges too
     db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
     for i in range(8):  # eight one-row commits, then one commit with eight rows
         db.commit(CI, [(2, {"order_id": i})], at=T0 + timedelta(minutes=i))
@@ -648,9 +658,11 @@ def test_a_newer_capture_instance_takes_over_at_its_start_lsn(spark, workdir):
     }
 
 
-def test_partitions_split_at_the_newer_start_without_empty_ranges(spark, workdir):
+def test_partitions_split_at_the_newer_start_without_empty_ranges(spark, workdir, monkeypatch):
+    from mssql_cdc import source
     from mssql_cdc.lsn import from_int, to_int
 
+    monkeypatch.setattr(source, "MIN_ROWS_PER_PARTITION", 1)  # these few rows in ranges too
     _, v2, s, c = _switch(workdir)
     reader = _stream_reader(spark, workdir, numPartitions=2)
 

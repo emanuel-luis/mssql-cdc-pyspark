@@ -22,8 +22,9 @@
   so every file there is the current batch's, and a retried task rewrites its file under the
   same name
   (``<from>-<to>.json``). Selecting files by the rows' LSNs would miss the partitions that
-  read none, such as the trailing one that ends at the end offset. Metrics never fail a
-  batch. ``mssql_cdc.stream()`` wires both ends from one set of options.
+  read none, such as an idle batch's, which ends at the end offset. Only the batch's last
+  partition measures the position (watermark, capture's progress, end commit time). Metrics
+  never fail a batch. ``mssql_cdc.stream()`` wires both ends from one set of options.
 * Changes to the source are facts too (ADR 0023): while planning a batch the reader leaves an
   ``event-<kind>-<lsn>.json`` file in the same directory for a schema change or a switch to a
   newer capture instance. The sink writes each as an event row of the batch, in the same

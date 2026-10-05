@@ -500,6 +500,25 @@ def test_capture_instances_lists_the_table_s_instances_oldest_first():
         SqlCdcClient(rec).capture_instances("dbo_orders]; DROP TABLE x --")
 
 
+def test_captured_columns_are_read_once_per_instance_until_forgotten():
+    def fetched(rec):
+        return [c[1][0] for c in rec.calls if "sp_cdc_get_captured_columns" in c[0]]
+
+    rec = Cdc(ORDERS, CAPTURED)
+    client = SqlCdcClient(rec)
+    client.capture_instances("dbo_orders")
+    client.capture_instances("dbo_orders")  # the next planning: the listing only
+    assert fetched(rec) == ["dbo_orders", "dbo_orders_v2"]
+    # ALTER COLUMN changes a captured type: the reader forgets them when a batch holds DDL
+    rec.captured = {**CAPTURED, "dbo_orders_v2": [_col(1, "id", "bigint", 19, 0)]}
+    client.forget_columns()
+    assert client.capture_instances("dbo_orders")[1].column_types == ["BIGINT"]
+    # an instance dropped and created again under its name is another one: its own columns
+    rec.instances = [dict(r, create_date=datetime(2026, 10, 1)) for r in ORDERS]
+    client.capture_instances("dbo_orders")
+    assert fetched(rec) == ["dbo_orders", "dbo_orders_v2"] * 3
+
+
 def test_planning_lists_the_resolved_table_only_until_it_misses_the_name():
     full = ("EXEC sys.sp_cdc_help_change_data_capture", ())
 
@@ -726,21 +745,23 @@ def test_ping_and_network_wait():
 def test_split_points_tile_the_change_rows_of_the_capture_instance():
     rec = Rows(
         [
-            {"b": "0x0000002a000001000001", "n": "0x0000002a000001000002"},
-            {"b": "0x0000002a000001000003", "n": "0x0000002a000001000004"},
+            {"b": "0x0000002a000001000001", "n": "0x0000002a000001000002", "r": 3},
+            {"b": "0x0000002a000001000003", "n": "0x0000002a000001000004", "r": 2},
         ]
     )
     points = SqlCdcClient(rec, source_timezone="UTC").split_points("dbo_orders", "0x01", "0x02", 4)
-    # each bound with the LSN after it, where the next range starts: no query per bound
+    # each bound with the LSN after it, where the next range starts (no query per bound), and
+    # its tile's rows, by which small tiles are merged
     assert points == [
-        ("0x0000002A000001000001", "0x0000002A000001000002"),
-        ("0x0000002A000001000003", "0x0000002A000001000004"),
+        ("0x0000002A000001000001", "0x0000002A000001000002", 3),
+        ("0x0000002A000001000003", "0x0000002A000001000004", 2),
     ]
     assert len(rec.calls) == 1
     sql, params = rec.calls[-1]
     assert sql == (
         "SELECT CONVERT(varchar(22), MAX(__$start_lsn), 1) AS b, "
-        "CONVERT(varchar(22), sys.fn_cdc_increment_lsn(MAX(__$start_lsn)), 1) AS n FROM ("
+        "CONVERT(varchar(22), sys.fn_cdc_increment_lsn(MAX(__$start_lsn)), 1) AS n, "
+        "COUNT_BIG(*) AS r FROM ("
         "SELECT __$start_lsn, NTILE(4) OVER (ORDER BY __$start_lsn) AS g "
         "FROM cdc.[dbo_orders_CT] "
         "WHERE __$start_lsn BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)"

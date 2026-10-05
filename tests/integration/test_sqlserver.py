@@ -501,9 +501,10 @@ def test_split_points_balance_rows_across_uneven_commits(sqlserver, backend):
     try:
         lo, hi = client.min_lsn(ci), client.max_lsn()
         points = client.split_points(ci, lo, hi, 2)
-        assert all(after == client.increment_lsn(b) for b, after in points)
+        assert all(after == client.increment_lsn(b) for b, after, _ in points)
+        assert [rows for _, _, rows in points] == [8, 8]  # each tile's rows, from the server
         ranges, prev = [], lo
-        for b, after in points:
+        for b, after, _ in points:
             ranges.append((prev, b))
             prev = after
         sizes = [

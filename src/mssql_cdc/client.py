@@ -490,10 +490,11 @@ class CdcClient(ABC):
     @abstractmethod
     def split_points(
         self, capture_instance: str, from_lsn: str, to_lsn: str, n: int
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str, int]]:
         """Up to ``n`` commit-aligned upper bounds that split [from, to] into ranges holding
         about the same number of change rows of ``capture_instance``, ascending, each with
-        the LSN after it (``increment_lsn``), where the next range starts."""
+        the LSN after it (``increment_lsn``), where the next range starts, and the rows of
+        its tile."""
 
     @abstractmethod
     def iter_changes(
@@ -599,6 +600,10 @@ class CdcClient(ABC):
         """Every capture instance of the table ``capture_instance`` tracks, oldest first. A
         dropped ``capture_instance`` is followed to its table when that can be told. Its
         computed columns are in ``computed``, not in ``columns``."""
+
+    def forget_columns(self) -> None:
+        """Make the next ``capture_instances`` read the captured columns again: a client
+        may cache them, and ALTER COLUMN changes their types."""
 
     @abstractmethod
     def ddl_history(self, capture_instance: str, from_lsn: str, to_lsn: str) -> list[DdlChange]:
@@ -774,6 +779,8 @@ class SqlCdcClient(CdcClient):
         self._tz = None if source_timezone.lower() == "auto" else _check_tz(source_timezone)
         self._offset_min: int | None = None  # set instead of _tz by the pre-2022 fallback
         self._resolved_table: tuple[str, str] | None = None  # (schema, table) _resolve found
+        # capture_instances' cache: the kept captured column rows, the computed column names
+        self._columns: dict[tuple[str, str], tuple[list[dict], tuple[str, ...]]] = {}
 
     # -- helpers --------------------------------------------------------------
     @property
@@ -957,21 +964,23 @@ class SqlCdcClient(CdcClient):
         # are database-wide, and on a real table they left the largest range with ~2x the
         # mean rows (ADR 0015). Each bound is the last commit LSN of its tile, so a commit
         # whose rows straddle two tiles stays whole in the first range. The LSN after each
-        # comes along, where the next range starts: no round trip per bound.
+        # comes along, where the next range starts: no round trip per bound. So does the
+        # tile's row count, free once grouped, by which the reader merges small tiles.
         ci = _check_capture_instance(capture_instance)
         n = int(n)
         sql = (
             "SELECT CONVERT(varchar(22), MAX(__$start_lsn), 1) AS b, "
-            "CONVERT(varchar(22), sys.fn_cdc_increment_lsn(MAX(__$start_lsn)), 1) AS n FROM ("
+            "CONVERT(varchar(22), sys.fn_cdc_increment_lsn(MAX(__$start_lsn)), 1) AS n, "
+            "COUNT_BIG(*) AS r FROM ("
             f"SELECT __$start_lsn, NTILE({n}) OVER (ORDER BY __$start_lsn) AS g "
             f"FROM cdc.[{ci}_CT] "
             "WHERE __$start_lsn BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)"
             ") x GROUP BY g ORDER BY b"
         )
-        points: list[tuple[str, str]] = []
+        points: list[tuple[str, str, int]] = []
         for batch in self._change_table_batches(ci, sql, (from_lsn, to_lsn), 1000):
-            for b, after in zip(batch.column(0).to_pylist(), batch.column(1).to_pylist()):
-                points.append((_lsn.normalize(b), _lsn.normalize(after)))
+            for b, after, rows in zip(*(c.to_pylist() for c in batch.columns)):
+                points.append((_lsn.normalize(b), _lsn.normalize(after), int(rows)))
         return points
 
     def ping(self, samples=3):
@@ -1034,16 +1043,27 @@ class SqlCdcClient(CdcClient):
         return ", ".join(ddl)
 
     def capture_instances(self, capture_instance):
-        # ponytail: one sp_cdc_get_captured_columns per instance per call (every planning);
-        # cache by (name, create_date) if planning time shows up in profiles.
         rows = self._resolve(capture_instance)[1]
-        # CDC stores NULL for a computed column in every change row: left out (by column_id,
-        # which a column dropped and added back does not keep)
-        computed = {c["column_id"] for c in self._table_columns(rows[0]) if c["is_computed"]}
+        computed: set[int] | None = None
         out = []
         for r in rows:
-            cols = self._captured_rows(r["capture_instance"])
-            kept = [c for c in cols if c["column_id"] not in computed]
+            # An instance's columns never change, their types do (ALTER COLUMN): cached per
+            # instance and creation, so not refetched every planning; forget_columns() drops
+            # them when a batch holds DDL, before its types are checked (ADR 0023's D1).
+            key = (r["capture_instance"], str(r.get("create_date")))
+            if key not in self._columns:
+                if computed is None:
+                    # CDC stores NULL for a computed column in every change row: left out (by
+                    # column_id, which a column dropped and added back does not keep)
+                    computed = {
+                        c["column_id"] for c in self._table_columns(rows[0]) if c["is_computed"]
+                    }
+                cols = self._captured_rows(r["capture_instance"])
+                self._columns[key] = (
+                    [c for c in cols if c["column_id"] not in computed],
+                    tuple(c["column_name"] for c in cols if c["column_id"] in computed),
+                )
+            kept, skipped = self._columns[key]
             types: list[str | None] = []
             for c in kept:
                 try:
@@ -1058,7 +1078,7 @@ class SqlCdcClient(CdcClient):
                     self._hex(r["start_lsn"]),
                     [_check_column(c["column_name"]) for c in kept],
                     types,
-                    tuple(c["column_name"] for c in cols if c["column_id"] in computed),
+                    skipped,
                 )
             )
         return out
@@ -1072,6 +1092,9 @@ class SqlCdcClient(CdcClient):
         )
         params = (r["source_schema"], r["source_table"])
         return [c for batch in self._b.batches(sql, params, 1000) for c in batch.to_pylist()]
+
+    def forget_columns(self):
+        self._columns.clear()
 
     def ddl_history(self, capture_instance, from_lsn, to_lsn):
         # The documented API, not cdc.ddl_history (invariant 11): it needs what
