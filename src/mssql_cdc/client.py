@@ -933,7 +933,9 @@ class SqlCdcClient(CdcClient):
                 for r in batch.to_pylist()
             ]
         except Exception as exc:  # Error 22981, driver-specific type
-            raise ValueError(not_found) from exc
+            # the driver's own words too: a dropped connection is no missing instance
+            cause = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+            raise ValueError(f"{not_found} Cause: {cause}") from exc
         if not rows:
             raise ValueError(not_found)
         return sorted(rows, key=lambda r: r["column_ordinal"])
@@ -1274,7 +1276,11 @@ class SqlCdcClient(CdcClient):
         try:
             yield from self._b.batches(sql, params, batch_size)
         except Exception as exc:
-            if "denied" in str(exc) and f"{ci}_CT".lower() in str(exc).lower():
+            # 229/230: permission denied, the number a login of any language gets; the object
+            # name too, since error 208 (no such object) names it as well
+            text = str(exc)
+            denied = "denied" in text or "(229)" in text or "(230)" in text
+            if denied and f"{ci}_CT".lower() in text.lower():
                 raise PermissionError(
                     f"The login cannot read the change table cdc.[{ci}_CT]. Beyond what the CDC "
                     f"query functions need, the reader needs: GRANT SELECT ON cdc.[{ci}_CT] "

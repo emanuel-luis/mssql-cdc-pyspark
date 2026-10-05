@@ -285,22 +285,43 @@ def test_captured_columns_errors_point_to_columns_option():
         def batches(self, sql, params, batch_size):
             raise RuntimeError("Object doesn't exist or access is denied.")  # Error 22981
 
-    with pytest.raises(ValueError, match="gating role"):
+    with pytest.raises(ValueError, match="gating role.*Cause: Object doesn't exist"):
         SqlCdcClient(Denied()).captured_columns("dbo_orders")
+
+    class Dropped(Recorder):  # a transient error says so, first line only
+        def batches(self, sql, params, batch_size):
+            raise RuntimeError("Communication link failure (08S01)\n[ODBC] details")
+
+    with pytest.raises(ValueError, match=r"Cause: Communication link failure \(08S01\)$"):
+        SqlCdcClient(Dropped()).captured_columns("dbo_orders")
 
 
 def test_change_table_permission_error_names_the_grant():
     class Denied(Recorder):
-        def batches(self, sql, params, batch_size):
-            raise RuntimeError(
-                "[SQL Server]The SELECT permission was denied on the object "
-                "'dbo_orders_CT', database 'db', schema 'cdc'."
-            )
+        def __init__(self, message):
+            super().__init__()
+            self.message = message
 
-    with pytest.raises(PermissionError, match=r"GRANT SELECT ON cdc\.\[dbo_orders_CT\].*own grant"):
-        list(SqlCdcClient(Denied()).iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
-    with pytest.raises(PermissionError, match=r"GRANT SELECT ON cdc\.\[dbo_orders_CT\]"):
-        SqlCdcClient(Denied(), source_timezone="UTC").split_points("dbo_orders", "0x01", "0x02", 4)
+        def batches(self, sql, params, batch_size):
+            raise RuntimeError(self.message)
+
+    english = (
+        "[SQL Server]The SELECT permission was denied on the object "
+        "'dbo_orders_CT', database 'db', schema 'cdc'."
+    )
+    # another language: the error number and the object name still tell it
+    localized = "[SQL Server]A permissão SELECT foi negada no objeto 'dbo_orders_CT'. (229)"
+    for message in (english, localized):
+        client = SqlCdcClient(Denied(message), source_timezone="UTC")
+        grant = r"GRANT SELECT ON cdc\.\[dbo_orders_CT\]"
+        with pytest.raises(PermissionError, match=grant + ".*own grant"):
+            list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+        with pytest.raises(PermissionError, match=grant):
+            client.split_points("dbo_orders", "0x01", "0x02", 4)
+    missing = Denied("Invalid object name 'cdc.dbo_orders_CT'. (208)")  # names it too
+    with pytest.raises(RuntimeError, match="Invalid object name") as raised:
+        list(SqlCdcClient(missing).iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+    assert not isinstance(raised.value, PermissionError)
 
 
 def _instance(ci, table, start, created=None, schema="dbo"):
