@@ -67,8 +67,9 @@ where = ["src"]
 testpaths = ["tests"]
 # integration tests: pytest -m sqlserver (needs Docker)
 addopts = ["-ra", "--strict-markers", "--strict-config", "--durations=25", "-m", "not sqlserver"]
-# A hung stream fails its test with every thread's stack instead of running until the
-# CI job's own limit.
+# A hung stream aborts the whole run after dumping every thread's stack (the thread method
+# ends the process, so no later test or report runs) instead of running until the CI job's
+# own limit.
 timeout = 900
 timeout_method = "thread"
 markers = [
