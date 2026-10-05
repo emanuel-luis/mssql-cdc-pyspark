@@ -27,6 +27,10 @@ changes.printSchema()
 
 An update is two rows, operation 3 and operation 4.
 
+A source column whose name equals one of these, or one the sink adds (`_batch_id`,
+`_snapshot`, `_chunk`), ignoring case, raises `ValueError` when the stream or snapshot loads:
+leave it out with [columns](options.md#columns).
+
 ## Ordering changes
 
 Order rows with `(_start_lsn, _command_id, _seqval, _operation)`, for example in bronze:

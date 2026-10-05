@@ -53,7 +53,25 @@ by the older release
   `main`
   ([ADR 0003](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0003-mssql-python-default-backend/) amendment 3).
 
+### Breaking
+
+- `maxCommitsPerBatch`, `numPartitions` and `arrowBatchSize` below 1, or not an integer,
+  raise `ValueError`, and so does a negative `connectTimeout`. `maxCommitsPerBatch=0` used
+  to mean unlimited without a word: omit the option instead.
+- A source column named like a metadata column or one the sink adds (`_start_lsn`,
+  `_chunk`, ..., in any case) raises `ValueError` when the stream loads, instead of being
+  dropped, failing later on a duplicate column, or read as the chunk number: leave it out
+  with `columns`.
+
 ### Changed
+
+- The reader logs a WARNING naming any option it does not know, so a misspelt name no
+  longer leaves its default in force silently.
+- The reader refuses a `metricsPath` that is a URI too, and logs a WARNING with the file
+  when it cannot write a metrics file, instead of turning the facts' metrics NULL silently.
+- Planning sends fewer queries: each range's start comes from the same query as the split
+  points, and after the first resolution the client lists only the table's own capture
+  instances, falling back to the whole database when that misses.
 
 - `to_delta` names the query after the sink's `app_id` (`<app_id>.g<n>` in generation `n`)
   when `query_name` is not given.
@@ -108,6 +126,9 @@ by the older release
   name without `]` or a control character, up to 100 characters, is accepted. The
   validators no longer accept a trailing newline.
 - `backfill(isolation="SNAPSHOT")` passed the reader's check but failed while planning.
+- A stream on a database capture had not written to yet (`sys.fn_cdc_get_max_lsn()` NULL)
+  failed with `TypeError` in `latestOffset`, and `startingLsn=latest` planned from no
+  offset: a NULL `max_lsn` is now the zero LSN, as the pipeline already took it.
 - A snapshot's own commit is found among every commit after it, not only the last five.
 - A table path holding a backtick is escaped in SQL.
 - The Databricks example's epoch was off by the driver's UTC offset on a driver not set to

@@ -23,8 +23,9 @@ query = stream(spark, options).to_delta(
 )
 ```
 
-Option names are case-insensitive (`startinglsn` works). Pass values as strings, as Spark
-does. A boolean option is true for `true`, `1`, `yes` or `y`, in any case, and false for
+Option names are case-insensitive (`startinglsn` works). The reader logs one WARNING naming
+any option it does not know, which is how a misspelt name shows. Pass values as strings, as
+Spark does. A boolean option is true for `true`, `1`, `yes` or `y`, in any case, and false for
 anything else.
 
 ## Source options
@@ -102,7 +103,7 @@ Anything else fails with `ValueError: Unknown backend`. Why `mssql-python` is th
 ### connectTimeout
 
 Login timeout in seconds, passed to `mssql_python.connect`, or to `arrow_odbc.connect` with
-`backend=arrow-odbc`.
+`backend=arrow-odbc`. A negative value raises `ValueError`.
 
 ### sourceTimeZone
 
@@ -172,7 +173,7 @@ At most this many commits per micro-batch, counted in `cdc.lsn_time_mapping`. Th
 database-wide: idle entries and other tables' commits count too. A batch always ends on a
 commit boundary. Without it every batch reads up to `max_lsn`, so the first batch after a
 long stop or a long snapshot reads the whole backlog in one go: set it to keep that batch
-bounded.
+bounded. A positive integer: omit the option for unlimited (`0` raises `ValueError`).
 
 It needs Spark 4.2+, or a runtime with its admission control backported, such as Databricks
 Runtime 18.2+ ([Databricks](../DATABRICKS.md)). On older Spark it is ignored. With
@@ -190,14 +191,15 @@ tiles of the rows, and reads a table without a unique index in one partition.
 * `auto`: the cores of the session that called `register()` (`defaultParallelism`;
   `stream()` calls it), else the CPU count of the node that plans (Spark Connect, or without
   `register()`). [ADR 0011](../decisions/0011-num-partitions-from-cores.md).
-* A number: set it to cap the load on the source.
+* A positive integer: set it to cap the load on the source. Anything else raises `ValueError`.
 
 ### arrowBatchSize
 
 Rows per Arrow record batch fetched from the driver, in the stream and the snapshot. Each
 batch is cast to the output schema and handed to Spark as it arrives. Batches are also
 capped near 64 MiB, on the default backend as on `arrow-odbc`, so a table with large
-`(max)`, `text` or `xml` values reads in smaller batches.
+`(max)`, `text` or `xml` values reads in smaller batches. A positive integer; anything else
+raises `ValueError`.
 
 ### failOnDataLoss
 
