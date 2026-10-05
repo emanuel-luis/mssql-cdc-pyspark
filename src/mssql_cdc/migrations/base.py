@@ -29,17 +29,27 @@ def current_version(kind: str) -> int:
 
 
 def migrate(spark, table: str, kind: str) -> int:
-    """Apply the migrations ``table`` has not had yet; return its version afterwards."""
+    """Apply the migrations ``table`` has not had yet; return its version afterwards.
+
+    A migration and its version stamp are two commits: one re-run after a crash between
+    them, or by a job that lost the race to stamp it, must change nothing (``add_columns``
+    skips the columns the table has, ``set_comments`` sets the same text)."""
     migrations = _migrations(kind)
     properties = delta_table(spark, table).detail().first()["properties"] or {}
     version = int(properties.get(SCHEMA_VERSION_PROPERTY, 0))  # unstamped = created before any
+    if version > len(migrations):
+        raise ValueError(
+            f"{table} is at {kind} schema version {version}, and this mssql-cdc-pyspark knows "
+            f"{len(migrations)}: a newer release migrated it. Upgrade mssql-cdc-pyspark rather "
+            "than run an older one against it."
+        )
     for number, migration in enumerate(migrations[version:], start=version + 1):
         migration.apply(spark, table)
         spark.sql(
             f"ALTER TABLE {table_ref(table)} SET TBLPROPERTIES "
             f"('{SCHEMA_VERSION_PROPERTY}' = '{number}')"
         )
-    return max(version, len(migrations))
+    return len(migrations)
 
 
 def ensure(spark, table: str, kind: str, columns, comment: str) -> None:
@@ -59,10 +69,15 @@ def ensure(spark, table: str, kind: str, columns, comment: str) -> None:
 
 def add_columns(spark, table: str, columns) -> None:
     """Add nullable ``(name, type, comment)`` columns with an empty append and
-    ``mergeSchema``: a metadata-only commit; existing rows read NULL."""
+    ``mergeSchema``: a metadata-only commit; existing rows read NULL. A column the table
+    already has (ignoring case, as Delta does) is skipped; with none left, nothing is written."""
     from pyspark.sql.types import StructField, StructType
 
     fields = list(delta_table(spark, table).toDF().schema.fields)
+    have = {f.name.lower() for f in fields}
+    columns = [c for c in columns if c[0].lower() not in have]
+    if not columns:
+        return
     for name, data_type, comment in columns:
         if isinstance(data_type, str):
             data_type = spark.createDataFrame([], f"`{name}` {data_type}").schema[0].dataType

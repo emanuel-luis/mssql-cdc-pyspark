@@ -11,8 +11,11 @@ def is_path(name_or_path: str) -> bool:
 
 
 def table_ref(name_or_path: str) -> str:
-    """A table name, or ``delta.`path``` when given a filesystem/object-store path (for SQL)."""
-    return f"delta.`{name_or_path}`" if is_path(name_or_path) else name_or_path
+    """A table name, or ``delta.`path``` when given a filesystem/object-store path (for SQL);
+    a backtick in the path is doubled, as SQL escapes it inside backticks."""
+    if not is_path(name_or_path):
+        return name_or_path
+    return "delta.`" + name_or_path.replace("`", "``") + "`"
 
 
 def delta_table(spark, name_or_path: str):
