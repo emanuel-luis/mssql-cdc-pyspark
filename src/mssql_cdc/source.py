@@ -154,6 +154,17 @@ KNOWN_OPTIONS = frozenset(
 )
 
 
+def warn_unknown(options) -> None:
+    """One WARNING naming the options not in ``KNOWN_OPTIONS``. The readers log it where
+    Spark runs them (a Python worker's stderr); ``stream()`` logs it in the caller's process."""
+    unknown = sorted(str(k) for k in options if str(k).lower() not in KNOWN_OPTIONS)
+    if unknown:
+        _log.warning(
+            "mssql_cdc: unknown option(s) %s ignored; see docs/reference/options.md",
+            ", ".join(unknown),
+        )
+
+
 # -- types across schema changes (ADR 0023) ------------------------------------
 _INTS = ["tinyint", "smallint", "int", "bigint"]
 _DIGITS = {"tinyint": 3, "smallint": 5, "int": 10, "bigint": 20}
@@ -345,12 +356,7 @@ class _Common:
 
     def __init__(self, options: dict, schema, default_num_partitions: int | None = None):
         self.options = options
-        unknown = sorted(str(k) for k in options if str(k).lower() not in KNOWN_OPTIONS)
-        if unknown:
-            _log.warning(
-                "mssql_cdc: unknown option(s) %s ignored; see docs/reference/options.md",
-                ", ".join(unknown),
-            )
+        warn_unknown(options)
         self.capture_instance = _opt(options, "captureInstance")
         if not self.capture_instance:
             raise ValueError("Option 'captureInstance' is required (e.g. 'dbo_orders')")
@@ -463,7 +469,15 @@ class _BaseReader(_Common, DataSourceStreamReader):
             oldest = self._instances(self.client)[0].name
             lsn = self.client.decrement_lsn(self.client.min_lsn(oldest))
         elif start.lower() == "latest":
-            lsn = self._max_lsn()
+            # as a snapshot is stamped: never below the oldest instance's first LSN, which
+            # min_lsn becomes once capture reaches it (the retention guard would fail there)
+            lsn = snapshot_lsn(self.client, self._instances(self.client)[0])
+            if lsn == ZERO_LSN:  # max_lsn NULL, the instance's start unknown: nowhere safe
+                raise ValueError(
+                    f"{self.capture_instance}: capture has not written to this database yet "
+                    "(sys.fn_cdc_get_max_lsn() is NULL) and the capture instance has no start "
+                    "LSN: retry once the capture job has run (is SQL Server Agent running?)."
+                )
         else:
             from .lsn import normalize
 

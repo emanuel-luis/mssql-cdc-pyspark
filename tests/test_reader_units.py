@@ -197,21 +197,39 @@ def test_a_failed_read_closes_its_client():
 
 
 # -- offsets -----------------------------------------------------------------------------
-def test_a_database_capture_has_not_written_to_yet_starts_at_zero(tmp_path):
+def test_latest_on_a_database_capture_has_not_written_to_starts_before_the_instance(tmp_path):
     from pyspark.sql.streaming.datasource import ReadAllAvailable, ReadMaxRows
 
     from mssql_cdc.lsn import ZERO_LSN
 
-    FakeCdcDatabase(str(tmp_path), [CI])  # no entry in cdc.lsn_time_mapping: max_lsn is NULL
-    assert FakeCdcClient(str(tmp_path)).max_lsn() is None
+    db = FakeCdcDatabase(str(tmp_path), [CI])  # no cdc.lsn_time_mapping entry: max_lsn NULL
+    fake = FakeCdcClient(str(tmp_path))
+    assert fake.max_lsn() is None
     reader = _reader(str(tmp_path), startingLsn="latest")
     start = reader.initialOffset()
-    assert start == {"lsn": ZERO_LSN, "commit_ts": ""}
+    # just before the instance's first LSN, as a snapshot is stamped; not the zero LSN
+    assert start == {"lsn": fake.decrement_lsn(fake.min_lsn(CI)), "commit_ts": ""}
+    assert start["lsn"] > ZERO_LSN
     assert reader.latestOffset(start, ReadAllAvailable()) == start
     assert reader.latestOffset(start, ReadMaxRows(5)) == start
-    assert reader.reportLatestOffset() == start
+    assert reader.reportLatestOffset()["lsn"] == ZERO_LSN  # what capture has reached: nothing
     reader.prepareForTriggerAvailableNow()
     assert reader.latestOffset(start, ReadAllAvailable()) == start
+    reader._target = None  # back to a trigger that keeps running
+    # capture's first commit: read, not a DataLossError from below min_lsn
+    lsn = db.commit(CI, [(2, {"order_id": 1})], at=T0)
+    end = reader.latestOffset(start, ReadAllAvailable())
+    assert end["lsn"] == lsn
+    [r] = reader.partitions(start, end)
+    assert (r.from_lsn, r.to_lsn) == (lsn, lsn)
+
+
+def test_latest_with_no_max_lsn_and_no_instance_start_asks_to_retry(monkeypatch):
+    reader = _reader(startingLsn="latest")
+    monkeypatch.setattr("mssql_cdc.source.snapshot_lsn", lambda client, source: _lsn(0))
+    monkeypatch.setattr(reader, "_instances", lambda client: [None])
+    with pytest.raises(ValueError, match="retry once the capture job has run"):
+        reader.initialOffset()
 
 
 class Counting:

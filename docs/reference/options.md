@@ -23,8 +23,9 @@ query = stream(spark, options).to_delta(
 )
 ```
 
-Option names are case-insensitive (`startinglsn` works). The reader logs one WARNING naming
-any option it does not know, which is how a misspelt name shows. Pass values as strings, as
+Option names are case-insensitive (`startinglsn` works). `stream()` logs one WARNING naming
+any option it does not know, in your job's log, which is how a misspelt name shows; the reader
+logs it again in the driver's stderr log, also with `spark.readStream`. Pass values as strings, as
 Spark does. A boolean option is true for `true`, `1`, `yes` or `y`, in any case, and false for
 anything else.
 
@@ -159,6 +160,9 @@ Where a new checkpoint starts. A checkpoint that already has offsets ignores it.
 * `earliest`: the oldest change CDC still holds (`sys.fn_cdc_get_min_lsn` of the table's
   oldest capture instance).
 * `latest`: `sys.fn_cdc_get_max_lsn()` when the query starts; only later commits are read.
+  On a capture instance that capture has not reached yet (a quiet database just after
+  `sys.sp_cdc_enable_table`), the LSN just before the instance's first one instead, as a
+  snapshot does.
 * An LSN, such as `0x0000002A000001F00003`: treated as already processed, so the first batch
   reads the commits after it. The `0x` is optional, and fewer than 20 hex digits are padded
   on the left. An LSN that CDC cleanup has already passed fails the first batch with
@@ -478,6 +482,7 @@ what to do next:
 | `waiting_headroom` | paused: the stream's retention headroom is below `min_headroom_hours` |
 | `waiting_metrics` | paused: the stream has written no facts row with a headroom yet |
 | `no_snapshot` | no chunked snapshot of this `target` and `app_id` is open: the stream has not opened it yet, or `target` or `app_id` is wrong, or the stream bootstraps with `snapshot="full"` |
+
 Each wave is one commit to `target` and one `snapshot_chunk` facts row per chunk
 ([Tables](tables.md#facts)).
 

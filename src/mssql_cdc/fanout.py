@@ -48,7 +48,8 @@ def start_many(
     of name to options for that stream alone, which override ``options``
     (``numPartitions``, ``columns``, ``startingLsn``...). ``facts_table`` and the other
     keyword arguments (``trigger``, ``bootstrap``, ``on_data_loss``...) go to every
-    ``to_delta``; each query is named after its app_id.
+    ``to_delta``; each query is named as ``to_delta`` names it, after its sink id
+    (``<app_id>.g<n>`` after a re-snapshot), as its facts rows are.
 
     The facts table is created, or migrated, once before the first start: writers that
     commit to a new Delta table at the same time conflict. The streams start in order,
@@ -85,7 +86,6 @@ def start_many(
                 ids["app_id"],
                 ids["checkpoint"],
                 facts_table=facts_table,
-                query_name=ids["app_id"],
                 **to_delta_kwargs,
             )
     except BaseException:

@@ -238,8 +238,10 @@ def _last_offset(checkpoint: str) -> dict | None:
 class CdcStream:
     def __init__(self, spark: SparkSession, options: dict):
         from . import register  # lazy: the package imports this module
+        from .source import warn_unknown
 
         self.spark, self.options = spark, dict(options)
+        warn_unknown(self.options)  # here, in the caller's log; the reader's goes to a worker's
         register(spark)
 
     def _capture_instance(self) -> str:
@@ -1108,17 +1110,17 @@ class CdcStream:
 
         from . import sink
         from .client import last_bound, make_client
-        from .source import snapshot_lsn
+        from .source import ISOLATION_LEVELS, snapshot_lsn
         from .spark import available_cores
         from .tables import delta_table, exists
 
         if chunk_rows is not None and int(chunk_rows) < 1:
             raise ValueError(f"chunk_rows must be at least 1, not {chunk_rows}")
         asked = isolation if isolation is not None else _opt(self.options, "isolationLevel")
-        level = str(asked or "").strip().lower()
-        if level not in ("", "readcommitted", "snapshot"):
+        level = str(asked or "readCommitted").strip().lower()
+        if level not in ISOLATION_LEVELS:
             raise ValueError(f"isolation must be 'snapshot' or 'readCommitted', not {asked!r}")
-        isolation = "snapshot" if level == "snapshot" else None  # as client._isolated takes it
+        isolation = ISOLATION_LEVELS[level]  # as client._isolated takes it
         ci, t0 = self._capture_instance(), time.monotonic()
         ours = _family(app_id)
         kinds = ("snapshot_open", "snapshot_plan", "snapshot_chunk", "bootstrap", "resnapshot")
