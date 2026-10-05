@@ -18,22 +18,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { persist-credentials: false }
+        with: { persist-credentials: false, fetch-depth: 0 }  # origin/main, for the check below
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with: { python-version: "3.11", enable-cache: false }
       - name: Tag matches the version in pyproject.toml
         if: github.event_name == 'push'
         run: test "v$(uv version --short)" = "$GITHUB_REF_NAME"
+      - name: Tagged commit is on main
+        if: github.event_name == 'push'
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: CHANGELOG.md has the release's section (its state compatibility, ADR 0021)
+        if: github.event_name == 'push'
+        run: grep -q "^## \[$(uv version --short)\]" CHANGELOG.md
       - run: uv build
-      - run: uvx twine check --strict dist/*
+      # Uploaded before anything else is installed: later steps cannot change what is published.
+      # A failing check below still fails the job, and the publish jobs need it.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: dist, path: dist/ }
+      - run: uvx twine==7.0.0 check --strict dist/*
       - name: Smoke test (install each distribution, import, print the version)
         run: |
           for f in dist/*.whl dist/*.tar.gz; do
             uv run --isolated --no-project --with "$f" --with "pyspark>=4.2" \
               python -c "import mssql_cdc, importlib.metadata as m; print(m.version('mssql-cdc-pyspark'))"
           done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with: { name: dist, path: dist/ }
 
   testpypi:
     name: publish to TestPyPI (dry run)
