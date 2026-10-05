@@ -34,6 +34,7 @@ arrow-odbc = ["arrow-odbc>=10"]
 # Tests and lab/ (not packaged). `uv sync` installs this group by default.
 dev = [
     "pytest>=8",
+    "pytest-timeout>=2",
     "pyspark>=4.2",
     "delta-spark>=4.4",
     "faker>=30",
@@ -59,7 +60,12 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not sqlserver'"  # integration tests: pytest -m sqlserver (needs Docker)
+# integration tests: pytest -m sqlserver (needs Docker)
+addopts = ["-ra", "--strict-markers", "--strict-config", "--durations=25", "-m", "not sqlserver"]
+# A hung stream fails its test with every thread's stack instead of running until the
+# CI job's own limit.
+timeout = 900
+timeout_method = "thread"
 markers = [
   "delta: needs Delta Lake jars (Maven access on first run)",
   "sqlserver: integration tests against SQL Server 2022 in Docker (testcontainers)",

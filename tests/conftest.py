@@ -1,8 +1,21 @@
 import os
 import shutil
 import tempfile
+import traceback
 
 import pytest
+
+# CI sets MSSQL_CDC_TEST_DELTA=require: a Delta session that cannot be built, or a PySpark
+# without admission control, ends the run instead of skipping the tests that need them.
+REQUIRE = os.environ.get("MSSQL_CDC_TEST_DELTA") == "require"
+
+
+def pytest_sessionstart(session):
+    if REQUIRE:
+        from mssql_cdc import source
+
+        if not source.HAS_ADMISSION_CONTROL:
+            pytest.exit("MSSQL_CDC_TEST_DELTA=require: this PySpark has no admission control")
 
 
 def _builder(delta: bool):
@@ -33,16 +46,22 @@ def _builder(delta: bool):
 @pytest.fixture(scope="session")
 def spark():
     """One session for the whole run. Uses Delta when the jars resolve (set
-    MSSQL_CDC_TEST_DELTA=0 to skip trying), otherwise plain Spark."""
+    MSSQL_CDC_TEST_DELTA=0 to skip trying, =require to fail without it), otherwise
+    plain Spark."""
     session, has_delta = None, False
     if os.environ.get("MSSQL_CDC_TEST_DELTA", "1") != "0":
         try:
             session = _builder(delta=True).getOrCreate()
             session.range(1).write.format("delta").mode("overwrite").save(tempfile.mkdtemp())
             has_delta = True
-        except Exception:  # noqa: BLE001 - jars unavailable, no Maven access, etc.
+        except Exception as e:  # noqa: BLE001 - jars unavailable, no Maven access, etc.
             if session is not None:
                 session.stop()
+            if REQUIRE:
+                pytest.exit(
+                    "MSSQL_CDC_TEST_DELTA=require, but no Delta session:\n"
+                    + "".join(traceback.format_exception(e))
+                )
             session = None
     if session is None:
         session = _builder(delta=False).getOrCreate()
