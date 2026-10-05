@@ -79,6 +79,10 @@ METADATA_COLUMNS = [
     ("_command_id", "INT"),
     ("_commit_ts", "TIMESTAMP_NTZ"),
 ]
+# the metadata columns and the sink's: no source column may take one of these names
+RESERVED_COLUMNS = frozenset(
+    {n.lower() for n, _ in METADATA_COLUMNS} | {"_batch_id", "_snapshot", "_chunk"}
+)
 # 1-4 are SQL Server's __$operation codes; 0 marks a snapshot row (ADR 0016)
 OPERATIONS = {0: "snapshot", 1: "delete", 2: "insert", 3: "update_before", 4: "update_after"}
 SCHEMA_CHANGE_POLICIES = ("classify", "fail")
@@ -89,6 +93,22 @@ _log = logging.getLogger(__name__)
 def _opt(options, key: str, default=None):
     lowered = {k.lower(): v for k, v in dict(options).items()}
     return lowered.get(key.lower(), default)
+
+
+_DDL_NAME = re.compile(r"\s*(`(?:[^`]|``)+`|[^\s`:]+)")  # `a b` INT, a INT, a: INT
+
+
+def _ddl_names(ddl: str) -> list[str]:
+    """The column names of a Spark DDL list, such as ``a INT, `b c` DECIMAL(18,2)``."""
+    # ponytail: cut at commas outside () and <>; one inside a backticked name or a COMMENT
+    # string misplaces a piece, which matters only if that piece is a reserved name
+    names = []
+    for part in re.split(r",(?![^()<>]*[)>])", ddl):
+        m = _DDL_NAME.match(part)
+        if m and part.strip():
+            name = m[1]
+            names.append(name[1:-1].replace("``", "`") if name.startswith("`") else name)
+    return names
 
 
 def _truthy(value) -> bool:
@@ -262,6 +282,13 @@ class MssqlCdcDataSource(DataSource):
 
     def schema(self) -> str:
         columns = _opt(self.options, "columns") or self._captured_columns()
+        taken = [c for c in _ddl_names(columns) if c.lower() in RESERVED_COLUMNS]
+        if taken:  # a duplicate field, or a source column read as the chunk number
+            raise ValueError(
+                f"Source column(s) {', '.join(taken)} take the name of a column the library "
+                f"adds ({', '.join(sorted(RESERVED_COLUMNS))}, in any case): list 'columns' "
+                "without them, or read a capture instance that does not capture them."
+            )
         include_cmd = _truthy(_opt(self.options, "includeCommandId", "true"))
         meta = [f"{n} {t}" for n, t in METADATA_COLUMNS if include_cmd or n != "_command_id"]
         return ", ".join(meta) + ", " + columns

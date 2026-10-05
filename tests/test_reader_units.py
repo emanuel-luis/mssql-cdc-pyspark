@@ -111,6 +111,43 @@ def test_connect_timeout_must_be_a_non_negative_integer():
             make_client({"connectionString": "Server=x", "connectTimeout": value})
 
 
+def test_ddl_names():
+    from mssql_cdc.source import _ddl_names
+
+    ddl = "a INT, `b c` DECIMAL(18, 2), `d``e` STRUCT<x: INT, y: INT>, f: STRING, g MAP<INT,INT>"
+    assert _ddl_names(ddl) == ["a", "b c", "d`e", "f", "g"]
+
+
+@pytest.mark.parametrize(
+    ("columns", "name"),
+    [
+        ("id INT, _Seqval STRING", "_Seqval"),  # in any case
+        ("`_batch_id` BIGINT, id INT", "_batch_id"),
+        ("id INT, _chunk INT", "_chunk"),  # a snapshot would read it as the chunk number
+        ("amount DECIMAL(18, 2), _commit_ts TIMESTAMP", "_commit_ts"),
+    ],
+)
+def test_a_source_column_named_as_a_metadata_column_fails_at_load(columns, name):
+    from mssql_cdc.source import MssqlCdcDataSource, MssqlCdcSnapshotDataSource
+
+    for source in (MssqlCdcDataSource, MssqlCdcSnapshotDataSource):
+        with pytest.raises(
+            ValueError, match=rf"Source column\(s\) {name} take the name.*'columns'"
+        ):
+            source({"captureInstance": CI, "columns": columns}).schema()
+
+
+def test_inferred_columns_are_checked_and_the_snapshot_still_adds_its_chunk(tmp_path):
+    from mssql_cdc.source import MssqlCdcDataSource, MssqlCdcSnapshotDataSource
+
+    FakeCdcDatabase(str(tmp_path), [CI], columns={CI: "id INT, _operation INT"})
+    inferred = {"backend": "fake", "fakePath": str(tmp_path), "captureInstance": CI}
+    with pytest.raises(ValueError, match="_operation take the name.*capture instance"):
+        MssqlCdcDataSource(inferred).schema()
+    chunked = {"captureInstance": CI, "columns": "id INT", "snapshotChunks": "[]"}
+    assert MssqlCdcSnapshotDataSource(chunked).schema().endswith(", id INT, _chunk INT")
+
+
 def test_metrics_path_must_be_a_path_every_node_writes_with_open():
     for uri in ("s3://bucket/metrics", "abfss://c@a.dfs.core.windows.net/m", "dbfs:/m"):
         with pytest.raises(ValueError, match="is a URI.*local or FUSE path"):
