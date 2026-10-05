@@ -283,6 +283,36 @@ def test_a_skip_past_purged_changes_is_logged_on_the_driver_and_in_the_task(tmp_
     assert f"from {lsns[2]} up to min_lsn {lsns[3]}" in skipped[1]
 
 
+def test_the_fake_retries_a_replace_that_a_reader_holds_up(tmp_path, monkeypatch):
+    import os
+
+    from mssql_cdc import fake
+
+    real, refused = os.replace, []
+
+    def held(src, dst):  # Windows refuses to replace a file another process has open
+        if len(refused) < 2:
+            refused.append(dst)
+            raise PermissionError(13, "The process cannot access the file", dst)
+        real(src, dst)
+
+    monkeypatch.setattr(fake.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fake.os, "replace", held)
+    db, lsns = _db(str(tmp_path), n_tx=3)
+    refused.clear()
+    db.cleanup(CI, lsns[1])  # rewrites the mapping and the change rows the same way
+    client = FakeCdcClient(str(tmp_path))
+    assert len(refused) == 2 and client.min_lsn(CI) == lsns[1]
+    assert [r["start_lsn"] for r in client._mapping()] == lsns[1:]
+
+    def always(src, dst):
+        raise PermissionError(13, "The process cannot access the file", dst)
+
+    monkeypatch.setattr(fake.os, "replace", always)
+    with pytest.raises(PermissionError):  # not forever
+        db.cleanup(CI, lsns[2])
+
+
 # -- planning ----------------------------------------------------------------------------
 def test_split_starts_each_range_after_its_bound_without_a_query():
     from mssql_cdc.client import CaptureInstance

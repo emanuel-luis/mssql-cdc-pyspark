@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
@@ -63,11 +64,22 @@ def _read_json(path: str) -> dict:
         return json.load(fh)
 
 
-def _write_json(path: str, value) -> None:
+def _write(path: str, text: str) -> None:
     # whole or not at all: another process may read it meanwhile (commit_before_read)
     with open(path + ".tmp", "w", encoding="utf-8") as fh:
-        json.dump(value, fh)
-    os.replace(path + ".tmp", path)
+        fh.write(text)
+    for attempt in range(5):
+        try:
+            os.replace(path + ".tmp", path)
+            return
+        except PermissionError:  # Windows, while a reader holds the file open
+            if attempt == 4:
+                raise
+            time.sleep(0.05)
+
+
+def _write_json(path: str, value) -> None:
+    _write(path, json.dumps(value))
 
 
 def _key_columns(key) -> list[str]:
@@ -513,8 +525,7 @@ class FakeCdcDatabase:
             (os.path.join(self.path, _MAPPING), low),
         ):
             kept = [r for r in _read_jsonl(path) if r["start_lsn"] >= lsn_from]
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.writelines(json.dumps(r) + "\n" for r in kept)
+            _write(path, "".join(json.dumps(r) + "\n" for r in kept))
 
     # -- schema changes (ADR 0023) ---------------------------------------------
     def add_capture_instance(
