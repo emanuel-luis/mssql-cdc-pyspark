@@ -19,6 +19,7 @@ server, other keys from seeks on the table's key; no row crosses the network.
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from abc import ABC, abstractmethod
@@ -31,6 +32,7 @@ import pyarrow as pa
 
 from . import lsn as _lsn
 
+_log = logging.getLogger(__name__)
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _TZ_RE = re.compile(r"^[A-Za-z0-9 ._+\-/()]+$")
 # int, decimal(18,2), varchar(20) COLLATE Greek_CI_AS
@@ -591,6 +593,15 @@ class CdcClient(ABC):
         (``ASYNC_NETWORK_IO``); None when unknown."""
         return None
 
+    def clock(self) -> tuple[str | None, int | None]:
+        """How commit times are converted to UTC: (zone, None), or (None, a fixed UTC offset
+        in minutes) on a server that names no zone; (None, None) when there is nothing to
+        convert. Planned ranges carry it, so every task converts as the driver does."""
+        return None, None
+
+    def set_clock(self, zone: str | None, offset_min: int | None) -> None:
+        """Take ``clock()`` of the driver's client instead of detecting it again."""
+
     def close(self) -> None:  # pragma: no cover - default no-op
         pass
 
@@ -721,7 +732,8 @@ class SqlCdcClient(CdcClient):
     # -- helpers --------------------------------------------------------------
     @property
     def timezone(self) -> str:
-        """Time zone of the server clock; with ``auto``, detected once per client.
+        """Time zone of the server clock; with ``auto``, detected once per client (the driver's
+        reader hands its clock to the tasks: ``clock``/``set_clock``).
 
         SQL Server 2022+ and Azure SQL name it (``CURRENT_TIMEZONE_ID()``), and ``AT TIME
         ZONE`` applies the daylight-saving rules in force at each commit. Older versions
@@ -729,22 +741,41 @@ class SqlCdcClient(CdcClient):
         (``SYSDATETIMEOFFSET()``) is applied to every commit, returned as ``UTC-03:00``.
         That is exact for zones without daylight saving; elsewhere, name the zone.
         """
-        # ponytail: one query per client (driver and every task); ship the detected zone
-        # to executors in the options if it ever shows up in profiles.
         if self._tz is None and self._offset_min is None:
-            try:
+            # The version, not a failed call: the name fails to compile before 2022 even in a
+            # CASE branch never taken, and any other error must not pass for an old server.
+            named = self._b.scalar(
+                "SELECT CASE WHEN CAST(SERVERPROPERTY('ProductMajorVersion') AS int) >= 16 "
+                "OR CAST(SERVERPROPERTY('EngineEdition') AS int) IN (5, 8) THEN 1 ELSE 0 END"
+            )
+            if named == 1:
                 self._tz = _check_tz(self._b.scalar("SELECT CURRENT_TIMEZONE_ID()"))
-            except ValueError:
-                raise
-            except Exception:  # noqa: BLE001 - no such function before 2022; driver-specific type
+            else:
                 self._offset_min = int(
                     self._b.scalar("SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())")
+                )
+                _log.warning(
+                    "mssql_cdc: SQL Server before 2022 names no time zone: commit times are "
+                    "converted with its current UTC offset (%+d minutes). In a zone with "
+                    "daylight saving set sourceTimeZone to its name, or finalized_until can run "
+                    "ahead of the data around a transition, even across runs.",
+                    self._offset_min,
                 )
         if self._tz is not None:
             return self._tz
         assert self._offset_min is not None  # the fallback above set it
         sign, minutes = ("+" if self._offset_min >= 0 else "-"), abs(self._offset_min)
         return f"UTC{sign}{minutes // 60:02d}:{minutes % 60:02d}"
+
+    def clock(self):
+        _ = self.timezone  # resolves the zone, or the fallback's offset
+        return self._tz, self._offset_min
+
+    def set_clock(self, zone, offset_min):
+        if zone is not None:
+            self._tz = _check_tz(zone)  # inlined into the T-SQL like a configured one
+        if offset_min is not None:
+            self._offset_min = int(offset_min)
 
     def _utc(self, expr: str, offset_min: int | None = None) -> str:
         """``tran_end_time`` is a timezone-less datetime in the server's clock.

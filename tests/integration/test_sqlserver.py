@@ -340,13 +340,11 @@ def test_heartbeat_script_keeps_an_idle_stream_current(spark, sqlserver, workdir
 def test_pre_2022_offset_fallback_matches_the_named_zone(sqlserver):
     from mssql_cdc.client import MssqlPythonBackend, SqlCdcClient
 
-    class Pre2022(MssqlPythonBackend):  # SQL Server 2016-2019 have no CURRENT_TIMEZONE_ID()
+    class Pre2022(MssqlPythonBackend):  # SQL Server 2019 (15), which has no CURRENT_TIMEZONE_ID()
         def scalar(self, sql, params=()):
-            if "CURRENT_TIMEZONE_ID" in sql:
-                raise RuntimeError(
-                    "'CURRENT_TIMEZONE_ID' is not a recognized built-in function name."
-                )
-            return super().scalar(sql, params)
+            assert "CURRENT_TIMEZONE_ID" not in sql  # it would not even compile there
+            version = "SERVERPROPERTY('ProductMajorVersion')"
+            return super().scalar(sql.replace(version, "15"), params)
 
     named = make_client({"connectionString": sqlserver.connection_string})
     fallback = SqlCdcClient(Pre2022(sqlserver.connection_string))
@@ -354,6 +352,7 @@ def test_pre_2022_offset_fallback_matches_the_named_zone(sqlserver):
         lsn = named.max_lsn()
         assert fallback.timezone == "UTC-03:00"  # America/Sao_Paulo has no daylight saving now
         assert fallback.lsn_to_time(lsn) == named.lsn_to_time(lsn)
+        assert named.clock() == (sqlserver.timezone_name, None)  # 2022: named, by its version
     finally:
         named.close()
         fallback.close()

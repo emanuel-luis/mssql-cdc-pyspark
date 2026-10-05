@@ -203,6 +203,9 @@ class LsnRange(InputPartition):
     from_lsn: str  # inclusive
     to_lsn: str  # inclusive
     columns: list[str] | None = None  # the source columns it has; None: all. The rest read NULL
+    # the driver client's clock(), so a task converts commit times as the offsets were
+    zone: str | None = None
+    offset_min: int | None = None
 
 
 class MssqlCdcDataSource(DataSource):
@@ -437,9 +440,9 @@ class _BaseReader(_Common, DataSourceStreamReader):
 
     def _split(self, client, inst, lo: str, hi: str) -> list[LsnRange]:
         """[lo, hi] of one instance in up to numPartitions ranges of about the same rows."""
-        cols = self._columns_of(inst)
+        cols, clock = self._columns_of(inst), client.clock()
         if self.num_partitions <= 1:
-            return [LsnRange(inst.name, lo, hi, cols)]
+            return [LsnRange(inst.name, lo, hi, cols, *clock)]
         bounds = [b for b in client.split_points(inst.name, lo, hi, self.num_partitions) if b]
         if not bounds or bounds[-1] != hi:
             bounds.append(hi)
@@ -447,7 +450,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
         for b in bounds:
             if b < lo:
                 continue
-            ranges.append(LsnRange(inst.name, lo, b, cols))
+            ranges.append(LsnRange(inst.name, lo, b, cols, *clock))
             lo = client.increment_lsn(b)
         return ranges
 
@@ -592,6 +595,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
         client = self.client
         started, rows, nbytes = time.perf_counter(), 0, 0
         try:
+            client.set_clock(partition.zone, partition.offset_min)  # the driver's, not detected
             if self.metrics_path:  # one round trip and the session's wait so far, before reading
                 rtt = client.ping(1)
                 wait_before = client.network_wait_ms()

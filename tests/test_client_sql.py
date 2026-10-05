@@ -10,6 +10,8 @@ from mssql_cdc.client import Backend, SqlCdcClient, make_client
 
 
 class Recorder(Backend):
+    named = 1  # SQL Server 2022 or Azure SQL: CURRENT_TIMEZONE_ID() names the zone
+
     def __init__(self, scalar_value="0x0000002A000001000001", tz="UTC", range_offset=None):
         self.calls = []
         self.value = scalar_value
@@ -22,6 +24,8 @@ class Recorder(Backend):
 
     def scalar(self, sql, params=()):
         self.calls.append((sql, tuple(params)))
+        if "SERVERPROPERTY('ProductMajorVersion')" in sql:
+            return self.named
         if "CURRENT_TIMEZONE_ID" in sql:
             return self.tz
         if "FROM cdc.lsn_time_mapping" in sql and "TZOFFSET" in sql:
@@ -92,28 +96,51 @@ def test_timezone_auto_is_detected_once_per_client():
     assert "AT TIME ZONE N'E. South America Standard Time') AT TIME ZONE 'UTC'" in rec.calls[-1][0]
 
 
-def test_timezone_auto_falls_back_to_the_current_offset_before_2022():
-    class OldServer(Recorder):  # SQL Server 2016-2019
-        def scalar(self, sql, params=()):
-            if "CURRENT_TIMEZONE_ID" in sql:
-                self.calls.append((sql, tuple(params)))
-                raise RuntimeError(
-                    "'CURRENT_TIMEZONE_ID' is not a recognized built-in function name."
-                )
-            if "TZOFFSET" in sql:
-                self.calls.append((sql, tuple(params)))
-                return -180
-            return super().scalar(sql, params)
+class OldServer(Recorder):
+    """SQL Server 2016-2019: no CURRENT_TIMEZONE_ID(); its current UTC offset is UTC-3."""
 
+    named = 0
+
+    def scalar(self, sql, params=()):
+        if "SYSDATETIMEOFFSET" in sql:
+            self.calls.append((sql, tuple(params)))
+            return -180
+        return super().scalar(sql, params)
+
+
+def test_timezone_auto_falls_back_to_the_current_offset_before_2022(caplog):
     rec = OldServer("2026-09-28T16:50:00.123")
     client = SqlCdcClient(rec)
-    client.lsn_to_time("0x01")
-    list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
-    assert client.timezone == "UTC-03:00"
+    with caplog.at_level("WARNING", logger="mssql_cdc.client"):
+        client.lsn_to_time("0x01")
+        list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+    assert client.timezone == "UTC-03:00" and client.clock() == (None, -180)
     assert "CAST(DATEADD(minute, 180, m.tran_end_time) AS datetime2(3))" in rec.calls[-1][0]
-    assert [sql for sql, _ in rec.calls].count(
-        "SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())"
-    ) == 1
+    sqls = [sql for sql, _ in rec.calls]
+    assert sqls.count("SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())") == 1
+    # decided by the version: the function name does not compile there, even unused
+    assert sum("SERVERPROPERTY('ProductMajorVersion')" in s for s in sqls) == 1
+    assert not any("CURRENT_TIMEZONE_ID" in s for s in sqls)
+    warned = [r.getMessage() for r in caplog.records if "daylight saving" in r.getMessage()]
+    assert len(warned) == 1 and "set sourceTimeZone" in warned[0]
+
+
+def test_a_clock_set_from_the_drivers_client_is_not_detected_again():
+    zone = "E. South America Standard Time"
+    driver = SqlCdcClient(Recorder(tz=zone))
+    assert driver.clock() == (zone, None)
+    for clock, conversion in [
+        (driver.clock(), f"AT TIME ZONE N'{zone}') AT TIME ZONE 'UTC'"),
+        ((None, -180), "CAST(DATEADD(minute, 180, m.tran_end_time) AS datetime2(3))"),
+    ]:
+        rec = Recorder(tz="UTC")  # what detection would find: not used
+        task = SqlCdcClient(rec)
+        task.set_clock(*clock)
+        list(task.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+        assert conversion in rec.calls[-1][0]
+        assert not any("SERVERPROPERTY" in s or "CURRENT_TIMEZONE_ID" in s for s, _ in rec.calls)
+    with pytest.raises(ValueError, match="Invalid sourceTimeZone"):  # inlined: validated again
+        SqlCdcClient(Recorder()).set_clock("UTC'; DROP TABLE x --", None)
 
 
 def test_time_to_lsn_maps_utc_to_the_server_clock_to_the_second():
@@ -136,13 +163,7 @@ def test_time_to_lsn_maps_utc_to_the_server_clock_to_the_second():
     SqlCdcClient(utc, source_timezone="UTC").time_to_lsn(at)
     assert "'largest less than or equal', CONVERT(datetime2(0), ?, 126)), 1)" in utc.calls[-1][0]
 
-    class OldServer(Recorder):  # SQL Server 2016-2019: the current offset, UTC-3
-        def scalar(self, sql, params=()):
-            if "CURRENT_TIMEZONE_ID" in sql:
-                raise RuntimeError("'CURRENT_TIMEZONE_ID' is not a recognized function name.")
-            return -180 if "TZOFFSET" in sql else super().scalar(sql, params)
-
-    old = OldServer()
+    old = OldServer()  # SQL Server 2016-2019: the current offset, UTC-3
     SqlCdcClient(old).time_to_lsn(at)
     assert "DATEADD(minute, -180, CONVERT(datetime2(0), ?, 126))" in old.calls[-1][0]
     for none in (None, "0x00000000000000000000"):  # no commit at or before it
