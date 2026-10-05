@@ -210,7 +210,8 @@ never (a column that stays NULL until each row changes).
   from SQL Server. A row in the range to apply of any other instance fails the call, naming
   it, instead of being skipped. A column bronze gained is added to silver.
 * Facts events. The reader, which cannot write Delta, leaves one JSON file per event in the
-  metrics directory (`metricsPath`), `event-<kind>-<lsn>.json` with `event`,
+  metrics directory (`metricsPath`), `event-<kind>-<lsn>.json` (ADR 0018's
+  `'data_skipped'`: `event-data_skipped-<ci>-<from>.json`) with `event`,
   `capture_instance`, `lsn`, `commit_ts` and `detail`. The sink writes each as a facts row of
   the batch, in the same Delta commit as the batch's own row (`txnAppId` `<app_id>#facts`,
   `txnVersion` the batch id), so a replay writes both or neither, and removes the files only

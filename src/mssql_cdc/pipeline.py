@@ -346,6 +346,8 @@ class CdcStream:
                 "allow_missing_columns=True to seed them as NULL"
             )
         with closing(make_client(self.options)) as client:
+            # a computed column listed in 'columns' reads NULL in every row, a seed's too
+            computed = {c.lower() for i in client.capture_instances(ci) for c in i.computed}
             done = None
             if isinstance(as_of, datetime):
                 if as_of.tzinfo:
@@ -392,7 +394,7 @@ class CdcStream:
             def column(name: str):
                 if name in meta:
                     return F.lit(values.get(name))
-                if name.lower() in given:
+                if name.lower() in given and name.lower() not in computed:
                     return F.col("`" + given[name.lower()].replace("`", "``") + "`")
                 return F.lit(None)
 

@@ -418,7 +418,8 @@ def test_a_skip_while_planning_leaves_a_data_skipped_event_with_the_gap(tmp_path
     db.cleanup(CI, lsns[3])  # found by the task after its read: logged only
     list(reader.read(planned))
     events = [n for n in sorted(os.listdir(metrics)) if n.startswith("event-")]
-    assert events == [f"event-data_skipped-{lsns[2]}.json"]
+    lo = reader.client.increment_lsn(lsns[0])
+    assert events == [f"event-data_skipped-{CI}-{lo}.json"]  # what a replan reproduces
     with open(os.path.join(metrics, events[0]), encoding="utf-8") as fh:
         at = (T0 + timedelta(minutes=2)).isoformat(timespec="milliseconds")
         assert json.load(fh) == {
@@ -430,6 +431,23 @@ def test_a_skip_while_planning_leaves_a_data_skipped_event_with_the_gap(tmp_path
             "lost_from_ts": start["commit_ts"],  # the last offset processed, as a re-snapshot's
             "lost_to_ts": at,
         }
+
+
+def test_a_replanned_skip_rewrites_its_event_file_with_the_new_min_lsn(tmp_path):
+    import json
+    import os
+
+    db, lsns = _db(str(tmp_path), n_tx=4)
+    db.cleanup(CI, lsns[2])
+    metrics = str(tmp_path / "metrics")
+    reader = _reader(str(tmp_path), failOnDataLoss="false", metricsPath=metrics)
+    start = {"lsn": lsns[0], "commit_ts": T0.isoformat(timespec="milliseconds")}
+    reader.partitions(start, {"lsn": lsns[-1]})
+    db.cleanup(CI, lsns[3])  # cleanup ran again before the batch was replayed
+    reader.partitions(start, {"lsn": lsns[-1]})
+    [event] = [n for n in os.listdir(metrics) if n.startswith("event-")]
+    with open(os.path.join(metrics, event), encoding="utf-8") as fh:
+        assert json.load(fh)["lsn"] == lsns[3]  # one row, saying where reading resumed
 
 
 def test_the_fake_retries_a_replace_that_a_reader_holds_up(tmp_path, monkeypatch):

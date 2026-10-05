@@ -87,7 +87,8 @@ def create_if_not_exists(
     """``columns``: ``(name, type, comment)``; ``type`` is a DDL string or a Spark DataType.
 
     A column name Delta takes only with column mapping (a space, or one of ``,;{}()=``)
-    creates the table with ``delta.columnMapping.mode = 'name'`` (reader 2, writer 5); no
+    creates the table with ``delta.columnMapping.mode = 'name'`` (the
+    ``columnMapping`` feature in its Delta protocol, which older engines refuse); no
     other name does.
 
     A no-op when the table exists: its schema, comments and properties are left as they

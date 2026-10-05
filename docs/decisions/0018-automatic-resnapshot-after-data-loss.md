@@ -4,7 +4,8 @@
 **Date:** 2026-09-29T17:46:41-03:00  
 **Amended:** 2026-10-02T20:30:12-03:00, a chunked re-snapshot opens at S and is read by `backfill()` (see the Amendment, ADR 0028)  
 **Amended:** 2026-10-03T18:10:05-03:00, a full re-snapshot opens too, under the mode lock of ADR 0028's Amendment (see Amendment 2)  
-**Amended:** 2026-10-05T12:46:11-03:00, a skip with `failOnDataLoss=false` leaves a `'data_skipped'` facts row with the gap (see Amendment 3)
+**Amended:** 2026-10-05T12:46:11-03:00, a skip with `failOnDataLoss=false` leaves a `'data_skipped'` facts row with the gap (see Amendment 3)  
+**Amended:** 2026-10-05T20:51:10-03:00, the `'data_skipped'` event file is named by the capture instance and the gap's start, which a replanned batch reproduces (Amendment 3)
 
 ## Context
 CDC cleanup deletes change rows by age (three days by default) whether or not the stream
@@ -174,7 +175,10 @@ on which capture instance or how much was lost.
   M, `detail` `'<from>..<M>'`, `lost_from_ts` the commit time of the batch's start offset,
   `lost_to_ts` M's commit time, the same columns a `'resnapshot'` row fills. Written after
   the schema checks, so a batch they fail leaves none; it needs `metricsPath`, as the other
-  events do. Facts migration 10 gives `event`, `lost_from_ts`, `lost_to_ts`, `detail`,
+  events do. The file is named by the capture instance and `<from>`
+  (`event-data_skipped-<ci>-<from>.json`), not by M: a replayed batch has the same `<from>`
+  but may find a newer M, so it rewrites the file instead of adding a second row, and both
+  instances of a batch that crosses a switch can skip to one M. Facts migration 10 gives `event`, `lost_from_ts`, `lost_to_ts`, `detail`,
   `batch_id` and the table their new comments.
 * The executor guard, which finds cleanup running mid-read, only logs: rows of the range
   may be missing, not certainly, and the task cannot tell which.

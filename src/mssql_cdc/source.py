@@ -320,15 +320,18 @@ def _write_metrics(path: str, name: str, metrics: dict) -> None:
         )
 
 
-def _write_event(path: str, kind: str, ci: str, lsn: str, commit_ts, detail: str, **gap) -> None:
+def _write_event(
+    path: str, kind: str, ci: str, lsn: str, commit_ts, detail: str, key: str = "", **gap
+) -> None:
     """One JSON per event, for the sink to fold into the facts (ADR 0023): named by its kind
-    and LSN, so a replanned batch rewrites the same file. ``gap``: a 'data_skipped' event's
-    ``lost_from_ts`` and ``lost_to_ts`` (ADR 0018). Best effort, like the metrics."""
+    and ``key`` (default its LSN), which a replanned batch reproduces, so it rewrites the same
+    file. ``gap``: a 'data_skipped' event's ``lost_from_ts`` and ``lost_to_ts`` (ADR 0018).
+    Best effort, like the metrics."""
     import json
 
     try:
         os.makedirs(path, exist_ok=True)
-        name = os.path.join(path, f"event-{kind}-{lsn}.json")
+        name = os.path.join(path, f"event-{kind}-{key or lsn}.json")
         body = {"event": kind, "capture_instance": ci, "lsn": lsn, "commit_ts": commit_ts}
         with open(name + ".tmp", "w", encoding="utf-8") as fh:
             json.dump({**body, "detail": detail, **gap}, fh)
@@ -678,7 +681,10 @@ class _BaseReader(_Common, DataSourceStreamReader):
             if self.metrics_path:  # as a re-snapshot's: after the last offset, before min_lsn
                 ts = client.lsn_to_time(low)
                 gap = {"lost_from_ts": start.get("commit_ts") or None, "lost_to_ts": ts}
-                _write_event(self.metrics_path, "data_skipped", ci, low, ts, f"{lo}..{low}", **gap)
+                # named by the instance and where the gap starts, which a replan reproduces;
+                # M may have moved on by then, and two instances' gaps can end at the same M
+                key, detail = f"{ci}-{lo}", f"{lo}..{low}"
+                _write_event(self.metrics_path, "data_skipped", ci, low, ts, detail, key, **gap)
         return ranges
 
     def _pieces(self, client, instances, lo: str, hi: str) -> list[tuple]:

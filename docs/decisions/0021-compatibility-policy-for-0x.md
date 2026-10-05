@@ -5,7 +5,8 @@
 **Amended:** 2026-10-01T15:55:00-03:00, the public surface is the documentation site's reference (API, options, output schema), not the README  
 **Amended:** 2026-10-05T06:01:09-03:00, an older release keeps writing tables a newer one migrated, unless a migration sets `mssql_cdc.min_version` (amendment 2, ADR 0013)  
 **Amended:** 2026-10-05T12:35:09-03:00, every release keeps the state its wheel writes under `tests/compat/<version>`, and the current code must resume it (amendment 3)  
-**Amended:** 2026-10-05T12:49:29-03:00, the state contract covers the silver and reconcile schemas, the facts `event` values, the JSON of snapshot rows and a backfill wave's userMetadata, whose keys are only added; the public surface is what `docs/reference/api.md` lists (amendment 4)
+**Amended:** 2026-10-05T12:49:29-03:00, the state contract covers the silver and reconcile schemas, the facts `event` values, the JSON of snapshot rows and a backfill wave's userMetadata, whose keys are only added; the public surface is what `docs/reference/api.md` lists (amendment 4)  
+**Amended:** 2026-10-05T20:51:10-03:00, the kept state includes a chunked snapshot left open, and the `fake` backend's files in it stay readable (amendment 3)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -56,11 +57,15 @@ The Python API, on the other hand, is young and will change.
   offsets, checkpoint layout, table migrations and event payloads, with ADR links.
 * Every release keeps the state it writes (amendment 3): `tests/compat/generate.py`, run
   with the published wheel, writes a checkpoint with two generations and the bronze,
-  silver, facts and control tables to `tests/compat/<version>`, and
-  `tests/compat/test_compat.py` resumes each such directory with the current code
-  ([RELEASING.md](../RELEASING.md), step 6). Tests that rebuild an old table from today's
-  column lists follow any edit of those lists; bytes a release wrote do not. 0.1.0's were
-  written from its PyPI wheel after the fact.
+  silver, facts and control tables to `tests/compat/<version>`, and from 0.2.0 on a
+  second stream's chunked snapshot left open after one wave (amendment 4's payloads); and
+  `tests/compat/test_compat.py` resumes each such directory with the current code, and
+  finishes that snapshot ([RELEASING.md](../RELEASING.md), step 6). Tests that rebuild an
+  old table from today's column lists follow any edit of those lists; bytes a release wrote
+  do not. 0.1.0's were written from its PyPI wheel after the fact. The directories also
+  hold the source the release's `fake` backend wrote (`src/`), which the test reads with
+  today's fake: the fake stays internal, but a change to its files must keep reading the
+  old ones.
 * The public surface is what the documentation site's reference documents (amendment, ADR
   0024): the objects `docs/reference/api.md` lists, the formats `mssql_cdc` and
   `mssql_cdc_snapshot`, the options in `docs/reference/options.md` and the output schema in

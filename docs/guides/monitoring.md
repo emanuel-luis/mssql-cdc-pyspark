@@ -48,7 +48,7 @@ Event rows (`event` set) are different: `min_lsn`, `max_lsn` and `end_lsn` all h
 event's LSN, and the commit-time columns its commit time, whatever `rows` says. Their
 `started_at` and `duration_ms` are NULL, except on a snapshot row whose snapshot that run
 took (a reused one also has `rows` NULL). `detail` is set on source changes,
-`lost_from_ts` and `lost_to_ts` on re-snapshots.
+`lost_from_ts` and `lost_to_ts` on re-snapshots and `data_skipped` rows.
 
 Every column's comment is in [Tables](../reference/tables.md). Times are UTC, as
 `TIMESTAMP_NTZ`. The `event` column tells the kinds of rows apart:
@@ -60,6 +60,9 @@ Every column's comment is in [Tables](../reference/tables.md). Times are UTC, as
 - `schema_change` and `capture_instance_switched`: DDL on the source table or a move to a
   newer capture instance, with the `batch_id` of the batch that read past it, `rows = 0` and
   the change in `detail` ([Schema changes](schema-changes.md)).
+- `data_skipped`: purged changes skipped with `failOnDataLoss=false`, with the `batch_id` of
+  the batch that skipped them, `rows = 0`, the gap in `lost_from_ts` and `lost_to_ts` and
+  the LSNs skipped in `detail` ([Data loss](data-loss.md)).
 
 Statistics over micro-batches filter `event IS NULL`.
 
@@ -254,7 +257,7 @@ stalls or errs means capture did.
   captured columns that `columns` leaves out) are logged by the Python worker that Spark
   runs the source in on the driver. They land in the driver's stderr log, not in handlers
   your job attaches to the `mssql_cdc` logger. The durable channel is the facts table's
-  event rows, `schema_change` and `capture_instance_switched`, which need
+  event rows, `schema_change`, `capture_instance_switched` and `data_skipped`, which need
   [metricsPath](../reference/options.md#metricspath).
 - Metrics are NULL without `metricsPath` (a URI checkpoint without one), when the metrics
   directory is not shared by every node ([above](#metrics-are-null)), and on the first

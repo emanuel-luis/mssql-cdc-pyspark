@@ -24,7 +24,9 @@ declares). Captured columns (Spark DDL, per instance) are optional; without them
 instance keeps every column of every change and ``columns`` must be passed to the source.
 
 State lives in plain files so that the Spark driver and every executor process
-see the same data (Python workers are separate processes, even locally).
+see the same data (Python workers are separate processes, even locally). Each release's
+``tests/compat/<version>/src`` holds files its fake wrote, which the current fake must still
+read: the fake is internal, but a change to its files keeps reading the old ones (ADR 0021).
 """
 
 from __future__ import annotations

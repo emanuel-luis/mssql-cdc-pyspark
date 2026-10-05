@@ -296,7 +296,8 @@ def _json(facts: dict) -> str:
 
 def _files(path: str, events: bool = False) -> list[str]:
     """The partitions' metrics files in ``path`` or, with ``events``, the reader's event files
-    (``event-<kind>-<lsn>.json``, ADR 0023)."""
+    (``event-<kind>-<lsn>.json``, a data skip's ``event-data_skipped-<ci>-<from>.json``, ADR
+    0023)."""
     return [
         name
         for name in glob.glob(os.path.join(path, "*.json"))

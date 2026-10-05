@@ -32,8 +32,9 @@ snapshot row's `detail` and of a backfill wave's userMetadata, keys that are onl
 ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/) amendment 4); `tests/compat/<version>`
 holds the state each release's wheel wrote, and the tests resume it (amendment 3). A bronze
 or silver table created with a column name Delta refuses without column mapping gets it,
-which raises its Delta protocol (reader 2, writer 5); existing tables are untouched. A
-restarted stream's inferred schema leaves out computed columns; an existing bronze table
+which adds the `columnMapping` feature to its Delta protocol (older readers and writers
+refuse the table); existing tables are untouched. A restarted stream's inferred schema
+leaves out computed columns; an existing bronze table
 keeps such a column, and the rows appended after the upgrade hold NULL in it, as its change
 rows always did.
 
@@ -49,7 +50,7 @@ rows always did.
   14 s, with a WARNING each time; `DataLossError`, `SchemaChangedError`, `ValueError` and
   `PermissionError` are never retried ([ADR 0029](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0029-driver-retries-and-lock-timeout/)).
 - `apply_changes` takes the capture instance from the options' `captureInstance` when
-  `capture_instance` is omitted.
+  `capture_instance` is omitted (one given still wins).
 - `is_data_loss(exc)` and `is_schema_changed(exc)` recognise `DataLossError` and
   `SchemaChangedError`, also inside the `StreamingQueryException` that
   `awaitTermination()` raises or `await_all` returns.
@@ -95,9 +96,10 @@ rows always did.
   license of the default driver's binaries, and how to install without them; the driver's
   Python process per stream in `start_many`; what a Spark Connect client must reach; the
   source-query cost of the default trigger; minute granularity across a daylight-saving
-  fall-back; the tested platform scope, local Spark 4.2 and Databricks classic compute with
-  `metricsPath` on a path every node sees (without one, as on EMR or Dataproc by default,
-  the metric columns stay NULL and schema change events do not reach the facts);
+  fall-back; the tested platform scope, local Spark 4.2 and Databricks classic compute on a
+  single node, with `metricsPath` on a path every node sees (without one, as on EMR or
+  Dataproc by default, the metric columns stay NULL and schema change events do not reach
+  the facts);
   Databricks serverless, unsupported until tested. The site says it documents
   `main`
   ([ADR 0003](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0003-mssql-python-default-backend/) amendment 3).
@@ -123,17 +125,17 @@ rows always did.
 - `to_delta` raises `ValueError` for `on_data_loss="resnapshot"` with `failOnDataLoss=false`
   (a purge skipped while the query runs would hide the gap from the next run's check):
   remove `failOnDataLoss=false`.
-- `apply_changes` raises `ValueError` when its `capture_instance` and the `captureInstance`
-  of its `options` name different instances (ignoring case), which it used to accept: pass
-  the stream's options, or drop one of the two.
-
-### Changed
-
 - The inferred schema leaves out computed columns, which SQL Server CDC stores as NULL in
   every change row, so snapshot rows no longer carry values every later change nulls; `load()`
   logs a warning naming them (`sys.columns.is_computed`, which the reader already sees: no
-  new grant). One listed in `columns` stays in the schema and reads NULL in every row,
-  snapshot rows included, and `reconcile()` no longer compares computed columns
+  new grant). A query that selects one fails with `UNRESOLVED_COLUMN`, and a new bronze
+  table lacks it: list it in `columns` to keep it, NULL in every row, snapshot and seed
+  rows included
+  ([ADR 0007](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0007-infer-columns-from-cdc-metadata/) amendment).
+
+### Changed
+
+- `reconcile()` no longer compares computed columns, also one listed in `columns`
   ([ADR 0007](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0007-infer-columns-from-cdc-metadata/) amendment).
 - A micro-batch is cut into at most `numPartitions` ranges of about 50,000 change rows or
   more, so a batch of fewer than about 100,000 change rows is read in one partition, with

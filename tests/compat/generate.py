@@ -9,9 +9,13 @@ holding ``mssql-cdc-pyspark==X.Y.Z`` and the PySpark and delta-spark of that rel
 On the fake backend, with ``to_delta(bootstrap=True, on_data_loss="resnapshot")`` and the
 bronze verdict and ``apply_changes`` after every run: a bootstrap, batches in generation 0,
 CDC cleanup purging changes the stream has not read, the re-snapshot into generation 1 (its
-state file), batches in it. It writes the fake source (``src/``), the checkpoint (``ckpt/``),
-the bronze, silver, facts and control Delta tables (``delta/<kind>``, catalog tables
-``compat.<kind>``) and ``manifest.json``, which tells the test what it needs to resume them.
+state file), batches in it. Then a second stream of the table, into its own bronze, opens a
+chunked snapshot and ``backfill()`` reads one wave of it, leaving it open: its
+'snapshot_open' and 'snapshot_plan' rows and the wave's userMetadata are state too (ADR 0021
+amendment 4). It writes the fake source (``src/``), the checkpoints (``ckpt/``,
+``ckpt-chunked/``), the bronze, silver, facts and control Delta tables (``delta/<kind>``,
+catalog tables ``compat.<kind>``), the chunked stream's bronze (``compat.bronze_chunked``)
+and ``manifest.json``, which tells the test what it needs to resume them.
 """
 
 import importlib.metadata
@@ -25,6 +29,8 @@ KEY, VALUE = "order_id", "status"
 OPTIONS = {"captureInstance": "dbo_orders", "maxCommitsPerBatch": "1"}
 APP_ID = "compat"
 TABLES = {kind: f"compat.{kind}" for kind in ("bronze", "silver", "facts", "control")}
+# a second stream of the table, its facts in TABLES["facts"]
+CHUNKED = {"bronze": "compat.bronze_chunked", "app_id": "compat-chunked", "ckpt": "ckpt-chunked"}
 T0 = datetime(2026, 9, 28, 13, 50)
 
 
@@ -108,6 +114,24 @@ def main(out: Path) -> None:
     commit((3, 3, "new"), (4, 3, "paid"))
     commit((2, 5, "new"))
     run()  # batches in generation 1
+    chunked = stream(spark, {**options, "numPartitions": "2"})
+    chunked.to_delta(
+        CHUNKED["bronze"],
+        CHUNKED["app_id"],
+        str(out / CHUNKED["ckpt"]),
+        TABLES["facts"],
+        trigger={"availableNow": True},
+        bootstrap=True,
+        snapshot="chunked",
+    ).awaitTermination()  # opens the snapshot at S and streams from there
+    status = chunked.backfill(
+        CHUNKED["bronze"],
+        app_id=CHUNKED["app_id"],
+        facts_table=TABLES["facts"],
+        chunk_rows=1,
+        max_waves=1,
+    )
+    assert status["state"] == "running", status  # left open, for the next release to finish
     spark.stop()
 
     # Hadoop's checksums of local files, and Delta's optional version checksums: more than
@@ -123,6 +147,7 @@ def main(out: Path) -> None:
         "key": KEY,
         "value": VALUE,
         "tables": TABLES,
+        "chunked": CHUNKED,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     files = [p for p in out.rglob("*") if p.is_file()]

@@ -931,6 +931,22 @@ def test_seed_refuses_a_point_cdc_does_not_hold_and_a_copy_missing_columns(delta
     assert (row["order_id"], row["status"], row["_operation"]) == (0, None, 0)
 
 
+def test_seed_reads_a_computed_column_listed_in_columns_as_null(delta_spark, workdir):
+    from mssql_cdc import stream
+
+    src, declared = os.path.join(workdir, "src"), "order_id INT, qty INT, total INT"
+    db = FakeCdcDatabase(
+        src, [CI], keys={CI: "order_id"}, columns={CI: declared}, computed={CI: ["total"]}
+    )
+    lsn = db.commit(CI, [(2, {"order_id": 1, "qty": 1, "total": 10})], at=T0)
+    options = {"backend": "fake", "fakePath": src, "captureInstance": CI, "columns": declared}
+    target = os.path.join(workdir, "bronze")
+    copy = delta_spark.createDataFrame([(1, 1, 10)], declared)  # a SELECT * export
+    stream(delta_spark, options).seed(target, copy, lsn)
+    [row] = delta_spark.read.format("delta").load(target).collect()
+    assert (row["qty"], row["total"]) == (1, None)  # as every change row and snapshot row
+
+
 def _orders(workdir, n=3):
     """A keyed fake with orders 0..n-1 inserted, and the stream options for it."""
     src = os.path.join(workdir, "src")

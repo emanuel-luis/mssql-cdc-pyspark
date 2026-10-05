@@ -84,10 +84,12 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
    ```
 
    On the fake backend it runs a bootstrap, batches, a re-snapshot into generation 1 and
-   batches in it, and writes the checkpoint, the bronze, silver, facts and control tables
-   and a `manifest.json` (about 300 KiB). `tests/compat/test_compat.py` copies every
-   `tests/compat/<version>` and resumes it with the current code: no duplicates, offsets
-   carry on, every table migrated, silver applied, the next re-snapshot. Commit the
+   batches in it, then opens a chunked snapshot for a second stream and reads one wave of
+   it, and writes the checkpoints, the bronze, silver, facts and control tables, the second
+   stream's bronze and a `manifest.json` (about 500 KiB). `tests/compat/test_compat.py`
+   copies every `tests/compat/<version>` and resumes it with the current code: the open
+   chunked snapshot finished, no duplicates, offsets carry on, every table migrated, silver
+   applied, the next re-snapshot. Commit the
    directory to `main` (`test(compat): X.Y.Z state`). If a "Breaking" change of the release
    stops `generate.py` from running on it, adapt the script; the directories already
    committed keep their own `manifest.json`. A release candidate gets none.

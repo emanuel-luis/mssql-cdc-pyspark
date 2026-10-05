@@ -57,8 +57,7 @@ apply_changes(
 ```
 
 A capture instance without a unique index fails with `ValueError` and asks for `keys`. A
-`capture_instance` passed too must be the options' `captureInstance` (ignoring case), or
-the call fails with `ValueError`.
+`capture_instance` passed too wins over the options' `captureInstance`.
 
 ## How it behaves
 

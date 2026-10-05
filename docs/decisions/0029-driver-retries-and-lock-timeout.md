@@ -31,7 +31,7 @@ SQLSTATE and keeps only a text for it, not the SQLSTATE; `arrow-odbc` prints it 
   times, 1-2, 2-4 and 4-8 seconds apart (exponential backoff with jitter, about 14 seconds
   at most), with a WARNING each time; then it raises the last error. A run re-reads from SQL
   Server everything it plans with, and what it leaves behind is idempotent (event files named
-  by kind and LSN, the instance names seen), so a retry is safe.
+  by what a replan reproduces, the instance names seen), so a retry is safe.
 * Transient means SQLSTATE 08xxx (a broken or refused connection), HYT00 or HYT01 (a
   timeout) or 40001 (a deadlock victim). For `mssql-python`, an `OperationalError` whose text
   is the one it gives those SQLSTATEs: it also raises `OperationalError` for 28000 (a login

@@ -1,5 +1,6 @@
 """State a released version wrote resumes with this code (ADR 0021): offsets, the checkpoint
-layout with its generations, and the bronze, silver, facts and control tables.
+layout with its generations, the bronze, silver, facts and control tables, and from 0.2.0
+on a chunked snapshot left open after one wave.
 
 ``tests/compat/<version>`` holds what ``generate.py`` wrote with that version's wheel; a
 release adds its own (docs/RELEASING.md)."""
@@ -37,13 +38,51 @@ def test_the_state_a_release_wrote_resumes(delta_spark, tmp_path, version):
     tables = m["tables"]
     database = {name.split(".")[0] for name in tables.values()}.pop()
     spark.sql(f"CREATE DATABASE {database}")
+    chunked = m.get("chunked")  # written from 0.2.0 on
+    names = [*tables.values(), *([chunked["bronze"]] if chunked else [])]
     try:
-        for kind, name in tables.items():
-            location = (tmp_path / "delta" / kind).as_uri()
+        for name in names:
+            location = (tmp_path / "delta" / name.split(".")[1]).as_uri()
             spark.sql(f"CREATE TABLE {name} USING delta LOCATION '{location}'")
+        if chunked:  # before _resume's loss, which would stop its stream too
+            _finish_chunked(spark, m, str(tmp_path / "src"), str(tmp_path / chunked["ckpt"]))
         _resume(spark, m, str(tmp_path / "src"), str(tmp_path / "ckpt"))
     finally:
         spark.sql(f"DROP DATABASE {database} CASCADE")  # external tables: tmp_path keeps them
+
+
+def _source_table(src: str, ci: str, key: str, value: str) -> list:
+    with open(os.path.join(src, "tables", f"{ci}.json"), encoding="utf-8") as fh:
+        return sorted((r[key], r[value]) for r in json.load(fh).values())
+
+
+def _finish_chunked(spark, m: dict, src: str, ckpt: str) -> None:
+    """The chunked snapshot the release left open, after one wave: this code reads its
+    'snapshot_open' and 'snapshot_plan' rows, reads the other chunks, and its stream and
+    silver carry on."""
+    c, key, value = m["chunked"], m["key"], m["value"]
+    facts, control = m["tables"]["facts"], m["tables"]["control"]
+    ci = m["options"]["captureInstance"]
+    cdc = stream(spark, {**m["options"], "backend": "fake", "fakePath": src, "numPartitions": "2"})
+    status = cdc.backfill(c["bronze"], app_id=c["app_id"], facts_table=facts)
+    assert status["done"] and status["chunks_done"] == status["chunks_total"] > 2, status
+    cdc.to_delta(
+        c["bronze"],
+        c["app_id"],
+        ckpt,
+        facts,
+        trigger={"availableNow": True},
+        bootstrap=True,
+        snapshot="chunked",
+    ).awaitTermination()
+    silver = c["bronze"] + "_silver"
+    apply_changes(spark, c["bronze"], silver, ci, [key], control_table=control, facts_table=facts)
+    rows = sorted((r[key], r[value]) for r in spark.table(silver).collect())
+    assert rows == _source_table(src, ci, key, value)
+    properties = spark.sql(f"DESCRIBE DETAIL {c['bronze']}").first()["properties"]
+    assert int(properties[migrations.SCHEMA_VERSION_PROPERTY]) == (
+        migrations.current_version("bronze")
+    )
 
 
 def _resume(spark, m: dict, src: str, ckpt: str) -> None:
@@ -86,8 +125,7 @@ def _resume(spark, m: dict, src: str, ckpt: str) -> None:
         return rows.groupBy("_start_lsn", "_seqval", "_operation").count().collect()
 
     def source_table():
-        with open(os.path.join(src, "tables", f"{ci}.json"), encoding="utf-8") as fh:
-            return sorted((r[key], r[value]) for r in json.load(fh).values())
+        return _source_table(src, ci, key, value)
 
     def snapshots():
         return spark.table(bronze).where("_operation = 0").select("_start_lsn").distinct().count()
