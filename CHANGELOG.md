@@ -24,9 +24,49 @@ and no migration sets that property yet
 ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0013-schema-migrations-per-table-kind/)
 amendment,
 [ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)).
+Facts migration 10 rewrites the comments of `event`, `lost_from_ts`, `lost_to_ts`, `detail`,
+`batch_id` and the table (metadata only), and `event` gains the value `'data_skipped'`
+([ADR 0018](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0018-automatic-resnapshot-after-data-loss/) amendment 3). The state contract
+also covers the silver and reconcile schemas, the facts `event` values and the keys of a
+snapshot row's `detail` and of a backfill wave's userMetadata, keys that are only ever added
+([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/) amendment 4); `tests/compat/<version>`
+holds the state each release's wheel wrote, and the tests resume it (amendment 3). A bronze
+or silver table created with a column name Delta refuses without column mapping gets it,
+which raises its Delta protocol (reader 2, writer 5); existing tables are untouched.
 
 ### Added
 
+- `lockTimeoutMs` source option (off by default): `SET LOCK_TIMEOUT` before every read of
+  the source table (snapshot, chunked-snapshot planning, reconcile), so a read blocked by a
+  writer fails with error 1222 and Spark retries the task instead of hanging
+  ([ADR 0029](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0029-driver-retries-and-lock-timeout/)).
+- The stream's driver-side calls (`initialOffset`, `latestOffset`, `reportLatestOffset`,
+  `partitions`, `prepareForTriggerAvailableNow`) retry a transient SQL Server error
+  (SQLSTATE 08xxx, HYT00, HYT01, 40001) on a new connection, up to 3 times within about
+  14 s, with a WARNING each time; `DataLossError`, `SchemaChangedError`, `ValueError` and
+  `PermissionError` are never retried ([ADR 0029](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0029-driver-retries-and-lock-timeout/)).
+- `apply_changes` takes the capture instance from the options' `captureInstance` when
+  `capture_instance` is omitted, and raises `ValueError` when both are given and name
+  different instances (ignoring case).
+- `is_data_loss(exc)` and `is_schema_changed(exc)` recognise `DataLossError` and
+  `SchemaChangedError`, also inside the `StreamingQueryException` that
+  `awaitTermination()` raises or `await_all` returns.
+- Bronze and silver tables are created with `delta.columnMapping.mode = 'name'` when a
+  captured column name holds a character Delta refuses otherwise (a space or `,;{}()=`, as
+  in `[Unit Price]`); such tables used to fail on their first write. Other Delta features
+  (deletion vectors, clustering, OPTIMIZE, type widening) are documented as opt-ins under
+  Tables > Table properties
+  ([ADR 0012](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0012-delta-tables-through-the-deltatable-api/) amendment).
+- With `failOnDataLoss=false`, a batch whose planning skips changes CDC cleanup purged
+  writes a `data_skipped` facts row: the batch's `batch_id`, `rows` 0, `min_lsn` = `max_lsn`
+  the `min_lsn` it resumed at, the LSNs skipped in `detail` and the gap in `lost_from_ts`
+  and `lost_to_ts`, as on a `resnapshot` row. It needs a facts table and `metricsPath`
+  (`to_delta` sets it); a skip a task finds after its read is still only logged
+  ([ADR 0018](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0018-automatic-resnapshot-after-data-loss/) amendment 3).
+- A compatibility test against the state released versions wrote: `tests/compat/<version>`
+  holds a checkpoint with two generations and the bronze, silver, facts and control tables
+  that version's wheel wrote (0.1.0 from its PyPI wheel), and `tests/compat/test_compat.py`
+  resumes each with the current code; every release adds its own (`docs/RELEASING.md`).
 - `backfill()` returns `state`: `done`, `running`, `waiting_headroom`, `waiting_metrics` or
   `no_snapshot`, so a loop can tell a pause worth waiting out from a snapshot that does not
   exist (a wrong `app_id` or `target`, or a stream that bootstraps with `snapshot="full"`);
@@ -53,12 +93,18 @@ amendment,
   license of the default driver's binaries, and how to install without them; the driver's
   Python process per stream in `start_many`; what a Spark Connect client must reach; the
   source-query cost of the default trigger; minute granularity across a daylight-saving
-  fall-back; Databricks serverless, unsupported until tested. The site says it documents
+  fall-back; the tested platform scope, local Spark 4.2 and Databricks classic compute with
+  `metricsPath` on a path every node sees (without one, as on EMR or Dataproc by default,
+  the metric columns stay NULL and schema change events do not reach the facts);
+  Databricks serverless, unsupported until tested. The site says it documents
   `main`
   ([ADR 0003](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0003-mssql-python-default-backend/) amendment 3).
 
 ### Breaking
 
+- `failOnDataLoss` and `includeCommandId` accept only true/false, 1/0, yes/no or y/n (any
+  case), and raise `ValueError` naming the option otherwise. Values such as `on`, `off` or a
+  typo like `ture` used to read as false, which turned the retention guard off.
 - `maxCommitsPerBatch`, `numPartitions` and `arrowBatchSize` below 1, or not an integer,
   raise `ValueError`, and so does a negative `connectTimeout`. `maxCommitsPerBatch=0` used
   to mean unlimited without a word: omit the option instead.
@@ -78,6 +124,22 @@ amendment,
 
 ### Changed
 
+- The inferred schema leaves out computed columns, which SQL Server CDC stores as NULL in
+  every change row, so snapshot rows no longer carry values every later change nulls; `load()`
+  logs a warning naming them (`sys.columns.is_computed`, which the reader already sees: no
+  new grant). One listed in `columns` stays in the schema and reads NULL in every row,
+  snapshot rows included, and `reconcile()` no longer compares computed columns
+  ([ADR 0007](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0007-infer-columns-from-cdc-metadata/) amendment).
+- A micro-batch is cut into at most `numPartitions` ranges of about 50,000 change rows or
+  more, so a batch of fewer than about 100,000 change rows is read in one partition, with
+  one connection, instead of one per core
+  ([ADR 0015](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0015-split-batches-by-change-rows/) amendment).
+- Only a batch's last partition measures where the stream is (retention watermark,
+  `max_lsn`, capture lag, end commit time); the other partitions skip those four queries
+  ([ADR 0014](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0014-network-and-read-metrics-in-facts/) amendment 5,
+  [ADR 0020](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0020-capture-and-ingestion-lag-in-facts/) amendment 2).
+- The planner reads each capture instance's captured columns (and which are computed) once
+  per query run, and again before checking types whenever a batch holds DDL.
 - `stream()` and the reader log a WARNING naming any option they do not know, so a misspelt
   name no longer leaves its default in force silently.
 - The reader logs a WARNING with the file when it cannot write a metrics file, instead of
@@ -123,6 +185,10 @@ amendment,
 
 ### Fixed
 
+- `backfill()` completes a chunked snapshot whose `'snapshot_open'` row has no `kind`
+  (written by an unreleased build that put it in `mode`), taking generation 0 as a bootstrap
+  and a later one as a re-snapshot, instead of failing with `KeyError` once its last chunk
+  is in.
 - A checkpoint deleted or rewound while `app_id` stayed the same made Delta skip every write
   up to the old batch id while the query ran on and the verdict advanced: with a
   `facts_table`, the run's first batch now raises `ValueError` saying so.

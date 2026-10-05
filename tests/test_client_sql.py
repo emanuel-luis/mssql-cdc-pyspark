@@ -509,6 +509,7 @@ def test_captured_columns_are_read_once_per_instance_until_forgotten():
     client.capture_instances("dbo_orders")
     client.capture_instances("dbo_orders")  # the next planning: the listing only
     assert fetched(rec) == ["dbo_orders", "dbo_orders_v2"]
+    assert sum("sys.columns" in c[0] for c in rec.calls) == 1  # is_computed: cached with them
     # ALTER COLUMN changes a captured type: the reader forgets them when a batch holds DDL
     rec.captured = {**CAPTURED, "dbo_orders_v2": [_col(1, "id", "bigint", 19, 0)]}
     client.forget_columns()
