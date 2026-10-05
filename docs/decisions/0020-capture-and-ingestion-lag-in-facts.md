@@ -2,7 +2,8 @@
 
 **Status:** accepted  
 **Date:** 2026-09-30T10:33:11-03:00  
-**Amended:** 2026-09-30T15:16:41-03:00, ingestion lag measured from the batch's end offset; a batch without rows writes its row, so facts that stop arriving mean the stream or capture stopped (see the Amendment)
+**Amended:** 2026-09-30T15:16:41-03:00, ingestion lag measured from the batch's end offset; a batch without rows writes its row, so facts that stop arriving mean the stream or capture stopped (see the Amendment)  
+**Amended:** 2026-10-05T13:53:56-03:00, measured once a batch, by its last partition (see Amendment 2)
 
 ## Context
 A stream can be stale for two different reasons, and they need different people. CDC
@@ -77,3 +78,13 @@ ADR 0017, amended the same day):
 * `tests/test_delta_sink.py` checks the lag of an empty batch and of a batch whose end offset
   is past its last change against the fake's timeline; `tests/integration` checks `end_lsn`
   and `end_commit_ts` are filled on a real server.
+
+## Amendment 2: measured once a batch
+`max_lsn`, its commit time and the capture lag describe the batch, not a partition, yet every
+partition queried them and the sink kept the latest and the largest. Now only the batch's
+last partition, the one that ends at the end offset, measures them, right after its read
+(ADR 0014, Amendment 5): `source_max_commit_ts` and `capture_lag_seconds` are that
+partition's values. "Two more short queries per partition" above becomes two per batch. The
+moment of the measurement moves by at most the time between the partitions' ends, within
+one batch, so the alerts above keep their thresholds. `tests/test_delta_sink.py` and
+`tests/integration` check the facts as before.

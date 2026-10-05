@@ -66,8 +66,9 @@ touch:
 - `maxCommitsPerBatch`: the most commits one micro-batch reads (counted in
   `cdc.lsn_time_mapping`). Unlimited by default, so the first run after a long stop reads
   everything up to `max_lsn` in one batch; set it to keep batches small.
-- `numPartitions`: how many LSN ranges, each read on its own connection, one batch is split
-  into. `auto` takes the session's cores; set a number to cap the load on SQL Server.
+- `numPartitions`: at most how many LSN ranges, each read on its own connection, one batch is
+  split into. `auto` takes the session's cores; set a number to cap the load on SQL Server.
+  A range holds about 50,000 change rows or more, so small batches are read in one.
 - `startingLsn`: where a new checkpoint starts. `earliest` (the default, the oldest change
   CDC still holds), `latest`, or an LSN such as `0x0000002A000001F40003`, taken as already
   processed. A checkpoint that has offsets ignores it.
@@ -161,9 +162,9 @@ The facts table uses `<app_id>#facts` the same way, and snapshot events `<app_id
 ## Metrics and `metricsPath`
 
 With a facts table, every partition of a batch leaves a small file with its round trip to
-SQL Server, read time, megabytes, network wait, the retention watermark, the capture lag and
-the commit time of its last LSN. The sink folds them into the batch's facts row and deletes
-them. Without them, the facts still have counts and LSN ranges, but `end_lsn`,
+SQL Server, read time, megabytes and network wait; the batch's last partition adds where the
+stream is: the retention watermark, the capture lag and the commit time of the batch's end.
+The sink folds them into the batch's facts row and deletes them. Without them, the facts still have counts and LSN ranges, but `end_lsn`,
 `retention_headroom_hours`, the lags and the network columns are NULL, and schema change
 events do not reach the facts ([Monitoring](monitoring.md)).
 

@@ -5,7 +5,8 @@
 **Amended:** 2026-09-29T10:48:30-03:00, the round trip moved to the partitions; `stream()` declares the options once  
 **Amended:** 2026-09-29T22:15:55-03:00, a partition that read no rows leaves no file (see Amendment 2)  
 **Amended:** 2026-09-30T15:16:41-03:00, every partition leaves a file again, with the commit time of its last LSN; the sink folds every file present (see Amendment 3)  
-**Amended:** 2026-09-30T17:47:32-03:00, one directory per stream, emptied before each batch is read (see Amendment 4)
+**Amended:** 2026-09-30T17:47:32-03:00, one directory per stream, emptied before each batch is read (see Amendment 4)  
+**Amended:** 2026-10-05T13:53:56-03:00, only the batch's last partition measures where the stream is (see Amendment 5)
 
 ## Context
 On a production source the reader was network-bound: round trips of 180–950 ms, and the
@@ -110,3 +111,24 @@ Now:
 * Wired by hand, `metricsPath` must belong to one stream, and `delta_sink` needs the same
   directory as `metrics_path`: nothing else removes the files, and every partition of every
   batch writes one, so without it they pile up.
+
+## Amendment 5: the batch's position, measured once
+Every partition measured the retention watermark (ADR 0017), how far capture had got and
+its lag (ADR 0020), and the commit time of its own `to_lsn`. The first three describe the
+whole batch, and the sink kept the latest or largest of each; of the fourth it used only the
+partition with the largest `to_lsn`. They were four of each partition's nine queries.
+
+Now the planner marks the batch's last range (`LsnRange.last`, the one that ends at the end
+offset), and only it measures the four after its read; the other partitions leave their
+read metrics (range, rows, bytes, seconds, round trip, network wait). A partition other
+than the last runs 5 queries: the ping, the wait counter, the read, the retention guard
+(invariant 4) and the wait counter again; the last runs those and `max_lsn` plus three
+commit times (`tests/test_reader_units.py` pins both). Each runs one more, its range's UTC
+offset (ADR 0008), where the server's clock is a named zone other than UTC. The sink is unchanged: its maximum
+over the one value present is that value, and `end_lsn` is still the largest `to_lsn`. When
+`failOnDataLoss=false` skipped everything up to the end offset in the batch's last capture
+instance, the last range planned measures, as the largest `to_lsn` did before. The facts
+columns keep their meaning; their comments, written for the per-partition values ("the
+latest seen by the batch's partitions"), still hold for the one partition that reports.
+With small tiles merged (ADR 0015, Amendment) a small batch is a single partition anyway;
+this saves queries in large batches, four per range other than the last.

@@ -174,12 +174,13 @@ finally:
 
 The streams share the cluster, and their micro-batches run at the same time.
 
-- **Executor cores.** A batch is read in `numPartitions` ranges, each a task on one core
-  with its own connection to SQL Server. `numPartitions=auto` gives every stream all the
-  session's cores ([ADR 0011](../decisions/0011-num-partitions-from-cores.md)): with twenty
-  tables on sixteen cores, every batch of every table is cut into sixteen ranges, mostly
-  tiny ones. Set it per table instead: 1 or 2 for small or quiet tables, more for the busy
-  ones, with a sum close to the cores.
+- **Executor cores.** A batch is read in up to `numPartitions` ranges, each a task on one
+  core with its own connection to SQL Server. `numPartitions=auto` gives every stream all the
+  session's cores ([ADR 0011](../decisions/0011-num-partitions-from-cores.md)), but a range
+  holds about 50,000 change rows or more ([ADR 0015](../decisions/0015-split-batches-by-change-rows.md)),
+  so a table's steady small batches take one core each and only a large batch (a backlog,
+  a bulk load) spreads over all of them. Cap it per table where those large batches would
+  starve the other streams: 1 or 2 for small or quiet tables, more for the busy ones.
 - **Connections on SQL Server.** At most one per running task, so no more than the
   executor cores, plus one per stream on the driver, which plans its batches.
 - **The driver** plans every stream and runs every `foreachBatch`, where the sink writes

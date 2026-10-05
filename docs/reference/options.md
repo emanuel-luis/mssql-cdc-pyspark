@@ -206,9 +206,10 @@ at most this many commits.
 
 ### numPartitions
 
-How many partitions, each with its own connection to SQL Server, a micro-batch is read in.
-The stream cuts a batch into commit-aligned LSN ranges holding about the same number of
-change rows ([ADR 0015](../decisions/0015-split-batches-by-change-rows.md)). A snapshot cuts
+At most how many partitions, each with its own connection to SQL Server, a micro-batch is
+read in. The stream cuts a batch into commit-aligned LSN ranges holding about the same number
+of change rows, each about 50,000 or more, so a batch of fewer than about 100,000 change rows
+is read in one partition ([ADR 0015](../decisions/0015-split-batches-by-change-rows.md)). A snapshot cuts
 a single integer key into uniform ranges between its MIN and MAX, any other key into `NTILE`
 tiles of the rows, and reads a table without a unique index in one partition.
 
@@ -252,8 +253,9 @@ Anything else is a `ValueError`. See [Schema changes](../guides/schema-changes.m
 ### metricsPath
 
 A directory where each partition leaves a JSON file with its metrics (round trip, read time,
-MB, network wait, retention watermark, capture lag, the commit time of its last LSN), and
-where the reader leaves an event file for each schema change and capture instance switch.
+MB, network wait; the batch's last partition also the retention watermark, capture lag and
+the commit time of the batch's end), and where the reader leaves an event file for each
+schema change and capture instance switch.
 The sink folds them into the batch's facts row and removes them. Without it the metric
 columns of the facts table and `end_lsn` stay NULL, and events only reach the driver log.
 
