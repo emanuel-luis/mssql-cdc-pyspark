@@ -6,7 +6,7 @@ from datetime import datetime
 
 import pytest
 
-from mssql_cdc.sink import _fold_metrics, _headroom, _lag, write_facts
+from mssql_cdc.sink import _event_row, _fold_metrics, _headroom, _lag, write_facts
 
 T = datetime(2026, 9, 28, 14, 0)
 
@@ -69,6 +69,16 @@ def test_headroom_and_lag_are_null_without_either_end():
     assert _headroom(datetime(2026, 9, 28, 12, 30), T)["retention_headroom_hours"] == 1.5
     assert _lag(None, T) is None and _lag(T, None) is None
     assert _lag(datetime(2026, 9, 28, 14, 0, 30), T) == 30.0
+
+
+def test_a_data_skipped_event_row_carries_the_gap():
+    lsn = "0x00000000000000000020"
+    event = {"event": "data_skipped", "lsn": lsn, "commit_ts": "2026-09-28T14:00:00.000"}
+    gap = {"lost_from_ts": "2026-09-28T13:00:00.000", "lost_to_ts": "2026-09-28T14:00:00.000"}
+    row = _event_row({**event, "detail": "0x01..0x20", **gap}, app_id="a", batch_id=3)
+    assert (row["lost_from_ts"], row["lost_to_ts"]) == (datetime(2026, 9, 28, 13), T)
+    assert (row["batch_id"], row["rows"], row["min_lsn"], row["max_lsn"]) == (3, 0, lsn, lsn)
+    assert _event_row({**event, "event": "schema_change"})["lost_from_ts"] is None  # no gap
 
 
 def test_a_facts_key_that_is_no_column_raises_before_anything_is_written():

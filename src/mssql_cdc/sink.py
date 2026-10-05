@@ -26,8 +26,9 @@
   partition measures the position (watermark, capture's progress, end commit time). Metrics
   never fail a batch. ``mssql_cdc.stream()`` wires both ends from one set of options.
 * Changes to the source are facts too (ADR 0023): while planning a batch the reader leaves an
-  ``event-<kind>-<lsn>.json`` file in the same directory for a schema change or a switch to a
-  newer capture instance. The sink writes each as an event row of the batch, in the same
+  ``event-<kind>-<lsn>.json`` file in the same directory for a schema change, a switch to a
+  newer capture instance or a skip past purged changes (``failOnDataLoss=false``, with the
+  gap, ADR 0018). The sink writes each as an event row of the batch, in the same
   commit as the batch's own row, so a replay writes both or neither, and removes the files
   only after that (the partitions' files are removed before the read; these stay). Without
   a facts table they are removed unwritten: the reader has logged them.
@@ -64,10 +65,9 @@ from .migrations.facts import (
     END_COLUMNS,
     EVENT_COLUMNS,
     LAG_COLUMNS,
-    LOCK_COMMENTS,
-    MODE_COMMENTS,
     NETWORK_COLUMNS,
     RETENTION_COLUMNS,
+    SKIP_COMMENTS,
 )
 from .tables import is_path
 
@@ -156,9 +156,10 @@ FACTS_COMMENT = (
     "(end_lsn, end_commit_ts) and how long it took. The same facts are in each target commit's "
     "userMetadata (batches with rows only), which Delta log cleanup eventually drops. Each "
     "snapshot stream().to_delta takes (bootstrap or re-snapshot), each schema change on the "
-    "source and each switch to a newer capture instance adds one row, with event set (see its "
-    "comment); a snapshot adds one more when it opens; a chunked one also adds one with the "
-    "chunks its first stream().backfill() call plans and one per chunk it reads."
+    "source, each switch to a newer capture instance and each skip past purged changes "
+    "(failOnDataLoss=false) adds one row, with event set (see its comment); a snapshot adds one "
+    "more when it opens; a chunked one also adds one with the chunks its first "
+    "stream().backfill() call plans and one per chunk it reads."
 )
 FACTS_COLUMNS = [
     (
@@ -174,8 +175,9 @@ FACTS_COLUMNS = [
         "BIGINT",
         (
             "Structured Streaming micro-batch id. With app_id, the idempotency key: a replayed "
-            "batch is skipped, so its row (event NULL) never appears twice. Its 'schema_change' "
-            "and 'capture_instance_switched' rows carry it too; snapshot event rows have none."
+            "batch is skipped, so its row (event NULL) never appears twice. Its 'schema_change', "
+            "'capture_instance_switched' and 'data_skipped' rows carry it too; snapshot event "
+            "rows have none."
         ),
     ),
     (
@@ -223,10 +225,10 @@ FACTS_COLUMNS = [
     ),
     *NETWORK_COLUMNS,
     *RETENTION_COLUMNS,
-    *((n, t, LOCK_COMMENTS.get(n, MODE_COMMENTS.get(n, c))) for n, t, c in EVENT_COLUMNS),
+    *((n, t, SKIP_COMMENTS.get(n, c)) for n, t, c in EVENT_COLUMNS),
     *LAG_COLUMNS,
     *END_COLUMNS,
-    *((n, t, MODE_COMMENTS.get(n, c)) for n, t, c in DETAIL_COLUMNS),
+    *((n, t, SKIP_COMMENTS.get(n, c)) for n, t, c in DETAIL_COLUMNS),
     ("target", "STRING", "Table name or path the batch was written to."),
     (
         "written_at",
@@ -325,13 +327,19 @@ def _read_events(path: str) -> tuple[list[str], list[dict]]:
 
 
 def _event_row(event: dict, **batch) -> dict:
-    """A facts row for one of the reader's events: in the batch that read past it, 0 rows."""
-    ts = datetime.fromisoformat(event["commit_ts"]) if event.get("commit_ts") else None
+    """A facts row for one of the reader's events: in the batch that read past it, 0 rows;
+    a 'data_skipped' one also has the gap (ADR 0018)."""
+    ts, lost_from, lost_to = (
+        datetime.fromisoformat(event[k]) if event.get(k) else None
+        for k in ("commit_ts", "lost_from_ts", "lost_to_ts")
+    )
     lsn = event["lsn"]
     return {
         **batch,
         "event": event["event"],
         "detail": event.get("detail"),
+        "lost_from_ts": lost_from,
+        "lost_to_ts": lost_to,
         "rows": 0,
         "deletes": 0,
         "inserts": 0,
@@ -442,7 +450,8 @@ def delta_sink(
     ``metrics_path`` feeds the facts table with each partition's read and network metrics:
     the directory of the source option ``metricsPath``, used by no other stream. Its files are removed after each batch,
     with or without a facts table; without ``metrics_path`` nothing removes them. It also
-    carries the reader's schema change and capture instance switch events to the facts.
+    carries the reader's schema change, capture instance switch and data skipped events to
+    the facts.
     A batch that read rows but found no metrics file there logs a warning, once per run.
     """
     created: set[str] = set()  # once per query run, not once per batch

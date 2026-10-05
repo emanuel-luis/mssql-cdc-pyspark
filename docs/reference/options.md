@@ -235,7 +235,9 @@ after its read, since cleanup can run in between.
 
 `false` skips ahead to what CDC still holds and loses those changes; the skip logs a
 WARNING naming the capture instance and the LSN range skipped, and `finalized_until` moves
-past the gap ([Finalization](../guides/finalization.md#pitfalls)). Prefer `to_delta(on_data_loss="resnapshot")`, which recovers with a snapshot and records the
+past the gap ([Finalization](../guides/finalization.md#pitfalls)). A skip found while
+planning also writes a `data_skipped` facts row with the gap, through
+[metricsPath](#metricspath). Prefer `to_delta(on_data_loss="resnapshot")`, which recovers with a snapshot and records the
 gap: see [Data loss](../guides/data-loss.md).
 
 ### schemaChangePolicy
@@ -255,7 +257,8 @@ Anything else is a `ValueError`. See [Schema changes](../guides/schema-changes.m
 A directory where each partition leaves a JSON file with its metrics (round trip, read time,
 MB, network wait; the batch's last partition also the retention watermark, capture lag and
 the commit time of the batch's end), and where the reader leaves an event file for each
-schema change and capture instance switch.
+schema change, capture instance switch and skip past purged changes
+([failOnDataLoss](#failondataloss)).
 The sink folds them into the batch's facts row and removes them. Without it the metric
 columns of the facts table and `end_lsn` stay NULL, and events only reach the driver log.
 

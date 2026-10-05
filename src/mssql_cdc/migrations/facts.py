@@ -317,6 +317,40 @@ LOCK_COMMENTS = {
 }
 
 
+# Migration 10 (2026-10-05): a batch that failOnDataLoss=false made skip purged changes writes
+# a 'data_skipped' row with the gap (ADR 0018, Amendment 3). Comments only, with batch_id's
+# and the table's; the creation columns take these, over the earlier ones.
+SKIP_COMMENTS = {
+    "event": LOCK_COMMENTS["event"].replace(
+        "Downstream rebuilds only from 'bootstrap' and 'resnapshot' rows.",
+        "'data_skipped' (failOnDataLoss=false), with the batch_id of the batch that skipped them "
+        "and rows = 0: CDC cleanup had purged changes the stream had not read, and the batch "
+        "went on from what it left; min_lsn = max_lsn is the capture instance's min_lsn it "
+        "resumed at, lost_from_ts and lost_to_ts the gap, detail the LSNs skipped. Downstream "
+        "rebuilds only from 'bootstrap' and 'resnapshot' rows: after a 'data_skipped' row the "
+        "target lacks the skipped changes (a row deleted in the gap stays) until a new snapshot.",
+    ),
+    "lost_from_ts": (
+        "On 'resnapshot' rows, the UTC commit time of the last offset the stream had processed. "
+        "Changes committed after it and before lost_to_ts were purged unread: the target has "
+        "the rows as of the snapshot, but those changes are missing from its change history. On "
+        "'data_skipped' rows, the same for the batch's start offset: the changes it skipped were "
+        "committed after it and before lost_to_ts, and are missing from the target. NULL on "
+        "other rows, and when the stream had processed no offset since an explicit startingLsn."
+    ),
+    "lost_to_ts": (
+        "On 'resnapshot' and 'data_skipped' rows, the UTC commit time of the CDC retention "
+        "watermark (sys.fn_cdc_get_min_lsn) when the loss was detected: where the gap in the "
+        "change history ends. NULL on other rows."
+    ),
+    "detail": MODE_COMMENTS["detail"].replace(
+        "NULL on other rows.",
+        "On 'data_skipped' rows, 'from..to': the first LSN not read and the min_lsn reading "
+        "resumed at. NULL on other rows.",
+    ),
+}
+
+
 def _end_offset(spark, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT  # the comments new tables are created with
 
@@ -348,6 +382,13 @@ def _snapshot_modes(spark, table: str) -> None:
     )
 
 
+def _skipped_changes(spark, table: str) -> None:
+    from ..sink import FACTS_COLUMNS, FACTS_COMMENT
+
+    changed = ("batch_id", *SKIP_COMMENTS)
+    set_comments(spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in changed}, FACTS_COMMENT)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         "network and read metrics", lambda spark, table: add_columns(spark, table, NETWORK_COLUMNS)
@@ -365,4 +406,5 @@ MIGRATIONS: list[Migration] = [
         "full snapshot opens per run",
         lambda spark, table: set_comments(spark, table, LOCK_COMMENTS),
     ),
+    Migration("skipped changes", _skipped_changes),
 ]

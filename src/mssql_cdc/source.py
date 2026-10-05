@@ -320,9 +320,10 @@ def _write_metrics(path: str, name: str, metrics: dict) -> None:
         )
 
 
-def _write_event(path: str, kind: str, ci: str, lsn: str, commit_ts, detail: str) -> None:
+def _write_event(path: str, kind: str, ci: str, lsn: str, commit_ts, detail: str, **gap) -> None:
     """One JSON per event, for the sink to fold into the facts (ADR 0023): named by its kind
-    and LSN, so a replanned batch rewrites the same file. Best effort, like the metrics."""
+    and LSN, so a replanned batch rewrites the same file. ``gap``: a 'data_skipped' event's
+    ``lost_from_ts`` and ``lost_to_ts`` (ADR 0018). Best effort, like the metrics."""
     import json
 
     try:
@@ -330,7 +331,7 @@ def _write_event(path: str, kind: str, ci: str, lsn: str, commit_ts, detail: str
         name = os.path.join(path, f"event-{kind}-{lsn}.json")
         body = {"event": kind, "capture_instance": ci, "lsn": lsn, "commit_ts": commit_ts}
         with open(name + ".tmp", "w", encoding="utf-8") as fh:
-            json.dump({**body, "detail": detail}, fh)
+            json.dump({**body, "detail": detail, **gap}, fh)
         os.replace(name + ".tmp", name)
     except OSError as exc:
         _log.warning("mssql_cdc: could not write the %s event file in %s: %s", kind, path, exc)
@@ -654,12 +655,14 @@ class _BaseReader(_Common, DataSourceStreamReader):
                     detail += f"; no longer captured, read as NULL: {', '.join(lost)}"
                 ts = client.lsn_to_time(inst.start_lsn)
                 events.append(("capture_instance_switched", inst.name, inst.start_lsn, ts, detail))
-        ranges = []
+        ranges, skipped = [], []
         gone = self._gone(instances)
         for inst, lo, hi in pieces:
-            # failOnDataLoss=false: skip ahead to what cleanup left
             oldest = inst is instances[0]
-            lo = max(lo, self._guard_retention(client, inst.name, lo, gone if oldest else []))
+            low = self._guard_retention(client, inst.name, lo, gone if oldest else [])
+            if low > lo:  # failOnDataLoss=false: skip ahead to what cleanup left
+                skipped.append((inst.name, lo, low))
+                lo = low
             if lo <= hi:  # invariant 3: cleanup may have left nothing up to hi
                 if inst.name.lower() not in self._checked:  # the run's first read of it (D2)
                     self._check_switch(inst)
@@ -671,6 +674,11 @@ class _BaseReader(_Common, DataSourceStreamReader):
             _log.warning("mssql_cdc: %s on %s at %s: %s", kind, ci, lsn, detail)
             if self.metrics_path:  # for the sink to fold into the facts
                 _write_event(self.metrics_path, kind, ci, lsn, ts, detail)
+        for ci, lo, low in skipped:  # the guard logged each; the facts keep the gap (ADR 0018)
+            if self.metrics_path:  # as a re-snapshot's: after the last offset, before min_lsn
+                ts = client.lsn_to_time(low)
+                gap = {"lost_from_ts": start.get("commit_ts") or None, "lost_to_ts": ts}
+                _write_event(self.metrics_path, "data_skipped", ci, low, ts, f"{lo}..{low}", **gap)
         return ranges
 
     def _pieces(self, client, instances, lo: str, hi: str) -> list[tuple]:

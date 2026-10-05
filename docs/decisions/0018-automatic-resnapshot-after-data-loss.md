@@ -3,7 +3,8 @@
 **Status:** accepted  
 **Date:** 2026-09-29T17:46:41-03:00  
 **Amended:** 2026-10-02T20:30:12-03:00, a chunked re-snapshot opens at S and is read by `backfill()` (see the Amendment, ADR 0028)  
-**Amended:** 2026-10-03T18:10:05-03:00, a full re-snapshot opens too, under the mode lock of ADR 0028's Amendment (see Amendment 2)
+**Amended:** 2026-10-03T18:10:05-03:00, a full re-snapshot opens too, under the mode lock of ADR 0028's Amendment (see Amendment 2)  
+**Amended:** 2026-10-05T12:46:11-03:00, a skip with `failOnDataLoss=false` leaves a `'data_skipped'` facts row with the gap (see Amendment 3)
 
 ## Context
 CDC cleanup deletes change rows by age (three days by default) whether or not the stream
@@ -160,3 +161,26 @@ ADR 0028's Amendment locks the snapshot mode while a snapshot is open. For recov
   generation. The `DataLossError` of step 3 says so.
 * A chunked recovery that finds a full open of the next generation still being read raises
   instead of starting from it; a complete one, an emptied table's, it starts from.
+
+## Amendment 3: a skip leaves the gap in the facts
+`failOnDataLoss=false` skipped purged changes with a WARNING only, and a log line does not
+last: the facts showed an ordinary batch, so nobody could later tell when the loss happened,
+on which capture instance or how much was lost.
+
+* When the driver guard skips a range ahead to `min_lsn` M while planning, the reader leaves
+  a `'data_skipped'` event file through the path that carries `'schema_change'` and
+  `'capture_instance_switched'` (ADR 0023), and the sink writes it as an event row of the
+  batch in the batch's own commit: `batch_id` the batch's, `rows` 0, `min_lsn` = `max_lsn` =
+  M, `detail` `'<from>..<M>'`, `lost_from_ts` the commit time of the batch's start offset,
+  `lost_to_ts` M's commit time, the same columns a `'resnapshot'` row fills. Written after
+  the schema checks, so a batch they fail leaves none; it needs `metricsPath`, as the other
+  events do. Facts migration 10 gives `event`, `lost_from_ts`, `lost_to_ts`, `detail`,
+  `batch_id` and the table their new comments.
+* The executor guard, which finds cleanup running mid-read, only logs: rows of the range
+  may be missing, not certainly, and the task cannot tell which.
+* `apply_changes` and `finalized_until` are unchanged: a skip leaves no snapshot to rebuild
+  from, so silver keeps what the skipped changes would have changed until a new snapshot,
+  and the verdict moves past the gap. A helper that reads the gaps waits for a consumer
+  that asks.
+  - Considered: holding silver's verdict at a `'data_skipped'` row. It would hold it until
+    a snapshot nothing schedules, which `failOnDataLoss=false` was set to avoid.

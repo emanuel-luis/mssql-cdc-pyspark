@@ -39,11 +39,15 @@ decides what to do next. A rerun fails the same way: the checkpoint still points
 an older capture instance of the table was disabled before the stream had read its changes,
 the message names it as the other possible cause ([Schema changes](schema-changes.md)).
 
-The option `failOnDataLoss=false` skips ahead to what cleanup left instead. The skip only
-logs a WARNING naming the capture instance and the LSN range skipped, in the driver's log
-or, when a task finds it after its read, that executor's; the query goes on and
-`finalized_until` moves past the gap. Use it only where losing the changes is acceptable
-and a snapshot is not.
+The option `failOnDataLoss=false` skips ahead to what cleanup left instead. The skip logs a
+WARNING naming the capture instance and the LSN range skipped, in the driver's log or, when
+a task finds it after its read, that executor's. A skip found while planning also leaves a
+[`data_skipped` row](#the-events-in-the-facts) with the gap in the facts table, when the
+stream has one and a [metricsPath](../reference/options.md#metricspath) (`to_delta` sets
+it); one a task finds after its read is only logged. The query goes on and
+`finalized_until` moves past the gap. Nothing rebuilds downstream: silver keeps what the
+skipped changes would have changed, a row deleted in the gap included, until a new
+snapshot. Use it only where losing the changes is acceptable and a snapshot is not.
 
 ## Recovering by hand
 
@@ -220,15 +224,21 @@ snapshot was reused). A `'resnapshot'` row also carries the gap:
 - `lost_to_ts`: commit time of the retention watermark when the loss was found, where the
   gap ends.
 
+With `failOnDataLoss=false`, a batch that skipped purged changes has a `'data_skipped'` row
+instead, with its `batch_id` and `rows` = 0: `min_lsn` = `max_lsn` is the `min_lsn` the
+batch resumed at, `detail` the LSNs skipped (`from..to`), and `lost_from_ts` and
+`lost_to_ts` the gap as above, from the batch's start offset. It is not a snapshot:
+nothing rebuilds from it.
+
 ```sql
-SELECT written_at, app_id, rows, lost_from_ts, lost_to_ts
+SELECT written_at, app_id, event, rows, lost_from_ts, lost_to_ts
 FROM ops.ingestion_facts
-WHERE target = 'bronze.orders' AND event = 'resnapshot'
+WHERE target = 'bronze.orders' AND event IN ('resnapshot', 'data_skipped')
 ORDER BY written_at DESC
 ```
 
 Statistics over micro-batches filter on `event IS NULL`. The other events,
-`'schema_change'` and `'capture_instance_switched'`, are not snapshots.
+`'schema_change'`, `'capture_instance_switched'` and `'data_skipped'`, are not snapshots.
 
 ## Downstream after a re-snapshot
 
