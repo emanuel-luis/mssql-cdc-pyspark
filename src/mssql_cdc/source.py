@@ -629,6 +629,19 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 f"{min_lsn}): {why}. A re-snapshot is required. "
                 "Set failOnDataLoss=false to skip ahead (loses changes)."
             )
+        if from_lsn < min_lsn:  # failOnDataLoss=false: skipped, but never without a trace
+            try:
+                at = client.lsn_to_time(min_lsn)
+            except Exception:  # noqa: BLE001 - a log line must never fail the read
+                at = None
+            _log.warning(
+                "mssql_cdc: %s: change data from %s up to min_lsn %s (committed at %s) is "
+                "gone; failOnDataLoss=false skips it, and those changes are lost",
+                capture_instance,
+                from_lsn,
+                min_lsn,
+                f"{at} UTC" if at else "an unknown time",
+            )
         return min_lsn
 
     # -- data (runs on executors) ---------------------------------------------

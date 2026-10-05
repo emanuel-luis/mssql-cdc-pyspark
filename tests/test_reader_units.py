@@ -208,6 +208,25 @@ def test_the_fake_maps_only_an_entrys_own_lsn_to_its_time(tmp_path):
     assert [d.commit_ts for d in client.ddl_history(CI, lsns[0], ddl)] == [second]
 
 
+def test_a_skip_past_purged_changes_is_logged_on_the_driver_and_in_the_task(tmp_path, caplog):
+    db, lsns = _db(str(tmp_path), n_tx=4)
+    db.cleanup(CI, lsns[2])  # purged below commit 2
+    reader = _reader(str(tmp_path), failOnDataLoss="false")
+    with caplog.at_level("WARNING", logger="mssql_cdc.source"):
+        [planned] = reader.partitions({"lsn": lsns[0], "commit_ts": ""}, {"lsn": lsns[-1]})
+        assert planned.from_lsn == lsns[2]
+        db.cleanup(CI, lsns[3])  # after planning, before the read
+        list(reader.read(planned))
+    skipped = [r.getMessage() for r in caplog.records if "failOnDataLoss=false" in r.getMessage()]
+    at = (T0 + timedelta(minutes=2)).isoformat(timespec="milliseconds")
+    assert len(skipped) == 2
+    assert (
+        f"{CI}: change data from 0x" in skipped[0]
+        and f"{lsns[2]} (committed at {at} UTC)" in skipped[0]
+    )
+    assert f"from {lsns[2]} up to min_lsn {lsns[3]}" in skipped[1]
+
+
 # -- planning ----------------------------------------------------------------------------
 def test_split_starts_each_range_after_its_bound_without_a_query():
     from mssql_cdc.client import CaptureInstance
