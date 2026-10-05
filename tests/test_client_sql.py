@@ -238,6 +238,40 @@ def test_nth_commit_and_normalization():
     assert "TOP (5)" in rec.calls[-1][0]
 
 
+def test_mssql_python_batches_are_bounded_in_bytes_not_only_rows():
+    from types import SimpleNamespace
+
+    from mssql_cdc.client import MssqlPythonBackend
+
+    class Cursor:  # each batch holds the rows asked for, of the next width (bytes per row)
+        def __init__(self, widths):
+            self.widths, self.asked = list(widths), []
+
+        def execute(self, sql, params):
+            pass
+
+        def arrow_batch(self, n):
+            self.asked.append(n)
+            width = self.widths.pop(0) if self.widths else 0
+            return SimpleNamespace(num_rows=n if width else 0, nbytes=n * width)
+
+        def close(self):
+            pass
+
+    def asked(batch_size, *widths):
+        cursor = Cursor(widths)
+        backend = object.__new__(MssqlPythonBackend)
+        backend._conn = SimpleNamespace(cursor=lambda: cursor)
+        list(backend.batches("SELECT 1", (), batch_size))
+        return cursor.asked
+
+    mib = 1024 * 1024
+    # a first batch of at most 1000 rows; then as many as fit in 64 MiB, up to batch_size
+    assert asked(10_000, mib, 100, 100) == [1000, 64, 10_000, 10_000]
+    assert asked(10, 100) == [10, 10]
+    assert asked(10_000, 100 * mib) == [1000, 1]  # one row wider than the bound: one a batch
+
+
 def test_make_client_requires_connection_string():
     with pytest.raises(ValueError, match="connectionString"):
         make_client({"backend": "mssql-python"})

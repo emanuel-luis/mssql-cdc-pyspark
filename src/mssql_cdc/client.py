@@ -628,6 +628,9 @@ class Backend(ABC):
         pass
 
 
+_MAX_BATCH_BYTES = 64 * 1024 * 1024  # about the most an Arrow batch from either backend holds
+
+
 class MssqlPythonBackend(Backend):
     """Microsoft ``mssql-python`` driver with native Arrow fetch (>= 1.5.0)."""
 
@@ -637,13 +640,20 @@ class MssqlPythonBackend(Backend):
         self._conn = mssql_python.connect(connection_string, autocommit=True, timeout=timeout)
 
     def batches(self, sql, params, batch_size):
+        # batch_size is a row count; the bytes are bounded as ArrowOdbcBackend's are, so a
+        # table of (max) columns does not build gigabyte batches in a Python worker
         cur = self._conn.cursor()
         try:
             cur.execute(sql, tuple(params))
+            size = min(batch_size, 1000)
             while True:
-                batch = cur.arrow_batch(batch_size)
+                batch = cur.arrow_batch(size)
                 if batch.num_rows == 0:
                     break
+                # ponytail: rows from the last batch's mean row size; rows far wider than the
+                # batch before still overshoot, by at most one batch
+                fit = _MAX_BATCH_BYTES * batch.num_rows // max(1, batch.nbytes)
+                size = max(1, min(batch_size, fit))
                 yield batch
         finally:
             cur.close()
@@ -683,7 +693,7 @@ class ArrowOdbcBackend(Backend):
         self,
         connection_string: str,
         timeout: int = 30,
-        max_bytes_per_batch: int = 64 * 1024 * 1024,
+        max_bytes_per_batch: int = _MAX_BATCH_BYTES,
     ):
         import arrow_odbc
 
