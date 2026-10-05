@@ -71,11 +71,18 @@ def _row(order_id, status):
 
 
 def test_changes_apply_incrementally_and_a_rerun_or_a_position_left_behind_changes_nothing(
-    delta_spark, workdir
+    delta_spark, workdir, caplog
 ):
     o = Orders(delta_spark, workdir)
     # before the stream writes its first batch there is no bronze: nothing to apply yet
-    assert o.apply() == {"rebuilt": False, "applied_lsn": None, "finalized_until": None}
+    nothing = {"rebuilt": False, "applied_lsn": None, "finalized_until": None}
+    assert o.apply() == {**nothing, "bronze_found": False}
+    assert (
+        o.apply(facts_table=None) == o.apply(facts_table=None) == {**nothing, "bronze_found": False}
+    )
+    warned = [r.getMessage() for r in caplog.records if r.name == "mssql_cdc.silver"]
+    assert sum(o.bronze in m and "does not exist" in m for m in warned) == 3  # on every call
+    assert sum("without facts_table" in m for m in warned) == 1  # once per table
     o.commit((2, _row(1, "new")), (2, _row(2, "new")))
     o.commit((3, _row(1, "new")), (4, _row(1, "paid")))
     o.commit((2, _row(None, "new")))  # a unique index admits one NULL key
@@ -343,6 +350,63 @@ def test_a_control_table_at_version_0_gains_applied_lsn_and_snapshot_wave(delta_
         )
 
 
+def test_a_bronze_without_command_id_orders_a_transaction_by_seqval(delta_spark, workdir, caplog):
+    o = Orders(delta_spark, workdir)
+    o.options["includeCommandId"] = "false"  # change tables without __$command_id
+    o.commit((2, _row(1, "new")), (2, _row(2, "new")))
+    o.commit((3, _row(1, "new")), (4, _row(1, "paid")), (1, _row(2, "new")), (2, _row(2, "again")))
+    o.run()
+    assert "_command_id" not in delta_spark.read.format("delta").load(o.bronze).columns
+    o.apply()
+    assert o.rows() == o.source() == [(1, "paid"), (2, "again")]
+    assert any("no _command_id" in r.getMessage() for r in caplog.records)
+
+
+def test_a_wrong_granularity_fails_before_anything_is_written(workdir):
+    control = os.path.join(workdir, "control")
+    with pytest.raises(ValueError, match="granularity"):
+        apply_changes(None, "b", "s", CI, ["order_id"], control_table=control, granularity="hourly")
+    assert not os.path.exists(control)
+
+
+def test_facts_rows_that_name_bronze_otherwise_warn_then_fail_on_its_chunk_rows(
+    delta_spark, workdir, caplog
+):
+    o = Orders(delta_spark, workdir)
+    o.options["numPartitions"] = "1"  # one chunk per wave
+    for i in range(4):
+        o.commit((2, _row(i, "new")))
+
+    def run():
+        o.run(facts_table=o.facts, bootstrap=True, snapshot="chunked")
+
+    def apply(bronze):
+        return apply_changes(
+            delta_spark,
+            bronze,
+            o.silver,
+            CI,
+            ["order_id"],
+            control_table=o.control,
+            facts_table=o.facts,
+        )
+
+    run()  # opens the snapshot at S, its facts rows under o.bronze
+    o.commit((2, _row(9, "new")))
+    run()
+    elsewhere = "file:" + o.bronze  # the same table, spelled otherwise
+    apply(elsewhere)  # change rows alone: a bronze written by snapshot() has no facts row either
+    assert any(
+        "no row for target" in r.getMessage() and repr(o.bronze) in r.getMessage()
+        for r in caplog.records
+    )
+    stream(delta_spark, o.options).backfill(
+        o.bronze, app_id="orders-v1", facts_table=o.facts, chunk_rows=2, max_waves=1
+    )
+    with pytest.raises(ValueError, match=r"no 'snapshot_open' row .*Targets with one: \['"):
+        apply(elsewhere)  # its chunk rows would never be applied
+
+
 # Chunked snapshots: bronze and the facts written directly, as the stream and the backfill
 # write them, at LSNs numbered by hand.
 def _lsn(n):
@@ -397,6 +461,11 @@ class Log:
     def legacy_snapshot(self, n, image):
         """A snapshot as stream().to_delta wrote it before chunks: rows at its LSN alone."""
         self._append([(k, s, CI, _lsn(n), None, 0, None, _ts(n), None) for k, s in image], CHANGE)
+
+    def whole(self, n, image):
+        """A whole snapshot at LSN ``n``, as snapshot() writes it: _snapshot = _start_lsn."""
+        rows = [(k, s, CI, _lsn(n), None, 0, None, _ts(n), None, _lsn(n), None) for k, s in image]
+        self._append(rows, f"{CHANGE}, _snapshot STRING, _chunk INT")
 
     def wave(self, s, wave, stamp, chunks):
         """Wave ``wave`` of the chunked snapshot at ``s``, read at ``stamp``: one bronze
@@ -646,3 +715,15 @@ def test_a_legacy_snapshot_rebuilds_and_an_open_resnapshot_holds_the_verdict_unt
     assert done["rebuilt"] and done["finalized_until"] == released > before
     assert g.rows() == [(1, "new"), (3, "paid"), (4, "new")]
     assert g.position() == (_lsn(51), _lsn(50), None, None)
+
+
+def test_a_newer_whole_snapshot_rebuilds_silver_and_an_older_one_is_ignored(delta_spark, workdir):
+    g = Log(delta_spark, workdir)
+    g.whole(10, [(1, "a"), (2, "a")])
+    assert g.apply()["rebuilt"] and g.rows() == [(1, "a"), (2, "a")]
+    g.change(20, (2, 3, "a"))
+    g.whole(50, [(1, "b")])  # the scan for snapshots now starts at 10
+    assert g.apply()["rebuilt"] and g.rows() == [(1, "b")]
+    g.whole(30, [(4, "c")])  # older than the one silver was rebuilt from
+    assert not g.apply()["rebuilt"] and g.rows() == [(1, "b")]
+    assert g.position()[:2] == (_lsn(50), _lsn(50))

@@ -8,7 +8,9 @@ Each call applies what the capture instance's rows in ``bronze`` hold beyond the
 the latest image per key by ``(_start_lsn, _command_id, _seqval, _operation)``; operation
 1 deletes the key, 0 (snapshot), 2 and 4 upsert it, and 3 (the row before an update)
 deletes its own key: the 4 of an update that keeps the key outranks it, so a 3 is the latest
-row only when the update moved the row to another key.
+row only when the update moved the row to another key. A bronze without ``_command_id``
+(``includeCommandId=false``) is ordered by ``(_start_lsn, _seqval, _operation)``, as the
+reader orders it then: within a transaction, by ``__$seqval``.
 Run it after the stream, in the same job or another; one job per silver table.
 
 * Capture instances: after the stream switched to a newer capture instance of the table,
@@ -28,7 +30,8 @@ Run it after the stream, in the same job or another; one job per silver table.
   Complete: the newest ``max_lsn`` of the facts' 'bootstrap' and 'resnapshot' rows for
   ``bronze`` (an emptied table's snapshot has only its event), or of the operation-0 rows
   that are no chunks. The events carry no capture instance, so ``bronze`` holds one source
-  table, as its verdict already requires.
+  table, as its verdict already requires. The facts rows are matched by ``target`` as
+  ``to_delta`` got it: bronze must be named the same here, or a call on chunk rows fails.
 * Chunked snapshots (``_chunk`` set) arrive in waves after their 'snapshot_open' facts row,
   stamped at or above S, and are complete at their completion row: ``facts_table`` is
   required. While one is open (a 'snapshot_open' newer than every complete snapshot), a
@@ -45,20 +48,29 @@ Run it after the stream, in the same job or another; one job per silver table.
   itself. Bronze commits its rows before its verdict (ADR 0005), so the rows applied hold
   every commit up to it: silver never claims more than it has applied. While a snapshot is
   open, silver lacks keys or holds stale ones: its verdict is held until the rebuild. Without
-  ``facts_table`` it is never advanced: a chunked snapshot opens, and an emptied table's
-  re-snapshot happens, in the facts alone, before bronze holds any row of it.
+  ``facts_table`` it is never advanced (a warning says so once per table): a chunked
+  snapshot opens, and an emptied table's re-snapshot happens, in the facts alone, before
+  bronze holds any row of it.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from contextlib import closing
 from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from . import finalization, migrations
 from .sink import BRONZE_COLUMN_COMMENTS
 from .tables import delta_table, exists, table_ref
+
+if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
+
+_log = logging.getLogger(__name__)
+_warned: set[tuple[str, str]] = set()  # (what, table) warned about once in this process
 
 SILVER_COMMENT = (
     "Current state of a SQL Server table, one row per key, built from the bronze change log "
@@ -86,6 +98,12 @@ def _q(name: str) -> str:
 def _one(df):
     row = df.first()
     return row[0] if row else None
+
+
+def _warn_once(what: str, table: str, message: str, *args) -> None:
+    if (what, table) not in _warned:
+        _warned.add((what, table))
+        _log.warning(message, *args)
 
 
 def _source_keys(capture_instance: str, options: dict | None) -> list[str]:
@@ -119,13 +137,15 @@ def _record(
     )
     names = ("applied_lsn", "snapshot_lsn", "open_snapshot_lsn", "snapshot_wave")
     values = {n: f"s.{n}" for n in names}
-    (
-        delta_table(spark, control_table)
-        .alias("t")
-        .merge(src.alias("s"), "t.table_name = s.table_name")
-        .whenMatchedUpdate(set=values)
-        .whenNotMatchedInsert(values={"table_name": "s.table_name", **values})
-        .execute()
+    finalization._retrying(  # trackers and other silver jobs MERGE into it too
+        lambda: (
+            delta_table(spark, control_table)
+            .alias("t")
+            .merge(src.alias("s"), "t.table_name = s.table_name")
+            .whenMatchedUpdate(set=values)
+            .whenNotMatchedInsert(values={"table_name": "s.table_name", **values})
+            .execute()
+        )
     )
 
 
@@ -203,12 +223,23 @@ def _absent(spark, target: str, key: str, key_type, chunks: dict, held):
             ranges.append((_bound(lo, key_type, True), _bound(hi, key_type, False), stamp))
         except OverflowError:  # a lower bound past the last microsecond: no key surely inside
             continue
+    if not ranges:
+        return None
     bound = LongType() if isinstance(key_type, IntegralType) else key_type  # MAX + 1 fits
     schema = StructType(
         [StructField("lo", bound), StructField("hi", bound), StructField("l", StringType())]
     )
     r = F.broadcast(spark.createDataFrame(ranges, schema)).alias("r")
-    t = delta_table(spark, target).toDF().alias("t")
+    # the ranges' span as literals, which Delta's file stats prune silver by before the join
+    # (inequalities only: a nested loop). A NULL key fails either: with every range closed on
+    # that side, it is in none.
+    k = F.col(_q(key))
+    near = F.col("_start_lsn") < max(stamp for _, _, stamp in ranges)
+    if all(lo is not None for lo, _, _ in ranges):
+        near &= k >= F.lit(str(min(lo for lo, _, _ in ranges))).cast(bound)
+    if all(hi is not None for _, hi, _ in ranges):
+        near &= k < F.lit(str(max(hi for _, hi, _ in ranges))).cast(bound)
+    t = delta_table(spark, target).toDF().where(near).alias("t")
     k = F.col(f"t.{_q(key)}")
     inside = (
         (F.col("r.lo").isNull() | (k >= F.col("r.lo")))
@@ -222,7 +253,7 @@ def _absent(spark, target: str, key: str, key_type, chunks: dict, held):
 
 
 def apply_changes(
-    spark,
+    spark: SparkSession,
     bronze: str,
     target: str,
     capture_instance: str,
@@ -231,11 +262,11 @@ def apply_changes(
     control_table: str,
     facts_table: str | None = None,
     options: dict | None = None,
-    granularity: str = "hour",
+    granularity: finalization.Granularity = "hour",
 ) -> dict:
     """Bring ``target`` up to the capture instance's changes in ``bronze``, a table fed by
     that capture instance alone (and the newer ones of its table it switched to). Until the
-    stream creates ``bronze``, it does nothing.
+    stream creates ``bronze``, it does nothing but log a warning that names it.
 
     ``keys``: the source's key columns; without them, read from the capture instance's
     unique index through ``options`` (the stream's), which also name the table's other
@@ -243,13 +274,23 @@ def apply_changes(
     the position and gets the verdict; ``bronze``'s own verdict must be under the same name
     or path.
     ``facts_table``: the stream's, needed to see the re-snapshot of an emptied table and
-    any chunked snapshot (a call fails on chunk rows without it). Without it, the verdict is
-    not advanced.
-    Returns ``{"rebuilt", "applied_lsn", "finalized_until"}``.
+    any chunked snapshot (a call fails on chunk rows without it, or when its rows name
+    bronze otherwise). Without it, the verdict is not advanced.
+    Returns ``{"rebuilt", "applied_lsn", "finalized_until", "bronze_found"}``;
+    ``bronze_found`` is False when ``bronze`` does not exist (nothing was applied).
     """
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
+    finalization._check_granularity(granularity)  # before any write, not at the verdict
+    if not facts_table:
+        _warn_once(
+            "no facts",
+            target,
+            "apply_changes into %s without facts_table: its finalized_until is not advanced "
+            "(pass the stream's facts table)",
+            target,
+        )
     keys = list(keys) if keys else _source_keys(capture_instance, options)
     finalization.ensure_control_table(spark, control_table)
     control = delta_table(spark, control_table).toDF()
@@ -262,14 +303,39 @@ def apply_changes(
         "applied_lsn", "snapshot_lsn", "finalized_until", "open_snapshot_lsn", "snapshot_wave"
     )
     applied, rebuilt_from, finalized, open_from, wave_from = row.first() or (None,) * 5
-    if not exists(spark, bronze):  # the stream has written no batch yet
-        return {"rebuilt": False, "applied_lsn": applied, "finalized_until": finalized}
+    if not exists(spark, bronze):  # the stream has written no batch yet, or a wrong name
+        _log.warning(
+            "bronze %s does not exist: nothing applied to %s. Expected until the stream writes "
+            "its first batch; otherwise check the name (a typo, or bronze and target swapped)",
+            bronze,
+            target,
+        )
+        return {
+            "rebuilt": False,
+            "applied_lsn": applied,
+            "finalized_until": finalized,
+            "bronze_found": False,
+        }
     points: list = []
-    facts, opened, chunks = None, None, {}
+    every, facts, opened, chunks = None, None, None, {}
     if facts_table and exists(spark, facts_table):
-        facts = delta_table(spark, facts_table).toDF().where(F.col("target") == bronze)
+        every = delta_table(spark, facts_table).toDF()
+        facts = every.where(F.col("target") == bronze)
         snapshots = F.col("event").isin("bootstrap", "resnapshot")  # not the source's changes
-        points.append(_one(facts.where(snapshots).agg(F.max("max_lsn"))))
+        newest, found = facts.agg(
+            F.max(F.when(snapshots, F.col("max_lsn"))), F.count(F.lit(1))
+        ).first()
+        points.append(newest)
+        if not found and ("facts", bronze) not in _warned:  # e.g. written by snapshot() alone
+            _warn_once(
+                "facts",
+                bronze,
+                "%s has no row for target %r: if the stream writes it under another name, "
+                "snapshots are missed. Its targets: %s",
+                facts_table,
+                bronze,
+                sorted(r[0] for r in every.select("target").distinct().collect() if r[0]),
+            )
         if "detail" in facts.columns:  # facts migration 6
             # a full snapshot's open row only locks the mode: its rows come whole
             full = F.get_json_object("detail", "$.mode").eqNullSafe("full")
@@ -294,17 +360,28 @@ def apply_changes(
     snap = F.coalesce("_snapshot", "_start_lsn") if "_snapshot" in columns else F.col("_start_lsn")
     chunked = F.col("_chunk").isNotNull() if "_chunk" in columns else F.lit(False)
     op = F.col("_operation")
-    # ponytail: a scan for operation 0 on every call (file stats skip change-only files);
-    # keep the newest snapshot LSN in the control table if it shows up.
+    snapshot_rows = ours & (op == 0)
+    if rebuilt_from:
+        # A whole snapshot's rows carry its S in _start_lsn too, and rebuilt_from stays among
+        # the points (bronze and the facts are append-only): no older snapshot can change the
+        # result, and Delta's stats on _start_lsn skip their files.
+        snapshot_rows &= F.col("_start_lsn") >= rebuilt_from
     whole, chunk_rows = (
-        pinned.where(ours & (op == 0))
+        pinned.where(snapshot_rows)
         .agg(F.max(F.when(~chunked, snap)), F.count(F.when(chunked, 1)))
-        .first()
+        .collect()[0]  # a global aggregation: one row
     )
     if chunk_rows and facts is None:
         raise ValueError(
             f"{bronze} holds rows of a chunked snapshot: pass facts_table (the stream's), "
             "whose rows say which chunks arrived and when the snapshot is complete"
+        )
+    if chunk_rows and opened is None and every is not None:
+        named = every.where(F.col("event") == "snapshot_open").select("target").distinct()
+        raise ValueError(
+            f"{bronze} holds rows of a chunked snapshot, but {facts_table} has no "
+            f"'snapshot_open' row for target = {bronze!r}: is it named otherwise in to_delta? "
+            f"Targets with one: {sorted(r[0] for r in named.collect() if r[0])}"
         )
     points.append(whole)
     snapshot = max((p for p in points if p), default=None)
@@ -330,8 +407,12 @@ def apply_changes(
             (op == 0) & (F.col("_snapshot") == s_open) & F.col("_chunk").isin(*new)
         )
         rows = rows.unionByName(waves)
-    # a row of another instance would be skipped for good: a switch silver was not told about
-    other = _one(rows.where(~ours).select("_capture_instance"))
+    # a row of another instance would be skipped for good: a switch silver was not told about.
+    # One pass for it and the newest change (the waves are operation 0: no change).
+    other, top = rows.agg(
+        F.max(F.when(~ours, F.col("_capture_instance"))),
+        F.max(F.when(ours & change, F.col("_start_lsn"))),
+    ).collect()[0]
     if other is not None:
         raise ValueError(
             f"{bronze} holds rows of capture instance {other!r}, which is not "
@@ -352,12 +433,9 @@ def apply_changes(
         [(f.name, f.dataType, None) for f in captured] + SILVER_COLUMNS,
         SILVER_COMMENT,
     )
-    have = set(delta_table(spark, target).toDF().columns)
-    added = [(f.name, f.dataType, None) for f in captured if f.name not in have]
-    if added:  # captured by a newer capture instance: bronze gained it, so does silver
-        migrations.add_columns(spark, target, added)
+    # captured by a newer capture instance: bronze gained it, so does silver
+    migrations.add_columns(spark, target, [(f.name, f.dataType, None) for f in captured])
 
-    top = _one(rows.where(change).agg(F.max("_start_lsn")))
     merged = top is not None or (rebuild and snapshot is not None) or bool(new)
     if merged:
         if new:
@@ -380,12 +458,19 @@ def apply_changes(
                 if gone is not None:
                     rows = rows.unionByName(gone, allowMissingColumns=True)
         columns_out = [*names, "_start_lsn", "_commit_ts"]
-        last = Window.partitionBy(*[F.col(_q(k)) for k in keys]).orderBy(
-            F.col("_start_lsn").desc(),
-            F.col("_command_id").desc_nulls_last(),
-            F.col("_seqval").desc_nulls_last(),
-            F.col("_operation").desc(),
-        )
+        order = [F.col("_start_lsn").desc()]
+        if "_command_id" in columns:
+            order.append(F.col("_command_id").desc_nulls_last())
+        else:
+            _warn_once(
+                "no _command_id",
+                bronze,
+                "%s has no _command_id (includeCommandId=false): the changes of one "
+                "transaction are ordered by _seqval (__$seqval)",
+                bronze,
+            )
+        order += [F.col("_seqval").desc_nulls_last(), F.col("_operation").desc()]
+        last = Window.partitionBy(*[F.col(_q(k)) for k in keys]).orderBy(*order)
         latest = (
             rows.withColumn("_mssql_cdc_rank", F.row_number().over(last))
             .where(F.col("_mssql_cdc_rank") == 1)
@@ -430,4 +515,5 @@ def apply_changes(
         "finalized_until": finalized
         if is_open or not facts_table
         else finalization.advance(spark, control_table, target, offset, granularity),
+        "bronze_found": True,
     }
