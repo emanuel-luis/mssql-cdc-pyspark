@@ -12,6 +12,107 @@ compatibility" line.
 
 ## [Unreleased]
 
+State compatibility: offsets and checkpoints unchanged. Control migration 4 rewrites the
+comment of `finalized_until` (metadata only), the next time `finalization.advance` or
+`apply_changes` opens the control table. A migration interrupted between its change and its
+version stamp now completes on the next open instead of failing every writer
+(`add_columns` skips the columns a table already has), and a table stamped with a schema
+version newer than the running release knows raises `ValueError` instead of being written
+by the older release
+([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0013-schema-migrations-per-table-kind/)).
+
+### Added
+
+- `backfill()` returns `state`: `done`, `running`, `waiting_headroom`, `waiting_metrics` or
+  `no_snapshot`, so a loop can tell a pause worth waiting out from a snapshot that does not
+  exist (a wrong `app_id` or `target`, or a stream that bootstraps with `snapshot="full"`);
+  the bootstrap guide's loop branches on it.
+- `apply_changes` returns `bronze_found`, and logs a warning naming the table when bronze
+  does not exist (before the stream's first batch, or a wrong name). It also warns, once
+  per table, when called without `facts_table` (its verdict is then held), when bronze has
+  no `_command_id`, and when the facts table has no row for bronze's name.
+- `FinalizationListener.last_error` and `failures`: the error of the last attempt (`None`
+  once one succeeds) and how many failed in a row. The first failed verdict of a streak is
+  logged at ERROR with its traceback, then one WARNING at most every 10 minutes.
+- INFO logs for the bootstrap, each snapshot and each `backfill()` wave (target, LSN, rows,
+  seconds, chunks done), and a WARNING with the lost range when `to_delta` decides to
+  re-snapshot.
+- `finalization.finalized_until` is in the API reference, and so public.
+- `SECURITY.md`: how to report a vulnerability privately, and what is in scope.
+- Documentation: alerts on NULL metrics, on the verdict's freshness (control table) and on
+  capture itself from the SQL Server side (`sys.dm_cdc_log_scan_sessions`,
+  `sys.dm_cdc_errors`, the capture job, with a monitoring login); retention for the facts
+  table's micro-batch rows and compaction of bronze; the NULLs CDC stores in change rows
+  (computed columns, LOB types); quoting a password in the connection string, Entra ID
+  authentication and Spark's redaction of `connectionString`; the access policy that the
+  key values in a chunked snapshot's facts rows and bronze history need; the Microsoft
+  license of the default driver's binaries, and how to install without them; the driver's
+  Python process per stream in `start_many`; what a Spark Connect client must reach; the
+  source-query cost of the default trigger; minute granularity across a daylight-saving
+  fall-back; Databricks serverless, unsupported until tested. The site says it documents
+  `main`
+  ([ADR 0003](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0003-mssql-python-default-backend/) amendment 3).
+
+### Changed
+
+- `to_delta` names the query after the sink's `app_id` (`<app_id>.g<n>` in generation `n`)
+  when `query_name` is not given.
+- `to_delta` refuses, with `ValueError`, `snapshot_on_switch=True` together with
+  `snapshot="chunked"` (the switch snapshot reads the whole table inside a batch), a
+  `metricsPath` that is a URI (Python wrote it as a local directory named after the
+  scheme), and `on_data_loss="resnapshot"` with `failOnDataLoss=false` (a purge skipped
+  while the query runs would hide the gap from the next run's check).
+- `backfill(isolation=None)` reads and plans with the stream's `isolationLevel` option
+  instead of READ COMMITTED; `isolation` takes `"snapshot"` or `"readCommitted"` in any case
+  and is checked before anything is read.
+- `is_final` takes an aware `datetime` in UTC instead of raising `TypeError`.
+- `advance` and `apply_changes` retry a control-table MERGE that loses to a concurrent
+  commit for up to a minute, with backoff, instead of the tracker's two retries.
+- With `failOnDataLoss=false`, skipping purged changes logs a WARNING naming the capture
+  instance and the LSN range.
+- An idle stream sends one `max_lsn` query per poll: `reportLatestOffset` reuses what
+  `latestOffset` read, and the commit count is skipped when nothing is new.
+- The default backend caps Arrow batches near 64 MiB, as `arrow-odbc` does, so LOB-heavy
+  rows read in smaller batches.
+- With `sourceTimeZone=auto` before SQL Server 2022, the driver ships the offset it read to
+  the executors, so a run applies one offset to its offsets and its rows, and logs a
+  WARNING each time it takes that fallback
+  ([ADR 0008](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0008-detect-source-time-zone/) amendment 3).
+- The sink logs a warning, once per run, when a batch that read rows found no metrics file,
+  and writes bronze in about one file per million rows of a batch instead of one per range.
+- Error messages: "capture instance not found" ends with the driver's own error, and the
+  change-table permission hint also works for logins whose language is not English.
+- The Databricks example installs the released version (`==0.2.0rc1`) instead of the
+  repository's moving `main`, quotes `UID` and `PWD` in braces, and computes the verdict's
+  epoch in UTC.
+- Packaging and CI: pyarrow 18 or later; classifiers for Python 3.10 to 3.13, which the
+  weekly CI run tests; the release workflow refuses a tag whose commit is not on `main` or
+  whose version has no `CHANGELOG.md` heading; `docker compose` binds SQL Server to
+  127.0.0.1 and `.env.example` ships no password (set `MSSQL_SA_PASSWORD`); every lab result
+  records the server's `@@VERSION`.
+
+### Fixed
+
+- A checkpoint deleted or rewound while `app_id` stayed the same made Delta skip every write
+  up to the old batch id while the query ran on and the verdict advanced: with a
+  `facts_table`, the run's first batch now raises `ValueError` saying so.
+- `on_data_loss="resnapshot"` with a checkpoint that Python and Spark resolve differently (a
+  schemeless `/mnt/...` path on Databricks classic, an HDFS default file system, a Spark
+  Connect client) found no offsets and re-snapshotted on every run: when the facts table
+  holds batches of the stream, the pre-flight now raises `ValueError`.
+- A migration re-run after a crash between its change and its version stamp, or by a job
+  that lost the race to stamp it, appended duplicate columns and failed.
+- `apply_changes` failed on a bronze written with `includeCommandId=false`; it now orders
+  by `(_start_lsn, _seqval, _operation)` there.
+- Capture instance names with non-ASCII letters (`dbo_Café`) failed every call; any
+  name without `]` or a control character, up to 100 characters, is accepted. The
+  validators no longer accept a trailing newline.
+- `backfill(isolation="SNAPSHOT")` passed the reader's check but failed while planning.
+- A snapshot's own commit is found among every commit after it, not only the last five.
+- A table path holding a backtick is escaped in SQL.
+- The Databricks example's epoch was off by the driver's UTC offset on a driver not set to
+  UTC.
+
 ## [0.2.0rc1] - 2026-10-04
 
 State compatibility: offsets and checkpoints unchanged. Existing tables migrate the next
