@@ -16,10 +16,14 @@ State compatibility: offsets and checkpoints unchanged. Control migration 4 rewr
 comment of `finalized_until` (metadata only), the next time `finalization.advance` or
 `apply_changes` opens the control table. A migration interrupted between its change and its
 version stamp now completes on the next open instead of failing every writer
-(`add_columns` skips the columns a table already has), and a table stamped with a schema
-version newer than the running release knows raises `ValueError` instead of being written
-by the older release
-([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0013-schema-migrations-per-table-kind/)).
+(`add_columns` skips the columns a table already has), and one that loses to another job's
+concurrent commit runs again. A release still writes a table a newer one migrated, with a
+WARNING, so jobs that share a table can upgrade or roll back one at a time; a release that
+knows fewer migrations than the table property `mssql_cdc.min_version` names refuses it,
+and no migration sets that property yet
+([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0013-schema-migrations-per-table-kind/)
+amendment,
+[ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)).
 
 ### Added
 
@@ -62,44 +66,52 @@ by the older release
   `_chunk`, ..., in any case) raises `ValueError` when the stream loads, instead of being
   dropped, failing later on a duplicate column, or read as the chunk number: leave it out
   with `columns`.
+- `to_delta` raises `ValueError` for `snapshot_on_switch=True` together with
+  `snapshot="chunked"` (the switch snapshot reads the whole table inside a batch): drop
+  `snapshot_on_switch`, or use `snapshot="full"`.
+- `to_delta` raises `ValueError` for a `metricsPath` that is a URI (Python wrote it as a
+  local directory named after the scheme, and every metric came out NULL): use a local or
+  FUSE path, such as `/Volumes/...`, that every node sees. The reader refuses one too.
+- `to_delta` raises `ValueError` for `on_data_loss="resnapshot"` with `failOnDataLoss=false`
+  (a purge skipped while the query runs would hide the gap from the next run's check):
+  remove `failOnDataLoss=false`.
 
 ### Changed
 
-- The reader logs a WARNING naming any option it does not know, so a misspelt name no
-  longer leaves its default in force silently.
-- The reader refuses a `metricsPath` that is a URI too, and logs a WARNING with the file
-  when it cannot write a metrics file, instead of turning the facts' metrics NULL silently.
+- `stream()` and the reader log a WARNING naming any option they do not know, so a misspelt
+  name no longer leaves its default in force silently.
+- The reader logs a WARNING with the file when it cannot write a metrics file, instead of
+  turning the facts' metrics NULL silently.
 - Planning sends fewer queries: each range's start comes from the same query as the split
   points, and after the first resolution the client lists only the table's own capture
   instances, falling back to the whole database when that misses.
 
 - `to_delta` names the query after the sink's `app_id` (`<app_id>.g<n>` in generation `n`)
-  when `query_name` is not given.
-- `to_delta` refuses, with `ValueError`, `snapshot_on_switch=True` together with
-  `snapshot="chunked"` (the switch snapshot reads the whole table inside a batch), a
-  `metricsPath` that is a URI (Python wrote it as a local directory named after the
-  scheme), and `on_data_loss="resnapshot"` with `failOnDataLoss=false` (a purge skipped
-  while the query runs would hide the gap from the next run's check).
+  when `query_name` is not given, and so does `start_many`, whose queries kept the
+  generation-less name after a re-snapshot.
 - `backfill(isolation=None)` reads and plans with the stream's `isolationLevel` option
   instead of READ COMMITTED; `isolation` takes `"snapshot"` or `"readCommitted"` in any case
   and is checked before anything is read.
 - `is_final` takes an aware `datetime` in UTC instead of raising `TypeError`.
-- `advance` and `apply_changes` retry a control-table MERGE that loses to a concurrent
-  commit for up to a minute, with backoff, instead of the tracker's two retries.
+- `advance` and `apply_changes` retry a control-table MERGE, and every table's migrations,
+  that lose to a concurrent commit for up to a minute, with backoff, instead of the
+  tracker's two retries.
 - With `failOnDataLoss=false`, skipping purged changes logs a WARNING naming the capture
   instance and the LSN range.
 - An idle stream sends one `max_lsn` query per poll: `reportLatestOffset` reuses what
   `latestOffset` read, and the commit count is skipped when nothing is new.
 - The default backend caps Arrow batches near 64 MiB, as `arrow-odbc` does, so LOB-heavy
-  rows read in smaller batches.
+  rows read in smaller batches; the first batch of each read holds 64 rows, so it stays
+  small before the row width is known.
 - With `sourceTimeZone=auto` before SQL Server 2022, the driver ships the offset it read to
   the executors, so a run applies one offset to its offsets and its rows, and logs a
   WARNING each time it takes that fallback
   ([ADR 0008](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0008-detect-source-time-zone/) amendment 3).
-- The sink logs a warning, once per run, when a batch that read rows found no metrics file,
-  and writes bronze in about one file per million rows of a batch instead of one per range.
+- The sink logs a warning, once per run, when a batch that read rows found no metrics file.
 - Error messages: "capture instance not found" ends with the driver's own error, and the
-  change-table permission hint also works for logins whose language is not English.
+  change-table permission hint also works for logins whose language is not English: on an
+  error naming the change table, the client asks SQL Server (`HAS_PERMS_BY_NAME`) whether
+  the login may read it, whatever the language and the driver.
 - The Databricks example installs the released version (`==0.2.0rc1`) instead of the
   repository's moving `main`, quotes `UID` and `PWD` in braces, and computes the verdict's
   epoch in UTC.
@@ -127,8 +139,11 @@ by the older release
   validators no longer accept a trailing newline.
 - `backfill(isolation="SNAPSHOT")` passed the reader's check but failed while planning.
 - A stream on a database capture had not written to yet (`sys.fn_cdc_get_max_lsn()` NULL)
-  failed with `TypeError` in `latestOffset`, and `startingLsn=latest` planned from no
-  offset: a NULL `max_lsn` is now the zero LSN, as the pipeline already took it.
+  failed with `TypeError` in `latestOffset`: a NULL `max_lsn` is now the zero LSN, as the
+  pipeline already took it. `startingLsn=latest` on a capture instance capture has not
+  reached yet (a quiet database just after the enable) started below the instance's first
+  LSN and failed its first batch with a false `DataLossError`: it starts just before that
+  LSN, as a snapshot is stamped, and asks to retry when neither is known.
 - A snapshot's own commit is found among every commit after it, not only the last five.
 - A table path holding a backtick is escaped in SQL.
 - A stream whose first batch created bronze while `backfill()` created it too failed with
