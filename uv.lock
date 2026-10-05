@@ -998,7 +998,7 @@ requires-dist = [
     { name = "arrow-odbc", marker = "extra == 'arrow-odbc'", specifier = ">=10" },
     { name = "delta-spark", marker = "extra == 'spark'", specifier = ">=4.4" },
     { name = "mssql-python", specifier = ">=1.5" },
-    { name = "pyarrow", specifier = ">=14" },
+    { name = "pyarrow", specifier = ">=18" },
     { name = "pyspark", marker = "extra == 'spark'", specifier = ">=4.2" },
 ]
 provides-extras = ["spark", "arrow-odbc"]

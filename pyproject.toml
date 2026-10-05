@@ -26,7 +26,8 @@ classifiers = [
   "Typing :: Typed",
 ]
 # mssql-python is the default backend, imported only when it opens a connection (ADR 0003).
-dependencies = ["pyarrow>=14", "mssql-python>=1.5"]
+# pyarrow's floor is PySpark 4.2's own.
+dependencies = ["pyarrow>=18", "mssql-python>=1.5"]
 
 [project.optional-dependencies]
 # PySpark itself is not a hard dependency: managed platforms (Databricks, EMR,
