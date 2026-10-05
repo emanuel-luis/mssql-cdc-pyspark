@@ -48,7 +48,6 @@ from __future__ import annotations
 import glob
 import json
 import logging
-import math
 import os
 import statistics
 import time
@@ -72,9 +71,6 @@ from .migrations.facts import (
 from .tables import is_path
 
 _log = logging.getLogger(__name__)
-# ponytail: a guess at a file size worth one bronze file per batch; tune it, or make it an
-# option, if profiles ask
-_ROWS_PER_FILE = 1_000_000
 
 BRONZE_COMMENT = (
     "Append-only change rows from SQL Server CDC, written by mssql-cdc-pyspark's delta_sink. "
@@ -483,8 +479,7 @@ def delta_sink(
             if facts["rows"]:  # a batch that read none writes no target commit, only its facts
                 out = bronze_rows(df, batch_id)
                 ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
-                # a few files, not one per range: coalesce is narrow and reads the persisted rows
-                out = out.coalesce(max(1, math.ceil(facts["rows"] / _ROWS_PER_FILE)))
+                # one file per range read, written in parallel; compaction merges small ones
                 # mergeSchema: a column a newer capture instance captures joins bronze (ADR 0023)
                 _write(out, target, app_id, batch_id, _json(facts), merge_schema=True)
             duration_ms = round((time.monotonic() - t0) * 1000)

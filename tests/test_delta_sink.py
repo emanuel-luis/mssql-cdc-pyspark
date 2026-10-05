@@ -283,9 +283,6 @@ def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
     assert row["retention_watermark_ts"] == T0 - timedelta(hours=70)
     assert row["retention_headroom_hours"] == 70.05  # the batch's last commit is T0 + 3 min
     assert not [f for f in os.listdir(metrics) if f.endswith(".json")]  # folded and removed
-    history = spark.sql(f"DESCRIBE HISTORY delta.`{target}`").collect()
-    [append] = [h for h in history if h["operation"] == "WRITE"]
-    assert append["operationMetrics"]["numFiles"] == "1"  # one file, not one per range read
 
 
 def test_capture_and_ingestion_lag_reach_the_facts(delta_spark, workdir):

@@ -95,8 +95,9 @@ on a quiet database and no trigger, that is a batch about every 10 seconds, some
 commits a day per stream: use a `processingTime` trigger to bound it, and keep the tables
 small:
 
-- compact the facts table and bronze (auto compaction, or a scheduled `OPTIMIZE` and
-  `VACUUM`); bronze gets at least one file per batch with rows. `OPTIMIZE ops.ingestion_facts
+- compact the facts table and bronze (optimized writes or auto compaction, or a scheduled
+  `OPTIMIZE` and `VACUUM`); bronze gets a file per range each batch with rows reads (at
+  most `numPartitions` per capture instance). `OPTIMIZE ops.ingestion_facts
   ZORDER BY (target, app_id)` keeps each stream's rows together for the library's own reads;
 - delete old micro-batch rows from the facts table, never its event rows, which the
   snapshots, `apply_changes` and `reconcile` read back:
