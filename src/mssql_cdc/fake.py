@@ -178,14 +178,12 @@ class FakeCdcClient(CdcClient):
     def _time_at_or_before(self, lsn: str) -> str | None:
         """The commit time of the last entry at or before ``lsn``, as
         ``SqlCdcClient._commit_time_at_or_before``."""
-        return max(
-            (
-                (r["start_lsn"], r["tran_end_time"])
-                for r in self._mapping()
-                if r["start_lsn"] <= lsn
-            ),
-            default=(None, None),
-        )[1]
+        best = None
+        for row in self._mapping():  # in LSN order
+            if row["start_lsn"] > lsn:
+                break
+            best = row["tran_end_time"]
+        return best
 
     def time_to_lsn(self, ts_utc):
         at = ts_utc.isoformat(timespec="milliseconds")  # the mapping's times are UTC here
