@@ -53,6 +53,30 @@ class Server(Backend):
         return "0x00000000000000000001"
 
 
+def _lsn(n: int) -> str:
+    return f"0x{n:020X}"
+
+
+# -- planning ----------------------------------------------------------------------------
+def test_split_starts_each_range_after_its_bound_without_a_query():
+    from mssql_cdc.client import CaptureInstance
+
+    class Points:
+        def clock(self):
+            return None, None
+
+        def split_points(self, ci, lo, hi, n):  # a bound two tiles share, and one at hi
+            return [(_lsn(5), _lsn(6)), (_lsn(5), _lsn(6)), (_lsn(9), _lsn(10))]
+
+        def increment_lsn(self, lsn):
+            raise AssertionError("a round trip per bound")
+
+    ranges = _reader(numPartitions=3)._split(
+        Points(), CaptureInstance(CI, None, [], []), _lsn(1), _lsn(9)
+    )
+    assert [(r.from_lsn, r.to_lsn) for r in ranges] == [(_lsn(1), _lsn(5)), (_lsn(6), _lsn(9))]
+
+
 # -- the driver's clock in every task -------------------------------------------------
 def test_planned_ranges_carry_the_drivers_clock(tmp_path, monkeypatch):
     zone = "E. South America Standard Time"

@@ -401,11 +401,12 @@ def test_split_points_balance_rows_across_uneven_commits(sqlserver, backend):
     client = make_client({"connectionString": sqlserver.connection_string, "backend": backend})
     try:
         lo, hi = client.min_lsn(ci), client.max_lsn()
-        bounds = client.split_points(ci, lo, hi, 2)
+        points = client.split_points(ci, lo, hi, 2)
+        assert all(after == client.increment_lsn(b) for b, after in points)
         ranges, prev = [], lo
-        for b in bounds:
+        for b, after in points:
             ranges.append((prev, b))
-            prev = client.increment_lsn(b)
+            prev = after
         sizes = [
             sqlserver.run(
                 f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE __$start_lsn BETWEEN "

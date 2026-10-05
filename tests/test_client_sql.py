@@ -600,12 +600,29 @@ def test_ping_and_network_wait():
 
 
 def test_split_points_tile_the_change_rows_of_the_capture_instance():
-    rec = Rows([{"b": "0x0000002a000001000001"}, {"b": "0x0000002a000001000002"}])
+    rec = Rows(
+        [
+            {"b": "0x0000002a000001000001", "n": "0x0000002a000001000002"},
+            {"b": "0x0000002a000001000003", "n": "0x0000002a000001000004"},
+        ]
+    )
     points = SqlCdcClient(rec, source_timezone="UTC").split_points("dbo_orders", "0x01", "0x02", 4)
-    assert points == ["0x0000002A000001000001", "0x0000002A000001000002"]
+    # each bound with the LSN after it, where the next range starts: no query per bound
+    assert points == [
+        ("0x0000002A000001000001", "0x0000002A000001000002"),
+        ("0x0000002A000001000003", "0x0000002A000001000004"),
+    ]
+    assert len(rec.calls) == 1
     sql, params = rec.calls[-1]
-    assert "NTILE(4) OVER (ORDER BY __$start_lsn)" in sql and "FROM cdc.[dbo_orders_CT]" in sql
-    assert "lsn_time_mapping" not in sql and params == ("0x01", "0x02")
+    assert sql == (
+        "SELECT CONVERT(varchar(22), MAX(__$start_lsn), 1) AS b, "
+        "CONVERT(varchar(22), sys.fn_cdc_increment_lsn(MAX(__$start_lsn)), 1) AS n FROM ("
+        "SELECT __$start_lsn, NTILE(4) OVER (ORDER BY __$start_lsn) AS g "
+        "FROM cdc.[dbo_orders_CT] "
+        "WHERE __$start_lsn BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)"
+        ") x GROUP BY g ORDER BY b"
+    )
+    assert params == ("0x01", "0x02")
 
 
 def test_source_table_matches_the_capture_instance_ignoring_case():

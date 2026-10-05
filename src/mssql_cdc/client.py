@@ -460,9 +460,12 @@ class CdcClient(ABC):
         """The n-th commit LSN strictly after ``lsn`` in cdc.lsn_time_mapping."""
 
     @abstractmethod
-    def split_points(self, capture_instance: str, from_lsn: str, to_lsn: str, n: int) -> list[str]:
+    def split_points(
+        self, capture_instance: str, from_lsn: str, to_lsn: str, n: int
+    ) -> list[tuple[str, str]]:
         """Up to ``n`` commit-aligned upper bounds that split [from, to] into ranges holding
-        about the same number of change rows of ``capture_instance``."""
+        about the same number of change rows of ``capture_instance``, ascending, each with
+        the LSN after it (``increment_lsn``), where the next range starts."""
 
     @abstractmethod
     def iter_changes(
@@ -910,19 +913,22 @@ class SqlCdcClient(CdcClient):
         # Tiles of the change table's own rows, not of cdc.lsn_time_mapping's commits: those
         # are database-wide, and on a real table they left the largest range with ~2x the
         # mean rows (ADR 0015). Each bound is the last commit LSN of its tile, so a commit
-        # whose rows straddle two tiles stays whole in the first range.
+        # whose rows straddle two tiles stays whole in the first range. The LSN after each
+        # comes along, where the next range starts: no round trip per bound.
         ci = _check_capture_instance(capture_instance)
         n = int(n)
         sql = (
-            "SELECT CONVERT(varchar(22), MAX(__$start_lsn), 1) AS b FROM ("
+            "SELECT CONVERT(varchar(22), MAX(__$start_lsn), 1) AS b, "
+            "CONVERT(varchar(22), sys.fn_cdc_increment_lsn(MAX(__$start_lsn)), 1) AS n FROM ("
             f"SELECT __$start_lsn, NTILE({n}) OVER (ORDER BY __$start_lsn) AS g "
             f"FROM cdc.[{ci}_CT] "
             "WHERE __$start_lsn BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)"
             ") x GROUP BY g ORDER BY b"
         )
-        points: list[str | None] = []
+        points: list[tuple[str, str]] = []
         for batch in self._change_table_batches(ci, sql, (from_lsn, to_lsn), 1000):
-            points.extend(self._hex(v) for v in batch.column(0).to_pylist())
+            for b, after in zip(batch.column(0).to_pylist(), batch.column(1).to_pylist()):
+                points.append((_lsn.normalize(b), _lsn.normalize(after)))
         return points
 
     def ping(self, samples=3):

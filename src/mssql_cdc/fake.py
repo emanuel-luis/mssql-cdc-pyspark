@@ -193,7 +193,7 @@ class FakeCdcClient(CdcClient):
         points, idx = [], 0
         for i in range(n):
             idx += size + (1 if i < rem else 0)
-            points.append(lsns[idx - 1])
+            points.append((lsns[idx - 1], self.increment_lsn(lsns[idx - 1])))
         return points
 
     def _keys(self) -> dict:

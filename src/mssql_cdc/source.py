@@ -441,18 +441,13 @@ class _BaseReader(_Common, DataSourceStreamReader):
     def _split(self, client, inst, lo: str, hi: str) -> list[LsnRange]:
         """[lo, hi] of one instance in up to numPartitions ranges of about the same rows."""
         cols, clock = self._columns_of(inst), client.clock()
-        if self.num_partitions <= 1:
-            return [LsnRange(inst.name, lo, hi, cols, *clock)]
-        bounds = [b for b in client.split_points(inst.name, lo, hi, self.num_partitions) if b]
-        if not bounds or bounds[-1] != hi:
-            bounds.append(hi)
         ranges = []
-        for b in bounds:
-            if b < lo:
-                continue
-            ranges.append(LsnRange(inst.name, lo, b, cols, *clock))
-            lo = client.increment_lsn(b)
-        return ranges
+        if self.num_partitions > 1:
+            for b, after in client.split_points(inst.name, lo, hi, self.num_partitions):
+                if lo <= b < hi:  # a bound two tiles share comes twice: once
+                    ranges.append(LsnRange(inst.name, lo, b, cols, *clock))
+                    lo = after
+        return [*ranges, LsnRange(inst.name, lo, hi, cols, *clock)]
 
     def _columns_of(self, inst) -> list[str] | None:
         """The query's source columns ``inst`` captures; None when it has them all (or its
