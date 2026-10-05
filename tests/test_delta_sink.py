@@ -1367,7 +1367,7 @@ def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
             properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
         )
         # add_columns through saveAsTable, set_comments on a table name
-        assert migrations.migrate(spark, old, "facts") == 9
+        assert migrations.migrate(spark, old, "facts") == migrations.current_version("facts")
         assert {name for name, _, _ in added} <= set(spark.table(old).columns)
     finally:
         for name in (bronze, facts, control, old):
