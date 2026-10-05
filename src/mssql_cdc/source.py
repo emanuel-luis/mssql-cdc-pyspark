@@ -51,6 +51,8 @@ from pyspark.sql.datasource import (
     InputPartition,
 )
 
+from .lsn import ZERO_LSN
+
 try:  # Spark 4.2+ (and runtimes that backported SPARK-55304)
     from pyspark.sql.streaming.datasource import (
         ReadAllAvailable,
@@ -367,6 +369,10 @@ class _BaseReader(_Common, DataSourceStreamReader):
     def _offset(self, lsn: str) -> dict:
         return {"lsn": lsn, "commit_ts": self.client.lsn_to_time(lsn) or ""}
 
+    def _max_lsn(self) -> str:
+        # sys.fn_cdc_get_max_lsn() is NULL on a database capture has not written to yet
+        return self.client.max_lsn() or ZERO_LSN
+
     def initialOffset(self) -> dict:
         start = (_opt(self.options, "startingLsn", "earliest") or "earliest").strip()
         if start.lower() == "earliest":
@@ -375,7 +381,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
             oldest = self._instances(self.client)[0].name
             lsn = self.client.decrement_lsn(self.client.min_lsn(oldest))
         elif start.lower() == "latest":
-            lsn = self.client.max_lsn()
+            lsn = self._max_lsn()
         else:
             from .lsn import normalize
 
@@ -685,10 +691,10 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
         return ReadMaxRows(self._max_commits) if self._max_commits else ReadAllAvailable()
 
     def prepareForTriggerAvailableNow(self) -> None:
-        self._target = self.client.max_lsn()
+        self._target = self._max_lsn()
 
     def latestOffset(self, start: dict, limit) -> dict:
-        upper = self._target or self.client.max_lsn()
+        upper = self._target or self._max_lsn()
         if isinstance(limit, ReadMaxRows):
             nth = self.client.nth_commit_after(start["lsn"], limit.max_rows)
             if nth is not None and nth < upper:
@@ -699,14 +705,14 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
 
     def reportLatestOffset(self):
         # Surfaces capture progress (max_lsn) as latestOffset in query progress.
-        return self._offset(self.client.max_lsn())
+        return self._offset(self._max_lsn())
 
 
 class MssqlCdcLegacyStreamReader(_BaseReader):  # pragma: no cover - Spark < 4.2
     """Spark 4.0/4.1 without admission control: every batch reads up to max_lsn."""
 
     def latestOffset(self) -> dict:  # type: ignore[override]  # Spark < 4.2 signature; stubs are 4.2
-        return self._offset(self.client.max_lsn())
+        return self._offset(self._max_lsn())
 
 
 # --------------------------------------------------------------------------- #
@@ -723,8 +729,6 @@ def snapshot_lsn(client, source) -> str:
     instance's ``start_lsn`` in ``source`` (a ``SourceTable``) is not. ``max_lsn`` itself is
     NULL on a database capture has not written to yet.
     """
-    from .lsn import ZERO_LSN
-
     max_lsn = client.max_lsn() or ZERO_LSN
     if source.start_lsn is None:
         return max_lsn  # no low endpoint yet; the stream's retention guard still checks it

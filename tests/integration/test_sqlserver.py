@@ -358,6 +358,23 @@ def test_pre_2022_offset_fallback_matches_the_named_zone(sqlserver):
         fallback.close()
 
 
+def test_lsn_to_time_maps_a_commit_lsn_only(sqlserver):
+    """What FakeCdcClient.lsn_to_time copies: sys.fn_cdc_map_lsn_to_time is NULL for an LSN
+    that is no commit's, not the time of the last commit before it."""
+    ci = sqlserver.cdc_table("map_probe", "id INT NOT NULL PRIMARY KEY")
+    sqlserver.run("INSERT INTO dbo.map_probe VALUES (1)")
+    sqlserver.wait_for_changes(ci, 1)
+    [(commit,)] = sqlserver.run(
+        f"SELECT CONVERT(varchar(22), MAX(__$start_lsn), 1) FROM cdc.[{ci}_CT]"
+    )
+    client = make_client({"connectionString": sqlserver.connection_string})
+    try:
+        assert client.lsn_to_time(commit) is not None
+        assert client.lsn_to_time(client.decrement_lsn(commit)) is None
+    finally:
+        client.close()
+
+
 def test_time_to_lsn_maps_a_fall_back_hour_to_a_time_no_later_commit_reads_before(sqlserver):
     from mssql_cdc.client import MssqlPythonBackend, SqlCdcClient
 

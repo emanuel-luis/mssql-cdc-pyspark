@@ -57,6 +57,39 @@ def _lsn(n: int) -> str:
     return f"0x{n:020X}"
 
 
+# -- offsets -----------------------------------------------------------------------------
+def test_a_database_capture_has_not_written_to_yet_starts_at_zero(tmp_path):
+    from pyspark.sql.streaming.datasource import ReadAllAvailable, ReadMaxRows
+
+    from mssql_cdc.lsn import ZERO_LSN
+
+    FakeCdcDatabase(str(tmp_path), [CI])  # no entry in cdc.lsn_time_mapping: max_lsn is NULL
+    assert FakeCdcClient(str(tmp_path)).max_lsn() is None
+    reader = _reader(str(tmp_path), startingLsn="latest")
+    start = reader.initialOffset()
+    assert start == {"lsn": ZERO_LSN, "commit_ts": ""}
+    assert reader.latestOffset(start, ReadAllAvailable()) == start
+    assert reader.latestOffset(start, ReadMaxRows(5)) == start
+    assert reader.reportLatestOffset() == start
+    reader.prepareForTriggerAvailableNow()
+    assert reader.latestOffset(start, ReadAllAvailable()) == start
+
+
+def test_the_fake_maps_only_an_entrys_own_lsn_to_its_time(tmp_path):
+    db, lsns = _db(str(tmp_path), n_tx=2)
+    client = FakeCdcClient(str(tmp_path))
+    first = T0.isoformat(timespec="milliseconds")
+    assert client.lsn_to_time(lsns[0]) == first
+    # like sys.fn_cdc_map_lsn_to_time: NULL for an LSN that is no entry's (tests/integration)
+    assert client.lsn_to_time(client.increment_lsn(lsns[0])) is None
+    assert client.lsn_to_time(client.decrement_lsn(lsns[0])) is None
+    # a DDL's LSN is no commit's: its time is the last commit's at or before it
+    ddl = db.ddl(CI, None, "ALTER TABLE dbo.orders ADD CONSTRAINT d DEFAULT 0 FOR x")
+    assert client.lsn_to_time(ddl) is None
+    second = (T0 + timedelta(minutes=1)).isoformat(timespec="milliseconds")
+    assert [d.commit_ts for d in client.ddl_history(CI, lsns[0], ddl)] == [second]
+
+
 # -- planning ----------------------------------------------------------------------------
 def test_split_starts_each_range_after_its_bound_without_a_query():
     from mssql_cdc.client import CaptureInstance

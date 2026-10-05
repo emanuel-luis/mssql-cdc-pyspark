@@ -145,7 +145,7 @@ class FakeCdcClient(CdcClient):
     # -- CdcClient ------------------------------------------------------------
     def max_lsn(self):
         m = self._mapping()
-        return m[-1]["start_lsn"] if m else _lsn.ZERO_LSN
+        return m[-1]["start_lsn"] if m else None  # NULL before capture's first entry, as there
 
     def min_lsn(self, capture_instance):
         mins, name = self._mins(), self._name(capture_instance)
@@ -160,14 +160,20 @@ class FakeCdcClient(CdcClient):
         return _lsn.from_int(max(_lsn.to_int(lsn) - 1, 0))
 
     def lsn_to_time(self, lsn):
-        # "largest less than or equal" semantics, like sys.fn_cdc_map_lsn_to_time
-        best = None
-        for row in self._mapping():
-            if row["start_lsn"] <= lsn:
-                best = row["tran_end_time"]
-            else:
-                break
-        return best
+        # like sys.fn_cdc_map_lsn_to_time: an entry's own LSN only, None for any other
+        return next((r["tran_end_time"] for r in self._mapping() if r["start_lsn"] == lsn), None)
+
+    def _time_at_or_before(self, lsn: str) -> str | None:
+        """The commit time of the last entry at or before ``lsn``, as
+        ``SqlCdcClient._commit_time_at_or_before``."""
+        return max(
+            (
+                (r["start_lsn"], r["tran_end_time"])
+                for r in self._mapping()
+                if r["start_lsn"] <= lsn
+            ),
+            default=(None, None),
+        )[1]
 
     def time_to_lsn(self, ts_utc):
         at = ts_utc.isoformat(timespec="milliseconds")  # the mapping's times are UTC here
@@ -218,7 +224,7 @@ class FakeCdcClient(CdcClient):
     def ddl_history(self, capture_instance, from_lsn, to_lsn):
         rows = _read_jsonl(os.path.join(self.path, "ddl", f"{self._name(capture_instance)}.jsonl"))
         return [
-            DdlChange(r["lsn"], self.lsn_to_time(r["lsn"]), r["command"])
+            DdlChange(r["lsn"], self._time_at_or_before(r["lsn"]), r["command"])
             for r in rows
             if from_lsn < r["lsn"] <= to_lsn
         ]
