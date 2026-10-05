@@ -389,9 +389,9 @@ def test_change_table_permission_error_names_the_grant():
             list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
         with pytest.raises(PermissionError, match=grant):
             client.split_points("dbo_orders", "0x01", "0x02", 4)
-        assert backend.calls[-1][1] == ("cdc.[dbo_orders_CT]",)
+        assert backend.calls[-1][1] == ("dbo_orders", "cdc.[dbo_orders_CT]")
     for other in (
-        Denied("Invalid object name 'cdc.dbo_orders_CT'.", perms=None),  # no such object
+        Denied("Invalid object name 'cdc.dbo_orders_CT'.", perms=None),  # the instance is gone
         Denied("The SELECT permission was denied on 'dbo_orders_CT'", RuntimeError("link")),
         Denied("Communication link failure (08S01)"),  # names no table: nothing asked
     ):

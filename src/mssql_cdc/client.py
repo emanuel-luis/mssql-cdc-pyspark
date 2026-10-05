@@ -1343,7 +1343,7 @@ class SqlCdcClient(CdcClient):
         except Exception as exc:
             # an error naming the change table, then SQL Server asked whether the login may
             # read it: the message's language and each driver's layout of it do not matter
-            if f"{ci}_CT".lower() in str(exc).lower() and self._denied(f"cdc.[{ci}_CT]"):
+            if f"{ci}_CT".lower() in str(exc).lower() and self._denied(ci):
                 raise PermissionError(
                     f"The login cannot read the change table cdc.[{ci}_CT]. Beyond what the CDC "
                     f"query functions need, the reader needs: GRANT SELECT ON cdc.[{ci}_CT] "
@@ -1352,12 +1352,19 @@ class SqlCdcClient(CdcClient):
                 ) from exc
             raise
 
-    def _denied(self, table: str) -> bool:
-        """Whether the login lacks SELECT on ``table`` (0; NULL: no such object)."""
+    def _denied(self, ci: str) -> bool:
+        """Whether the login lacks SELECT on the change table of ``ci``, an instance that still
+        exists: HAS_PERMS_BY_NAME is 0 for any object the login cannot see, a dropped one too,
+        and sys.fn_cdc_get_min_lsn is 0x00 once the instance is gone."""
         try:
-            return self._b.scalar("SELECT HAS_PERMS_BY_NAME(?, 'OBJECT', 'SELECT')", (table,)) == 0
+            perms = self._b.scalar(
+                "SELECT CASE WHEN sys.fn_cdc_get_min_lsn(?) > 0x00000000000000000000 "
+                "THEN HAS_PERMS_BY_NAME(?, 'OBJECT', 'SELECT') END",
+                (ci, f"cdc.[{ci}_CT]"),
+            )
         except Exception:  # noqa: BLE001 - the read's own error is the one to raise
             return False
+        return perms == 0
 
     def close(self):
         self._b.close()
