@@ -5,7 +5,13 @@ import importlib.metadata
 import importlib.util
 
 try:
-    from .client import DataLossError, SchemaChangedError, make_client
+    from .client import (
+        DataLossError,
+        SchemaChangedError,
+        is_data_loss,
+        is_schema_changed,
+        make_client,
+    )
     from .fanout import await_all, start_many, stop_all
     from .pipeline import stream
     from .reconcile import reconcile
@@ -30,6 +36,8 @@ __all__ = [
     "SchemaChangedError",
     "apply_changes",
     "await_all",
+    "is_data_loss",
+    "is_schema_changed",
     "make_client",
     "reconcile",
     "register",

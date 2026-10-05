@@ -256,7 +256,7 @@ def apply_changes(
     spark: SparkSession,
     bronze: str,
     target: str,
-    capture_instance: str,
+    capture_instance: str | None = None,
     keys: Sequence[str] | None = None,
     *,
     control_table: str,
@@ -268,6 +268,8 @@ def apply_changes(
     that capture instance alone (and the newer ones of its table it switched to). Until the
     stream creates ``bronze``, it does nothing but log a warning that names it.
 
+    ``capture_instance``: the stream's; without it, ``captureInstance`` of ``options``. Both
+    given must name the same one (ignoring case), or the call raises ``ValueError``.
     ``keys``: the source's key columns; without them, read from the capture instance's
     unique index through ``options`` (the stream's), which also name the table's other
     capture instances: needed once bronze holds a newer one's rows. ``control_table`` keeps
@@ -283,6 +285,17 @@ def apply_changes(
     from pyspark.sql import functions as F
 
     finalization._check_granularity(granularity)  # before any write, not at the verdict
+    from .pipeline import _opt
+
+    named = _opt(options, "captureInstance") if options else None
+    if capture_instance and named and capture_instance.lower() != named.lower():
+        raise ValueError(
+            f"capture_instance {capture_instance!r} is not the options' captureInstance "
+            f"{named!r}: pass one of them"
+        )
+    capture_instance = capture_instance or named
+    if not capture_instance:
+        raise ValueError("pass capture_instance, or the stream's options with captureInstance")
     if not facts_table:
         _warn_once(
             "no facts",

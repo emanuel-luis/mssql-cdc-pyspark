@@ -42,21 +42,23 @@ bronze is now applied (`applied_lsn`), silver's verdict (`finalized_until`) and 
 bronze exists (`bronze_found`). The first call that finds bronze counts as a rebuild.
 
 To read the key from the capture instance's unique index instead of naming it, leave out
-`keys` and pass the stream's options:
+`keys` and pass the stream's options. The capture instance then comes from their
+`captureInstance` too:
 
 ```python
 apply_changes(
     spark,
     "bronze.orders",
     "silver.orders",
-    "dbo_orders",
     control_table="ops.table_finalization",
     facts_table="ops.ingestion_facts",
     options=options,
 )
 ```
 
-A capture instance without a unique index fails with `ValueError` and asks for `keys`.
+A capture instance without a unique index fails with `ValueError` and asks for `keys`. A
+`capture_instance` passed too must be the options' `captureInstance` (ignoring case), or
+the call fails with `ValueError`.
 
 ## How it behaves
 

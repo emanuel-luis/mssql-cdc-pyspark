@@ -48,6 +48,27 @@ class SchemaChangedError(RuntimeError):
     restart it to re-infer the schema (ADR 0023)."""
 
 
+def _raised(exc: BaseException, error: type) -> bool:
+    # Raised in the data source, it reaches the caller as Spark's exception, whose text holds
+    # the Python worker's traceback, ending in "mssql_cdc.client.<error>: <message>".
+    return isinstance(exc, error) or f"{error.__module__}.{error.__qualname__}:" in str(exc)
+
+
+def is_data_loss(exc: BaseException) -> bool:
+    """Whether ``exc`` is a ``DataLossError``, or the exception Spark stopped a query with
+    because of one: what ``awaitTermination()`` raises (``StreamingQueryException``),
+    ``query.exception()`` or ``await_all`` returns. Recover with a re-snapshot
+    (``to_delta(on_data_loss="resnapshot")``)."""
+    return _raised(exc, DataLossError)
+
+
+def is_schema_changed(exc: BaseException) -> bool:
+    """Whether ``exc`` is a ``SchemaChangedError``, or the exception Spark stopped a query
+    with because of one (as ``is_data_loss``). Restart the query, or change the target first
+    when the message asks to."""
+    return _raised(exc, SchemaChangedError)
+
+
 class SourceTable(NamedTuple):
     """The table a capture instance tracks (``sys.sp_cdc_help_change_data_capture``)."""
 

@@ -43,7 +43,8 @@ every `to_delta`, as in [Options](../reference/options.md#to_delta-parameters).
 
 `await_all` waits for every query and returns the error of each one that failed, by
 capture instance. It raises nothing, so the job above raises itself: without that, a run
-with a failed table succeeds.
+with a failed table succeeds. `is_data_loss(error)` and `is_schema_changed(error)` pick out
+the failures that need a decision rather than a retry.
 
 ### Options per table
 

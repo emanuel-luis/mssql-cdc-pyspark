@@ -5,7 +5,15 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from mssql_cdc import await_all, start_many, stop_all
+from mssql_cdc import (
+    DataLossError,
+    SchemaChangedError,
+    await_all,
+    is_data_loss,
+    is_schema_changed,
+    start_many,
+    stop_all,
+)
 from mssql_cdc.fake import FakeCdcDatabase
 
 pytestmark = pytest.mark.delta
@@ -26,6 +34,13 @@ def _fake(workdir):
         "checkpoint": os.path.join(workdir, "ckpt", "{ci}"),
     }
     return db, {"backend": "fake", "fakePath": src}, templates
+
+
+def test_the_error_helpers_recognise_the_library_errors_themselves():
+    assert is_data_loss(DataLossError("x")) and not is_data_loss(SchemaChangedError("x"))
+    assert is_schema_changed(SchemaChangedError("x")) and not is_schema_changed(ValueError("x"))
+    # a message that merely mentions the name is no such error
+    assert not is_data_loss(RuntimeError("DataLossError: retry with failOnDataLoss=false"))
 
 
 def _bronze(spark, workdir, ci):
@@ -89,6 +104,9 @@ def test_a_failing_stream_leaves_the_others_running(delta_spark, workdir):
         assert sorted(r["id"] for r in _bronze(spark, workdir, "dbo_customers").collect()) == [7, 8]
         failed = await_all(queries, timeout=1)
         assert list(failed) == ["dbo_orders"] and customers.isActive
+        # Spark's exception, recognised as the DataLossError the source raised
+        assert is_data_loss(failed["dbo_orders"])
+        assert not is_schema_changed(failed["dbo_orders"])
     finally:
         stop_all(queries)
     assert not customers.isActive

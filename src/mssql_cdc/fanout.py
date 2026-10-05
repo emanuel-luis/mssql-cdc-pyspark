@@ -101,7 +101,8 @@ def await_all(
     error of each query that stopped with one, by capture instance.
 
     It raises nothing for them: raise when the result is not empty, or the run succeeds
-    with a table behind. A query still running at the timeout is not in it (see
+    with a table behind. ``is_data_loss`` and ``is_schema_changed`` tell which errors need
+    a decision rather than a retry. A query still running at the timeout is not in it (see
     ``isActive``). With ``trigger={"availableNow": True}`` every query stops once it has
     caught up; for queries that keep running, ``spark.streams.awaitAnyTermination()``
     returns as soon as one stops.

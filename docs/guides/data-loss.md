@@ -34,7 +34,8 @@ Set failOnDataLoss=false to skip ahead (loses changes).
 ```
 
 The query stops, and `awaitTermination()` raises Spark's streaming query exception with
-that message. A rerun fails the same way: the checkpoint still points before the gap. When
+that message; `mssql_cdc.is_data_loss(exc)` tells it from other failures, for a job that
+decides what to do next. A rerun fails the same way: the checkpoint still points before the gap. When
 an older capture instance of the table was disabled before the stream had read its changes,
 the message names it as the other possible cause ([Schema changes](schema-changes.md)).
 

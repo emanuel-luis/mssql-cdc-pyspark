@@ -139,6 +139,20 @@ def test_a_column_name_delta_refuses_without_column_mapping_gets_it_in_bronze_an
     assert [(r["order_id"], r["Qty (kg)"]) for r in rows] == [(1, 3.0)]
 
 
+def test_the_capture_instance_comes_from_the_options_and_must_match_them(delta_spark, workdir):
+    o = Orders(delta_spark, workdir)
+    o.commit((2, _row(1, "new")))
+    o.run()
+    with pytest.raises(ValueError, match="pass capture_instance"):
+        apply_changes(delta_spark, o.bronze, o.silver, keys=["order_id"], control_table=o.control)
+    with pytest.raises(ValueError, match="'dbo_other' is not the options' captureInstance"):
+        apply_changes(
+            delta_spark, o.bronze, o.silver, "dbo_other", control_table=o.control, options=o.options
+        )
+    apply_changes(delta_spark, o.bronze, o.silver, control_table=o.control, options=o.options)
+    assert o.rows() == o.source() == [(1, "new")]
+
+
 def test_snapshot_then_changes_and_the_verdict_is_the_bronze_one_read_before_the_apply(
     delta_spark, workdir, monkeypatch
 ):

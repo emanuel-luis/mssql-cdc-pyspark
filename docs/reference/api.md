@@ -52,6 +52,10 @@ returns the table's verdict, a naive UTC `datetime`, or `None` before the first 
 
 ::: mssql_cdc.SchemaChangedError
 
+::: mssql_cdc.is_data_loss
+
+::: mssql_cdc.is_schema_changed
+
 ## Local Spark
 
 ::: mssql_cdc.spark.get_spark
