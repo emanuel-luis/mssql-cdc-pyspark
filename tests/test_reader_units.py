@@ -114,6 +114,41 @@ def test_a_database_capture_has_not_written_to_yet_starts_at_zero(tmp_path):
     assert reader.latestOffset(start, ReadAllAvailable()) == start
 
 
+class Counting:
+    """The calls latestOffset and reportLatestOffset make, each a query on SQL Server."""
+
+    def __init__(self, max_lsn):
+        self.max, self.calls = max_lsn, []
+
+    def max_lsn(self):
+        self.calls.append("max_lsn")
+        return self.max
+
+    def nth_commit_after(self, lsn, n):  # fewer than n commits after lsn: None
+        self.calls.append("nth_commit_after")
+
+    def lsn_to_time(self, lsn):
+        self.calls.append("lsn_to_time")
+        return "2026-09-28T13:50:00.000"
+
+
+def test_an_idle_stream_asks_sql_server_for_max_lsn_alone_each_poll():
+    from pyspark.sql.streaming.datasource import ReadMaxRows
+
+    reader, client = _reader(), Counting(_lsn(5))
+    reader._client = client
+    start = {"lsn": _lsn(5), "commit_ts": "2026-09-28T13:50:00.000"}
+    for _ in range(3):  # Spark's polls, every 10 ms or so without a trigger
+        assert reader.latestOffset(start, ReadMaxRows(10)) == start
+        assert reader.reportLatestOffset()["lsn"] == _lsn(5)
+    assert client.calls == ["max_lsn", "lsn_to_time", "max_lsn", "max_lsn"]
+    client.calls.clear()
+    client.max = _lsn(9)  # capture moved: planned up to it, and reported
+    assert reader.latestOffset(start, ReadMaxRows(10))["lsn"] == _lsn(9)
+    assert reader.reportLatestOffset()["lsn"] == _lsn(9)
+    assert client.calls == ["max_lsn", "nth_commit_after", "lsn_to_time", "lsn_to_time"]
+
+
 def test_the_fake_maps_only_an_entrys_own_lsn_to_its_time(tmp_path):
     db, lsns = _db(str(tmp_path), n_tx=2)
     client = FakeCdcClient(str(tmp_path))

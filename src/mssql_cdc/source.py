@@ -682,6 +682,10 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
     def __init__(self, options, schema, default_num_partitions=None):
         super().__init__(options, schema, default_num_partitions)
         self._target = None
+        # Spark polls latestOffset and reportLatestOffset back to back, about every 10 ms on
+        # an idle stream: the max_lsn latestOffset read last, and the offset last reported
+        self._seen_max: str | None = None
+        self._reported: dict | None = None
         max_commits = _opt(options, "maxCommitsPerBatch")
         self._max_commits = int(max_commits) if max_commits else None
 
@@ -694,18 +698,25 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
         self._target = self._max_lsn()
 
     def latestOffset(self, start: dict, limit) -> dict:
-        upper = self._target or self._max_lsn()
+        if self._target:  # Trigger.AvailableNow: up to the max_lsn it started with
+            upper = self._target
+        else:
+            upper = self._seen_max = self._max_lsn()
+        if upper <= start["lsn"]:  # idle: nth_commit_after could only lower upper
+            return start
         if isinstance(limit, ReadMaxRows):
             nth = self.client.nth_commit_after(start["lsn"], limit.max_rows)
             if nth is not None and nth < upper:
                 upper = nth
-        if upper <= start["lsn"]:
-            return start
         return self._offset(upper)
 
     def reportLatestOffset(self):
-        # Surfaces capture progress (max_lsn) as latestOffset in query progress.
-        return self._offset(self._max_lsn())
+        # Surfaces capture progress (max_lsn) as latestOffset in query progress: the one
+        # latestOffset just read, and its commit time once per LSN
+        lsn = self._seen_max or self._max_lsn()
+        if self._reported is None or self._reported["lsn"] != lsn:
+            self._reported = self._offset(lsn)
+        return self._reported
 
 
 class MssqlCdcLegacyStreamReader(_BaseReader):  # pragma: no cover - Spark < 4.2
