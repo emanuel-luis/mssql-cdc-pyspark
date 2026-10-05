@@ -254,6 +254,22 @@ def test_least_privilege_login_needs_one_grant_on_the_change_table(spark, sqlser
         client.close()
 
 
+def test_a_login_in_another_language_is_told_the_grant_it_needs(sqlserver, backend):
+    ci = sqlserver.cdc_table("priv_pt", "id INT NOT NULL PRIMARY KEY")
+    sqlserver.run("INSERT INTO dbo.priv_pt VALUES (1)")
+    sqlserver.wait_for_changes(ci, 1)
+    conn = sqlserver.login("cdc_leitor", "GRANT SELECT ON dbo.priv_pt TO cdc_leitor")
+    sqlserver.run("ALTER LOGIN [cdc_leitor] WITH DEFAULT_LANGUAGE = Brazilian")
+    lsn = sqlserver.start_lsn(ci)
+    client = make_client({"connectionString": conn, "backend": backend})
+    try:
+        with pytest.raises(PermissionError, match=r"GRANT SELECT ON cdc\.\[dbo_priv_pt_CT\]") as e:
+            list(client.iter_changes(ci, lsn, lsn, ["id"], True, 10))
+    finally:
+        client.close()
+    assert "negada" in str(e.value.__cause__)  # SQL Server answered in Portuguese
+
+
 def test_a_table_with_an_accented_name_streams_under_its_default_instance(
     spark, sqlserver, backend
 ):

@@ -645,7 +645,7 @@ class MssqlPythonBackend(Backend):
         cur = self._conn.cursor()
         try:
             cur.execute(sql, tuple(params))
-            size = min(batch_size, 1000)
+            size = min(batch_size, 64)  # rows of 1 MiB would make a first 1000 a GiB
             while True:
                 batch = cur.arrow_batch(size)
                 if batch.num_rows == 0:
@@ -1341,11 +1341,9 @@ class SqlCdcClient(CdcClient):
         try:
             yield from self._b.batches(sql, params, batch_size)
         except Exception as exc:
-            # 229/230: permission denied, the number a login of any language gets; the object
-            # name too, since error 208 (no such object) names it as well
-            text = str(exc)
-            denied = "denied" in text or "(229)" in text or "(230)" in text
-            if denied and f"{ci}_CT".lower() in text.lower():
+            # an error naming the change table, then SQL Server asked whether the login may
+            # read it: the message's language and each driver's layout of it do not matter
+            if f"{ci}_CT".lower() in str(exc).lower() and self._denied(f"cdc.[{ci}_CT]"):
                 raise PermissionError(
                     f"The login cannot read the change table cdc.[{ci}_CT]. Beyond what the CDC "
                     f"query functions need, the reader needs: GRANT SELECT ON cdc.[{ci}_CT] "
@@ -1353,6 +1351,13 @@ class SqlCdcClient(CdcClient):
                     "new instance of the table needs its own grant."
                 ) from exc
             raise
+
+    def _denied(self, table: str) -> bool:
+        """Whether the login lacks SELECT on ``table`` (0; NULL: no such object)."""
+        try:
+            return self._b.scalar("SELECT HAS_PERMS_BY_NAME(?, 'OBJECT', 'SELECT')", (table,)) == 0
+        except Exception:  # noqa: BLE001 - the read's own error is the one to raise
+            return False
 
     def close(self):
         self._b.close()

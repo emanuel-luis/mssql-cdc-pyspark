@@ -266,10 +266,10 @@ def test_mssql_python_batches_are_bounded_in_bytes_not_only_rows():
         return cursor.asked
 
     mib = 1024 * 1024
-    # a first batch of at most 1000 rows; then as many as fit in 64 MiB, up to batch_size
-    assert asked(10_000, mib, 100, 100) == [1000, 64, 10_000, 10_000]
+    # a first batch of at most 64 rows; then as many as fit in 64 MiB, up to batch_size
+    assert asked(10_000, mib, 100, 100) == [64, 64, 10_000, 10_000]
     assert asked(10, 100) == [10, 10]
-    assert asked(10_000, 100 * mib) == [1000, 1]  # one row wider than the bound: one a batch
+    assert asked(10_000, 100 * mib) == [64, 1]  # one row wider than the bound: one a batch
 
 
 def test_make_client_requires_connection_string():
@@ -353,30 +353,52 @@ def test_captured_columns_errors_point_to_columns_option():
 
 def test_change_table_permission_error_names_the_grant():
     class Denied(Recorder):
-        def __init__(self, message):
+        """Every read fails with ``message``; HAS_PERMS_BY_NAME answers ``perms``."""
+
+        def __init__(self, message, perms=0):
             super().__init__()
-            self.message = message
+            self.message, self.perms = message, perms
 
         def batches(self, sql, params, batch_size):
             raise RuntimeError(self.message)
+
+        def scalar(self, sql, params=()):
+            if "HAS_PERMS_BY_NAME" not in sql:
+                return super().scalar(sql, params)
+            self.calls.append((sql, tuple(params)))
+            if isinstance(self.perms, Exception):
+                raise self.perms
+            return self.perms
 
     english = (
         "[SQL Server]The SELECT permission was denied on the object "
         "'dbo_orders_CT', database 'db', schema 'cdc'."
     )
-    # another language: the error number and the object name still tell it
-    localized = "[SQL Server]A permissão SELECT foi negada no objeto 'dbo_orders_CT'. (229)"
+    # another language, as mssql-python words it: no error number in the text, so SQL
+    # Server is asked
+    localized = (
+        "Driver Error: Syntax error or access violation; DDBC Error: [Microsoft][SQL Server]"
+        "A permissão SELECT foi negada no objeto 'dbo_orders_CT', banco de dados 'db', "
+        "esquema 'cdc'."
+    )
     for message in (english, localized):
-        client = SqlCdcClient(Denied(message), source_timezone="UTC")
+        backend = Denied(message)
+        client = SqlCdcClient(backend, source_timezone="UTC")
         grant = r"GRANT SELECT ON cdc\.\[dbo_orders_CT\]"
         with pytest.raises(PermissionError, match=grant + ".*own grant"):
             list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
         with pytest.raises(PermissionError, match=grant):
             client.split_points("dbo_orders", "0x01", "0x02", 4)
-    missing = Denied("Invalid object name 'cdc.dbo_orders_CT'. (208)")  # names it too
-    with pytest.raises(RuntimeError, match="Invalid object name") as raised:
-        list(SqlCdcClient(missing).iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
-    assert not isinstance(raised.value, PermissionError)
+        assert backend.calls[-1][1] == ("cdc.[dbo_orders_CT]",)
+    for other in (
+        Denied("Invalid object name 'cdc.dbo_orders_CT'.", perms=None),  # no such object
+        Denied("The SELECT permission was denied on 'dbo_orders_CT'", RuntimeError("link")),
+        Denied("Communication link failure (08S01)"),  # names no table: nothing asked
+    ):
+        with pytest.raises(RuntimeError, match=other.message[:20]) as raised:
+            list(SqlCdcClient(other).iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+        assert not isinstance(raised.value, PermissionError)
+    assert not [c for c in other.calls if "HAS_PERMS_BY_NAME" in c[0]]
 
 
 def _instance(ci, table, start, created=None, schema="dbo"):
