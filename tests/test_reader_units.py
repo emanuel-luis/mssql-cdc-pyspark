@@ -1,6 +1,7 @@
 """The stream reader's own logic without a SparkSession (pyspark is imported, never started):
 what crosses to the executors, read()'s cleanup, offsets and option checks."""
 
+import threading
 from datetime import datetime, timedelta
 
 import pytest
@@ -55,6 +56,44 @@ class Server(Backend):
 
 def _lsn(n: int) -> str:
     return f"0x{n:020X}"
+
+
+class Live:
+    """A client with a live connection (an unpicklable lock) whose read fails midway."""
+
+    def __init__(self):
+        self.connection, self.closed = threading.Lock(), False
+
+    def set_clock(self, zone, offset_min):
+        pass
+
+    def iter_changes(self, *args):
+        raise RuntimeError("connection reset")
+
+    def close(self):
+        self.closed = True
+
+
+# -- invariant 5: executors are stateless ---------------------------------------------------
+def test_a_reader_reaches_the_executors_without_its_client():
+    from pyspark import cloudpickle
+
+    reader = _reader()
+    reader._client = Live()
+    with pytest.raises(TypeError):
+        cloudpickle.dumps(reader._client)  # what Spark would fail on
+    assert cloudpickle.loads(cloudpickle.dumps(reader))._client is None
+    assert isinstance(reader._client, Live)  # the driver keeps its own
+
+
+def test_a_failed_read_closes_its_client():
+    from mssql_cdc.source import LsnRange
+
+    reader, live = _reader(), Live()
+    reader._client = live
+    with pytest.raises(RuntimeError, match="connection reset"):
+        list(reader.read(LsnRange(CI, _lsn(1), _lsn(2))))
+    assert live.closed and reader._client is None
 
 
 # -- offsets -----------------------------------------------------------------------------
