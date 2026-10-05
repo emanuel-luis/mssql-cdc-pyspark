@@ -57,8 +57,10 @@ anything else.
 ### captureInstance
 
 The CDC capture instance to read, such as `dbo_orders` (SQL Server's default name is
-`<schema>_<table>`). Matched ignoring case, as SQL Server does; an exact match wins, and two
-instances whose names differ only in case fail with a `ValueError` asking for the exact one.
+`<schema>_<table>`). Any name SQL Server allows, Unicode letters included (`dbo_Café`),
+except one with `]` or a control character. Matched ignoring case, as SQL Server does; an
+exact match wins, and two instances whose names differ only in case fail with a `ValueError`
+asking for the exact one.
 
 When the table gets a newer capture instance the stream moves to it on its own, and a
 configured name that was disabled still resolves when it is the table's default name. See
@@ -72,6 +74,19 @@ Connection string for `mssql-python` or ODBC Driver 18, for example
 The driver plans with it and every executor task opens its own connection with it, so the
 server must be reachable from every worker. The login needs the grants in
 [Permissions](../guides/permissions.md).
+
+- A value that contains `;` or `}`, a password for instance, goes in braces with every `}`
+  doubled: `PWD={p;a}}ss}` for `p;a}ss`. Quote values read from a secret store this way, as
+  in `"PWD={" + secret.replace("}", "}}") + "}"`.
+- Without a SQL login's password: Entra ID authentication, which `mssql-python` and ODBC
+  Driver 18 support where the server takes Entra ID logins (Azure SQL, SQL Server with
+  Entra ID). `Authentication=ActiveDirectoryMsi` uses a managed identity and needs no secret
+  at all; `Authentication=ActiveDirectoryServicePrincipal` takes the application id as `UID`
+  and its secret as `PWD`.
+- Spark does not redact this option by default: its default patterns (`secret`, `password`,
+  `token`, `url`...) match neither the key `connectionString` nor `PWD=`. Where options can
+  surface (a table defined with `OPTIONS (...)`, a plan in the UI or a log), set
+  `spark.sql.redaction.options.regex` to `(?i)url|connectionstring`.
 
 ### backend
 
@@ -97,10 +112,13 @@ touch captured `datetime` columns.
 
 * `auto`: `CURRENT_TIMEZONE_ID()` on SQL Server 2022+ and Azure SQL, which applies the
   daylight-saving rules in force at each commit. Older versions lack the function; then the
-  server's current UTC offset (`SYSDATETIMEOFFSET()`) is applied to every commit, which is
-  exact only for zones without daylight saving.
+  driver reads the server's current UTC offset (`SYSDATETIMEOFFSET()`) and the run applies
+  it to every commit, on the driver and the executors alike, logging a warning each time.
+  That is exact only for zones without daylight saving: across a transition, also between
+  two runs, `finalized_until` can run ahead of the data.
 * A Windows time zone name, such as `E. South America Standard Time`, or `UTC`: set it on a
-  server older than 2022 in a zone with daylight saving.
+  server older than 2022 in a zone with daylight saving. `AT TIME ZONE` takes the name since
+  SQL Server 2016 and applies each commit's own offset.
 
 [ADR 0008](../decisions/0008-detect-source-time-zone.md).
 
@@ -129,6 +147,9 @@ Read `__$command_id` into `_command_id`, the order of a statement within its tra
 With `false` the column is left out of the output. Set it only when the change tables lack
 `__$command_id`, which can happen on SQL Server 2016
 ([ADR 0023](../decisions/0023-schema-changes-and-capture-instance-switching.md)).
+[`apply_changes`](../guides/silver.md) works without the column: the order within a
+transaction then follows `__$seqval`, which Microsoft's documentation says not to order by
+([ADR 0009](../decisions/0009-read-change-tables-directly.md)).
 
 ### startingLsn
 
@@ -149,7 +170,9 @@ After a re-snapshot (generation 1 and later), `to_delta` replaces it with that s
 
 At most this many commits per micro-batch, counted in `cdc.lsn_time_mapping`. That table is
 database-wide: idle entries and other tables' commits count too. A batch always ends on a
-commit boundary. Without it every batch reads up to `max_lsn`.
+commit boundary. Without it every batch reads up to `max_lsn`, so the first batch after a
+long stop or a long snapshot reads the whole backlog in one go: set it to keep that batch
+bounded.
 
 It needs Spark 4.2+, or a runtime with its admission control backported, such as Databricks
 Runtime 18.2+ ([Databricks](../DATABRICKS.md)). On older Spark it is ignored. With
@@ -172,7 +195,9 @@ tiles of the rows, and reads a table without a unique index in one partition.
 ### arrowBatchSize
 
 Rows per Arrow record batch fetched from the driver, in the stream and the snapshot. Each
-batch is cast to the output schema and handed to Spark as it arrives.
+batch is cast to the output schema and handed to Spark as it arrives. Batches are also
+capped near 64 MiB, on the default backend as on `arrow-odbc`, so a table with large
+`(max)`, `text` or `xml` values reads in smaller batches.
 
 ### failOnDataLoss
 
@@ -181,8 +206,9 @@ older capture instance that was disabled before the stream read them), raise
 `DataLossError`. It is checked on the driver before a batch is planned and in every task
 after its read, since cleanup can run in between.
 
-`false` skips ahead to what CDC still holds and loses those changes without a trace.
-Prefer `to_delta(on_data_loss="resnapshot")`, which recovers with a snapshot and records the
+`false` skips ahead to what CDC still holds and loses those changes; the skip logs a
+WARNING naming the capture instance and the LSN range skipped, and `finalized_until` moves
+past the gap ([Finalization](../guides/finalization.md#pitfalls)). Prefer `to_delta(on_data_loss="resnapshot")`, which recovers with a snapshot and records the
 gap: see [Data loss](../guides/data-loss.md).
 
 ### schemaChangePolicy
@@ -205,9 +231,10 @@ where the reader leaves an event file for each schema change and capture instanc
 The sink folds them into the batch's facts row and removes them. Without it the metric
 columns of the facts table and `end_lsn` stay NULL, and events only reach the driver log.
 
-It must be a path Python can write on every node: local, or a FUSE mount such as a
-Databricks Volume, not an object-store URI. A file that cannot be written is skipped: metrics
-never fail a read.
+It must be a path Python can write on every node and the driver can read: local, or a FUSE
+mount such as a Databricks Volume. A URI (`s3://`, `abfss://`, `dbfs:/`) is a `ValueError`,
+since Python would write it as a local directory named after the scheme. A file that cannot
+be written is skipped: metrics never fail a read.
 
 * Through `to_delta`, an explicit `metricsPath` holds each stream's files under
   `<metricsPath>/<app_id>`, so streams may share it. Without one, `to_delta` uses
@@ -253,11 +280,13 @@ on a column no index leads, each range scans the table.
 
 ### isolationLevel
 
-For `mssql_cdc_snapshot` only: `readCommitted` (the default) or `snapshot`, which reads
-under SNAPSHOT isolation and needs the database's `ALLOW_SNAPSHOT_ISOLATION`; SQL Server
-refuses it otherwise. A SNAPSHOT read does not wait for writers' locks and holds versions
-in tempdb while it runs. Anything else is a `ValueError`: a snapshot never reads
-uncommitted rows (`NOLOCK`). `backfill(isolation="snapshot")` sets it.
+For `mssql_cdc_snapshot` only: `readCommitted` (the default) or `snapshot`, in any case,
+which reads under SNAPSHOT isolation and needs the database's `ALLOW_SNAPSHOT_ISOLATION`;
+SQL Server refuses it otherwise. A SNAPSHOT read does not wait for writers' locks and holds
+versions in tempdb while it runs. Anything else is a `ValueError`: a snapshot never reads
+uncommitted rows (`NOLOCK`). `backfill()` reads and plans with the stream's
+`isolationLevel` unless its `isolation=` argument, which takes the same values, says
+otherwise.
 
 ## to_delta parameters
 
@@ -290,7 +319,9 @@ or a `:`). Created on the first batch with rows ([Tables](tables.md#bronze)).
 The sink's identity: the Delta `txnAppId` of every append to `target`, with the batch id as
 `txnVersion`, so a replayed batch is skipped. Keep it stable for the life of a checkpoint. A
 new checkpoint needs a new `app_id`: its batch ids restart at 0 and would be skipped as
-already written. Facts rows use `<app_id>#facts` and snapshot events `<app_id>#events`;
+already written. With a `facts_table`, a checkpoint that was deleted or rewound under the
+same `app_id` fails its first batch with an error saying so, instead of skipping the writes;
+without one, nothing catches it. Facts rows use `<app_id>#facts` and snapshot events `<app_id>#events`;
 generation `n` of a re-snapshot writes as `<app_id>.g<n>`.
 
 ### checkpoint
@@ -300,6 +331,17 @@ path or a Volume lets `to_delta` place the metrics there and is required by
 `on_data_loss="resnapshot"`. A URI (`abfss://`, `dbfs:/`) works for everything else, with
 `metricsPath` set by hand. Not `/dbfs/...` with `on_data_loss="resnapshot"`: Spark and Python
 resolve it to two different directories.
+
+`to_delta`'s bootstrap and `on_data_loss="resnapshot"` pre-flight, `seed()` and
+`backfill()` run in the calling Python process: they connect to SQL Server, and the
+pre-flight reads the checkpoint, from there. From a Spark Connect client (Databricks Connect
+included), that machine must reach SQL Server and see the checkpoint path. When the facts
+table already holds batches of the stream but Python finds nothing of Spark's in the
+checkpoint, the pre-flight raises `ValueError` instead of re-snapshotting: either Python and
+Spark resolve the path to two different directories (on Databricks classic, a path without a
+scheme such as `/mnt/...` is DBFS for Spark and the driver's disk for Python; a Spark Connect
+client's own disk), so use a path both see, such as a Volume; or the checkpoint was deleted,
+so start again with a new `app_id`.
 
 ### facts_table
 
@@ -311,13 +353,14 @@ The facts table, a name or a path: one row per micro-batch, snapshot and source 
 
 Keyword arguments for `DataStreamWriter.trigger`, such as `{"availableNow": True}` or
 `{"processingTime": "1 minute"}`. `None` is Spark's default: the next batch as soon as the
-previous one ends and the source has moved. Every batch writes a facts row, so a
-`processingTime` trigger bounds how many a quiet stream writes
-([Monitoring](../guides/monitoring.md)).
+previous one ends and the source has moved, which polls SQL Server back to back while the
+source is idle. Every batch writes a facts row, so a `processingTime` trigger bounds both
+for an always-on stream ([Triggers](../guides/streaming.md#triggers)).
 
 ### query_name
 
-Passed to `DataStreamWriter.queryName`.
+Passed to `DataStreamWriter.queryName`. By default the sink's `app_id`, `<app_id>.g<n>` in
+generation `n`, so the Spark UI, progress logs and listener events match the facts rows.
 
 ### bootstrap
 
@@ -335,8 +378,10 @@ On a table too big to snapshot within the retention, with `snapshot="chunked"`, 
   `DataLossError`.
 * `"resnapshot"`: before the query starts, check whether that has happened; if so, snapshot
   the table into `target` again, write a `resnapshot` facts row with the gap, and continue
-  in a new generation. Requires `facts_table` and a local or Volume `checkpoint`; run one job
-  per stream. A purge while the query runs still fails it, and the next run recovers.
+  in a new generation. Requires `facts_table`, `failOnDataLoss` left true (`ValueError`
+  otherwise: a purge skipped while the query runs would hide the gap from the next check)
+  and a local or Volume `checkpoint`; run one job per stream. A purge while the query runs
+  still fails it, and the next run recovers.
 
 Anything else is a `ValueError`. See [Data loss](../guides/data-loss.md).
 
@@ -351,8 +396,9 @@ default); `0` allows a retry right away.
 
 `True` appends a snapshot of the table after the batch that first reads a newer capture
 instance, so that rows unchanged since the switch carry the columns only the newer instance
-captures instead of NULL. It reads the whole table. With a URI checkpoint it needs
-`metricsPath` (`ValueError` otherwise). See
+captures instead of NULL. It reads the whole table inside that batch, so the stream waits
+for the read: not for tables too big to snapshot. With `snapshot="chunked"` it is a
+`ValueError`, and with a URI checkpoint it needs `metricsPath` (`ValueError` otherwise). See
 [Schema changes](../guides/schema-changes.md#rows-unchanged-since-the-switch).
 
 ### snapshot
@@ -385,7 +431,7 @@ status = stream(spark, options).backfill(
     facts_table="ops.ingestion_facts",
 )
 # {"snapshot": "0x...", "chunks_done": 8, "chunks_total": 40, "done": False,
-#  "paused": False, "reason": None}
+#  "paused": False, "state": "running", "reason": None}
 ```
 
 `backfill(target, *, app_id, facts_table, chunk_rows=None, max_waves=None,
@@ -398,7 +444,7 @@ snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in waves 
   (`<app_id>.g<n>`) are found from `app_id`. With a full snapshot of the stream still
   open it raises `ValueError`, before anything else
   ([One mode per run](../guides/bootstrap.md#one-mode-per-run)). Otherwise, without an open
-  chunked snapshot it returns at once, `paused` with a `reason`.
+  chunked snapshot it returns at once, `paused` with state `no_snapshot` and a `reason`.
 * `chunk_rows`: the most rows a chunk holds when planned (at least 1; `None` is
   1,000,000). It counts on the first call only, which plans every chunk and records the plan
   in a `snapshot_plan` facts row; later calls keep the plan's value and log a warning when
@@ -415,11 +461,21 @@ snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in waves 
   less retention headroom (less that row's age), or there is none. `None`: never pause.
 * `isolation`: `"snapshot"` sets [isolationLevel](#isolationlevel) and plans the chunks
   under SNAPSHOT isolation too (the counts and seeks of the first call, and the search for
-  the first key after MAX before each wave), so neither waits for writers' locks; `None`
-  reads and plans READ COMMITTED.
+  the first key after MAX before each wave), so neither waits for writers' locks;
+  `"readCommitted"` reads and plans READ COMMITTED. Either in any case; anything else is a
+  `ValueError` before anything is read. `None` takes the stream's `isolationLevel` option.
 
 The result: `snapshot` (its LSN S), `chunks_done`, `chunks_total` (the plan's count, `None`
-until a call has planned it), `done`, and `paused` with its `reason`.
+until a call has planned it), `done`, `paused` with its `reason`, and `state`, which says
+what to do next:
+
+| `state` | Meaning |
+|---|---|
+| `done` | the snapshot is complete: stop calling |
+| `running` | this call's `max_waves` or `max_seconds` ran out: call again |
+| `waiting_headroom` | paused: the stream's retention headroom is below `min_headroom_hours` |
+| `waiting_metrics` | paused: the stream has written no facts row with a headroom yet |
+| `no_snapshot` | no chunked snapshot of this `target` and `app_id` is open: the stream has not opened it yet, or `target` or `app_id` is wrong, or the stream bootstraps with `snapshot="full"` |
 Each wave is one commit to `target` and one `snapshot_chunk` facts row per chunk
 ([Tables](tables.md#facts)).
 

@@ -1,13 +1,20 @@
 # Installation
 
+!!! note "These pages document `main`"
+    The latest release on PyPI may be older, and `pip install mssql-cdc-pyspark` skips
+    release candidates: a feature not released yet needs `pip install --pre
+    mssql-cdc-pyspark` or the candidate's exact pin, such as `==0.2.0rc1`. What each release
+    has is in the
+    [changelog](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md).
+
 ## Requirements
 
 | What | Version | Notes |
 |---|---|---|
-| Python | 3.10+ | |
+| Python | 3.10–3.13 | CI runs 3.11 on every push and all four weekly |
 | Spark | 4.2+ | or a runtime with the Python data source admission control backported, such as Databricks Runtime 18.2+ ([Databricks](../DATABRICKS.md)) |
 | Delta Lake | delta-spark 4.4+ locally | for `to_delta`, the facts and control tables and `apply_changes`; Spark platforms ship it |
-| Java | 17 or 21 | only for a local Spark |
+| Java | 17 | only for a local Spark; CI runs 17, 21 is untested |
 | SQL Server | CI runs 2022 | CDC enabled on the database and the table, SQL Server Agent running (capture and cleanup are Agent jobs) |
 
 Every Spark node that runs tasks must reach SQL Server: executors open their own
@@ -58,7 +65,21 @@ sudo apt-get install -y libltdl7 libkrb5-3 libgssapi-krb5-2
 The connection string uses ODBC keywords, for example
 `Server=host,1433;Database=db;UID=user;PWD=secret;Encrypt=yes`; add
 `TrustServerCertificate=yes` only for a server with a self-signed certificate, such as a
-local container.
+local container. How to quote a password and authenticate without one:
+[connectionString](../reference/options.md#connectionstring).
+
+`mssql-python` depends on `mssql-python-odbc`, which holds Microsoft's ODBC Driver 18
+binaries under Microsoft's license, not MIT: every default install brings them in, and
+license scanners flag them. Where that matters, install without them and use
+[arrow-odbc](#arrow-odbc) with a driver installed separately under its EULA:
+
+```bash
+pip install --no-deps mssql-cdc-pyspark
+pip install pyarrow arrow-odbc
+```
+
+`mssql-python` is imported only when it opens a connection, so the other backends work
+without it.
 
 ### arrow-odbc
 

@@ -28,9 +28,9 @@ What a version number may change is set by the 0.x policy
      selected ones with the tag rule `v*`;
    * `testpypi`: no reviewer; the manual run comes from a branch, so do not limit it to
      `v*` tags.
-4. Optional: a tag ruleset (Settings, Rules, Rulesets) targeting `v*` that restricts
-   creation, update and deletion to maintainers, so nobody else can push or move a release
-   tag.
+4. Optional while there is one maintainer: a tag ruleset (Settings, Rules, Rulesets)
+   targeting `v*` that restricts creation, update and deletion to maintainers, so nobody
+   else can push or move a release tag.
 
 ## Dry run (TestPyPI)
 
@@ -57,7 +57,9 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
 2. In `CHANGELOG.md`, turn `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` with the date
    of the tag (for 0.1.0, replace `unreleased` in `## [0.1.0] - unreleased` with it), keep
    an empty `## [Unreleased]` above it, check the "State compatibility" line, and update
-   the links at the bottom.
+   the links at the bottom. Bump the two install pins to the new version: the `%pip
+   install mssql-cdc-pyspark==...` line of `examples/databricks_notebook.py` and the
+   `pypi` library and `%pip` line in [`DATABRICKS.md`](DATABRICKS.md).
 3. Commit (`chore(release): X.Y.Z`), push to `main` and wait for CI.
 4. Tag and push the tag:
 
@@ -66,10 +68,14 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
    git push origin vX.Y.Z
    ```
 
-5. In the `release` run, approve the `pypi` deployment ("Review deployments"). Then
-   install from PyPI in a clean environment, as in the dry run without the TestPyPI index.
+5. The tag starts two runs: `ci` and `release`. Approve the `pypi` deployment of the
+   `release` run ("Review deployments") only once the `ci` run on the tag is green: the
+   approval is the only thing that waits for it. Then install from PyPI in a clean
+   environment, as in the dry run without the TestPyPI index.
 
-If `build` fails on the tag (a version mismatch, a failed check), nothing was published:
+`build` refuses a tag whose commit is not on `main`, and a version without its
+`## [X.Y.Z]` heading in `CHANGELOG.md`. If `build` fails on the tag (a version mismatch, a
+failed check), nothing was published:
 delete the tag (`git push --delete origin vX.Y.Z` and `git tag -d vX.Y.Z`), fix, and tag
 again. Once PyPI has a version, it cannot be uploaded again: fix forward with the next
 patch.
@@ -77,10 +83,3 @@ patch.
 A release candidate follows the same steps with a version like `0.2.0rc1`
 (`uv version 0.2.0rc1`, tag `v0.2.0rc1`); pip installs it only with `--pre` or an exact
 pin.
-
-## After the first release
-
-Switch the install in [`DATABRICKS.md`](DATABRICKS.md) from the requirements file with a
-git reference to the `pypi` library type, pinned to the release, for example
-`{"pypi": {"package": "mssql-cdc-pyspark==0.1.0"}}`; confirm on a cluster that it installs
-(with `mssql-python`) before replacing the old instructions.

@@ -118,14 +118,21 @@ tracker.join()  # the last batch's verdict is written
   that arrives while an advance runs replaces the one still waiting, and an end offset that
   does not move the verdict is skipped, so the control table gets about one commit per
   period, not one per batch.
-- A failed `advance` is tried twice more, 1 s and 2 s later, then logged (logger
-  `mssql_cdc.finalization`); it never touches the query. That covers a MERGE that loses a
-  write conflict to another stream advancing its row of the same control table, also after
-  the query has stopped. Otherwise the next progress tries again: an idle query still
-  reports progress about every 10 seconds (`spark.sql.streaming.noDataProgressEventInterval`).
+- A failure never touches the query. `advance` itself retries, for up to a minute with
+  backoff, a MERGE that loses a write conflict to another commit on the control table (in
+  open-source Delta two MERGEs conflict even on different rows), also after the query has
+  stopped. A verdict that still fails waits for the next progress: an idle query still
+  reports progress about every 10 seconds
+  (`spark.sql.streaming.noDataProgressEventInterval`).
+- `tracker.last_error` holds the error of the last attempt (`None` once one succeeds) and
+  `tracker.failures` how many failed in a row. The first failure of a streak is logged at
+  ERROR with its traceback (logger `mssql_cdc.finalization`), then one WARNING at most every
+  10 minutes until one succeeds, so a permanent error (no `MODIFY` on the control table)
+  shows once instead of flooding the log. Alert on the verdict's freshness too
+  ([Monitoring](monitoring.md#freshness-of-the-verdict)).
 - When the query terminates, with or without an error, the worker applies what is left,
   stops and removes the listener. `join(timeout)` waits for that and returns `False` if the
-  timeout passes first; a verdict that failed three times is in the log, not in `join`'s
+  timeout passes first; whether the last verdict failed is in `last_error`, not in `join`'s
   result. A restarted query is a new run: call `track` again.
 - `track` creates the control table before it returns, so a wrong name fails there.
   Called on a query that already finished, it applies the query's last progress and stops.
@@ -156,17 +163,26 @@ option where a listener cannot run ([Extension points](../ARCHITECTURE.md#extens
 - The control row is keyed by the string you pass to `advance`. Use the same name or path
   for the stream's target, the verdict, `apply_changes` and the consumers: `bronze.orders`
   and the table's storage path are two different rows.
-- `finalized_until` is a `TIMESTAMP_NTZ` in UTC, and `is_final` compares it with a naive
-  `datetime`. Pass the period end in UTC without `tzinfo`; an aware `datetime` raises
-  `TypeError`.
-- Complete is not lossless. After a re-snapshot that followed data loss, the verdict still
-  means that no more commits will arrive, but the changes between `lost_from_ts` and
-  `lost_to_ts` are missing from bronze's change history ([Data loss](data-loss.md)).
+- `finalized_until` is a `TIMESTAMP_NTZ` in UTC, and `advance` and `finalized_until` return
+  it as a naive `datetime`. Python's `.timestamp()` reads a naive `datetime` as the
+  machine's local time: call `fu.replace(tzinfo=timezone.utc).timestamp()` for an epoch.
+- Complete is not lossless. Over a recorded loss gap, a change-log table's verdict (bronze's)
+  means that nothing more will arrive, not that the gap's changes are in it: after a
+  re-snapshot that followed data loss, the changes between `lost_from_ts` and `lost_to_ts`
+  of the facts' `resnapshot` row are missing from bronze's change history
+  ([Data loss](data-loss.md)). Silver, rebuilt from the snapshot, is complete up to its own
+  verdict.
+- With `failOnDataLoss=false` the verdict can cover a gap nobody recorded: the skipped
+  changes leave only a warning in the log.
+- With a named zone that has daylight saving (`sourceTimeZone`, or `auto` on SQL Server
+  2022), `granularity="minute"` is unsafe across a fall-back: commits in the second pass of
+  the repeated hour get commit times an hour early, in minutes already declared final. Use
+  `"hour"` or `"day"` there; those rows are still filed under the hour before.
 
 ## See also
 
 - [Monitoring](monitoring.md): the per-batch facts behind the verdict.
 - [API reference](../reference/api.md#mssql_cdc.finalization.advance): `advance`, `track`,
-  `is_final`, `candidate`, `end_offset_from_progress`.
+  `finalized_until`, `is_final`, `candidate`, `end_offset_from_progress`.
 - [Design notes](../DESIGN.md): why SQL Server CDC can give a stronger signal than event
   times.

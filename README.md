@@ -4,8 +4,11 @@ A platform-agnostic **PySpark streaming source for SQL Server Change Data Captur
 built on Spark's Python DataSource V2 API, plus a **completeness signal**
 (`finalized_until`) that tells downstream jobs when a period of data is safe to read.
 
-* 100% PySpark: no JVM connector, no platform-specific APIs. Runs on local Spark,
-  Databricks classic (DBR 18.2+), and any Spark 4.2+ runtime.
+* 100% PySpark: no JVM connector, no platform-specific APIs. Tested on local Spark 4.2 and
+  on Databricks classic compute (DBR 18.2, dedicated access mode); other Spark 4.2+ runtimes
+  are untested. Databricks serverless is unsupported until tested: it refuses the DataFrame
+  cache API the sink calls on every batch, and `processingTime` triggers (it would need at
+  least `trigger={"availableNow": True}`).
 * Offsets are SQL Server commit LSNs, checkpointed by Spark. Supports
   `Trigger.AvailableNow` and per-batch limits (`maxCommitsPerBatch`).
 * Arrow end to end: the default driver (`mssql-python`) fetches straight into Arrow
@@ -15,7 +18,7 @@ built on Spark's Python DataSource V2 API, plus a **completeness signal**
 
 **Documentation: <https://emanuel-luis.github.io/mssql-cdc-pyspark/>**
 
-> Status: **v0.1, experimental.** Streaming-engine behaviour (offsets, checkpoints,
+> Status: **experimental** (0.x; the version is in `pyproject.toml`). Streaming-engine behaviour (offsets, checkpoints,
 > `AvailableNow`, admission control, retention guard) is covered by unit tests
 > against a file-backed CDC simulator. SQL Server behaviour is covered by the
 > `lab/` checks, which run locally against Docker and in GitHub Actions against
@@ -69,7 +72,7 @@ default driver needs system libraries that pip does not install; see
 
 ## Quick start (local)
 
-Requirements: Docker, [uv](https://docs.astral.sh/uv/), Java 17 or 21; on Linux, the
+Requirements: Docker, [uv](https://docs.astral.sh/uv/), Java 17 (21 is untested); on Linux, the
 driver's system libraries above.
 
 ```bash
@@ -154,4 +157,9 @@ the [decision records](https://emanuel-luis.github.io/mssql-cdc-pyspark/decision
 
 ## License
 
-MIT
+MIT. The default backend's dependency `mssql-python` pulls in `mssql-python-odbc`, which
+holds Microsoft's ODBC Driver 18 binaries under Microsoft's own license. For a
+license-sensitive install, leave it out (`pip install --no-deps mssql-cdc-pyspark`, then
+`pip install pyarrow arrow-odbc`) and use `backend=arrow-odbc` with a driver installed
+separately under its EULA
+([Installation](https://emanuel-luis.github.io/mssql-cdc-pyspark/getting-started/installation/#the-driver)).

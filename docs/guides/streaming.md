@@ -34,6 +34,11 @@ window too, add `bootstrap=True` ([Bootstrap](bootstrap.md)).
 `stream()` registers the data sources on the session and keeps the options. `to_delta`
 starts `spark.readStream.format("mssql_cdc")` with them, writes every micro-batch through
 `foreachBatch` with `delta_sink`, and returns the `StreamingQuery` without waiting for it.
+The query is named after the sink's `app_id` (`<app_id>.g<n>` in a re-snapshot's generation
+`n`) unless `query_name` says otherwise, so the Spark UI, progress logs and listener events
+match the facts rows. The bootstrap, snapshots and `backfill()` waves log their start and
+end at INFO, and a decision to re-snapshot logs a WARNING with the lost range (loggers under
+`mssql_cdc`).
 
 Each micro-batch reads the commits after the last processed offset, up to an end that never
 passes `sys.fn_cdc_get_max_lsn()`, the last commit CDC capture has processed. So every batch
@@ -78,14 +83,32 @@ Every option, with its default, is in [Options](../reference/options.md).
 | `trigger=` | Behaviour | Fits |
 |---|---|---|
 | `{"availableNow": True}` | Records `max_lsn` when the query starts, reads up to it in batches of `maxCommitsPerBatch` commits, then stops | Scheduled jobs: wait for the query, then advance `finalized_until` |
-| `{"processingTime": "1 minute"}` | One batch per interval, until stopped | An always-on stream with a bounded number of facts commits |
-| none | Batches back to back, until stopped | The lowest latency |
+| `{"processingTime": "1 minute"}` | One batch per interval, until stopped | An always-on stream, with a bounded load on SQL Server and a bounded number of facts commits |
+| none | Batches back to back, until stopped; while the source is idle Spark polls it about every 10 ms, a `max_lsn` query per poll | The lowest latency, at the cost of a steady stream of queries on an idle source |
+
+Prefer a `processingTime` trigger for an always-on stream, all the more with
+[start_many](many-tables.md), which multiplies the polling by the number of tables.
 
 Every trigger writes one facts commit, with rows or without. With the
 [heartbeat job](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/sql/heartbeat.sql)
 on a quiet database and no trigger, that is a batch about every 10 seconds, some 8,600 small
-commits a day per stream: use a `processingTime` trigger to bound it, and compact the facts
-table (auto compaction, or a scheduled `OPTIMIZE` and `VACUUM`).
+commits a day per stream: use a `processingTime` trigger to bound it, and keep the tables
+small:
+
+- compact the facts table and bronze (auto compaction, or a scheduled `OPTIMIZE` and
+  `VACUUM`); bronze gets at least one file per batch with rows. `OPTIMIZE ops.ingestion_facts
+  ZORDER BY (target, app_id)` keeps each stream's rows together for the library's own reads;
+- delete old micro-batch rows from the facts table, never its event rows, which the
+  snapshots, `apply_changes` and `reconcile` read back:
+
+```sql
+DELETE FROM ops.ingestion_facts
+WHERE event IS NULL
+  AND written_at < convert_timezone('UTC', localtimestamp()) - INTERVAL 90 DAYS;
+```
+
+Keep the window longer than any stream may stay stopped: the newest micro-batch rows of an
+`app_id` are what the [checkpoint checks](#app_id) and `backfill()`'s headroom pause read.
 
 After an `availableNow` run, advance the verdict from the query's last progress:
 
@@ -127,8 +150,10 @@ The facts table uses `<app_id>#facts` the same way, and snapshot events `<app_id
 
 - Keep `app_id` for the life of the checkpoint, and give each stream its own.
 - **A new checkpoint needs a new `app_id`.** Batch ids restart at 0, and Delta skips every
-  batch whose id is not above the last one it recorded for that `app_id`: the new
-  checkpoint's batches would be dropped without an error.
+  batch whose id is not above the last one it recorded for that `app_id`. With a
+  `facts_table`, a checkpoint deleted or rewound under the same `app_id` fails its first
+  batch with an error that says so; without one, its batches are dropped without an error
+  while the query and `finalization.track` carry on.
 - After an automatic re-snapshot, `to_delta` derives `<app_id>.g<n>` for the new generation
   by itself; keep passing the original ([Data loss](data-loss.md#generations)).
 
@@ -144,7 +169,8 @@ events do not reach the facts ([Monitoring](monitoring.md)).
 - `to_delta` sets `metricsPath` to `<checkpoint>/_mssql_cdc_metrics` on its own for a local
   or FUSE checkpoint.
 - With a URI checkpoint, set the `metricsPath` option to a directory every node can write
-  and the driver can read (a Volume, or a local path on a single node). `to_delta` puts each
+  and the driver can read (a Volume, or a local path on a single node), not a URI, which is
+  a `ValueError`. `to_delta` puts each
   stream's files under `<metricsPath>/<app_id>`, so streams may share one.
 
 ## The same pipeline by hand

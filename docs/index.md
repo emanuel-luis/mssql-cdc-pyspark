@@ -3,14 +3,22 @@
 A PySpark streaming source for SQL Server Change Data Capture (CDC), a Delta sink with
 per-batch facts, and a completeness signal, `finalized_until`, that tells downstream jobs
 when a period of data is safe to read. Pure Python on Spark's DataSource V2 API: no JVM
-connector and no platform-specific APIs, so the same code runs on a laptop, on Databricks
-and on any Spark 4.2+ runtime.
+connector and no platform-specific APIs. Tested on local Spark 4.2 and on Databricks
+classic compute (DBR 18.2); other Spark 4.2+ runtimes are untested, and Databricks
+serverless is unsupported ([Databricks](DATABRICKS.md)).
 
-!!! warning "v0.1, experimental"
+!!! warning "Experimental"
     The streaming engine is covered by unit tests and the SQL Server behaviour by
     integration tests against SQL Server 2022. Within 0.x a minor release may change the
     Python API; the state a stream leaves behind (checkpoints, table schemas) never breaks
     without a migration path ([ADR 0021](decisions/0021-compatibility-policy-for-0x.md)).
+
+!!! note "These pages document `main`"
+    The latest release on PyPI may be older: the
+    [changelog](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md)
+    says what each release has. A release candidate installs only with
+    `pip install --pre mssql-cdc-pyspark` or its exact pin, such as
+    `mssql-cdc-pyspark==0.2.0rc1`. Versioned docs come later.
 
 ## The problem
 

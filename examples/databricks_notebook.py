@@ -10,16 +10,25 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install "mssql-cdc-pyspark @ git+https://github.com/emanuel-luis/mssql-cdc-pyspark.git"
+# MAGIC %pip install mssql-cdc-pyspark==0.2.0rc1
 
 # COMMAND ----------
 
+from datetime import timezone
+
 from mssql_cdc import finalization, stream
+
+
+def quoted(value: str) -> str:
+    """An ODBC connection-string value in braces: a ';' or '}' in it cannot end it."""
+    return "{" + value.replace("}", "}}") + "}"
+
 
 SCHEMA = "lab.cdc"  # catalog.schema
 conn = (
     f"Server={dbutils.secrets.get('cdc', 'mssql-host')},1433;Database=cdc_lab;"
-    f"UID={dbutils.secrets.get('cdc', 'mssql-user')};PWD={dbutils.secrets.get('cdc', 'mssql-password')};"
+    f"UID={quoted(dbutils.secrets.get('cdc', 'mssql-user'))};"
+    f"PWD={quoted(dbutils.secrets.get('cdc', 'mssql-password'))};"
     "Encrypt=yes;TrustServerCertificate=no"
 )
 
@@ -42,4 +51,6 @@ end = finalization.end_offset_from_progress(query.lastProgress)
 fu = finalization.advance(spark, f"{SCHEMA}.table_finalization", f"{SCHEMA}.bronze_orders", end)
 print("finalized_until:", fu)
 # Expose it to downstream tasks (If/else condition task compares numbers):
-dbutils.jobs.taskValues.set("finalized_until_epoch", int(fu.timestamp()) if fu else 0)
+# fu is a naive UTC datetime: .timestamp() alone would read it as the driver's local time
+epoch = int(fu.replace(tzinfo=timezone.utc).timestamp()) if fu else 0
+dbutils.jobs.taskValues.set("finalized_until_epoch", epoch)

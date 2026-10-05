@@ -4,7 +4,8 @@
 **Date:** 2026-09-28T16:13:29-03:00 (recorded when the repository was first committed; decided before)  
 **Amended:** 2026-09-28T21:44:31-03:00, the `(max)` caveat measured (lab t8)  
 **Amended:** 2026-09-30T16:14:54-03:00, installed with the package instead of the `[mssql]` extra  
-**Amended:** 2026-10-01T17:55:59-03:00, `arrow-odbc` tested in CI; what it took and what still differs (see Amendment 2)
+**Amended:** 2026-10-01T17:55:59-03:00, `arrow-odbc` tested in CI; what it took and what still differs (see Amendment 2)  
+**Amended:** 2026-10-05T00:15:23-03:00, the default ships closed binaries too: ADBC's rejection corrected (see Amendment 3)
 
 ## Context
 `read()` yields Arrow record batches from executors. The driver should fetch natively into
@@ -74,3 +75,18 @@ Making them pass took these changes, which are also what still differs:
   when it is freed.
 * Not run with arrow-odbc: the heartbeat, facts metrics, the re-snapshot, silver, type
   changes and dropped columns. Throughput is not measured.
+
+## Amendment 3: the default ships closed binaries too
+The Decision rejected Columnar ADBC partly as a "closed binary". The default is no
+different: `mssql-python` depends on `mssql-python-odbc`, whose wheel holds Microsoft's ODBC
+Driver 18 binaries under Microsoft's licenses (its metadata says "Other/Proprietary
+License"), so every default install brings in proprietary binaries, while the package
+itself is MIT. What still sets ADBC apart is its separate installer: `mssql-python` installs
+with pip on every managed platform. The choice stands; the trade-off is now stated:
+
+* The README's License section and the installation page say so, as license scanners in
+  enterprise pipelines flag the dependency.
+* A license-sensitive install leaves it out (`pip install --no-deps mssql-cdc-pyspark`, then
+  `pyarrow` and `arrow-odbc`) and uses `backend=arrow-odbc` with ODBC Driver 18 installed
+  separately, where its EULA is accepted explicitly (`ACCEPT_EULA=Y`). The import of
+  `mssql-python` is lazy, so nothing else needs it.

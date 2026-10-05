@@ -12,3 +12,4 @@
    once, on the site (`docs/`), and the README links to it.
 6. User-visible changes get an entry under `## [Unreleased]` in `CHANGELOG.md`; breaking
    ones follow ADR 0021. Releases: `docs/RELEASING.md`.
+7. Security issues are reported privately, never in a public issue: see `SECURITY.md`.

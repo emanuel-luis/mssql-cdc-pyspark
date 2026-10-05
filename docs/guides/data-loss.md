@@ -38,9 +38,11 @@ that message. A rerun fails the same way: the checkpoint still points before the
 an older capture instance of the table was disabled before the stream had read its changes,
 the message names it as the other possible cause ([Schema changes](schema-changes.md)).
 
-The option `failOnDataLoss=false` skips ahead to what cleanup left instead.
-**Nothing records the skipped changes**: no error, no facts row. Use it only where losing
-them is acceptable and a snapshot is not.
+The option `failOnDataLoss=false` skips ahead to what cleanup left instead. The skip only
+logs a WARNING naming the capture instance and the LSN range skipped, in the driver's log
+or, when a task finds it after its read, that executor's; the query goes on and
+`finalized_until` moves past the gap. Use it only where losing the changes is acceptable
+and a snapshot is not.
 
 ## Recovering by hand
 
@@ -102,13 +104,28 @@ It needs:
 
 - a `facts_table`, where the event rows tell downstream to rebuild (a `ValueError`
   without one);
+- `failOnDataLoss` left true (a `ValueError` otherwise): a purge skipped while the query
+  runs would leave the next run's check no gap to see;
 - a checkpoint path that Python and Spark resolve to the same directory: local, or a Volume.
-  A URI (`dbfs:/`, `abfss://`) or a `/dbfs/...` path is a `ValueError`;
+  A URI (`dbfs:/`, `abfss://`) or a `/dbfs/...` path is a `ValueError`. A path that Spark
+  and Python resolve differently without saying so (on Databricks, `/mnt/...` or `/tmp/...`
+  is DBFS for Spark and the driver's disk for Python) is caught by its state: when the facts
+  table holds batches of the stream but Python finds nothing of Spark's in the checkpoint,
+  the pre-flight raises `ValueError` instead of taking the snapshot as the stream's position
+  and re-snapshotting on every run. The same error follows a deleted checkpoint: start
+  again with a new `app_id`;
+- a Python process that reaches SQL Server and sees the checkpoint: the pre-flight and the
+  snapshot run where `to_delta` is called, which from a Spark Connect client (Databricks
+  Connect included) is the client machine;
 - one job per stream: there is no lock, and two recoveries at once waste a snapshot.
 
 The check runs only before the query starts. A purge while the query runs still fails it
 with `DataLossError`, and the next run recovers: give the job a retry, or let the next
 scheduled run do it.
+
+The first batch after a full re-snapshot, as after any long stop, reads every change from
+the snapshot's LSN up to `max_lsn` in one batch, cached whole by the sink. Set
+[maxCommitsPerBatch](../reference/options.md#maxcommitsperbatch) to keep it bounded.
 
 ## Chunked re-snapshots
 
@@ -232,8 +249,9 @@ SELECT greatest(
 ```
 
 [`apply_changes`](silver.md) does this on its own when given the facts table.
-`finalized_until` stays monotonic across generations; over the gap it still means that
-nothing more will arrive, not that the gap's changes are in the target.
+`finalized_until` stays monotonic across generations; over the gap, bronze's verdict still
+means that nothing more will arrive, not that the gap's changes are in it
+([Finalization](finalization.md#pitfalls)).
 
 ## The interval between re-snapshots
 

@@ -84,6 +84,11 @@ alone; `start_many` adds no state of its own.
   Writers that commit to a new Delta table at the same time conflict; afterwards every
   stream only appends its own rows. The [health query](monitoring.md#health-of-every-stream)
   groups by `target`, so it covers every table as is.
+- A shared facts table shows every table's facts to whoever reads it, and a chunked
+  snapshot's facts rows hold source key values (the chunk bounds,
+  [Bootstrap](bootstrap.md#pitfalls)). Where keys are natural or personal identifiers, use
+  one `facts_table` per access domain, a `start_many` call each, and give each the access
+  policy of its bronze tables.
 - Finalization stays per table: advance each target's verdict after its own query, as in
   the job above. A consumer that joins two tables waits until both are final for its
   period. Each stream is a prefix of the commit history of its own table, read at its own
@@ -177,7 +182,11 @@ The streams share the cluster, and their micro-batches run at the same time.
 - **Connections on SQL Server.** At most one per running task, so no more than the
   executor cores, plus one per stream on the driver, which plans its batches.
 - **The driver** plans every stream and runs every `foreachBatch`, where the sink writes
-  bronze and the facts. Its load grows with the number of streams.
+  bronze and the facts. Each stream also keeps, for the life of its query, a Python worker
+  process of its own on the driver, where Spark runs the source's planning, and that
+  process's connection to SQL Server. Driver memory is therefore the first ceiling, before
+  executor cores: past what one driver holds, split the tables into several jobs. No
+  per-stream figure has been measured yet.
 - **Facts commits.** Every trigger of every stream writes a facts commit. A
   `processingTime` trigger bounds them; compact the facts table
   ([Monitoring](monitoring.md#pitfalls)).
@@ -191,7 +200,7 @@ The streams share the cluster, and their micro-batches run at the same time.
 | | One job with `start_many` | One job (or task) per table |
 |---|---|---|
 | Compute | one cluster, cores shared by every table | a cluster per job, or tasks on a shared job cluster |
-| Driver | one, planning every stream | one per job |
+| Driver | one, planning every stream, with a Python process per stream | one per job |
 | A failing table | the others keep running; the run reports it at its end | its own run fails, retries and alerts |
 | Restart | that table in the session, or the next run | that job |
 | Deploy | one list | one definition per table, or a loop over the list |

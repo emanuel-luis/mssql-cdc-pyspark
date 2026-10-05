@@ -65,7 +65,7 @@ Statistics over micro-batches filter `event IS NULL`.
 
 ## Health of every stream
 
-One query covers four alerts, on the latest micro-batch row of each target.
+One query covers five alerts, on the latest micro-batch row of each target.
 `convert_timezone('UTC', localtimestamp())` is the current UTC time as `TIMESTAMP_NTZ`,
 whatever the session time zone:
 
@@ -86,11 +86,25 @@ SELECT *
 FROM last
 WHERE hours_since_last > 0.25                 -- no facts for 15 minutes
    OR headroom_hours - hours_since_last < 24  -- less than a day before cleanup catches up
+   OR headroom_hours IS NULL                  -- no metrics: the alerts above are blind
    OR ingestion_lag_seconds > 3600            -- the stream is an hour behind capture
    OR capture_lag_seconds > 600;              -- capture is behind the database
 ```
 
-Drop the `WHERE` to see every stream; the thresholds are examples.
+Drop the `WHERE` to see every stream; the thresholds are examples. Keep the `IS NULL` line
+for streams expected to have metrics (all of them under `to_delta` with a facts table and a
+local or Volume checkpoint).
+
+### Metrics are NULL
+
+A comparison with NULL is never true, so without metrics the headroom and lag conditions
+never fire, and only the liveness one is left. On a stream that should have them, NULL
+metrics mean the executors' files never reached the driver: the metrics directory is not
+shared by every node (a driver-local checkpoint on a multi-node cluster, where each executor
+writes to its own disk), or not writable there. The sink logs a warning on the driver, once
+per run, when a batch that read rows found no metrics file. Use a path every node shares,
+such as a Volume
+([metricsPath](../reference/options.md#metricspath)).
 
 ### Facts stopped arriving
 
@@ -101,7 +115,8 @@ that keeps running (a `processingTime` trigger or the default), expect a row at 
 database; about 10 seconds with the
 [heartbeat](../decisions/0010-heartbeat-for-quiet-databases.md)) plus the trigger interval.
 A job run with `availableNow` on a schedule writes only while it runs: use the schedule
-interval. To tell the stream from capture, see [live capture lag](#live-capture-lag) below.
+interval. To tell the stream from capture, see [live capture lag](#live-capture-lag) and
+[capture from the SQL Server side](#capture-from-the-sql-server-side) below.
 
 ### Retention headroom falls
 
@@ -126,6 +141,28 @@ current stream, on a quiet table too. What it gains, the headroom loses.
 batch read: a log backlog, for the DBA rather than for the stream. On a quiet database
 without the heartbeat it sits up to about 5 minutes, so alert above that
 ([ADR 0020](../decisions/0020-capture-and-ingestion-lag-in-facts.md)).
+
+## Freshness of the verdict
+
+The facts say the data arrived; consumers wait on `finalized_until`. A verdict that stops
+moving (a tracker whose `advance` keeps failing, a job that no longer calls it) shows only
+in the control table. Alert per table when it falls behind by more than the period
+(`granularity`), plus the trigger or schedule interval, plus a margin:
+
+```sql
+SELECT table_name, finalized_until, updated_at
+FROM ops.table_finalization
+WHERE finalized_until IS NULL
+   OR finalized_until < convert_timezone('UTC', localtimestamp())
+        - INTERVAL 60 MINUTES   -- granularity "hour"
+        - INTERVAL 1 MINUTE     -- processingTime trigger, or the job's schedule interval
+        - INTERVAL 15 MINUTES;  -- margin: the idle entries' 5 minutes and slow batches
+```
+
+A silver table's verdict holds still while a chunked snapshot is open
+([Silver tables](silver.md#chunked-snapshots)), which can be days: leave it out of this
+alert until the snapshot completes. Why a tracker failed is in its `last_error` and the
+driver's log ([Finalization](finalization.md#continuous-mode)).
 
 ## Why a batch was slow
 
@@ -174,13 +211,53 @@ capture_lag = now - datetime.fromisoformat(latest["commit_ts"])
 If facts stopped arriving while the query still runs and this lag grows, capture has
 stopped (capture job or SQL Server Agent down).
 
+## Capture, from the SQL Server side
+
+An alerting setup built on SQL cannot read `lastProgress`. The DBA's side of the same
+question is SQL Server's own CDC views, in the source database
+([Administer and monitor change data capture](https://learn.microsoft.com/sql/relational-databases/track-changes/administer-and-monitor-change-data-capture-sql-server)):
+
+```sql
+-- the newest log scans: latency is how far capture is behind, in seconds
+SELECT TOP (5) start_time, end_time, latency, tran_count, command_count, error_count
+FROM sys.dm_cdc_log_scan_sessions
+WHERE session_id > 0          -- session 0 aggregates every scan since the instance started
+ORDER BY start_time DESC;
+
+-- errors of the recent scans
+SELECT TOP (20) entry_time, error_number, error_severity, error_message
+FROM sys.dm_cdc_errors
+ORDER BY entry_time DESC;
+```
+
+Alert when the newest scan is older than a few minutes or its `latency` grows, when
+`sys.dm_cdc_errors` has new rows, and when the capture job (`cdc.<database>_capture` in
+SQL Server Agent, listed by `sys.sp_cdc_help_jobs`) is not running. The views need
+`VIEW DATABASE STATE` (`VIEW DATABASE PERFORMANCE STATE` on SQL Server 2022) and the job's
+state needs rights in `msdb`: give them to a monitoring login, never to the stream's
+least-privilege reader ([Permissions](permissions.md)). Both views reset when the instance
+restarts.
+
+With the [liveness alert](#facts-stopped-arriving), the two tell the failures apart: facts
+stopped while capture is current means the stream stopped; facts stopped while capture
+stalls or errs means capture did.
+
 ## Pitfalls
 
 - Every micro-batch is a facts commit. A quiet stream with the heartbeat and the default
   trigger runs a batch about every 10 seconds, some 8,600 rows and small files a day. Bound
-  the rate with a `processingTime` trigger, and compact the facts table (auto compaction,
-  or a scheduled `OPTIMIZE` and `VACUUM`).
-- Metrics are NULL without `metricsPath` (a URI checkpoint without one), and on the first
+  the rate with a `processingTime` trigger, compact the facts table and bronze (auto
+  compaction, or a scheduled `OPTIMIZE` and `VACUUM`; `ZORDER BY (target, app_id)` for the
+  facts), and delete micro-batch rows older than a window, never event rows
+  ([Streaming](streaming.md#triggers)).
+- Warnings raised while a batch is planned (a schema change, a capture instance switch,
+  captured columns that `columns` leaves out) are logged by the Python worker that Spark
+  runs the source in on the driver. They land in the driver's stderr log, not in handlers
+  your job attaches to the `mssql_cdc` logger. The durable channel is the facts table's
+  event rows, `schema_change` and `capture_instance_switched`, which need
+  [metricsPath](../reference/options.md#metricspath).
+- Metrics are NULL without `metricsPath` (a URI checkpoint without one), when the metrics
+  directory is not shared by every node ([above](#metrics-are-null)), and on the first
   batch of a new checkpoint that had nothing to read.
 - When you wire the sink by hand, give `delta_sink(metrics_path=...)` the same directory as the
   `metricsPath` option and use it for one stream only: the sink folds and removes every file

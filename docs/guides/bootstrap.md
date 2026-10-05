@@ -51,7 +51,10 @@ the target and read nothing again.
    time of `L`; `_seqval`, `_command_id` and `_batch_id` are NULL.
 3. It appends them to the target in one Delta commit and, with a facts table, writes a
    facts row with `event = 'bootstrap'`, the snapshot's row count and how long it took.
-4. The stream starts a new checkpoint at `L` and reads every commit after it.
+4. The stream starts a new checkpoint at `L` and reads every commit after it. Its first
+   batch holds everything committed while the table was read, up to `max_lsn`, cached whole
+   by the sink: on a snapshot that takes hours, set
+   [maxCommitsPerBatch](../reference/options.md#maxcommitsperbatch) to keep it bounded.
 
 A commit that lands while the table is read can appear twice: in the snapshot, and as a
 change after `L`. Keeping the latest image per key, ordered by
@@ -139,6 +142,7 @@ and, in a task of its own, call `backfill()` until it is done:
 ```python
 import time
 
+grace = time.monotonic() + 3600  # the stream's first run may not have opened it yet
 while True:
     status = orders.backfill(
         "bronze.orders",
@@ -148,11 +152,20 @@ while True:
         max_seconds=3600,  # one call's budget; the next call goes on
         min_headroom_hours=24,
     )
-    if status["done"]:
+    state = status["state"]
+    if state == "done":
         break
-    if status["paused"]:
+    if state in ("waiting_headroom", "waiting_metrics"):
         time.sleep(600)  # status["reason"] says why
+    elif state == "no_snapshot":
+        if time.monotonic() > grace:  # a wrong target or app_id, or snapshot="full"
+            raise RuntimeError(status["reason"])
+        time.sleep(60)
+    # "running": the call's budget ran out; go on
 ```
+
+`state` is one of `done`, `running`, `waiting_headroom`, `waiting_metrics` and
+`no_snapshot` ([backfill parameters](../reference/options.md#backfill-parameters)).
 
 How it behaves ([ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md)):
 
@@ -183,7 +196,8 @@ so is every row inserted above the MAX: no chunk reads those.
 - `min_headroom_hours` pauses before a wave while the stream's newest facts row shows less
   [retention headroom](monitoring.md), or the stream has written none: the chunks share the
   link with the stream, and a stream that falls behind the retention loses the snapshot too.
-- `isolation="snapshot"` reads under SNAPSHOT isolation, where the DBA has set
+- `isolation="snapshot"`, or the stream's `isolationLevel=snapshot` option when `isolation`
+  is left out, reads under SNAPSHOT isolation, where the DBA has set
   `ALLOW_SNAPSHOT_ISOLATION`: neither a chunk nor the planning then waits for writers'
   locks, at the cost of the version store. By default it reads READ COMMITTED, where a chunk
   or the plan waits for a transaction holding locks in its range; never `NOLOCK`.
@@ -330,6 +344,13 @@ whole. With `snapshot="chunked"` the re-snapshot is chunked too
   waves.
 - A chunked snapshot needs the stream running while it is read: a gap after S (data loss,
   `failOnDataLoss=false`) abandons it. Leave `snapshotLsn` unset: a stamp below S breaks it.
+- A chunked snapshot copies source key values out of bronze: its facts rows
+  (`snapshot_open`, `snapshot_plan`, `snapshot_chunk`) and bronze's commit `userMetadata`
+  hold the chunk bounds: the key's MAX at the open and, for a key that is not a single
+  integer, a real key every `chunk_rows` rows. Column masks and row filters on bronze do not reach them, so give the
+  facts table and bronze's history (`DESCRIBE HISTORY`) bronze's access policy. Where keys
+  are natural or personal identifiers (a document number, an e-mail address), use one
+  `facts_table` per access domain ([Many tables](many-tables.md#what-each-stream-has)).
 - `to_delta(bootstrap=True)` with either `snapshot` mode, and `snapshot()`, return the S of
   a chunked snapshot of the target, open or complete, instead of reading the table again
   (given the facts table, a full run raises while it is open:

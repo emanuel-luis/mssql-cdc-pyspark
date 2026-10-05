@@ -28,7 +28,13 @@ options = {
 }
 ```
 
-Read the password from your platform's secret store rather than writing it in code.
+Read the password from your platform's secret store rather than writing it in code, and put
+it in braces with every `}` doubled, so that a `;` in it cannot end the value. Spark does
+not redact the `connectionString` option by default: where options can surface (a table
+defined with `OPTIONS (...)`, a plan in the UI or a log), set
+`spark.sql.redaction.options.regex` to `(?i)url|connectionstring`. Where the server takes
+Entra ID logins, a managed identity needs no password at all
+([connectionString](../reference/options.md#connectionstring)).
 
 ## What each grant is for
 

@@ -1,7 +1,8 @@
 # Running on Databricks (classic compute)
 
-Nothing in `mssql_cdc` imports Databricks APIs; the same package runs on any Spark
-4.2+ runtime, and on DBR 18.2+. Platform-specific concerns:
+Nothing in `mssql_cdc` imports Databricks APIs. What has run on Databricks is classic
+compute, DBR 18.2, dedicated access mode, single node (items 1 and 3); other runtimes and
+compute types are untested. Platform-specific concerns:
 
 1. **Runtime.** The source needs the Python data source streaming API with
    admission control and `Trigger.AvailableNow` (Spark 4.2, SPARK-55304). DBR 18.2
@@ -13,13 +14,16 @@ Nothing in `mssql_cdc` imports Databricks APIs; the same package runs on any Spa
    resolves to DBFS for the Spark checkpoint, so a fixed one survives the cluster and
    the next run fails with "does not support recovering from checkpoint location".
 2. **Access mode.** Use dedicated. Python streaming data sources on standard access
-   mode are untested.
-3. **Install.** In a job, a `pypi` task library with the released version (checked on
+   mode are untested. Serverless compute is unsupported until it is tested: it refuses
+   the DataFrame cache API that the sink calls on every batch, and `processingTime`
+   triggers, Spark's default included, so it would need at least
+   `trigger={"availableNow": True}`.
+3. **Install.** In a job, a `pypi` task library pinned to a release (checked with 0.1.0 on
    DBR 18.2, dedicated, single node: installed with `mssql-python`, bootstrap and stream
-   ran):
+   ran). A release candidate installs only by its exact pin:
 
    ```json
-   "libraries": [{"pypi": {"package": "mssql-cdc-pyspark==0.1.0"}}]
+   "libraries": [{"pypi": {"package": "mssql-cdc-pyspark==0.2.0rc1"}}]
    ```
 
    For an unreleased commit, a `requirements` task library pointing to a
@@ -34,7 +38,7 @@ Nothing in `mssql_cdc` imports Databricks APIs; the same package runs on any Spa
    "libraries": [{"requirements": "/Workspace/Users/<you>/requirements.txt"}]
    ```
 
-   In a notebook, `%pip install mssql-cdc-pyspark==0.1.0` (or the git line) works too. Leave out the `[spark]`
+   In a notebook, `%pip install mssql-cdc-pyspark==0.2.0rc1` (or the git line) works too. Leave out the `[spark]`
    extra: PyPI `pyspark` conflicts with the runtime's own Spark. `mssql-python`, installed
    with the package, loads `libltdl7` (and the Kerberos libraries) on every node that
    opens a connection; add a
@@ -49,9 +53,16 @@ Nothing in `mssql_cdc` imports Databricks APIs; the same package runs on any Spa
    fi
    ```
 4. **Network.** The SQL Server must be reachable from every worker (executors open
-   their own connections in `read()`).
+   their own connections in `read()`). `to_delta`'s bootstrap and
+   `on_data_loss="resnapshot"` pre-flight, `seed()` and `backfill()` run in the Python
+   process that calls them, which connects to SQL Server and, for the pre-flight, reads
+   the checkpoint itself: from Databricks Connect, that is your machine, which must reach
+   SQL Server and see the checkpoint path.
 5. **Names and paths.** Unity Catalog managed tables for bronze, facts and control;
-   checkpoints in a Volume.
+   checkpoints in a Volume. A path without a scheme (`/mnt/...`, `/tmp/...`) is DBFS for
+   Spark but the driver's local disk for Python: with `on_data_loss="resnapshot"`, when the
+   facts table holds batches of the stream but Python finds nothing of Spark's in the
+   checkpoint, `to_delta` raises `ValueError` saying the two may see different directories.
 6. **Tables too big to snapshot.** A table of billions of rows cannot be snapshotted within
    the CDC retention: seed it from a copy already in the lakehouse with `seed()`, then
    `to_delta(bootstrap=True)` starts from the seed without reading the table

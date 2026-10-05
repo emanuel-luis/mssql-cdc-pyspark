@@ -33,12 +33,13 @@ result = apply_changes(
     control_table="ops.table_finalization",
     facts_table="ops.ingestion_facts",
 )
-# {"rebuilt": False, "applied_lsn": "0x...", "finalized_until": datetime(...)}
+# {"rebuilt": False, "applied_lsn": "0x...", "finalized_until": datetime(...),
+#  "bronze_found": True}
 ```
 
 The result says whether this call rebuilt silver from a snapshot (`rebuilt`), how far
-bronze is now applied (`applied_lsn`) and silver's verdict (`finalized_until`). The first
-call that finds bronze counts as a rebuild.
+bronze is now applied (`applied_lsn`), silver's verdict (`finalized_until`) and whether
+bronze exists (`bronze_found`). The first call that finds bronze counts as a rebuild.
 
 To read the key from the capture instance's unique index instead of naming it, leave out
 `keys` and pass the stream's options:
@@ -62,7 +63,11 @@ A capture instance without a unique index fails with `ValueError` and asks for `
 Each call reads the capture instance's bronze rows beyond the last call and applies them
 with one Delta MERGE ([ADR 0019](../decisions/0019-silver-helper-applies-the-change-log.md)):
 
-- Per key, the latest image by `(_start_lsn, _command_id, _seqval, _operation)`. Operation 1
+- Per key, the latest image by `(_start_lsn, _command_id, _seqval, _operation)`, or
+  `(_start_lsn, _seqval, _operation)` when bronze has no `_command_id`
+  ([includeCommandId=false](../reference/options.md#includecommandid)): the order within a
+  transaction then follows `__$seqval`, which Microsoft's documentation says not to order
+  by. Operation 1
   deletes the key, and 0 (snapshot), 2 and 4 upsert it. Operation 3 (the row before an
   update) deletes its own key: the 4 of the same update outranks it, so it is the latest row
   only when the update moved the row to another key. Keys match with null-safe equality,
@@ -81,10 +86,12 @@ with one Delta MERGE ([ADR 0019](../decisions/0019-silver-helper-applies-the-cha
 - Silver's `finalized_until` is the bronze verdict as it stood before the call read bronze,
   truncated with `granularity` (`"hour"` by default). Bronze commits its rows before its
   verdict, so silver never claims more than it has applied. Without `facts_table` it is
-  never advanced: a chunked snapshot shows in the facts alone until its first wave lands. Gate silver consumers on the
-  silver name, as in [Finalization](finalization.md).
+  never advanced, and a warning says so (once per silver table in a process): a chunked
+  snapshot shows in the facts alone until its first wave lands. Gate silver consumers on
+  the silver name, as in [Finalization](finalization.md).
 - Until the stream has created bronze, a call does nothing and returns the previous
-  position and verdict.
+  position and verdict, with `bronze_found` false and a warning naming the table. A result
+  that keeps saying so is a wrong name, or arguments swapped, not a slow stream.
 
 Check how far bronze and silver are with one query on the control table:
 

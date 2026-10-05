@@ -21,7 +21,7 @@ changes.printSchema()
 | `_capture_instance` | STRING | the capture instance the row was read from: from a newer instance's start LSN on, that one ([Schema changes](../guides/schema-changes.md)) | the instance the snapshot was taken for |
 | `_start_lsn` | STRING | `__$start_lsn`, the commit LSN of the source transaction, as `0x` + 20 uppercase hex. All rows of a transaction share it; string order is commit order | the snapshot's LSN, recorded before the table was read |
 | `_seqval` | STRING | `__$seqval`, the change's position in the log, same format | NULL |
-| `_operation` | INT | 1 delete, 2 insert, 3 update (the row before), 4 update (the row after) | 0 |
+| `_operation` | INT | 1 delete, 2 insert, 3 update (the row before, with the NULLs [below](#nulls-in-change-rows)), 4 update (the row after) | 0 |
 | `_command_id` | INT | `__$command_id`, the order of the statement within its transaction, numbered per capture instance. Absent with `includeCommandId=false` | NULL |
 | `_commit_ts` | TIMESTAMP_NTZ | the commit time from `cdc.lsn_time_mapping`, converted to UTC ([sourceTimeZone](options.md#sourcetimezone)) | the commit time of `_start_lsn` |
 
@@ -84,6 +84,25 @@ stored. Every batch is cast to this schema before Spark sees it.
 
 With `columns`, the declared list and types are the schema, for example
 `order_id INT, status STRING, amount DECIMAL(18,2)`; the read casts to them.
+
+## NULLs in change rows
+
+SQL Server CDC does not store every value in the change table, so some change rows hold
+NULL where the source row had a value
+([cdc.<capture_instance>_CT](https://learn.microsoft.com/sql/relational-databases/system-tables/cdc-capture-instance-ct-transact-sql)):
+
+| Captured column | NULL in |
+|---|---|
+| a computed column | every change row |
+| `text`, `ntext`, `image` | operations 1 (delete) and 3 (the row before an update) |
+| `varchar(max)`, `nvarchar(max)`, `varbinary(max)` | operation 3, unless the update changed the column |
+
+The snapshot reads the source table, so its rows carry those values: a computed column has
+its value in snapshot rows and NULL in every change after them. A silver table then holds
+NULL for every key changed since the snapshot, and `reconcile()`, which hashes every
+captured column, reports those keys as `RECORD_DIFF`. Leave computed columns out of the
+capture instance (`@captured_column_list` of `sys.sp_cdc_enable_table`) and compute them
+downstream.
 
 ## Snapshot rows
 

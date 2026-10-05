@@ -5,8 +5,8 @@
 | Tool | Version | Notes |
 |---|---|---|
 | uv | 0.9+ | manages Python, the venv and `uv.lock` |
-| Python | 3.10–3.13 | CI uses 3.11; `uv python install 3.11` if none is present |
-| Java | 17 or 21 | required by Spark 4.x; `java` on `PATH` or `JAVA_HOME` set |
+| Python | 3.10–3.13 | CI runs 3.11 on every push and all four weekly; `uv python install 3.11` if none is present |
+| Java | 17 | required by Spark 4.x; CI runs 17, 21 is untested; `java` on `PATH` or `JAVA_HOME` set |
 | Docker | Engine (Linux) or Desktop (Windows) | SQL Server 2022 image is linux/amd64 |
 | Git | any | |
 
@@ -96,8 +96,12 @@ There is no `make`: `scripts\lab.ps1` has the same targets.
 
 Same on every platform (on Windows native, `scripts\lab.ps1 <target>` instead of `make`):
 
+`.env.example` leaves `MSSQL_SA_PASSWORD` empty: after copying it, set one in `.env` that
+meets SQL Server's password policy (at least 8 characters, three of upper case, lower
+case, digits and symbols), or the container does not start.
+
 ```bash
-cp .env.example .env                 # set MSSQL_SA_PASSWORD
+cp .env.example .env                 # then set MSSQL_SA_PASSWORD in .env
 docker compose up -d
 docker compose ps                    # wait for "healthy"
 uv run python -m lab.workload setup
@@ -162,16 +166,16 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
 `.github/workflows/ci.yml`:
 
 * `lint`: `ruff check`, `ruff format --check` and `mypy`; the other jobs wait for it.
-* `unit`: pytest with Delta on Ubuntu, Java 17, Python 3.11.
+* `unit`: pytest with Delta on Ubuntu, Java 17; Python 3.11 on every push, 3.10 to 3.13 on
+  the weekly schedule.
 * `integration`: `pytest -m sqlserver` (testcontainers on the runner's Docker), then the
   tests that take the `backend` fixture again with `MSSQL_CDC_TEST_BACKEND=arrow-odbc`, after
   installing ODBC Driver 18.
-* `lab`: a SQL Server 2022 service container with Agent, then workload, checks t2–t7, t9
-  and `examples/local_pipeline.py`. t1 and the destructive t7 run only on the weekly schedule
-  or a manual dispatch ("Run workflow"), and are `continue-on-error`. Results are uploaded
-  as the `lab-results` artifact.
+* `lab`: a SQL Server 2022 service container with Agent, then the workload, the lab checks
+  and `examples/local_pipeline.py` (the list is in `ci.yml`). t1 and the destructive t7 run only on the weekly schedule or a manual dispatch ("Run
+  workflow"), and are `continue-on-error`. Results are uploaded as the `lab-results`
+  artifact.
 
-## Releasing (later)
+## Releasing
 
-Not published to PyPI yet. Install from Git:
-`pip install "mssql-cdc-pyspark @ git+https://github.com/emanuel-luis/mssql-cdc-pyspark.git"`.
+See [Releasing](RELEASING.md).
