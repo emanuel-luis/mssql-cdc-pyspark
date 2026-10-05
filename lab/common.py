@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -100,10 +101,20 @@ def wait_for_rows(conn, capture_instance: str, expected: int, timeout: float = 1
 
 
 def save_result(name: str, payload: dict) -> Path:
+    """Persist ``payload`` with the server's build (@@VERSION's first line, which names the
+    CU), so a result is tied to the SQL Server it ran against. None when no server is
+    configured; checks such as t5 and t6 need none."""
+    server = None
+    if os.environ.get("MSSQL_SA_PASSWORD"):
+        try:
+            with closing(connect("master")) as conn:
+                server = scalar(conn, "SELECT @@VERSION").splitlines()[0]
+        except Exception as e:  # noqa: BLE001 - a result is saved even with the server down
+            server = f"unreachable ({type(e).__name__})"  # not the message: no connection details
     RESULTS.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = RESULTS / f"{name}-{stamp}.json"
-    path.write_text(json.dumps(payload, indent=2, default=str))
+    path.write_text(json.dumps({**payload, "server": server}, indent=2, default=str))
     return path
 
 
