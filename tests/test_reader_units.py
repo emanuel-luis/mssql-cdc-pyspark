@@ -102,6 +102,27 @@ def test_counts_read_as_integers():
     assert _reader(maxCommitsPerBatch="")._max_commits is None  # unlimited
 
 
+@pytest.mark.parametrize(
+    ("option", "attribute"),
+    [("failOnDataLoss", "fail_on_data_loss"), ("includeCommandId", "include_command_id")],
+)
+def test_a_boolean_option_is_true_or_false_or_an_error(option, attribute):
+    from mssql_cdc.source import MssqlCdcDataSource
+
+    for value in ("true", "TRUE", "1", " yes ", "Y"):
+        assert getattr(_reader(**{option: value}), attribute) is True
+    for value in ("false", "False", "0", "no", "N"):
+        assert getattr(_reader(**{option: value}), attribute) is False
+    for value in ("ture", "on", "off", ""):  # each used to read as false: the guard off
+        message = f"{option} must be true or false (or 1/0, yes/no, y/n), not {value!r}"
+        with pytest.raises(ValueError, match=re.escape(message)):
+            _reader(**{option: value})
+    with pytest.raises(ValueError, match="includeCommandId must be true or false"):
+        MssqlCdcDataSource(
+            {"captureInstance": CI, "columns": "id INT", "includeCommandId": "on"}
+        ).schema()
+
+
 def test_connect_timeout_must_be_a_non_negative_integer():
     from mssql_cdc.client import make_client
 

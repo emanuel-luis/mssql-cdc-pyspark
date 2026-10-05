@@ -8,8 +8,10 @@ from mssql_cdc.source import KNOWN_OPTIONS
 
 ROOT = Path(__file__).parents[1]
 PAGE = ROOT / "docs" / "reference" / "options.md"
-# _opt(options, "Name"...), _positive_int(options, "Name"...), opts.get("name"), opts["name"]
-READ = re.compile(r'(?:_opt|_positive_int)\(\s*[\w.]+,\s*"(\w+)"|opts(?:\.get\(|\[)"(\w+)"')
+# _opt, _positive_int, _bool or _non_negative(options, "Name"...), opts.get("name"), opts["name"]
+READ = re.compile(
+    r'(?:_opt|_positive_int|_bool|_non_negative)\(\s*[\w.]+,\s*"(\w+)"|opts(?:\.get\(|\[)"(\w+)"'
+)
 
 
 def test_every_option_the_source_reads_is_documented():

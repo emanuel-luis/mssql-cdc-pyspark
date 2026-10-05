@@ -1288,8 +1288,12 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
     with pytest.raises(ValueError, match="facts_table"):
         cdc.to_delta(target, "x", ckpt, on_data_loss="resnapshot")
     # a purge while the query runs would be skipped past, out of the next pre-flight's sight
-    for off in ("false", "no", "off"):
-        with pytest.raises(ValueError, match="needs failOnDataLoss true"):
+    for off, message in [
+        ("false", "needs failOnDataLoss true"),
+        ("no", "needs failOnDataLoss true"),
+        ("off", "failOnDataLoss must be true or false"),  # not a boolean: never read as false
+    ]:
+        with pytest.raises(ValueError, match=message):
             stream(spark, {**options, "failOnDataLoss": off}).to_delta(
                 target, "x", ckpt, "facts", on_data_loss="resnapshot"
             )

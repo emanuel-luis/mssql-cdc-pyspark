@@ -939,7 +939,7 @@ class CdcStream:
         write it and the driver reads it with Python file calls.
         """
         from .sink import delta_sink
-        from .source import _truthy
+        from .source import _bool
 
         if on_data_loss not in ("fail", "resnapshot"):
             raise ValueError(f"on_data_loss must be 'fail' or 'resnapshot', not {on_data_loss!r}")
@@ -981,8 +981,8 @@ class CdcStream:
                     "on_data_loss='resnapshot' needs a facts_table: its event rows "
                     "tell downstream to rebuild, and from which LSN"
                 )
-            fail = _opt(self.options, "failOnDataLoss")
-            if fail is not None and not _truthy(fail):
+            if not _bool(self.options, "failOnDataLoss", "true"):  # a typo raises there
+                fail = _opt(self.options, "failOnDataLoss")
                 raise ValueError(
                     f"on_data_loss='resnapshot' needs failOnDataLoss true, not {fail!r}: a purge "
                     "while the query runs would be skipped past, and the next run's check could "

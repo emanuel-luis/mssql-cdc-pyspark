@@ -111,8 +111,18 @@ def _ddl_names(ddl: str) -> list[str]:
     return names
 
 
-def _truthy(value) -> bool:
-    return str(value).strip().lower() in ("1", "true", "yes", "y")
+_BOOLEANS = {"true": True, "1": True, "yes": True, "y": True}
+_BOOLEANS |= {"false": False, "0": False, "no": False, "n": False}
+
+
+def _bool(options, name: str, default: str) -> bool:
+    """Option ``name`` as a boolean, in any case; any other value is a ValueError naming it,
+    so a typo such as ``ture`` never turns a guard off."""
+    value = _opt(options, name, default)
+    parsed = _BOOLEANS.get(str(value).strip().lower())
+    if parsed is None:
+        raise ValueError(f"{name} must be true or false (or 1/0, yes/no, y/n), not {value!r}")
+    return parsed
 
 
 def _positive_int(options, name: str, default=None, allowed="a positive integer", hint="") -> int:
@@ -300,7 +310,7 @@ class MssqlCdcDataSource(DataSource):
                 f"adds ({', '.join(sorted(RESERVED_COLUMNS))}, in any case): list 'columns' "
                 "without them, or read a capture instance that does not capture them."
             )
-        include_cmd = _truthy(_opt(self.options, "includeCommandId", "true"))
+        include_cmd = _bool(self.options, "includeCommandId", "true")
         meta = [f"{n} {t}" for n, t in METADATA_COLUMNS if include_cmd or n != "_command_id"]
         return ", ".join(meta) + ", " + columns
 
@@ -360,8 +370,8 @@ class _Common:
         self.capture_instance = _opt(options, "captureInstance")
         if not self.capture_instance:
             raise ValueError("Option 'captureInstance' is required (e.g. 'dbo_orders')")
-        self.include_command_id = _truthy(_opt(options, "includeCommandId", "true"))
-        self.fail_on_data_loss = _truthy(_opt(options, "failOnDataLoss", "true"))
+        self.include_command_id = _bool(options, "includeCommandId", "true")
+        self.fail_on_data_loss = _bool(options, "failOnDataLoss", "true")
         num_partitions = str(_opt(options, "numPartitions", "auto")).strip().lower()
         # auto: the session's cores (register()), else this driver node's CPUs. Each
         # partition opens its own connection to SQL Server.

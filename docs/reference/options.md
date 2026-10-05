@@ -26,8 +26,9 @@ query = stream(spark, options).to_delta(
 Option names are case-insensitive (`startinglsn` works). `stream()` logs one WARNING naming
 any option it does not know, in your job's log, which is how a misspelt name shows; the reader
 logs it again in the driver's stderr log, also with `spark.readStream`. Pass values as strings, as
-Spark does. A boolean option is true for `true`, `1`, `yes` or `y`, in any case, and false for
-anything else.
+Spark does. A boolean option is true for `true`, `1`, `yes` or `y` and false for `false`, `0`,
+`no` or `n`, in any case; anything else raises `ValueError` naming the option, so a typo such as
+`failOnDataLoss=ture` never turns a guard off.
 
 ## Source options
 
