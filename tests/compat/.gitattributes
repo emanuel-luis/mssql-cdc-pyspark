@@ -1,0 +1,2 @@
+# State files a release wrote, read back as they are: never convert their line endings.
+* -text

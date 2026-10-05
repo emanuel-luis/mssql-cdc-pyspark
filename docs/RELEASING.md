@@ -72,6 +72,25 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
    `release` run ("Review deployments") only once the `ci` run on the tag is green: the
    approval is the only thing that waits for it. Then install from PyPI in a clean
    environment, as in the dry run without the TestPyPI index.
+6. Keep the state the release writes, so later versions are tested against it
+   ([ADR 0021](decisions/0021-compatibility-policy-for-0x.md) amendment 3). On Linux (or
+   WSL), in a fresh virtual environment holding the wheel from PyPI and the `pyspark` and
+   `delta-spark` versions of the tag's `uv.lock`, from the repository root:
+
+   ```bash
+   python -m venv /tmp/compat-X.Y.Z && . /tmp/compat-X.Y.Z/bin/activate
+   pip install mssql-cdc-pyspark==X.Y.Z pyspark==<uv.lock> delta-spark==<uv.lock>
+   python tests/compat/generate.py tests/compat/X.Y.Z
+   ```
+
+   On the fake backend it runs a bootstrap, batches, a re-snapshot into generation 1 and
+   batches in it, and writes the checkpoint, the bronze, silver, facts and control tables
+   and a `manifest.json` (about 300 KiB). `tests/compat/test_compat.py` copies every
+   `tests/compat/<version>` and resumes it with the current code: no duplicates, offsets
+   carry on, every table migrated, silver applied, the next re-snapshot. Commit the
+   directory to `main` (`test(compat): X.Y.Z state`). If a "Breaking" change of the release
+   stops `generate.py` from running on it, adapt the script; the directories already
+   committed keep their own `manifest.json`. A release candidate gets none.
 
 `build` refuses a tag whose commit is not on `main`, and a version without its
 `## [X.Y.Z]` heading in `CHANGELOG.md`. If `build` fails on the tag (a version mismatch, a

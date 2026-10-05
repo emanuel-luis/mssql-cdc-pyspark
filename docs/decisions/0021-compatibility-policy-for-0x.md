@@ -3,7 +3,8 @@
 **Status:** accepted  
 **Date:** 2026-09-30T11:07:08-03:00  
 **Amended:** 2026-10-01T15:55:00-03:00, the public surface is the documentation site's reference (API, options, output schema), not the README  
-**Amended:** 2026-10-05T06:01:09-03:00, an older release keeps writing tables a newer one migrated, unless a migration sets `mssql_cdc.min_version` (amendment 2, ADR 0013)
+**Amended:** 2026-10-05T06:01:09-03:00, an older release keeps writing tables a newer one migrated, unless a migration sets `mssql_cdc.min_version` (amendment 2, ADR 0013)  
+**Amended:** 2026-10-05T12:35:09-03:00, every release keeps the state its wheel writes under `tests/compat/<version>`, and the current code must resume it (amendment 3)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -33,6 +34,13 @@ The Python API, on the other hand, is young and will change.
   own (as appended table migrations do), or the release notes give the exact steps.
 * Every release entry in `CHANGELOG.md` has a "State compatibility" line: what it does to
   offsets, checkpoint layout and table migrations, with ADR links.
+* Every release keeps the state it writes (amendment 3): `tests/compat/generate.py`, run
+  with the published wheel, writes a checkpoint with two generations and the bronze,
+  silver, facts and control tables to `tests/compat/<version>`, and
+  `tests/compat/test_compat.py` resumes each such directory with the current code
+  ([RELEASING.md](../RELEASING.md), step 6). Tests that rebuild an old table from today's
+  column lists follow any edit of those lists; bytes a release wrote do not. 0.1.0's were
+  written from its PyPI wheel after the fact.
 * The public surface is what the documentation site's reference documents (amendment, ADR
   0024): the objects listed in `docs/reference/api.md` (`stream()`, the `.to_delta()` and
   `.snapshot()` methods of what it returns, `register()`, `apply_changes()`,

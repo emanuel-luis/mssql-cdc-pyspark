@@ -1,0 +1,3 @@
+{"start_lsn": "0x0000002A000001000091", "seqval": "0x0000002A000001000092", "command_id": 1, "operation": 3, "row": {"order_id": 3, "status": "new"}}
+{"start_lsn": "0x0000002A000001000091", "seqval": "0x0000002A000001000093", "command_id": 2, "operation": 4, "row": {"order_id": 3, "status": "paid"}}
+{"start_lsn": "0x0000002A0000010000A1", "seqval": "0x0000002A0000010000A2", "command_id": 1, "operation": 2, "row": {"order_id": 5, "status": "new"}}
