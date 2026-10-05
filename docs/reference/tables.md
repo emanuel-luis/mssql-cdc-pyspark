@@ -114,6 +114,11 @@ bronze do not reach these copies: give the facts table and bronze's history the 
 policy as bronze. When keys are natural or personal identifiers (a document number, an
 e-mail address), keep one facts table per access domain rather than one for every table.
 
+The `event` values, the keys of these JSON payloads and those of a wave's `userMetadata`
+are state a later release reads back: a release only adds keys, never renames or removes
+one, so a query that parses `detail` keeps working across upgrades
+([ADR 0021](../decisions/0021-compatibility-policy-for-0x.md)).
+
 The kinds of row, and the Delta `txnAppId` and `txnVersion` that make each write idempotent:
 
 | Row | `event` | `batch_id` | `rows` | `app_id` | Idempotency key |
