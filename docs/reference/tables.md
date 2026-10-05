@@ -105,6 +105,14 @@ monitoring, the data-loss recovery and the schema-change events all need it.
 | `target` | STRING | Table name or path the batch was written to. |
 | `written_at` | TIMESTAMP_NTZ | When this facts row was written, after the target commit, UTC. |
 
+`detail` copies source key values. A chunked snapshot's 'snapshot_open', 'snapshot_plan'
+and 'snapshot_chunk' rows hold the key values at its chunk boundaries (with a composite or
+non-integer key, real keys of the table every `chunk_rows` rows), and so does the
+`userMetadata` of each wave's commit in bronze's history. Column masks and row filters on
+bronze do not reach these copies: give the facts table and bronze's history the same access
+policy as bronze. When keys are natural or personal identifiers (a document number, an
+e-mail address), keep one facts table per access domain rather than one for every table.
+
 The kinds of row, and the Delta `txnAppId` and `txnVersion` that make each write idempotent:
 
 | Row | `event` | `batch_id` | `rows` | `app_id` | Idempotency key |
@@ -145,7 +153,7 @@ silver table.
 | Column | Type | Comment |
 |---|---|---|
 | `table_name` | STRING | The table this verdict is about: the name passed to finalization.advance(), usually the target table. One row per table. |
-| `finalized_until` | TIMESTAMP_NTZ | The verdict, UTC. Every period that ends at or before this instant is complete in the table: no source commit at or before it can still arrive. It only moves forward. A consumer of the period [start, end) waits for finalized_until >= end. |
+| `finalized_until` | TIMESTAMP_NTZ | The verdict, UTC. Every period that ends at or before this instant is complete in the table: no source commit at or before it can still arrive. Over a recorded loss gap (lost_from_ts..lost_to_ts of the facts' 'resnapshot' rows), a change-log table's verdict means only that nothing more will arrive, not that the gap's changes are in it. It only moves forward. A consumer of the period [start, end) waits for finalized_until >= end. |
 | `end_lsn` | STRING | Source commit LSN (0x + 20 hex) of the batch end that last moved the verdict: how far the source had been read and committed to the table. |
 | `end_commit_ts` | TIMESTAMP_NTZ | Commit time of end_lsn, UTC. finalized_until is this instant truncated to the period (an hour by default), because transactions sharing this exact commit time may still be arriving. |
 | `updated_at` | TIMESTAMP_NTZ | When the verdict last moved, UTC. |
@@ -157,7 +165,9 @@ silver table.
 `finalization.advance` MERGEs on `table_name` and updates the row only when the new verdict
 is later, so it never moves back. `apply_changes` records `applied_lsn` and `snapshot_lsn`
 for its silver table (and, while a chunked snapshot is open, `open_snapshot_lsn` and
-`snapshot_wave`), then advances that table's verdict. See
+`snapshot_wave`), then advances that table's verdict. Every table shares the control table,
+and in OSS Delta two MERGEs on it conflict even when they change other rows, so both retry a
+MERGE that loses to a concurrent commit, for up to a minute. See
 [Finalization](../guides/finalization.md) and [Silver](../guides/silver.md).
 
 ```sql
@@ -232,7 +242,7 @@ The versions, from `mssql_cdc.migrations.<kind>.MIGRATIONS`:
 |---|---|---|
 | bronze | 2 | 1 capture instance comments, 2 snapshot and chunk columns |
 | facts | 9 | 1 network and read metrics, 2 retention headroom, 3 snapshot events, 4 lag metrics, 5 end offset, 6 source change events, 7 chunked snapshot events, 8 snapshot plans and modes, 9 full snapshot opens per run |
-| control | 3 | 1 add `applied_lsn` and `snapshot_lsn`, 2 add `open_snapshot_lsn` and `snapshot_wave`, 3 open re-snapshots too |
+| control | 4 | 1 add `applied_lsn` and `snapshot_lsn`, 2 add `open_snapshot_lsn` and `snapshot_wave`, 3 open re-snapshots too, 4 the verdict over a loss gap |
 | silver | 0 | none |
 | reconcile | 0 | none |
 

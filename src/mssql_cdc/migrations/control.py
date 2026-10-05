@@ -66,6 +66,19 @@ OPEN_COMMENTS = {
     ),
 }
 
+# Migration 4 (2026-10-04): over a re-snapshot's loss gap the verdict of a change-log table
+# says less than "complete" (ADR 0018). Comment only; the creation columns take it.
+VERDICT_COMMENTS = {
+    "finalized_until": (
+        "The verdict, UTC. Every period that ends at or before this instant is complete in the "
+        "table: no source commit at or before it can still arrive. Over a recorded loss gap "
+        "(lost_from_ts..lost_to_ts of the facts' 'resnapshot' rows), a change-log table's "
+        "verdict means only that nothing more will arrive, not that the gap's changes are in "
+        "it. It only moves forward. A consumer of the period [start, end) waits for "
+        "finalized_until >= end."
+    ),
+}
+
 
 MIGRATIONS: list[Migration] = [
     Migration(
@@ -78,5 +91,9 @@ MIGRATIONS: list[Migration] = [
     ),
     Migration(
         "open re-snapshots too", lambda spark, table: set_comments(spark, table, OPEN_COMMENTS)
+    ),
+    Migration(
+        "the verdict over a loss gap",
+        lambda spark, table: set_comments(spark, table, VERDICT_COMMENTS),
     ),
 ]

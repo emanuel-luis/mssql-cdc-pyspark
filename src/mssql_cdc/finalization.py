@@ -5,7 +5,10 @@ Two layers, in the spirit of Pinterest's partition finalization:
 * **Facts**, per micro-batch: what was written (row counts, LSN and commit-time
   ranges). See ``mssql_cdc.sink``.
 * **Verdict**, per table: ``finalized_until``. Every period strictly before it is
-  complete in the target table and will not receive more source commits.
+  complete in the target table and will not receive more source commits. Over a loss gap
+  a re-snapshot recorded (``lost_from_ts``..``lost_to_ts`` of the facts' 'resnapshot'
+  rows), a change-log table's verdict means only that nothing more will arrive, not that
+  the gap's changes are in it (ADR 0018).
 
 Why the verdict is sound for SQL Server CDC: a batch's end LSN never exceeds
 ``sys.fn_cdc_get_max_lsn()``, the last LSN the capture process has processed, and
@@ -24,18 +27,21 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pyspark.sql.streaming import StreamingQueryListener
 
 from . import migrations
-from .migrations.control import APPLIED_COLUMNS, OPEN_COMMENTS, WAVE_COLUMNS
+from .migrations.control import APPLIED_COLUMNS, OPEN_COMMENTS, VERDICT_COMMENTS, WAVE_COLUMNS
 from .tables import delta_table, table_ref  # noqa: F401 - table_ref re-exported
 
 if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
     from pyspark.sql.streaming.listener import (
         QueryProgressEvent,
         QueryStartedEvent,
@@ -43,14 +49,54 @@ if TYPE_CHECKING:
     )
 
 _log = logging.getLogger(__name__)
-_GRANULARITIES = ("minute", "hour", "day")
-_ATTEMPTS = 3  # per progress, 1 s then 2 s apart
+Granularity = Literal["minute", "hour", "day"]
+_GRANULARITIES = get_args(Granularity)
+_RETRY_SECONDS = 60  # how long a control-table MERGE retries concurrent commits
+_REPEAT_SECONDS = 600  # a tracker's failure streak: one WARNING at most this often
+# Delta's concurrent-modification errors: by class on classic PySpark, by error class in the
+# message on Spark Connect, which raises its own exception types
+_CONFLICTS = {
+    "ConcurrentAppendException",
+    "ConcurrentDeleteReadException",
+    "ConcurrentDeleteDeleteException",
+    "ConcurrentTransactionException",
+    "MetadataChangedException",
+}
+_CONFLICT_CODES = ("DELTA_CONCURRENT", "DELTA_METADATA_CHANGED")
+
+
+def _check_granularity(granularity: str) -> None:
+    if granularity.lower() not in _GRANULARITIES:
+        raise ValueError(f"granularity must be one of {_GRANULARITIES}")
+
+
+def _conflict(exc: BaseException) -> bool:
+    if _CONFLICTS.intersection(c.__name__ for c in type(exc).__mro__):
+        return True
+    return any(code in str(exc) for code in _CONFLICT_CODES)
+
+
+def _retrying(merge: Callable[[], object]) -> None:
+    """Run ``merge``, a MERGE into the control table, again while it loses to a concurrent
+    commit: in OSS Delta two MERGEs on the small table conflict even when they change other
+    rows (ADR 0026), and every tracker and silver job shares it. Exponential backoff with
+    full jitter, for up to ``_RETRY_SECONDS``; then, or on any other error, it raises."""
+    deadline, attempt = time.monotonic() + _RETRY_SECONDS, 0
+    while True:
+        try:
+            merge()
+            return
+        except Exception as exc:
+            left = deadline - time.monotonic()
+            if not _conflict(exc) or left <= 0:
+                raise
+            time.sleep(min(left, random.uniform(0, min(10.0, 0.5 * 2**attempt))))
+            attempt += 1
 
 
 def truncate(ts: datetime, granularity: str = "hour") -> datetime:
+    _check_granularity(granularity)
     g = granularity.lower()
-    if g not in _GRANULARITIES:
-        raise ValueError(f"granularity must be one of {_GRANULARITIES}")
     ts = ts.replace(second=0, microsecond=0)
     if g in ("hour", "day"):
         ts = ts.replace(minute=0)
@@ -93,15 +139,7 @@ CONTROL_COLUMNS = [
             "finalization.advance(), usually the target table. One row per table."
         ),
     ),
-    (
-        "finalized_until",
-        "TIMESTAMP_NTZ",
-        (
-            "The verdict, UTC. Every period that ends at or before "
-            "this instant is complete in the table: no source commit at or before it can still arrive. "
-            "It only moves forward. A consumer of the period [start, end) waits for finalized_until >= end."
-        ),
-    ),
+    ("finalized_until", "TIMESTAMP_NTZ", VERDICT_COMMENTS["finalized_until"]),
     (
         "end_lsn",
         "STRING",
@@ -125,16 +163,21 @@ CONTROL_COLUMNS = [
 ]
 
 
-def ensure_control_table(spark, control_table: str) -> None:
+def ensure_control_table(spark: SparkSession, control_table: str) -> None:
     migrations.ensure(spark, control_table, "control", CONTROL_COLUMNS, CONTROL_COMMENT)
 
 
 def advance(
-    spark, control_table: str, table_name: str, end_offset: dict | None, granularity: str = "hour"
+    spark: SparkSession,
+    control_table: str,
+    table_name: str,
+    end_offset: dict | None,
+    granularity: Granularity = "hour",
 ) -> datetime | None:
     """Monotonically advance ``finalized_until`` for ``table_name``.
 
-    Call only after the batch that produced ``end_offset`` is committed.
+    Call only after the batch that produced ``end_offset`` is committed. A MERGE that loses
+    to a concurrent commit on the control table is retried for up to a minute.
     """
     cand = candidate(end_offset, granularity)
     ensure_control_table(spark, control_table)
@@ -158,28 +201,37 @@ def advance(
             "end_commit_ts": "s.end_ts",
             "updated_at": "s.now",
         }
-        (
-            delta_table(spark, control_table)
-            .alias("t")
-            .merge(src.alias("s"), "t.table_name = s.table_name")
-            # never backwards; NULL on a row apply_changes created before any verdict
-            .whenMatchedUpdate(
-                condition="t.finalized_until IS NULL OR s.cand > t.finalized_until", set=changes
+        _retrying(
+            lambda: (
+                delta_table(spark, control_table)
+                .alias("t")
+                .merge(src.alias("s"), "t.table_name = s.table_name")
+                # never backwards; NULL on a row apply_changes created before any verdict
+                .whenMatchedUpdate(
+                    condition="t.finalized_until IS NULL OR s.cand > t.finalized_until", set=changes
+                )
+                .whenNotMatchedInsert(values={"table_name": "s.table_name", **changes})
+                .execute()
             )
-            .whenNotMatchedInsert(values={"table_name": "s.table_name", **changes})
-            .execute()
         )
     return finalized_until(spark, control_table, table_name)
 
 
-def finalized_until(spark, control_table: str, table_name: str) -> datetime | None:
+def finalized_until(spark: SparkSession, control_table: str, table_name: str) -> datetime | None:
     df = delta_table(spark, control_table).toDF()
     rows = df.where(df.table_name == table_name).select("finalized_until").collect()
     return rows[0][0] if rows else None
 
 
-def is_final(spark, control_table: str, table_name: str, period_end: datetime) -> bool:
-    """True when the period ending at ``period_end`` (exclusive) is complete."""
+def is_final(
+    spark: SparkSession, control_table: str, table_name: str, period_end: datetime
+) -> bool:
+    """True when the period ending at ``period_end`` (exclusive) is complete: no source
+    commit in it can still arrive. Over a loss gap a re-snapshot recorded (the facts'
+    'resnapshot' rows), a change-log table's period is final without the gap's changes.
+    An aware ``period_end`` is taken in UTC, as the verdict is."""
+    if period_end.tzinfo:
+        period_end = period_end.astimezone(timezone.utc).replace(tzinfo=None)
     fu = finalized_until(spark, control_table, table_name)
     return fu is not None and period_end <= fu
 
@@ -194,22 +246,32 @@ class FinalizationListener(StreamingQueryListener):
     thread, which calls ``advance``. A progress that arrives while an advance runs replaces
     the one still waiting: the newest end offset implies the older ones. The worker skips
     an end offset that does not move the verdict, so the control table gets a commit per
-    period, not per batch. A failed advance is tried twice more, 1 s and 2 s later (a MERGE
-    of another tracker on the same control table conflicts with it), then logged; the next
-    progress tries again. When the run terminates, the worker applies what is left, stops
-    and removes the listener (on Spark Connect it leaves it registered: see ``_run``).
+    period, not per batch. ``advance`` itself retries a MERGE that loses to another
+    tracker's on the same control table; a verdict that still fails is logged, and the next
+    progress tries again. ``last_error`` is the error of the last attempt (None once one
+    succeeds) and ``failures`` how many failed in a row: the first of a streak is logged as
+    an ERROR, then a WARNING at most every 10 minutes until one succeeds. When the run
+    terminates, the worker applies what is left, stops and removes the listener (on Spark
+    Connect it leaves it registered: see ``_run``).
     """
 
     def __init__(
-        self, spark, run_id: str, control_table: str, table_name: str, granularity: str = "hour"
+        self,
+        spark: SparkSession,
+        run_id: str,
+        control_table: str,
+        table_name: str,
+        granularity: Granularity = "hour",
     ):
-        if granularity.lower() not in _GRANULARITIES:
-            raise ValueError(f"granularity must be one of {_GRANULARITIES}")
+        _check_granularity(granularity)
         self._session, self._run_id = spark, str(run_id)
         self._control, self._table, self._granularity = control_table, table_name, granularity
         self._cond = threading.Condition()
         self._progress: Any = None  # the newest progress not yet applied
         self._stopped = False
+        self.last_error: Exception | None = None
+        self.failures = 0
+        self._warned = 0.0  # time.monotonic() of the streak's last log
         self._worker = threading.Thread(
             target=self._run, name=f"mssql-cdc-finalization {table_name}", daemon=True
         )
@@ -244,26 +306,15 @@ class FinalizationListener(StreamingQueryListener):
                 progress, self._progress = self._progress, None
             if progress is None:  # stopped, nothing left to apply
                 break
-            # a MERGE of another tracker on the same control table can conflict with this one;
-            # after the run terminates no next progress would retry it
-            for attempt in range(1, _ATTEMPTS + 1):
-                try:
-                    end = end_offset_from_progress(progress)
-                    cand = candidate(end, self._granularity)
-                    if cand is not None and (last is None or cand > last):
-                        advance(self._session, self._control, self._table, end, self._granularity)
-                        last = cand
-                    break
-                except Exception:  # noqa: BLE001 - the worker must survive
-                    _log.warning(
-                        "finalized_until of %s not advanced (attempt %d of %d)",
-                        self._table,
-                        attempt,
-                        _ATTEMPTS,
-                        exc_info=True,
-                    )
-                    if attempt < _ATTEMPTS:
-                        time.sleep(attempt)
+            try:
+                end = end_offset_from_progress(progress)
+                cand = candidate(end, self._granularity)
+                if cand is not None and (last is None or cand > last):
+                    advance(self._session, self._control, self._table, end, self._granularity)
+                    last = cand  # not on a failure: the next progress tries again
+                    self.last_error, self.failures = None, 0
+            except Exception as exc:  # noqa: BLE001 - the worker must survive
+                self._failed(exc)
         if type(self._session).__module__.startswith("pyspark.sql.connect"):
             # PySpark 4.2.0's Connect client removes its last listener under the lock its
             # event thread posts under, then joins that thread: an event in between hangs
@@ -274,15 +325,37 @@ class FinalizationListener(StreamingQueryListener):
         except Exception:  # noqa: BLE001 - a stopped session has no listeners left to remove
             _log.warning("could not remove the finalization listener of %s", self._table)
 
+    def _failed(self, exc: Exception) -> None:
+        """Log a failed verdict: the first of a streak with its traceback, as an ERROR (a
+        permanent one, such as no MODIFY on the control table, fails on every progress, about
+        every 10 s when idle), then one WARNING at most every ``_REPEAT_SECONDS``."""
+        n, now = self.failures + 1, time.monotonic()
+        if n == 1:
+            _log.error("finalized_until of %s not advanced", self._table, exc_info=True)
+            self._warned = now
+        elif now - self._warned >= _REPEAT_SECONDS:
+            _log.warning(
+                "finalized_until of %s still not advanced (%d failures in a row): %s",
+                self._table,
+                n,
+                exc,
+            )
+            self._warned = now
+        self.last_error, self.failures = exc, n
+
     def join(self, timeout: float | None = None) -> bool:
-        """Wait until the query has terminated and its last verdict is written (or failed
-        three times, and logged). False when ``timeout`` seconds pass first."""
+        """Wait until the query has terminated and its last verdict is written (or failed,
+        and logged: see ``last_error``). False when ``timeout`` seconds pass first."""
         self._worker.join(timeout)
         return not self._worker.is_alive()
 
 
 def track(
-    spark, query, control_table: str, table_name: str, granularity: str = "hour"
+    spark: SparkSession,
+    query,
+    control_table: str,
+    table_name: str,
+    granularity: Granularity = "hour",
 ) -> FinalizationListener:
     """Advance ``finalized_until`` of ``table_name`` after every batch of ``query``, a started
     StreamingQuery that writes it, until the query terminates; returns the listener.

@@ -313,19 +313,29 @@ def test_silver_follows_the_switch_to_a_newer_capture_instance_and_gains_its_col
 def test_a_control_table_at_version_0_gains_applied_lsn_and_snapshot_wave(delta_spark, workdir):
     from mssql_cdc import migrations, tables
     from mssql_cdc.finalization import CONTROL_COLUMNS
-    from mssql_cdc.migrations.control import APPLIED_COLUMNS, OPEN_COMMENTS, WAVE_COLUMNS
+    from mssql_cdc.migrations.control import (
+        APPLIED_COLUMNS,
+        OPEN_COMMENTS,
+        VERDICT_COMMENTS,
+        WAVE_COLUMNS,
+    )
 
     old = os.path.join(workdir, "control_v0")
     added = {name for name, _, _ in APPLIED_COLUMNS + WAVE_COLUMNS}
     tables.create_if_not_exists(
         delta_spark,
         old,
-        [c for c in CONTROL_COLUMNS if c[0] not in added],
+        [
+            (n, t, c if n not in VERDICT_COMMENTS else "v0's")
+            for n, t, c in CONTROL_COLUMNS
+            if n not in added
+        ],
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(delta_spark, old, "control") == 3
+    assert migrations.migrate(delta_spark, old, "control") == 4
     schema = delta_spark.read.format("delta").load(old).schema
     assert schema["open_snapshot_lsn"].metadata["comment"] == OPEN_COMMENTS["open_snapshot_lsn"]
+    assert schema["finalized_until"].metadata["comment"] == VERDICT_COMMENTS["finalized_until"]
     types = {"applied_lsn": "string", "snapshot_lsn": "string", "open_snapshot_lsn": "string"}
     for name, data_type in {**types, "snapshot_wave": "int"}.items():
         assert (
