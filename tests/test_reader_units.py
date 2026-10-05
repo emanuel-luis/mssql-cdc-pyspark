@@ -1,6 +1,7 @@
 """The stream reader's own logic without a SparkSession (pyspark is imported, never started):
 what crosses to the executors, read()'s cleanup, offsets and option checks."""
 
+import re
 import threading
 from datetime import datetime, timedelta
 
@@ -72,6 +73,49 @@ class Live:
 
     def close(self):
         self.closed = True
+
+
+# -- options ------------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("numPartitions", "four", "numPartitions must be 'auto' or a positive integer, not 'four'"),
+        ("numPartitions", "0", "numPartitions must be 'auto' or a positive integer, not '0'"),
+        ("arrowBatchSize", "0", "arrowBatchSize must be a positive integer, not '0'"),
+        ("arrowBatchSize", "1e4", "arrowBatchSize must be a positive integer, not '1e4'"),
+        (  # it used to mean unlimited, silently
+            "maxCommitsPerBatch",
+            "0",
+            "maxCommitsPerBatch must be a positive integer, not '0'; omit it to read up to max_lsn",
+        ),
+        ("maxCommitsPerBatch", "-5", "maxCommitsPerBatch must be a positive integer, not '-5'"),
+    ],
+)
+def test_a_count_option_must_be_a_positive_integer(option, value, message):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        _reader(**{option: value})
+
+
+def test_counts_read_as_integers():
+    reader = _reader(numPartitions=" 3 ", arrowBatchSize="500", maxCommitsPerBatch="7")
+    assert (reader.num_partitions, reader.batch_size, reader._max_commits) == (3, 500, 7)
+    assert _reader(maxCommitsPerBatch="")._max_commits is None  # unlimited
+
+
+def test_connect_timeout_must_be_a_non_negative_integer():
+    from mssql_cdc.client import make_client
+
+    for value in ("-1", "soon"):
+        message = f"connectTimeout must be a non-negative integer (seconds), not '{value}'"
+        with pytest.raises(ValueError, match=re.escape(message)):
+            make_client({"connectionString": "Server=x", "connectTimeout": value})
+
+
+def test_an_unknown_option_is_warned_about(caplog):
+    with caplog.at_level("WARNING", logger="mssql_cdc.source"):
+        _reader(maxCommitPerBatch="5", NUMPARTITIONS="2")  # a typo; known in any case
+    [warning] = [r.getMessage() for r in caplog.records if "unknown option" in r.getMessage()]
+    assert "maxCommitPerBatch" in warning and "NUMPARTITIONS" not in warning
 
 
 # -- invariant 5: executors are stateless ---------------------------------------------------

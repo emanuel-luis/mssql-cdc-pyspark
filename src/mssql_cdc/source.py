@@ -95,6 +95,45 @@ def _truthy(value) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "y")
 
 
+def _positive_int(options, name: str, default=None, allowed="a positive integer", hint="") -> int:
+    """Option ``name`` as an integer of at least 1; a ValueError names it and its value."""
+    value = _opt(options, name, default)
+    try:
+        n = int(str(value).strip())
+    except ValueError:
+        n = 0
+    if n < 1:
+        raise ValueError(f"{name} must be {allowed}, not {value!r}{hint}")
+    return n
+
+
+# Every option the source reads, in lower case (Spark's option names ignore case); any other
+# is warned about, since a misspelt one would silently leave its default in force.
+KNOWN_OPTIONS = frozenset(
+    {
+        "captureinstance",
+        "connectionstring",
+        "backend",
+        "sourcetimezone",
+        "connecttimeout",
+        "startinglsn",
+        "maxcommitsperbatch",
+        "numpartitions",
+        "failondataloss",
+        "includecommandid",
+        "columns",
+        "arrowbatchsize",
+        "metricspath",
+        "schemachangepolicy",
+        "isolationlevel",
+        "snapshotchunks",
+        "snapshotkeys",
+        "snapshotlsn",
+        "fakepath",
+    }
+)
+
+
 # -- types across schema changes (ADR 0023) ------------------------------------
 _INTS = ["tinyint", "smallint", "int", "bigint"]
 _DIGITS = {"tinyint": 3, "smallint": 5, "int": 10, "bigint": 20}
@@ -277,6 +316,12 @@ class _Common:
 
     def __init__(self, options: dict, schema, default_num_partitions: int | None = None):
         self.options = options
+        unknown = sorted(str(k) for k in options if str(k).lower() not in KNOWN_OPTIONS)
+        if unknown:
+            _log.warning(
+                "mssql_cdc: unknown option(s) %s ignored; see docs/reference/options.md",
+                ", ".join(unknown),
+            )
         self.capture_instance = _opt(options, "captureInstance")
         if not self.capture_instance:
             raise ValueError("Option 'captureInstance' is required (e.g. 'dbo_orders')")
@@ -288,9 +333,10 @@ class _Common:
         self.num_partitions = (
             max(1, default_num_partitions or os.cpu_count() or 1)
             if num_partitions == "auto"
-            else int(num_partitions)
+            else _positive_int(options, "numPartitions", allowed="'auto' or a positive integer")
         )
-        self.batch_size = int(_opt(options, "arrowBatchSize", "10000"))
+        # at least 1: with 0, mssql-python can return an empty first batch and read nothing
+        self.batch_size = _positive_int(options, "arrowBatchSize", "10000")
         # optional: a directory (local or FUSE, e.g. /Volumes/...) where each partition leaves
         # its metrics for delta_sink(metrics_path=...) to fold into the batch facts
         self.metrics_path = _opt(options, "metricsPath")
@@ -686,8 +732,12 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
         # an idle stream: the max_lsn latestOffset read last, and the offset last reported
         self._seen_max: str | None = None
         self._reported: dict | None = None
-        max_commits = _opt(options, "maxCommitsPerBatch")
-        self._max_commits = int(max_commits) if max_commits else None
+        max_commits = _opt(options, "maxCommitsPerBatch")  # 0 used to mean unlimited, silently
+        self._max_commits = (
+            _positive_int(options, "maxCommitsPerBatch", hint="; omit it to read up to max_lsn")
+            if max_commits
+            else None
+        )
 
     def getDefaultReadLimit(self):
         # ReadMaxRows is reused with "commits" semantics: custom ReadLimits are not

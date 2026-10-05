@@ -1372,7 +1372,13 @@ def make_client(options) -> CdcClient:
     conn = opts.get("connectionstring")
     if not conn:
         raise ValueError("Option 'connectionString' is required")
-    timeout = int(opts.get("connecttimeout", "30"))
+    raw = opts.get("connecttimeout", "30")
+    try:
+        timeout = int(str(raw).strip())
+    except ValueError:
+        timeout = -1
+    if timeout < 0:
+        raise ValueError(f"connectTimeout must be a non-negative integer (seconds), not {raw!r}")
     if backend == "mssql-python":
         return SqlCdcClient(MssqlPythonBackend(conn, timeout), tz)
     if backend == "arrow-odbc":
