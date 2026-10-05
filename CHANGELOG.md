@@ -32,7 +32,10 @@ snapshot row's `detail` and of a backfill wave's userMetadata, keys that are onl
 ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/) amendment 4); `tests/compat/<version>`
 holds the state each release's wheel wrote, and the tests resume it (amendment 3). A bronze
 or silver table created with a column name Delta refuses without column mapping gets it,
-which raises its Delta protocol (reader 2, writer 5); existing tables are untouched.
+which raises its Delta protocol (reader 2, writer 5); existing tables are untouched. A
+restarted stream's inferred schema leaves out computed columns; an existing bronze table
+keeps such a column, and the rows appended after the upgrade hold NULL in it, as its change
+rows always did.
 
 ### Added
 
@@ -46,8 +49,7 @@ which raises its Delta protocol (reader 2, writer 5); existing tables are untouc
   14 s, with a WARNING each time; `DataLossError`, `SchemaChangedError`, `ValueError` and
   `PermissionError` are never retried ([ADR 0029](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0029-driver-retries-and-lock-timeout/)).
 - `apply_changes` takes the capture instance from the options' `captureInstance` when
-  `capture_instance` is omitted, and raises `ValueError` when both are given and name
-  different instances (ignoring case).
+  `capture_instance` is omitted.
 - `is_data_loss(exc)` and `is_schema_changed(exc)` recognise `DataLossError` and
   `SchemaChangedError`, also inside the `StreamingQueryException` that
   `awaitTermination()` raises or `await_all` returns.
@@ -121,6 +123,9 @@ which raises its Delta protocol (reader 2, writer 5); existing tables are untouc
 - `to_delta` raises `ValueError` for `on_data_loss="resnapshot"` with `failOnDataLoss=false`
   (a purge skipped while the query runs would hide the gap from the next run's check):
   remove `failOnDataLoss=false`.
+- `apply_changes` raises `ValueError` when its `capture_instance` and the `captureInstance`
+  of its `options` name different instances (ignoring case), which it used to accept: pass
+  the stream's options, or drop one of the two.
 
 ### Changed
 
@@ -147,7 +152,6 @@ which raises its Delta protocol (reader 2, writer 5); existing tables are untouc
 - Planning sends fewer queries: each range's start comes from the same query as the split
   points, and after the first resolution the client lists only the table's own capture
   instances, falling back to the whole database when that misses.
-
 - `to_delta` names the query after the sink's `app_id` (`<app_id>.g<n>` in generation `n`)
   when `query_name` is not given, and so does `start_many`, whose queries kept the
   generation-less name after a re-snapshot.
@@ -180,7 +184,8 @@ which raises its Delta protocol (reader 2, writer 5); existing tables are untouc
 - Packaging and CI: pyarrow 18 or later; classifiers for Python 3.10 to 3.13, which the
   weekly CI run tests; the release workflow refuses a tag whose commit is not on `main` or
   whose version has no `CHANGELOG.md` heading; `docker compose` binds SQL Server to
-  127.0.0.1 and `.env.example` ships no password (set `MSSQL_SA_PASSWORD`); every lab result
+  127.0.0.1, where `.env.example` and the lab scripts now point (`localhost` could resolve to
+  `::1` first), and `.env.example` ships no password (set `MSSQL_SA_PASSWORD`); every lab result
   records the server's `@@VERSION`.
 
 ### Fixed
