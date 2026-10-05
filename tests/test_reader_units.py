@@ -111,6 +111,25 @@ def test_connect_timeout_must_be_a_non_negative_integer():
             make_client({"connectionString": "Server=x", "connectTimeout": value})
 
 
+def test_metrics_path_must_be_a_path_every_node_writes_with_open():
+    for uri in ("s3://bucket/metrics", "abfss://c@a.dfs.core.windows.net/m", "dbfs:/m"):
+        with pytest.raises(ValueError, match="is a URI.*local or FUSE path"):
+            _reader(metricsPath=uri)
+    for path in ("/Volumes/cat/sch/vol/metrics", "C:/metrics", "metrics"):
+        assert _reader(metricsPath=path).metrics_path == path
+
+
+def test_a_metrics_file_that_cannot_be_written_is_logged(tmp_path, caplog):
+    from mssql_cdc.source import _write_metrics
+
+    taken = tmp_path / "taken"
+    taken.write_text("a file, not a directory")
+    with caplog.at_level("WARNING", logger="mssql_cdc.source"):
+        _write_metrics(str(taken), "0x01-0x02", {"rows": 1})  # never raises
+    [warning] = [r.getMessage() for r in caplog.records]
+    assert f"metrics file 0x01-0x02.json in {taken}" in warning
+
+
 def test_an_unknown_option_is_warned_about(caplog):
     with caplog.at_level("WARNING", logger="mssql_cdc.source"):
         _reader(maxCommitPerBatch="5", NUMPARTITIONS="2")  # a typo; known in any case

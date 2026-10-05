@@ -187,14 +187,16 @@ def _write_metrics(path: str, name: str, metrics: dict) -> None:
     effort: a metric must never fail a read."""
     import json
 
+    target = os.path.join(path, f"{name}.json")
     try:
         os.makedirs(path, exist_ok=True)
-        name = os.path.join(path, f"{name}.json")
-        with open(name + ".tmp", "w", encoding="utf-8") as fh:
+        with open(target + ".tmp", "w", encoding="utf-8") as fh:
             json.dump(metrics, fh)
-        os.replace(name + ".tmp", name)
-    except OSError:
-        pass
+        os.replace(target + ".tmp", target)
+    except OSError as exc:  # the facts' metrics go NULL: say why, in the executor's log
+        _log.warning(
+            "mssql_cdc: could not write the metrics file %s.json in %s: %s", name, path, exc
+        )
 
 
 def _write_event(path: str, kind: str, ci: str, lsn: str, commit_ts, detail: str) -> None:
@@ -340,6 +342,13 @@ class _Common:
         # optional: a directory (local or FUSE, e.g. /Volumes/...) where each partition leaves
         # its metrics for delta_sink(metrics_path=...) to fold into the batch facts
         self.metrics_path = _opt(options, "metricsPath")
+        if self.metrics_path and re.match(r"[A-Za-z][A-Za-z0-9+.-]+:/", self.metrics_path):
+            # written with open(): s3://m would make a local 's3:' directory on each node
+            raise ValueError(
+                f"metricsPath {self.metrics_path!r} is a URI, and the metrics files are "
+                "written with Python's file functions: use a local or FUSE path (e.g. "
+                "/Volumes/...) that every node sees"
+            )
         policy = str(_opt(options, "schemaChangePolicy", "classify")).strip().lower()
         if policy not in SCHEMA_CHANGE_POLICIES:
             raise ValueError(f"schemaChangePolicy must be 'classify' or 'fail', not {policy!r}")
