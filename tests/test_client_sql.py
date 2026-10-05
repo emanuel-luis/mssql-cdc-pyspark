@@ -368,8 +368,10 @@ class Cdc(Recorder):
 
     def batches(self, sql, params, batch_size):
         self.calls.append((sql, tuple(params)))
-        if "sp_cdc_help_change_data_capture" in sql:
-            rows = self.instances
+        if "sp_cdc_help_change_data_capture" in sql:  # @source_schema, @source_name: one table
+            rows = [
+                r for r in self.instances if params in ((), (r["source_schema"], r["source_table"]))
+            ]
         elif "sp_cdc_get_captured_columns" in sql:
             rows = self.captured.get(params[0], [])
         elif "sp_cdc_get_ddl_history" in sql:
@@ -438,6 +440,44 @@ def test_capture_instances_lists_the_table_s_instances_oldest_first():
     assert names == ["dbo_orders", "dbo_orders_v2"]
     with pytest.raises(ValueError):
         SqlCdcClient(rec).capture_instances("dbo_orders]; DROP TABLE x --")
+
+
+def test_planning_lists_the_resolved_table_only_until_it_misses_the_name():
+    full = ("EXEC sys.sp_cdc_help_change_data_capture", ())
+
+    def one(table):
+        sql = "EXEC sys.sp_cdc_help_change_data_capture @source_schema = ?, @source_name = ?"
+        return sql, ("dbo", table)
+
+    class Server(Cdc):  # a table that does not exist: the procedure raises (error 22981)
+        def batches(self, sql, params, batch_size):
+            tables = {(r["source_schema"], r["source_table"]) for r in self.instances}
+            if "sp_cdc_help" in sql and params and tuple(params) not in tables:
+                self.calls.append((sql, tuple(params)))
+                raise RuntimeError("Object doesn't exist or access is denied.")
+            return super().batches(sql, params, batch_size)
+
+    rec = Server(ORDERS, CAPTURED)
+    client = SqlCdcClient(rec)
+    both = ["dbo_orders", "dbo_orders_v2"]
+    assert [i.name for i in client.capture_instances("dbo_orders")] == both
+    assert [i.name for i in client.capture_instances("DBO_ORDERS_V2")] == both  # ignoring case
+    # renamed: the old name lists nothing, the database lists it under the new one
+    rec.instances = [
+        dict(r, source_table="orders2") if "orders" in r["source_table"] else r for r in ORDERS
+    ]
+    assert [i.name for i in client.capture_instances("dbo_orders")] == both
+    assert client.source_table("dbo_orders").table == "orders2"
+    assert [i.name for i in client.capture_instances("dbo_other")] == ["dbo_other"]  # not there
+    assert [c for c in rec.calls if "sp_cdc_help" in c[0]] == [
+        full,
+        one("orders"),
+        one("orders"),
+        full,
+        one("orders2"),
+        one("orders2"),
+        full,
+    ]
 
 
 def test_a_disabled_capture_instance_is_followed_to_its_table():

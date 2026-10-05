@@ -731,6 +731,7 @@ class SqlCdcClient(CdcClient):
         self._b = backend
         self._tz = None if source_timezone.lower() == "auto" else _check_tz(source_timezone)
         self._offset_min: int | None = None  # set instead of _tz by the pre-2022 fallback
+        self._resolved_table: tuple[str, str] | None = None  # (schema, table) _resolve found
 
     # -- helpers --------------------------------------------------------------
     @property
@@ -1104,13 +1105,29 @@ class SqlCdcClient(CdcClient):
         it lists the capture instances whose captured columns the login can SELECT, which
         the query functions already require. @source_schema/@source_name applies the same
         check to one table, so this one listing already holds every instance of it.
+
+        Every planning resolves the name again: after the first, only the table it resolved
+        to is listed, and the whole database only when that misses the name (the instance
+        gone, the table renamed).
         """
         ci = _check_capture_instance(capture_instance)
-        listed = [
-            r
-            for batch in self._b.batches("EXEC sys.sp_cdc_help_change_data_capture", (), 1000)
-            for r in batch.to_pylist()
-        ]
+
+        def listing(sql: str, params=()) -> list[dict]:
+            return [r for b in self._b.batches(sql, params, 1000) for r in b.to_pylist()]
+
+        listed = None
+        if self._resolved_table is not None:
+            try:
+                one = listing(
+                    "EXEC sys.sp_cdc_help_change_data_capture @source_schema = ?, @source_name = ?",
+                    self._resolved_table,
+                )
+            except Exception:  # noqa: BLE001 - renamed or dropped; the full listing tells
+                one = []
+            if any(r["capture_instance"].lower() == ci.lower() for r in one):
+                listed = one
+        if listed is None:
+            listed = listing("EXEC sys.sp_cdc_help_change_data_capture")
         # The CDC functions and the change table resolve the name case-insensitively under
         # the default collation, so a config may not match the stored case: exact first.
         rows = [r for r in listed if r["capture_instance"] == ci] or [
@@ -1153,6 +1170,7 @@ class SqlCdcClient(CdcClient):
             (r for r in listed if table(r) == key),
             key=lambda r: (str(r.get("create_date") or ""), self._hex(r["start_lsn"]) or ""),
         )
+        self._resolved_table = key
         return found, same
 
     def source_table(self, capture_instance):
