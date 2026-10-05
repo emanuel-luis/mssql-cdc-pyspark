@@ -8,7 +8,7 @@
 | [0004](0004-verdict-in-control-table.md) | `finalized_until` in a control table, never in table properties | accepted | 2026-09-28T16:13:29-03:00 |  |
 | [0005](0005-ordering-over-atomicity.md) | Data first, verdict after, monotonic | accepted | 2026-09-28T16:13:29-03:00 |  |
 | [0006](0006-file-backed-fake-for-engine-tests.md) | A file-backed CDC fake to test the real Spark engine | accepted | 2026-09-28T16:13:29-03:00 |  |
-| [0007](0007-infer-columns-from-cdc-metadata.md) | Infer captured columns from CDC metadata | accepted | 2026-09-28T17:03:21-03:00 | 2026-09-28T18:11:50-03:00, 2026-10-01T17:55:59-03:00 |
+| [0007](0007-infer-columns-from-cdc-metadata.md) | Infer captured columns from CDC metadata | accepted | 2026-09-28T17:03:21-03:00 | 2026-09-28T18:11:50-03:00, 2026-10-01T17:55:59-03:00, 2026-10-05T12:19:45-03:00 |
 | [0008](0008-detect-source-time-zone.md) | Detect the server time zone by name | accepted | 2026-09-28T17:05:54-03:00 | 2026-09-28T20:19:40-03:00, 2026-09-28T21:44:31-03:00, 2026-10-05T00:15:23-03:00 |
 | [0009](0009-read-change-tables-directly.md) | Read the change table directly, re-check retention after the read | accepted | 2026-09-28T17:39:20-03:00 | 2026-09-28T18:11:50-03:00 |
 | [0010](0010-heartbeat-for-quiet-databases.md) | Idle lag of ~5 minutes; an optional Agent heartbeat for less | accepted | 2026-09-28T19:03:23-03:00 |  |

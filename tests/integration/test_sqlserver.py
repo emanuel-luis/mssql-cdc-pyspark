@@ -185,6 +185,50 @@ def test_unsupported_type_fails_at_load_with_a_pointer_to_columns(spark, sqlserv
         _read(spark, sqlserver, ci)
 
 
+def test_computed_columns_are_null_in_change_rows_and_left_out_of_the_schema(
+    spark, sqlserver, backend
+):
+    ci = sqlserver.cdc_table(
+        "computed_probe",
+        "id INT NOT NULL PRIMARY KEY, qty INT NOT NULL, total AS qty * 10, "
+        "total_p AS qty * 100 PERSISTED",
+    )
+    sqlserver.run("INSERT INTO dbo.computed_probe (id, qty) VALUES (1, 2), (2, 3)")
+    sqlserver.run("UPDATE dbo.computed_probe SET qty = 4 WHERE id = 1")
+    sqlserver.wait_for_changes(ci, 4)
+    # captured, and NULL in every change row, persisted or not
+    [(rows, total, total_p)] = sqlserver.run(
+        f"SELECT COUNT(*), COUNT(total), COUNT(total_p) FROM cdc.[{ci}_CT]"
+    )
+    assert (rows, total, total_p) == (4, 0, 0)
+    conn = _reader(sqlserver, "computed_probe", ci)  # sys.columns tells it to this login too
+    with closing(make_client({"connectionString": conn, "backend": backend})) as client:
+        [inst] = client.capture_instances(ci)
+        assert (inst.columns, inst.computed) == (["id", "qty"], ("total", "total_p"))
+        assert client.present_columns(ci, ["id", "qty", "total"]) == ["id", "qty"]
+    df, _ = _read(spark, sqlserver, ci, connectionString=conn, backend=backend)
+    assert [c for c in df.columns if not c.startswith("_")] == ["id", "qty"]
+    assert sorted((r["id"], r["qty"], r["_operation"]) for r in df.collect()) == [
+        (1, 2, 2),
+        (1, 2, 3),
+        (1, 4, 4),
+        (2, 3, 2),
+    ]
+    # listed in 'columns': NULL in snapshot rows too, as in every change row
+    snapshot = (
+        spark.read.format("mssql_cdc_snapshot")
+        .option("connectionString", conn)
+        .option("captureInstance", ci)
+        .option("columns", "id INT, qty INT, total INT")
+        .option("backend", backend)
+        .load()
+    )
+    assert sorted((r["id"], r["qty"], r["total"]) for r in snapshot.collect()) == [
+        (1, 4, None),
+        (2, 3, None),
+    ]
+
+
 def test_stream_resumes_from_checkpoint_with_transactions_in_order(
     spark, sqlserver, workdir, backend
 ):

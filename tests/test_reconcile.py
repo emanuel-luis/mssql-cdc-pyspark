@@ -17,9 +17,13 @@ T0 = datetime(2026, 10, 1, 9, 0)
 class Orders:
     """A keyed fake whose captured columns the stream infers, bronze, and silver."""
 
-    def __init__(self, spark, workdir, key="order_id", columns="order_id INT, status STRING"):
+    def __init__(
+        self, spark, workdir, key="order_id", columns="order_id INT, status STRING", computed=None
+    ):
         self.spark, self.key, self.src = spark, key, os.path.join(workdir, "src")
-        self.db = FakeCdcDatabase(self.src, [CI], keys={CI: key}, columns={CI: columns})
+        self.db = FakeCdcDatabase(
+            self.src, [CI], keys={CI: key}, columns={CI: columns}, computed=computed
+        )
         self.options = {"backend": "fake", "fakePath": self.src, "captureInstance": CI}
         self.bronze, self.silver, self.control, self.ckpt, self.report = (
             os.path.join(workdir, n) for n in ("bronze", "silver", "control", "ckpt", "report")
@@ -137,6 +141,19 @@ def test_an_insert_a_delete_and_an_update_not_applied_are_found_and_classified(
     assert found['{"order_id":15}'][:3] == ("RECORD_DIFF", "10", "20")
     assert json.loads(found['{"order_id":15}'][3]["detail"])["columns"] == "status"
     assert every["failures"] == {"MISSING_TARGET": 1, "MISSING_SOURCE": 1, "RECORD_DIFF": 1}
+
+
+def test_a_computed_column_listed_in_columns_is_not_compared(delta_spark, workdir):
+    declared = "order_id INT, status STRING, total INT"
+    o = Orders(delta_spark, workdir, columns=declared, computed={CI: ["total"]})
+    o.options["columns"] = declared  # kept in the schema, NULL in every row
+    o.commit(*[(2, {"order_id": i, "status": "new", "total": i}) for i in range(20)])
+    o.stream()
+    o.apply()
+    # silver as an older version left it: the values its snapshot read on keys not changed since
+    o.silver_table().update("order_id < 5", {"total": "1"})
+    result = o.reconcile(sample=1.0)
+    assert result["failures"] == {} and result["match"] == result["buckets"] == 2
 
 
 def test_differences_bronze_explains_are_in_flight(delta_spark, workdir, monkeypatch):

@@ -152,12 +152,14 @@ Required there, ignored otherwise. Internal, like the fake itself.
 Spark DDL of the captured columns to read, for example
 `order_id INT, status STRING, amount DECIMAL(18,2)`. When omitted, the driver infers them at
 `load()` from `sys.sp_cdc_get_captured_columns`, the union of every capture instance of the
-table ([Output schema](output-schema.md#captured-columns)).
+table, computed columns left out ([Output schema](output-schema.md#captured-columns)).
 
 Pass it to read a subset of the columns, to choose other types (the read casts to them), or
 when the backend has no column metadata (the fake without captured columns). A listed column
 that no capture instance of the table captures fails the first planning and the snapshot
-with a `ValueError`. A type change on the source made while the query runs is caught when the
+with a `ValueError`. A listed computed column reads NULL in every row, snapshot rows too,
+since CDC stores NULL for it in every change row; the first planning logs a warning naming
+it. A type change on the source made while the query runs is caught when the
 batch is planned; one made while it is stopped fails the cast at read time: update
 `columns` ([Schema changes](../guides/schema-changes.md#with-the-columns-option)).
 

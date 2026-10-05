@@ -19,9 +19,10 @@ COMMITTED, Tier 2 reads through the snapshot reader under the ``isolationLevel``
   key, a sample of ranges of about ``bucket_rows`` rows cut by ``NTILE``) are read through the
   snapshot reader (``snapshotChunks``, on ``keys``: ``snapshotKeys``) and joined with silver on the key, comparing
   ``sha2(to_json(struct(<captured columns>)), 256)`` computed by the same Spark function on
-  both sides. MISSING_TARGET: the key only in the source (an insert not applied);
-  MISSING_SOURCE: only in silver (a delete not applied, a stale key); RECORD_DIFF: other
-  values (an update not applied). For any other key silver is joined from the source's rows,
+  both sides (not a computed column, which CDC stores as NULL in every change row).
+  MISSING_TARGET: the key only in the source (an insert not applied); MISSING_SOURCE: only
+  in silver (a delete not applied, a stale key); RECORD_DIFF: other values (an update not
+  applied). For any other key silver is joined from the source's rows,
   which finds only the first and the last: no range Spark cuts of silver is SQL Server's.
 * IN_FLIGHT: M is ``max_lsn`` read just before the source is read, E silver's
   ``applied_lsn`` in ``control_table``, read before the silver version compared, which holds
@@ -325,6 +326,10 @@ def reconcile(
 
     with closing(make_client(options)) as client:
         source = client.source_table(ci)
+        # a computed column listed in 'columns': NULL in every change row, so silver cannot
+        # hold its value
+        computed = {c.lower() for i in client.capture_instances(ci) for c in i.computed}
+        columns = [f for f in columns if f.name.lower() not in computed]
         source_lsn = client.max_lsn() or ZERO_LSN  # M, before the source is read
         lower = min(source_lsn, silver_lsn or ZERO_LSN)
         if kind:

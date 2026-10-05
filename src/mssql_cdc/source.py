@@ -391,7 +391,8 @@ class MssqlCdcDataSource(DataSource):
 
     def _captured_columns(self) -> str:
         """Without ``columns``, the union of the captured columns of every capture instance
-        of the table, from CDC metadata (driver side)."""
+        of the table, from CDC metadata (driver side). Computed columns are left out: CDC
+        stores NULL for them in every change row."""
         from .client import make_client
 
         ci = _opt(self.options, "captureInstance")
@@ -403,6 +404,15 @@ class MssqlCdcDataSource(DataSource):
             for inst in instances:
                 if not inst.columns or None in inst.column_types:
                     return client.captured_columns(inst.name)  # raises, naming what is missing
+            computed = {c.lower(): c for i in instances for c in i.computed}
+            if computed:
+                _log.warning(
+                    "mssql_cdc: %s captures computed column(s) %s, which CDC stores as NULL in "
+                    "every change row: left out of the schema (list them in 'columns' to keep "
+                    "them, NULL in every row)",
+                    ci,
+                    ", ".join(computed.values()),
+                )
             return union_columns(instances)
         finally:
             client.close()
@@ -531,16 +541,26 @@ class _Common:
 
     def _check_declared(self, instances) -> None:
         """A source column no capture instance of the table captures would read NULL in every
-        change row: fail instead (a typo in 'columns', or a column CDC does not capture)."""
+        change row: fail instead (a typo in 'columns', or a column CDC does not capture). A
+        computed one reads NULL in every row, snapshot rows too: warn."""
         if any(not i.columns for i in instances):  # unknown (the fake without metadata)
             return
-        captured = {c.lower() for i in instances for c in i.columns}
+        computed = {c.lower() for i in instances for c in i.computed}
+        captured = {c.lower() for i in instances for c in i.columns} | computed
         missing = [c for c in self.source_columns if c.lower() not in captured]
         if missing:
             raise ValueError(
                 f"No capture instance of the table ({', '.join(i.name for i in instances)}) "
                 f"captures {', '.join(missing)}: fix 'columns', or capture them with a new "
                 "capture instance (sql/switch_capture_instance.sql)."
+            )
+        listed = [c for c in self.source_columns if c.lower() in computed]
+        if listed:
+            _log.warning(
+                "mssql_cdc: 'columns' lists computed column(s) %s of %s, which CDC stores as "
+                "NULL in every change row: read as NULL in every row, snapshot rows too",
+                ", ".join(listed),
+                instances[-1].name,
             )
 
 

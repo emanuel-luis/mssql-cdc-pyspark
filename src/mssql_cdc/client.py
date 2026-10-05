@@ -64,6 +64,8 @@ class CaptureInstance(NamedTuple):
     start_lsn: str | None  # its low endpoint, as sys.fn_cdc_get_min_lsn once capture reaches it
     columns: list[str]  # captured columns, in capture order; [] when unknown (the fake)
     column_types: list[str | None]  # their default Spark types; None: no default mapping
+    # captured computed columns, not in ``columns``: CDC stores NULL for them in every change row
+    computed: tuple[str, ...] = ()
 
 
 class DdlChange(NamedTuple):
@@ -574,7 +576,8 @@ class CdcClient(ABC):
     @abstractmethod
     def capture_instances(self, capture_instance: str) -> list[CaptureInstance]:
         """Every capture instance of the table ``capture_instance`` tracks, oldest first. A
-        dropped ``capture_instance`` is followed to its table when that can be told."""
+        dropped ``capture_instance`` is followed to its table when that can be told. Its
+        computed columns are in ``computed``, not in ``columns``."""
 
     @abstractmethod
     def ddl_history(self, capture_instance: str, from_lsn: str, to_lsn: str) -> list[DdlChange]:
@@ -582,7 +585,7 @@ class CdcClient(ABC):
 
     def present_columns(self, capture_instance: str, columns: Sequence[str]) -> list[str]:
         """Which of ``columns`` the source table still has, for a snapshot to read (the rest
-        it fills with NULL)."""
+        it fills with NULL). Not a computed column: its change rows are all NULL."""
         return list(columns)
 
     def captured_columns(self, capture_instance: str) -> str:
@@ -1012,11 +1015,16 @@ class SqlCdcClient(CdcClient):
     def capture_instances(self, capture_instance):
         # ponytail: one sp_cdc_get_captured_columns per instance per call (every planning);
         # cache by (name, create_date) if planning time shows up in profiles.
+        rows = self._resolve(capture_instance)[1]
+        # CDC stores NULL for a computed column in every change row: left out (by column_id,
+        # which a column dropped and added back does not keep)
+        computed = {c["column_id"] for c in self._table_columns(rows[0]) if c["is_computed"]}
         out = []
-        for r in self._resolve(capture_instance)[1]:
+        for r in rows:
             cols = self._captured_rows(r["capture_instance"])
+            kept = [c for c in cols if c["column_id"] not in computed]
             types: list[str | None] = []
-            for c in cols:
+            for c in kept:
                 try:
                     types.append(
                         _spark_type(c["data_type"], c["numeric_precision"], c["numeric_scale"])
@@ -1027,11 +1035,22 @@ class SqlCdcClient(CdcClient):
                 CaptureInstance(
                     r["capture_instance"],
                     self._hex(r["start_lsn"]),
-                    [_check_column(c["column_name"]) for c in cols],
+                    [_check_column(c["column_name"]) for c in kept],
                     types,
+                    tuple(c["column_name"] for c in cols if c["column_id"] in computed),
                 )
             )
         return out
+
+    def _table_columns(self, r: dict) -> list[dict]:
+        """``sys.columns`` rows (name, column_id, is_computed) of the source table of ``r``, a
+        ``_resolve`` row. sys.columns shows the columns of a table the login can SELECT."""
+        sql = (
+            "SELECT name, column_id, is_computed FROM sys.columns "
+            "WHERE object_id = OBJECT_ID(QUOTENAME(?) + '.' + QUOTENAME(?))"
+        )
+        params = (r["source_schema"], r["source_table"])
+        return [c for batch in self._b.batches(sql, params, 1000) for c in batch.to_pylist()]
 
     def ddl_history(self, capture_instance, from_lsn, to_lsn):
         # The documented API, not cdc.ddl_history (invariant 11): it needs what
@@ -1067,22 +1086,17 @@ class SqlCdcClient(CdcClient):
     def present_columns(self, capture_instance, columns):
         # A dropped captured column stays in the capture instance; one added back under the
         # same name is another column (a new column_id), so match by column_id, not by name.
-        # A column no instance captures is not read either: its change rows could only be NULL.
+        # A column no instance captures is not read either: its change rows could only be NULL;
+        # nor is a computed column, which CDC stores as NULL in every change row.
         rows = self._resolve(capture_instance)[1]
         captured = {}
         for r in rows:  # oldest first: the newest instance capturing a column wins
             for c in self._captured_rows(r["capture_instance"]):
                 captured[c["column_name"].lower()] = c["column_id"]
-        sql = (
-            "SELECT name, column_id FROM sys.columns "
-            "WHERE object_id = OBJECT_ID(QUOTENAME(?) + '.' + QUOTENAME(?))"
-        )
         live = {
-            r["name"].lower(): r["column_id"]
-            for batch in self._b.batches(
-                sql, (rows[0]["source_schema"], rows[0]["source_table"]), 1000
-            )
-            for r in batch.to_pylist()
+            c["name"].lower(): c["column_id"]
+            for c in self._table_columns(rows[0])
+            if not c["is_computed"]
         }
         return [
             c for c in columns if c.lower() in live and captured.get(c.lower()) == live[c.lower()]

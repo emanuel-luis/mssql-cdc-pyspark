@@ -16,7 +16,8 @@ It reproduces the parts of CDC the data source relies on:
   commit, and from there every commit lands in both, each with only its own captured
   columns and its own ``__$command_id`` (an update that changes none of an instance's
   columns writes no row there); DDL rows (``sys.sp_cdc_get_ddl_history``), a DROP
-  COLUMN also removing the column from the source table, which a snapshot then cannot select.
+  COLUMN also removing the column from the source table, which a snapshot then cannot select;
+* computed columns, NULL in every change row while the source table keeps their values.
 
 An instance's table is named after the first instance of it (the one the constructor
 declares). Captured columns (Spark DDL, per instance) are optional; without them the
@@ -47,6 +48,7 @@ _MIN = "min_lsn.json"
 _KEYS = "keys.json"
 _INSTANCES = "instances.json"  # name -> {"table", "created", "columns": [[name, type]] | None}
 _DROPPED = "dropped.json"  # table -> lower names of the columns DROP COLUMN removed from it
+_COMPUTED = "computed.json"  # table -> lower names of its computed columns
 _QUEUED = "before_read.jsonl"  # transactions the next table read commits first (tests)
 
 
@@ -223,11 +225,20 @@ class FakeCdcClient(CdcClient):
 
     def capture_instances(self, capture_instance):
         mins = self._mins()
+        same = _resolve(self.path, capture_instance)[1]
+        computed = self._computed(same[0][1]["table"])
         out = []
-        for name, meta in _resolve(self.path, capture_instance)[1]:
-            cols = meta.get("columns") or []
+        for name, meta in same:
+            every = meta.get("columns") or []
+            cols = [(c, t) for c, t in every if c.lower() not in computed]
             out.append(
-                CaptureInstance(name, mins.get(name), [c for c, _ in cols], [t for _, t in cols])
+                CaptureInstance(
+                    name,
+                    mins.get(name),
+                    [c for c, _ in cols],
+                    [t for _, t in cols],
+                    tuple(c for c, _ in every if c.lower() in computed),
+                )
             )
         return out
 
@@ -248,11 +259,15 @@ class FakeCdcClient(CdcClient):
     def _dropped(self, table: str) -> set[str]:
         return set(_read_json(os.path.join(self.path, _DROPPED)).get(table, []))
 
+    def _computed(self, table: str) -> set[str]:
+        return set(_read_json(os.path.join(self.path, _COMPUTED)).get(table, []))
+
     def present_columns(self, capture_instance, columns):
         # ponytail: by name, so a column added back after its DROP counts as present; SQL
         # Server matches by column_id (another column). Model column ids if a test needs it.
-        dropped = self._dropped(self.source_table(capture_instance).table)
-        return [c for c in columns if c.lower() not in dropped]
+        table = self.source_table(capture_instance).table
+        absent = self._dropped(table) | self._computed(table)  # computed: NULL in change rows
+        return [c for c in columns if c.lower() not in absent]
 
     def _table(self, table: str) -> list[dict]:
         return list(_read_json(os.path.join(self.path, "tables", f"{table}.json")).values())
@@ -382,17 +397,23 @@ class FakeCdcDatabase:
         start_lsn: int = 0x2A_0000_0100_0001,
         keys: dict[str, str | list[str]] | None = None,
         columns: dict[str, str] | None = None,
+        computed: dict[str, list[str]] | None = None,
     ):
         """``keys``: capture instance -> key column, or a list of them. Instances with a key
         also keep the source table's current rows (what a snapshot reads), updated by every
         commit. ``columns``: capture instance -> its captured columns as Spark DDL, what
-        ``sp_cdc_get_captured_columns`` would report (the source then infers its schema)."""
+        ``sp_cdc_get_captured_columns`` would report (the source then infers its schema).
+        ``computed``: capture instance -> the computed columns of its table, NULL in every
+        change row, as SQL Server CDC stores them; the source table keeps their values."""
         self.path = path
         os.makedirs(os.path.join(path, "changes"), exist_ok=True)
         os.makedirs(os.path.join(path, "tables"), exist_ok=True)
         os.makedirs(os.path.join(path, "ddl"), exist_ok=True)
         if keys:
             _write_json(os.path.join(path, _KEYS), keys)
+        if computed:
+            lowered = {ci: sorted(c.lower() for c in cols) for ci, cols in computed.items()}
+            _write_json(os.path.join(path, _COMPUTED), lowered)
         self._keys = FakeCdcClient(path)._keys()
         self._next = start_lsn
         existing = _read_jsonl(os.path.join(path, _MAPPING))
@@ -449,10 +470,16 @@ class FakeCdcDatabase:
         start = self._new_lsn()
         seq = _lsn.to_int(start)
         same = self._same_table(capture_instance)
+        table = same[0][1]["table"]
+        computed = FakeCdcClient(self.path)._computed(table)
         for k, (name, meta) in enumerate(same):
             keep = {c.lower() for c, _ in meta["columns"]} if meta.get("columns") else None
             captured = [
-                row if keep is None else {c: v for c, v in row.items() if c.lower() in keep}
+                {
+                    c: None if c.lower() in computed else v
+                    for c, v in row.items()
+                    if keep is None or c.lower() in keep
+                }
                 for _, row in changes
             ]
             for cmd, (op, _) in enumerate(changes, start=1):
@@ -481,7 +508,6 @@ class FakeCdcDatabase:
                     },
                 )
         self._append(_MAPPING, {"start_lsn": start, "tran_end_time": self._ts(at)})
-        table = same[0][1]["table"]
         keys = _key_columns(self._keys.get(table))
         if keys:  # the source table: after-images replace, deletes remove, before-images do nothing
             p = os.path.join(self.path, "tables", f"{table}.json")

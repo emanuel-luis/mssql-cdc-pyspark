@@ -49,8 +49,8 @@ Everything else the reader touches needs no grant: `cdc.lsn_time_mapping`,
 server's time zone, its own session's `ASYNC_NETWORK_IO` wait in
 `sys.dm_exec_session_wait_stats`, which a session may read without `VIEW SERVER STATE`,
 `sys.sp_spaceused` (the row estimate that sizes the first count of a chunked snapshot's integer key), and
-`sys.columns` for the collation of a string key, which shows the columns of a table the login
-can `SELECT`. The integration tests run the stream, the bootstrap, chunked snapshots and
+`sys.columns` for the collation of a string key and to tell computed columns, which shows the
+columns of a table the login can `SELECT`. The integration tests run the stream, the bootstrap, chunked snapshots and
 `reconcile` against SQL Server 2022 with a login that has only the two `SELECT` grants (no
 gating role).
 

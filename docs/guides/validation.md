@@ -37,7 +37,8 @@ matched. `report` holds one row per bucket and one per key or chunk that failed;
 2. **Rows.** Every MISMATCH bucket, and a `sample` of the MATCH ones (for other keys, a
    sample of key ranges SQL Server cuts), are read from the source and joined with silver on
    the key, comparing a SHA-256 of each row's captured columns computed by the same Spark
-   function on both sides:
+   function on both sides (not computed columns, which CDC stores as NULL in every change
+   row):
    - MISSING_TARGET: the key is only in the source, an insert silver never applied;
    - MISSING_SOURCE: the key is only in silver, a delete it never applied, or a stale key;
    - RECORD_DIFF: other values, an update it never applied; `detail` names the columns.

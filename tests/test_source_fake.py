@@ -871,6 +871,56 @@ def test_a_declared_column_no_instance_captures_fails_instead_of_reading_null(sp
         snapshot.partitions()
 
 
+def test_a_computed_column_is_left_out_of_the_inferred_schema_and_reads_null_declared(
+    spark, workdir, caplog
+):
+    from mssql_cdc.lsn import from_int, to_int
+    from mssql_cdc.source import MssqlCdcSnapshotReader
+
+    declared = "order_id INT, qty INT, total INT"
+    db = FakeCdcDatabase(
+        os.path.join(workdir, "src"),
+        [CI],
+        keys={CI: "order_id"},
+        columns={CI: declared},
+        computed={CI: ["total"]},
+    )
+    c = [db.commit(CI, [(2, {"order_id": i, "qty": i, "total": 10 * i})]) for i in (1, 2)]
+    c.append(
+        db.commit(
+            CI,
+            [
+                (3, {"order_id": 1, "qty": 1, "total": 10}),
+                (4, {"order_id": 1, "qty": 3, "total": 30}),
+            ],
+        )
+    )
+    with caplog.at_level("WARNING", logger="mssql_cdc.source"):
+        inferred = MssqlCdcDataSource(_opts(workdir, columns=None)).schema()
+    assert inferred.endswith("_commit_ts TIMESTAMP_NTZ, `order_id` INT, `qty` INT")
+    assert f"{CI} captures computed column(s) total" in caplog.text
+    # declared, it stays, NULL in change rows (as CDC stores it) and in snapshot rows alike
+    caplog.clear()
+    reader = _stream_reader(spark, workdir, columns=declared)
+    with caplog.at_level("WARNING", logger="mssql_cdc.source"):
+        changes = _rows(reader, _plan(reader, from_int(to_int(c[0]) - 1), c[-1]))
+    assert [(r["_operation"], r["qty"], r["total"]) for r in changes] == [
+        (2, 1, None),
+        (2, 2, None),
+        (3, 1, None),
+        (4, 3, None),
+    ]
+    assert "'columns' lists computed column(s) total" in caplog.text
+    snapshot = MssqlCdcSnapshotReader(
+        _opts(workdir, columns=declared, numPartitions=1), reader.schema
+    )
+    rows = [r for p in snapshot.partitions() for b in snapshot.read(p) for r in b.to_pylist()]
+    assert sorted((r["order_id"], r["qty"], r["total"]) for r in rows) == [
+        (1, 3, None),
+        (2, 2, None),
+    ]
+
+
 def test_a_disabled_configured_instance_is_followed_to_the_newer_one(spark, workdir):
     from mssql_cdc.source import MssqlCdcSnapshotReader
 

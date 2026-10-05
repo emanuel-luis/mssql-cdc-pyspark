@@ -60,6 +60,11 @@ it takes the union by name, older instance first; a column both capture with dif
 takes the newer type when it holds the older's values, otherwise `load()` fails with
 `SchemaChangedError`. A range of an instance that lacks a column reads it as NULL.
 
+A computed column is left out, and `load()` logs a warning naming it: CDC stores NULL for
+it in every change row ([below](#nulls-in-change-rows)), so its value never reaches a change.
+Compute it downstream from the columns it is computed from. The client tells it by
+`sys.columns.is_computed`, which a login that can `SELECT` the table sees.
+
 Default types, from `mssql_cdc.client`:
 
 | SQL Server | Spark |
@@ -87,7 +92,9 @@ Only `_commit_ts` is converted to UTC; captured `datetime` and `datetime2` value
 stored. Every batch is cast to this schema before Spark sees it.
 
 With `columns`, the declared list and types are the schema, for example
-`order_id INT, status STRING, amount DECIMAL(18,2)`; the read casts to them.
+`order_id INT, status STRING, amount DECIMAL(18,2)`; the read casts to them. A computed
+column listed there stays in the schema, NULL in every row, snapshot rows too, and the first
+planning logs a warning naming it.
 
 ## NULLs in change rows
 
@@ -101,19 +108,17 @@ NULL where the source row had a value
 | `text`, `ntext`, `image` | operations 1 (delete) and 3 (the row before an update) |
 | `varchar(max)`, `nvarchar(max)`, `varbinary(max)` | operation 3, unless the update changed the column |
 
-The snapshot reads the source table, so its rows carry those values: a computed column has
-its value in snapshot rows and NULL in every change after them. A silver table then holds
-NULL for every key changed since the snapshot, and `reconcile()`, which hashes every
-captured column, reports those keys as `RECORD_DIFF`. Leave computed columns out of the
-capture instance (`@captured_column_list` of `sys.sp_cdc_enable_table`) and compute them
-downstream.
+The snapshot reads the source table, so its rows hold the large values these change rows
+lack. A computed column is not read: the inferred schema leaves it out, and one listed in
+[columns](options.md#columns) reads NULL in snapshot rows too, so every row agrees.
+`reconcile()` does not compare computed columns.
 
 ## Snapshot rows
 
 The snapshot reads the source table itself, under READ COMMITTED (never `NOLOCK`), in the
 same schema. A captured column the source table no longer has (dropped, matched by
-`column_id`) reads NULL, as its change rows do since the drop. Written by `snapshot()` or
-`to_delta`, snapshot rows also get `_batch_id` NULL in bronze, and `_snapshot`, the LSN of
+`column_id`) reads NULL, as its change rows do since the drop; so does a computed column
+listed in `columns`. Written by `snapshot()` or `to_delta`, snapshot rows also get `_batch_id` NULL in bronze, and `_snapshot`, the LSN of
 the snapshot they belong to ([ADR 0016](../decisions/0016-bootstrap-snapshot-at-a-recorded-lsn.md)).
 
 With [snapshotChunks](options.md#snapshotchunks) the snapshot reads only those chunks and has

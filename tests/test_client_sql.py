@@ -298,6 +298,7 @@ def _col(ordinal, name, data_type, precision=None, scale=None, length=None, dt_p
         "source_schema": "sales",
         "source_table": "orders",
         "column_ordinal": ordinal,
+        "column_id": ordinal,
         "column_name": name,
         "data_type": data_type,
         "character_maximum_length": length,
@@ -604,28 +605,54 @@ def test_present_columns_match_the_source_table_by_column_id():
 
     captured = {
         "dbo_orders": [col(1, "id", 1), col(2, "b", 2), col(3, "c", 3)],
-        "dbo_orders_v2": [col(1, "id", 1), col(2, "c", 3), col(3, "d", 5)],
+        "dbo_orders_v2": [col(1, "id", 1), col(2, "c", 3), col(3, "d", 5), col(4, "t", 8)],
     }
     live = [  # b dropped and added again: another column_id; e never captured, not read
-        {"name": "id", "column_id": 1},
-        {"name": "c", "column_id": 3},
-        {"name": "d", "column_id": 5},
-        {"name": "b", "column_id": 6},
-        {"name": "e", "column_id": 7},
+        {"name": "id", "column_id": 1, "is_computed": False},
+        {"name": "c", "column_id": 3, "is_computed": False},
+        {"name": "d", "column_id": 5, "is_computed": False},
+        {"name": "b", "column_id": 6, "is_computed": False},
+        {"name": "e", "column_id": 7, "is_computed": False},
+        {"name": "t", "column_id": 8, "is_computed": True},  # NULL in every change row
     ]
     rec = Cdc([r for r in ORDERS if r["source_table"] == "orders"], captured, live=live)
-    assert SqlCdcClient(rec).present_columns("dbo_orders", ["ID", "b", "c", "d", "e", "x"]) == [
-        "ID",
-        "c",
-        "d",
-    ]
+    got = SqlCdcClient(rec).present_columns("dbo_orders", ["ID", "b", "c", "d", "e", "t", "x"])
+    assert got == ["ID", "c", "d"]
     assert rec.calls[-1] == (
         (
-            "SELECT name, column_id FROM sys.columns "
+            "SELECT name, column_id, is_computed FROM sys.columns "
             "WHERE object_id = OBJECT_ID(QUOTENAME(?) + '.' + QUOTENAME(?))"
         ),
         ("dbo", "orders"),
     )
+
+
+def test_computed_columns_are_told_by_sys_columns_and_left_out_of_the_schema(monkeypatch, caplog):
+    from mssql_cdc.client import CaptureInstance
+
+    captured = {"dbo_other": [_col(1, "id", "int", 10, 0), _col(2, "total", "int", 10, 0)]}
+    live = [  # by column_id: total, captured as column 2, is computed now
+        {"name": "id", "column_id": 1, "is_computed": False},
+        {"name": "total", "column_id": 2, "is_computed": True},
+    ]
+    rec = Cdc([ORDERS[1]], captured, live=live)
+    assert SqlCdcClient(rec).capture_instances("dbo_other") == [
+        CaptureInstance("dbo_other", V1, ["id"], ["INT"], ("total",))
+    ]
+    # the table's sys.columns, which a login that can SELECT it sees (invariant 11)
+    assert [c for c in rec.calls if "sys.columns" in c[0]] == [
+        (
+            (
+                "SELECT name, column_id, is_computed FROM sys.columns "
+                "WHERE object_id = OBJECT_ID(QUOTENAME(?) + '.' + QUOTENAME(?))"
+            ),
+            ("dbo", "other"),
+        )
+    ]
+    with caplog.at_level("WARNING", logger="mssql_cdc.source"):
+        schema = _load(monkeypatch, rec, captureInstance="dbo_other")
+    assert schema.endswith("_commit_ts TIMESTAMP_NTZ, `id` INT")
+    assert "dbo_other captures computed column(s) total" in caplog.text
 
 
 def _load(monkeypatch, backend, **options):
