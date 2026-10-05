@@ -44,7 +44,9 @@ def create_if_not_exists(
     """``columns``: ``(name, type, comment)``; ``type`` is a DDL string or a Spark DataType.
 
     A no-op when the table exists: its schema, comments and properties are left as they
-    are (``mssql_cdc.migrations`` changes existing tables).
+    are (``mssql_cdc.migrations`` changes existing tables). That includes a table another
+    writer created meanwhile, such as a stream and a backfill both creating bronze: Delta
+    fails the CREATE that loses the race (``DELTA_PROTOCOL_CHANGED`` on a path).
     """
     from delta.tables import DeltaTable
 
@@ -58,4 +60,8 @@ def create_if_not_exists(
         builder = builder.property(key, value)
     for name, data_type, column_comment in columns:
         builder = builder.addColumn(name, data_type, comment=column_comment)
-    builder.execute()
+    try:
+        builder.execute()
+    except Exception:
+        if not exists(spark, name_or_path):  # else another writer's CREATE won the race
+            raise

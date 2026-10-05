@@ -131,6 +131,9 @@ by the older release
   offset: a NULL `max_lsn` is now the zero LSN, as the pipeline already took it.
 - A snapshot's own commit is found among every commit after it, not only the last five.
 - A table path holding a backtick is escaped in SQL.
+- A stream whose first batch created bronze while `backfill()` created it too failed with
+  `DELTA_PROTOCOL_CHANGED`; a CREATE that loses the race to another writer now takes the
+  table that writer made, for every table the library creates.
 - The Databricks example's epoch was off by the driver's UTC offset on a driver not set to
   UTC.
 

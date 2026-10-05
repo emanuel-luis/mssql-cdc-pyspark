@@ -14,6 +14,32 @@ def test_table_ref_doubles_a_backtick_in_a_path():  # the ALTER TABLEs migration
     assert tables.table_ref("lab.cdc.orders") == "lab.cdc.orders"
 
 
+def test_a_create_lost_to_a_concurrent_writer_takes_its_table(delta_spark, workdir, monkeypatch):
+    # a stream and a backfill both create bronze: Delta fails the CREATE that loses the race
+    from delta.tables import DeltaTable
+
+    real, path = DeltaTable.createIfNotExists, os.path.join(workdir, "t")
+
+    class Lost:  # every builder call chains; execute loses to the other writer's CREATE
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: self
+
+        def execute(self):
+            real(delta_spark).location(path).addColumn("a", "STRING").execute()
+            raise RuntimeError("[DELTA_PROTOCOL_CHANGED] concurrent update")
+
+    class Failed(Lost):  # no table afterwards: the error is the caller's
+        def execute(self):
+            raise RuntimeError("no table")
+
+    monkeypatch.setattr(DeltaTable, "createIfNotExists", lambda spark: Lost())
+    tables.create_if_not_exists(delta_spark, path, [("a", "STRING", None)])
+    assert delta_spark.read.format("delta").load(path).columns == ["a"]
+    monkeypatch.setattr(DeltaTable, "createIfNotExists", lambda spark: Failed())
+    with pytest.raises(RuntimeError, match="no table"):
+        tables.create_if_not_exists(delta_spark, os.path.join(workdir, "u"), [("a", "INT", None)])
+
+
 def _commits(spark, path):
     return spark.sql(f"DESCRIBE HISTORY delta.`{path}`").count()
 
