@@ -21,7 +21,9 @@ services:
       # cdc.lsn_time_mapping.tran_end_time behaves with a non-UTC server (check t2).
       TZ: "${MSSQL_TZ:-UTC}"
     ports:
-      - "${MSSQL_PORT:-1433}:1433"
+      # This machine only: sa with a lab password. To reach it from elsewhere (a cluster,
+      # another host), widen it deliberately, e.g. "0.0.0.0:..." behind a firewall.
+      - "127.0.0.1:${MSSQL_PORT:-1433}:1433"
     volumes:
       - mssql-data:/var/opt/mssql
     healthcheck:
