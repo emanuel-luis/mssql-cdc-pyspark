@@ -220,6 +220,12 @@ idempotency and facts then up to it.
   has no effect ([Installation](../getting-started/installation.md)).
 - A query that stops with `DataLossError` or `SchemaChangedError` needs a decision, not
   a blind retry: see [Data loss](data-loss.md) and [Schema changes](schema-changes.md).
+- A broken connection, a failover or a deadlock on the driver (offsets and planning) is
+  retried on a new connection up to three times, within about 14 seconds, with a WARNING
+  each time; a longer outage stops the query, for the job's own retry. A task's read is
+  retried by Spark, as any failed task. A snapshot read waits for writers' locks unless
+  [lockTimeoutMs](../reference/options.md#locktimeoutms) is set
+  ([ADR 0029](../decisions/0029-driver-retries-and-lock-timeout.md)).
 
 ## See also
 

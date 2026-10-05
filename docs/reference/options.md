@@ -38,6 +38,7 @@ Spark does. A boolean option is true for `true`, `1`, `yes` or `y` and false for
 | [connectionString](#connectionstring) | required | stream, snapshot |
 | [backend](#backend) | `mssql-python` | stream, snapshot |
 | [connectTimeout](#connecttimeout) | `30` | stream, snapshot |
+| [lockTimeoutMs](#locktimeoutms) | none: wait | snapshot |
 | [sourceTimeZone](#sourcetimezone) | `auto` | stream, snapshot |
 | [fakePath](#fakepath) | none | `backend=fake` only |
 | [columns](#columns) | inferred | stream, snapshot |
@@ -106,6 +107,22 @@ Anything else fails with `ValueError: Unknown backend`. Why `mssql-python` is th
 
 Login timeout in seconds, passed to `mssql_python.connect`, or to `arrow_odbc.connect` with
 `backend=arrow-odbc`. A negative value raises `ValueError`.
+
+### lockTimeoutMs
+
+How long, in milliseconds, a read of the source table waits for a lock before it fails with
+SQL Server's error 1222 ("Lock request time out period exceeded"), sent as
+`SET LOCK_TIMEOUT` before each one: the snapshot's reads, a chunked snapshot's planning
+(`to_delta`, `backfill()`) and `reconcile()`'s counts and ranges. Spark retries a task that
+fails this way, and planning raises the error to its caller, so a lock held too long fails
+the job instead of leaving it waiting with no error. With `mssql-python`, a read that has
+already returned rows when it times out fails with `Unknown DDBC error`, which does not name
+the cause.
+
+Not set, a read waits as long as the lock is held (SQL Server's default). A non-negative
+integer (`0` fails at the first lock met); anything else raises `ValueError`. The change table
+reads ignore it. Under [isolationLevel](#isolationlevel)`=snapshot` a read takes no row locks,
+so it seldom waits ([ADR 0029](../decisions/0029-driver-retries-and-lock-timeout.md)).
 
 ### sourceTimeZone
 

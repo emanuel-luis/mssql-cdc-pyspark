@@ -34,15 +34,19 @@ the newer one from S, and a column an instance lacks reads NULL. Offsets do not 
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import logging
 import os
+import random
 import re
+import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import pairwise
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from pyspark.sql.datasource import (
     DataSource,
@@ -146,6 +150,7 @@ KNOWN_OPTIONS = frozenset(
         "backend",
         "sourcetimezone",
         "connecttimeout",
+        "locktimeoutms",
         "startinglsn",
         "maxcommitsperbatch",
         "numpartitions",
@@ -173,6 +178,76 @@ def warn_unknown(options) -> None:
             "mssql_cdc: unknown option(s) %s ignored; see docs/reference/options.md",
             ", ".join(unknown),
         )
+
+
+# -- driver-side retries (ADR 0029) -------------------------------------------
+# ponytail: a fixed 3 retries, 1-2, 2-4 and 4-8 s apart (14 s at most): an outage longer than
+# that still stops the query, for the job's own retry. An option when a site needs more.
+_RETRIES = 3
+_BACKOFF_S = 2.0
+# A broken or refused connection (SQLSTATE 08xxx), a timeout (HYT00, HYT01), a deadlock
+# victim (40001). arrow-odbc prints the SQLSTATE: "State: 08S01, Native error: 10054, ...".
+_TRANSIENT_STATE = re.compile(r"\bState: (08[0-9A-Z]{3}|HYT0[01]|40001)\b")
+# mssql-python keeps no SQLSTATE on its exceptions, only the OperationalError text it maps
+# each to: its texts for the same SQLSTATEs (tests/test_reader_units.py checks them). Not
+# 28000 (a login refused) nor HY000 (most server errors), which it raises as OperationalError.
+_TRANSIENT_TEXTS = frozenset(
+    {
+        "Client unable to establish connection",  # 08001
+        "Connection name in use",  # 08002
+        "Connection not open",  # 08003
+        "Server rejected the connection",  # 08004
+        "Connection failure during transaction",  # 08007
+        "Communication link failure",  # 08S01
+        "Timeout expired",  # HYT00
+        "Connection timeout expired",  # HYT01
+        "Serialization failure",  # 40001
+    }
+)
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _transient(exc: BaseException) -> bool:
+    """Whether a new connection may get past ``exc``: neither driver exposes SQL Server's
+    error number, so it is told by SQLSTATE. Never a data-loss, schema, option or grant error."""
+    from .client import DataLossError, SchemaChangedError
+
+    if isinstance(exc, (DataLossError, SchemaChangedError, ValueError, PermissionError)):
+        return False
+    driver = sys.modules.get("mssql_python")  # loaded, if it raised this
+    if driver is not None and isinstance(exc, driver.OperationalError):
+        return getattr(exc, "driver_error", None) in _TRANSIENT_TEXTS
+    return bool(_TRANSIENT_STATE.search(str(exc)))
+
+
+def _retrying(method: _F) -> _F:
+    """A driver-side reader method that, on a transient error (``_transient``), closes the
+    connection and runs again on a new one, up to ``_RETRIES`` times with exponential backoff
+    and jitter. Safe: each run reads what it plans from SQL Server again. Executors need none:
+    Spark retries a failed task."""
+
+    @functools.wraps(method)
+    def retried(self, *args):
+        for attempt in range(_RETRIES):
+            try:
+                return method(self, *args)
+            except Exception as exc:
+                if not _transient(exc):
+                    raise
+                self._drop_client()
+                wait = _BACKOFF_S * 2**attempt * random.uniform(0.5, 1)
+                _log.warning(
+                    "mssql_cdc: %s failed (%s); retry %d of %d on a new connection in %.1f s",
+                    method.__name__,
+                    exc,
+                    attempt + 1,
+                    _RETRIES,
+                    wait,
+                )
+                time.sleep(wait)
+        return method(self, *args)  # the last attempt raises what it meets
+
+    return cast(_F, retried)
 
 
 # -- types across schema changes (ADR 0023) ------------------------------------
@@ -423,6 +498,13 @@ class _Common:
             self._client = make_client(self.options)
         return self._client
 
+    def _drop_client(self) -> None:
+        """Close the connection, broken or not; the next ``client`` opens a new one."""
+        client, self._client = self._client, None
+        if client is not None:
+            with contextlib.suppress(Exception):  # a broken connection may fail to close too
+                client.close()
+
     def _instances(self, client) -> list:
         """Every capture instance of the source table, oldest first (``CaptureInstance``).
         Looked up by the newest name seen this run first, so an instance disabled after a
@@ -471,6 +553,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
         # sys.fn_cdc_get_max_lsn() is NULL on a database capture has not written to yet
         return self.client.max_lsn() or ZERO_LSN
 
+    @_retrying
     def initialOffset(self) -> dict:
         start = (_opt(self.options, "startingLsn", "earliest") or "earliest").strip()
         if start.lower() == "earliest":
@@ -494,6 +577,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
             lsn = normalize(start)
         return self._offset(lsn)
 
+    @_retrying
     def partitions(self, start: dict, end: dict):
         if end["lsn"] <= start["lsn"]:
             return []
@@ -817,9 +901,11 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
         # supported for Python sources, and a batch must end on a commit boundary.
         return ReadMaxRows(self._max_commits) if self._max_commits else ReadAllAvailable()
 
+    @_retrying
     def prepareForTriggerAvailableNow(self) -> None:
         self._target = self._max_lsn()
 
+    @_retrying
     def latestOffset(self, start: dict, limit) -> dict:
         if self._target:  # Trigger.AvailableNow: up to the max_lsn it started with
             upper = self._target
@@ -833,6 +919,7 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
                 upper = nth
         return self._offset(upper)
 
+    @_retrying
     def reportLatestOffset(self):
         # Surfaces capture progress (max_lsn) as latestOffset in query progress: the one
         # latestOffset just read, and its commit time once per LSN
@@ -845,6 +932,7 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
 class MssqlCdcLegacyStreamReader(_BaseReader):  # pragma: no cover - Spark < 4.2
     """Spark 4.0/4.1 without admission control: every batch reads up to max_lsn."""
 
+    @_retrying
     def latestOffset(self) -> dict:  # type: ignore[override]  # Spark < 4.2 signature; stubs are 4.2
         return self._offset(self._max_lsn())
 

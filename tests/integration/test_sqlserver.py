@@ -1689,6 +1689,61 @@ def test_a_snapshot_isolation_read_takes_the_committed_rows_without_waiting(sqls
         sqlserver.run("ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION OFF")
 
 
+def test_a_lock_timeout_fails_a_read_blocked_by_a_writer_instead_of_waiting(sqlserver, backend):
+    ci = sqlserver.cdc_table("ck_lt", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL")
+    sqlserver.run(f"INSERT INTO dbo.ck_lt SELECT n, 'old' FROM {_ROWS} WHERE n <= 10")
+    options = {"connectionString": _reader(sqlserver, "ck_lt", ci), "backend": backend}
+    holder = sqlserver.connect()
+    try:
+        holder.cursor().execute("BEGIN TRAN; UPDATE dbo.ck_lt SET v = 'held' WHERE id = 5")
+        with closing(make_client({**options, "lockTimeoutMs": "500"})) as client:
+            started = time.monotonic()
+            # a plan's count and seeks, which fail before any row: SQL Server's error 1222
+            with pytest.raises(Exception, match="Lock request time out period exceeded"):
+                client.key_buckets("dbo", "ck_lt", "id", "int", 5)
+            with pytest.raises(Exception, match="Lock request time out period exceeded"):
+                client.key_range("dbo", "ck_lt", "v")  # MIN and MAX of a column no index has
+            # a chunk's read, with parameters, fails too; mssql-python 1.x loses the message of
+            # an error met after the first rows were fetched ("Unknown DDBC error")
+            with pytest.raises(Exception):  # noqa: B017 - which one depends on the backend
+                list(client.iter_table("dbo", "ck_lt", ["id"], ["id"], None, (1,), None, 100))
+            assert time.monotonic() - started < 10
+        holder.cursor().execute("COMMIT")
+        with closing(make_client({**options, "lockTimeoutMs": "500"})) as client:
+            rows = client.iter_table("dbo", "ck_lt", ["v"], [], None, None, None, 100)
+            assert sum(b.num_rows for b in rows) == 10  # nothing held: the read goes through
+    finally:
+        holder.close()
+
+
+def test_the_driver_reconnects_when_its_session_is_killed(sqlserver, backend, monkeypatch):
+    from pyspark.sql.types import IntegerType, StructField, StructType
+
+    from mssql_cdc.source import MssqlCdcStreamReader, _transient
+
+    ci = sqlserver.cdc_table("rt_kill", "id INT NOT NULL PRIMARY KEY")
+    # ODBC Driver 18 reconnects a session that broke while idle on its own, once by default:
+    # off, the killed session fails as one broken by a failover mid-query does
+    connection = _reader(sqlserver, "rt_kill", ci).rstrip(";") + ";ConnectRetryCount=0;"
+    options = {
+        "connectionString": connection,
+        "backend": backend,
+        "captureInstance": ci,
+        "numPartitions": "1",
+    }
+    reader = MssqlCdcStreamReader(options, StructType([StructField("id", IntegerType())]))
+    killed = reader.client
+    sqlserver.run(f"KILL {int(killed._b.scalar('SELECT @@SPID'))}")  # as a failover would
+    with pytest.raises(Exception) as raised:  # whatever the driver raises: the point
+        killed.max_lsn()
+    error = raised.value
+    assert _transient(error), f"{type(error).__module__}.{type(error).__name__}: {error}"
+    monkeypatch.setattr("mssql_cdc.source.time.sleep", lambda seconds: None)
+    assert reader.reportLatestOffset()["lsn"].startswith("0x")  # on a new connection
+    assert reader._client is not killed
+    reader._drop_client()
+
+
 @pytest.mark.parametrize("keys", ["a", "a, b"])  # rows counted per slice; keyset seeks
 def test_a_snapshot_isolation_plan_does_not_wait_for_a_writers_locks(sqlserver, backend, keys):
     from mssql_cdc.client import plan_chunks, snapshot_plan

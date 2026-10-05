@@ -262,17 +262,22 @@ def _int_range(k: str, lo, hi, joiner: str) -> str:
     return f" {joiner} " + " AND ".join(parts) if parts else ""
 
 
-def _isolated(sql: str, isolation: str | None) -> str:
+def _isolated(sql: str, isolation: str | None, lock_timeout_ms: int | None = None) -> str:
     """``sql`` read under ``isolation``: None (READ COMMITTED) or ``"snapshot"``; never READ
-    UNCOMMITTED, whose dirty reads a rollback can leave in a snapshot or a plan."""
+    UNCOMMITTED, whose dirty reads a rollback can leave in a snapshot or a plan. With
+    ``lock_timeout_ms`` (the ``lockTimeoutMs`` option), a lock it waits for longer fails it
+    with error 1222 instead: Spark retries a task, a hang it cannot (ADR 0029)."""
     if isolation not in (None, "snapshot"):
         raise ValueError(f"isolation must be None or 'snapshot', not {isolation!r}")
     # SNAPSHOT reads the versions committed when the SELECT starts, without the writers' locks;
     # SQL Server refuses it unless the DBA set ALLOW_SNAPSHOT_ISOLATION. Sent without
     # parameters, the batch leaves the session at SNAPSHOT (tests/integration): after an
     # integer plan, backfill's client only reads CDC metadata (max_lsn, commit times) and seeks
-    # the first key after MAX under SNAPSHOT anyway.
-    return "SET TRANSACTION ISOLATION LEVEL SNAPSHOT; " + sql if isolation else sql
+    # the first key after MAX under SNAPSHOT anyway. LOCK_TIMEOUT stays the same way, on a
+    # client that sends it before every read of the source table.
+    if isolation:
+        sql = "SET TRANSACTION ISOLATION LEVEL SNAPSHOT; " + sql
+    return sql if lock_timeout_ms is None else f"SET LOCK_TIMEOUT {int(lock_timeout_ms)}; " + sql
 
 
 def _json_key(values: Sequence, types) -> object:
@@ -737,8 +742,11 @@ def _check_tz(name) -> str:
 
 
 class SqlCdcClient(CdcClient):
-    def __init__(self, backend: Backend, source_timezone: str = "auto"):
+    def __init__(
+        self, backend: Backend, source_timezone: str = "auto", lock_timeout_ms: int | None = None
+    ):
         self._b = backend
+        self._lock_timeout_ms = lock_timeout_ms  # on every read of the source table (ADR 0029)
         self._tz = None if source_timezone.lower() == "auto" else _check_tz(source_timezone)
         self._offset_min: int | None = None  # set instead of _tz by the pre-2022 fallback
         self._resolved_table: tuple[str, str] | None = None  # (schema, table) _resolve found
@@ -1194,12 +1202,16 @@ class SqlCdcClient(CdcClient):
             self._hex(r["start_lsn"]),
         )
 
+    def _source_read(self, sql: str, isolation: str | None = None) -> str:
+        """A read of the source table: a snapshot's, a plan's or reconcile's (``_isolated``)."""
+        return _isolated(sql, isolation, self._lock_timeout_ms)
+
     def key_range(self, schema, table, key, lo=None, hi=None, isolation=None):
         t, k = f"[{_check_column(schema)}].[{_check_column(table)}]", f"[{_check_column(key)}]"
         t += _int_range(k, lo, hi, "WHERE")
         # two scalar subqueries: each is one seek on an index led by the key
         sql = f"SELECT (SELECT MIN({k}) FROM {t}) AS lo, (SELECT MAX({k}) FROM {t}) AS hi"
-        for batch in self._b.batches(_isolated(sql, isolation), (), 1):
+        for batch in self._b.batches(self._source_read(sql, isolation), (), 1):
             if batch.num_rows:
                 row = batch.to_pylist()[0]
                 return row["lo"], row["hi"]
@@ -1251,7 +1263,7 @@ class SqlCdcClient(CdcClient):
         )
         return [
             tuple(row)
-            for batch in self._b.batches(sql, (), 1000)
+            for batch in self._b.batches(self._source_read(sql), (), 1000)
             for row in zip(*(c.to_pylist() for c in batch.columns))
         ]
 
@@ -1281,7 +1293,7 @@ class SqlCdcClient(CdcClient):
             )
         return [
             tuple(row)
-            for batch in self._b.batches(_isolated(sql, isolation), (), 1000)
+            for batch in self._b.batches(self._source_read(sql, isolation), (), 1000)
             for row in zip(*(c.to_pylist() for c in batch.columns))
         ]
 
@@ -1296,7 +1308,7 @@ class SqlCdcClient(CdcClient):
             lo,
             hi,
         )
-        yield from self._b.batches(_isolated(sql, isolation), params, batch_size)
+        yield from self._b.batches(self._source_read(sql, isolation), params, batch_size)
 
     def row_estimate(self, schema, table):
         # sys.sp_spaceused: public, and a lookup of the partitions' row counts, not a scan
@@ -1310,7 +1322,8 @@ class SqlCdcClient(CdcClient):
         t = f"[{_check_column(schema)}].[{_check_column(table)}]"
         k = ", ".join(f"[{_check_column(c)}]" for c in keys)
         desc = ", ".join(f"[{c}] DESC" for c in keys)
-        for batch in self._b.batches(f"SELECT TOP (1) {k} FROM {t} ORDER BY {desc}", (), 1):
+        sql = self._source_read(f"SELECT TOP (1) {k} FROM {t} ORDER BY {desc}")
+        for batch in self._b.batches(sql, (), 1):
             if batch.num_rows:
                 return tuple(c[0].as_py() for c in batch.columns)
         return None
@@ -1331,7 +1344,7 @@ class SqlCdcClient(CdcClient):
             lambda sql: f"SELECT * FROM ({sql} ORDER BY {k}) p",
         )
         sql = f"SELECT {k} FROM ({union}) u ORDER BY {k} OFFSET {n} ROWS FETCH NEXT 1 ROWS ONLY"
-        for batch in self._b.batches(_isolated(sql, isolation), params, 1):
+        for batch in self._b.batches(self._source_read(sql, isolation), params, 1):
             if batch.num_rows:
                 return tuple(c[0].as_py() for c in batch.columns)
         return None
@@ -1384,15 +1397,26 @@ def make_client(options) -> CdcClient:
     conn = opts.get("connectionstring")
     if not conn:
         raise ValueError("Option 'connectionString' is required")
-    raw = opts.get("connecttimeout", "30")
-    try:
-        timeout = int(str(raw).strip())
-    except ValueError:
-        timeout = -1
-    if timeout < 0:
-        raise ValueError(f"connectTimeout must be a non-negative integer (seconds), not {raw!r}")
+    timeout = _non_negative(opts, "connectTimeout", "seconds")
+    timeout = 30 if timeout is None else timeout
+    lock_timeout = _non_negative(opts, "lockTimeoutMs", "milliseconds")  # None: wait forever
     if backend == "mssql-python":
-        return SqlCdcClient(MssqlPythonBackend(conn, timeout), tz)
+        return SqlCdcClient(MssqlPythonBackend(conn, timeout), tz, lock_timeout)
     if backend == "arrow-odbc":
-        return SqlCdcClient(ArrowOdbcBackend(conn, timeout), tz)
+        return SqlCdcClient(ArrowOdbcBackend(conn, timeout), tz, lock_timeout)
     raise ValueError(f"Unknown backend {backend!r} (use mssql-python, arrow-odbc or fake)")
+
+
+def _non_negative(opts: dict, name: str, unit: str) -> int | None:
+    """Option ``name`` (``opts`` keyed in lower case) as an integer of at least 0; None when
+    absent. Anything else is a ValueError naming it."""
+    raw = opts.get(name.lower())
+    if raw is None:
+        return None
+    try:
+        n = int(str(raw).strip())
+    except ValueError:
+        n = -1
+    if n < 0:
+        raise ValueError(f"{name} must be a non-negative integer ({unit}), not {raw!r}")
+    return n

@@ -288,6 +288,89 @@ def test_an_idle_stream_asks_sql_server_for_max_lsn_alone_each_poll():
     assert client.calls == ["max_lsn", "nth_commit_after", "lsn_to_time", "lsn_to_time"]
 
 
+# -- driver-side retries (ADR 0029) ---------------------------------------------------------
+def _broken(error):
+    """A driver client whose every call to SQL Server raises ``error``."""
+
+    class Broken(Counting):
+        closed = False
+
+        def max_lsn(self):
+            raise error
+
+        def close(self):
+            self.closed = True
+
+    return Broken(None)
+
+
+def test_a_transient_error_on_the_driver_is_retried_on_a_new_connection(monkeypatch, caplog):
+    from mssql_python.exceptions import OperationalError
+    from pyspark.sql.streaming.datasource import ReadAllAvailable
+
+    from mssql_cdc import source
+
+    broken = _broken(OperationalError("Communication link failure", "TCP Provider: reset"))
+    fresh, slept = Counting(_lsn(9)), []
+    monkeypatch.setattr("mssql_cdc.client.make_client", lambda options: fresh)
+    monkeypatch.setattr(source.time, "sleep", slept.append)
+    reader = _reader()
+    reader._client = broken  # the connection a failover broke
+    start = {"lsn": _lsn(5), "commit_ts": "2026-09-28T13:50:00.000"}
+    with caplog.at_level("WARNING", logger="mssql_cdc.source"):
+        assert reader.latestOffset(start, ReadAllAvailable())["lsn"] == _lsn(9)
+    assert broken.closed and reader._client is fresh
+    assert len(slept) == 1 and 1 <= slept[0] <= 2
+    [warning] = [r.getMessage() for r in caplog.records]
+    assert "latestOffset failed" in warning and "Communication link failure" in warning
+    assert "retry 1 of 3 on a new connection" in warning
+
+
+def test_the_driver_gives_up_after_three_retries_and_never_retries_a_decision(monkeypatch):
+    from mssql_cdc import source
+    from mssql_cdc.client import DataLossError
+
+    slept: list[float] = []
+    monkeypatch.setattr(source.time, "sleep", slept.append)
+
+    def connections(error) -> list:  # every client make_client opens, each failing with error
+        made: list = []
+        monkeypatch.setattr(
+            "mssql_cdc.client.make_client", lambda options: made.append(_broken(error)) or made[-1]
+        )
+        return made
+
+    made = connections(RuntimeError("State: 08S01, Native error: 10054, Message: TCP reset"))
+    with pytest.raises(RuntimeError, match="08S01"):
+        _reader().reportLatestOffset()
+    assert len(made) == 4 and all(c.closed for c in made[:3])  # the first and 3 retries
+    assert len(slept) == 3 and 1 <= slept[0] <= 2 and 2 <= slept[1] <= 4 and 4 <= slept[2] <= 8
+    for error in (DataLossError("gone"), ValueError("State: 08S01"), PermissionError("grant")):
+        made = connections(error)
+        with pytest.raises(type(error)):
+            _reader().reportLatestOffset()
+        assert len(made) == 1  # raised at once
+
+
+def test_transient_errors_are_told_by_their_sqlstate():
+    from mssql_python.exceptions import sqlstate_to_exception
+
+    from mssql_cdc.client import SchemaChangedError
+    from mssql_cdc.source import _transient
+
+    # mssql-python: the exception it raises for each SQLSTATE, as installed
+    for state in ("08001", "08002", "08003", "08004", "08007", "08S01", "HYT00", "HYT01", "40001"):
+        assert _transient(sqlstate_to_exception(state, "from the server")), state
+    for state in ("28000", "HY000", "42S02", "22003", "IM002"):  # a login refused, SQL errors
+        error = sqlstate_to_exception(state, "from the server")
+        assert error is None or not _transient(error), state
+    # arrow-odbc prints the SQLSTATE in the message
+    assert _transient(RuntimeError("ODBC emitted an error:\nState: HYT00, Native error: 0, ..."))
+    assert _transient(RuntimeError("State: 40001, Native error: 1205, Message: deadlock victim"))
+    assert not _transient(RuntimeError("State: 42S02, Native error: 208, Message: Invalid object"))
+    assert not _transient(SchemaChangedError("State: 08S01"))
+
+
 def test_the_fake_maps_only_an_entrys_own_lsn_to_its_time(tmp_path):
     db, lsns = _db(str(tmp_path), n_tx=2)
     client = FakeCdcClient(str(tmp_path))

@@ -1,5 +1,6 @@
 """SqlCdcClient builds T-SQL; check the generated statements without a server."""
 
+import re
 from datetime import datetime
 from decimal import Decimal
 
@@ -1006,6 +1007,52 @@ def test_a_chunk_reads_under_read_committed_or_snapshot_never_nolock():
     with pytest.raises(ValueError, match="isolation"):
         list(client.iter_table("sales", "orders", ["id"], [], None, None, None, 10, "uncommitted"))
     assert not any("NOLOCK" in sql or "UNCOMMITTED" in sql for sql, _ in rec.calls)
+
+
+def test_a_lock_timeout_goes_before_every_read_of_the_source_table_only():
+    rec = Recorder()
+    client = SqlCdcClient(rec, source_timezone="UTC", lock_timeout_ms=1500)
+    reads = [  # the snapshot's, the plans' and reconcile's
+        lambda: client.key_range("sales", "orders", "id"),
+        lambda: client.key_buckets("sales", "orders", "id", "int", 10, 0, 10),
+        lambda: client.key_bound("sales", "orders", ["id"], None, None, (9,), 5),
+        lambda: list(client.iter_table("sales", "orders", ["id"], [], None, None, None, 10)),
+        lambda: client.key_tiles("sales", "orders", ["a", "b"], 4),
+        lambda: client.key_max("sales", "orders", ["a", "b"]),
+    ]
+    for read in reads:
+        read()
+        assert rec.calls[-1][0].startswith("SET LOCK_TIMEOUT 1500; SELECT ")
+    list(client.iter_table("sales", "orders", ["id"], [], None, None, None, 10, "snapshot"))
+    assert rec.calls[-1][0].startswith(
+        "SET LOCK_TIMEOUT 1500; SET TRANSACTION ISOLATION LEVEL SNAPSHOT; SELECT "
+    )
+    rec.calls.clear()
+    client.max_lsn()
+    list(client.iter_changes("dbo_orders", "0x01", "0x02", ["id"], True, 100))
+    assert rec.calls and not any("LOCK_TIMEOUT" in sql for sql, _ in rec.calls)
+    plain = Recorder()  # without the option: no SET at all, as before
+    SqlCdcClient(plain, source_timezone="UTC").key_max("sales", "orders", ["a"])
+    assert plain.calls[-1][0] == "SELECT TOP (1) [a] FROM [sales].[orders] ORDER BY [a] DESC"
+
+
+def test_lock_timeout_ms_is_a_non_negative_integer(monkeypatch):
+    class Connected(Backend):
+        def __init__(self, connection_string, timeout):
+            self.timeout = timeout
+
+        def batches(self, sql, params, batch_size):
+            return iter(())
+
+    monkeypatch.setattr("mssql_cdc.client.MssqlPythonBackend", Connected)
+    client = make_client({"connectionString": "Server=x", "LOCKTIMEOUTMS": " 500 "})
+    assert client._lock_timeout_ms == 500 and client._b.timeout == 30
+    assert make_client({"connectionString": "Server=x", "lockTimeoutMs": "0"})._lock_timeout_ms == 0
+    assert make_client({"connectionString": "Server=x"})._lock_timeout_ms is None
+    for value in ("-1", "1.5", "soon", ""):
+        message = f"lockTimeoutMs must be a non-negative integer (milliseconds), not {value!r}"
+        with pytest.raises(ValueError, match=re.escape(message)):
+            make_client({"connectionString": "Server=x", "lockTimeoutMs": value})
 
 
 def test_chunk_planning_counts_and_seeks_under_the_backfills_isolation():
