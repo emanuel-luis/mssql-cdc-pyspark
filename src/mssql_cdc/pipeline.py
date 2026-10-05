@@ -1280,7 +1280,10 @@ class CdcStream:
             sink.write_event(
                 self.spark,
                 facts_table,
-                info["kind"],
+                # a key added later is read with a default (ADR 0021): an open written before
+                # 'kind' (an unreleased shape put it in 'mode') is generation 0's bootstrap or a
+                # later generation's re-snapshot (ADR 0018)
+                info.get("kind") or ("resnapshot" if info["generation"] else "bootstrap"),
                 app_id=sink_id,
                 txn_app_id=f"{app_id}#events",
                 version=info["generation"],

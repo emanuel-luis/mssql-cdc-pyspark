@@ -1551,6 +1551,37 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
     assert len(_events(spark, facts, "bootstrap")) == 1
 
 
+def test_backfill_defaults_a_key_an_older_snapshot_open_row_lacks(delta_spark, workdir):
+    from pyspark.sql import functions as F
+
+    from mssql_cdc import stream
+    from mssql_cdc.tables import delta_table
+
+    spark = delta_spark
+    _, options = _orders(workdir, n=4)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+    cdc.to_delta(
+        target,
+        "old-v1",
+        ckpt,
+        facts,
+        trigger={"availableNow": True},
+        bootstrap=True,
+        snapshot="chunked",
+    ).awaitTermination()
+    [opened] = _events(spark, facts, "snapshot_open")
+    # the shape before 'kind' (ADR 0028's amendment): the kind in 'mode', which reads as chunked
+    detail = json.loads(opened["detail"])
+    detail["mode"] = detail.pop("kind")
+    delta_table(spark, facts).update(
+        "event = 'snapshot_open'", {"detail": F.lit(json.dumps(detail))}
+    )
+    assert cdc.backfill(target, app_id="old-v1", facts_table=facts, chunk_rows=2)["done"]
+    [done] = _events(spark, facts, "bootstrap")  # generation 0's kind
+    assert (done["min_lsn"], done["app_id"], done["rows"]) == (opened["min_lsn"], "old-v1", 4)
+
+
 @pytest.mark.parametrize("change", ["insert", "delete"])
 def test_backfill_resumes_after_a_crash_between_the_append_and_its_facts(
     delta_spark, workdir, monkeypatch, change
