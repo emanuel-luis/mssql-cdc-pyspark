@@ -47,9 +47,12 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
+import math
 import os
 import statistics
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from pyspark.sql import DataFrame
@@ -67,6 +70,11 @@ from .migrations.facts import (
     RETENTION_COLUMNS,
 )
 from .tables import is_path
+
+_log = logging.getLogger(__name__)
+# ponytail: a guess at a file size worth one bronze file per batch; tune it, or make it an
+# option, if profiles ask
+_ROWS_PER_FILE = 1_000_000
 
 BRONZE_COMMENT = (
     "Append-only change rows from SQL Server CDC, written by mssql-cdc-pyspark's delta_sink. "
@@ -231,6 +239,30 @@ FACTS_COLUMNS = [
 ]
 _FACT_FIELDS = [name for name, _, _ in FACTS_COLUMNS]
 FACTS_SCHEMA = ", ".join(f"{name} {data_type}" for name, data_type, _ in FACTS_COLUMNS)
+
+
+def _fact_tuples(rows: list[dict]) -> list[tuple]:
+    """Facts ``rows`` (column -> value, the rest NULL) in ``FACTS_SCHEMA``'s order. A key that
+    is no column raises: projecting would drop it and write NULL."""
+    unknown = sorted({k for r in rows for k in r} - set(_FACT_FIELDS))
+    if unknown:
+        raise ValueError(f"unknown facts columns: {unknown}")
+    return [tuple(r.get(k) for k in _FACT_FIELDS) for r in rows]
+
+
+def _last_batch(spark, facts_table: str, app_id: str) -> int | None:
+    """The largest batch id ``app_id`` wrote a batch row (event NULL) for in ``facts_table``,
+    an existing table; None when it wrote none."""
+    from .tables import delta_table
+
+    row = (
+        delta_table(spark, facts_table)
+        .toDF()
+        .where((F.col("app_id") == app_id) & F.col("event").isNull())
+        .agg(F.max("batch_id"))
+        .first()
+    )
+    return None if row is None else row[0]
 
 
 def _utc_now() -> datetime:
@@ -401,19 +433,23 @@ def _write(
 
 def delta_sink(
     target: str, app_id: str, facts_table: str | None = None, metrics_path: str | None = None
-):
+) -> Callable[[DataFrame, int], None]:
     """Return a ``foreachBatch`` function.
 
     ``app_id`` must be stable for the lifetime of a checkpoint. If the checkpoint is
     deleted, use a new ``app_id``; batch ids restart at 0 and would otherwise be
-    ignored as duplicates.
+    ignored as duplicates. With a facts table the run's first batch is checked against it:
+    a batch id below the largest one ``app_id`` already wrote there (the checkpoint was
+    deleted or rewound) raises ``ValueError`` instead. Without one nothing checks it.
 
     ``metrics_path`` feeds the facts table with each partition's read and network metrics:
     the directory of the source option ``metricsPath``, used by no other stream. Its files are removed after each batch,
     with or without a facts table; without ``metrics_path`` nothing removes them. It also
     carries the reader's schema change and capture instance switch events to the facts.
+    A batch that read rows but found no metrics file there logs a warning, once per run.
     """
     created: set[str] = set()  # once per query run, not once per batch
+    resumed = warned = False
 
     def ensure(spark, table: str, kind: str, columns, comment: str) -> None:
         if table not in created:
@@ -421,17 +457,34 @@ def delta_sink(
             created.add(table)
 
     def write_batch(df: DataFrame, batch_id: int) -> None:
+        nonlocal resumed, warned
         started_at, t0 = _utc_now(), time.monotonic()
+        spark = df.sparkSession
+        # ponytail: without a facts table nothing is checked; the newest bronze commit's
+        # userMetadata could stand in if that case needs it
+        if facts_table and not resumed:
+            # a restart replays at most the last batch, and a generation has its own app_id
+            ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
+            last = _last_batch(spark, facts_table, app_id)
+            if last is not None and batch_id < last:
+                raise ValueError(
+                    f"{facts_table} holds batch {last} of app_id {app_id!r}, but this run's "
+                    f"checkpoint starts at batch {batch_id}: the checkpoint was deleted or "
+                    "rewound while app_id stayed the same, so Delta would skip every write up to "
+                    f"batch {last} as done already. Use a new app_id, or restore the checkpoint."
+                )
+            resumed = True
         df = df.persist()
         try:
             if metrics_path:  # the batch is not read yet: a partition's file is a dead attempt's
                 _remove(_files(metrics_path))
             facts = batch_facts(df)  # reads the batch: its partitions write their metrics files
             facts.update({"batch_id": batch_id, "app_id": app_id})
-            spark = df.sparkSession
             if facts["rows"]:  # a batch that read none writes no target commit, only its facts
                 out = bronze_rows(df, batch_id)
                 ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
+                # a few files, not one per range: coalesce is narrow and reads the persisted rows
+                out = out.coalesce(max(1, math.ceil(facts["rows"] / _ROWS_PER_FILE)))
                 # mergeSchema: a column a newer capture instance captures joins bronze (ADR 0023)
                 _write(out, target, app_id, batch_id, _json(facts), merge_schema=True)
             duration_ms = round((time.monotonic() - t0) * 1000)
@@ -439,6 +492,20 @@ def delta_sink(
             # the reader's events, written while it planned this batch (or a dead attempt)
             names, events = _read_events(metrics_path) if metrics_path else ([], [])
             if facts_table:
+                # a batch with no range writes no file; one that read rows always does
+                if metrics_path and not folded and facts["rows"] and not warned:
+                    warned = True
+                    _log.warning(
+                        "mssql_cdc: batch %s of %s read %s rows but found no metrics file in %s: "
+                        "the executors cannot write that directory, or the driver cannot see it "
+                        "(a driver-local path on a multi-node cluster). Its retention and lag "
+                        "facts are NULL: use a path every node sees (local, or FUSE such as a "
+                        "Volume).",
+                        batch_id,
+                        app_id,
+                        facts["rows"],
+                        metrics_path,
+                    )
                 # where the stream is: the end offset, not the batch's last change, which on a
                 # quiet table lags it (the batch's last change as a fallback, without metrics)
                 position = folded.get("end_commit_ts") or facts["max_commit_ts"]
@@ -455,7 +522,7 @@ def delta_sink(
                 keys = {k: facts[k] for k in ("app_id", "batch_id", "target", "written_at")}
                 rows = [facts, *(_event_row(e, **keys) for e in events)]
                 facts_df = spark.createDataFrame(
-                    [tuple(r.get(k) for k in _FACT_FIELDS) for r in rows], FACTS_SCHEMA
+                    _fact_tuples(rows), FACTS_SCHEMA
                 )  # the batch's row has event NULL
                 # one commit: the batch's row and its events are written, or skipped, together
                 _write(facts_df, facts_table, f"{app_id}#facts", batch_id)
@@ -522,7 +589,7 @@ def write_facts(
 ) -> None:
     """Append facts ``rows`` (column -> value; the rest NULL, ``written_at`` now) in one
     commit, skipped by Delta when ``txn_app_id`` already wrote ``version`` (never when None)."""
-    migrations.ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
     now = _utc_now()
-    data = [tuple({"written_at": now, **r}.get(k) for k in _FACT_FIELDS) for r in rows]
+    data = _fact_tuples([{"written_at": now, **r} for r in rows])  # a wrong key raises first
+    migrations.ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
     _write(spark.createDataFrame(data, FACTS_SCHEMA), facts_table, txn_app_id, version)

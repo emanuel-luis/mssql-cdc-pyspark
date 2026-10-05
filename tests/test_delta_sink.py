@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -282,6 +283,9 @@ def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
     assert row["retention_watermark_ts"] == T0 - timedelta(hours=70)
     assert row["retention_headroom_hours"] == 70.05  # the batch's last commit is T0 + 3 min
     assert not [f for f in os.listdir(metrics) if f.endswith(".json")]  # folded and removed
+    history = spark.sql(f"DESCRIBE HISTORY delta.`{target}`").collect()
+    [append] = [h for h in history if h["operation"] == "WRITE"]
+    assert append["operationMetrics"]["numFiles"] == "1"  # one file, not one per range read
 
 
 def test_capture_and_ingestion_lag_reach_the_facts(delta_spark, workdir):
@@ -391,6 +395,7 @@ def test_stream_facade_declares_the_options_once(delta_spark, workdir):
         target, "facade-v1", ckpt, facts, trigger={"availableNow": True}
     )
     q.awaitTermination()
+    assert q.name == "facade-v1"  # named after the sink: the facts' app_id
     assert spark.read.format("delta").load(target).count() == 1
     [row] = spark.read.format("delta").load(facts).collect()
     assert row["read_seconds"] > 0  # metrics defaulted under the (local) checkpoint
@@ -449,6 +454,42 @@ def test_replayed_batch_is_ignored(delta_spark, workdir):
     write(df, 7)
     write(df, 7)  # same batch id replayed after a failure
     assert spark.read.format("delta").load(target).count() == 1
+
+
+def test_a_checkpoint_deleted_under_the_same_app_id_fails_instead_of_skipping(delta_spark, workdir):
+    from pyspark.errors import StreamingQueryException
+
+    spark = delta_spark
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    for i in range(3):
+        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+    target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
+    _stream(spark, workdir, target, "reset-v1", facts)  # batches 0 and 1
+    db.commit(CI, [(2, {"order_id": 3, "status": "new"})], at=T0 + timedelta(minutes=3))
+    _stream(spark, workdir, target, "reset-v1", facts)  # a plain restart goes on: batch 2
+    assert spark.read.format("delta").load(target).count() == 4
+    shutil.rmtree(os.path.join(workdir, "ckpt"))  # batch ids start at 0 again
+    # Delta would skip batches 0 to 2 as written: rows lost, the verdict moving on
+    with pytest.raises(StreamingQueryException, match="checkpoint was deleted or rewound"):
+        _stream(spark, workdir, target, "reset-v1", facts)
+    assert spark.read.format("delta").load(target).count() == 4
+
+
+def test_a_batch_whose_metrics_never_arrive_warns_once(delta_spark, workdir, caplog):
+    spark = delta_spark
+    target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
+    df = spark.createDataFrame(
+        [(1, 2, "0x" + "0" * 20, None)],
+        "order_id int, _operation int, _start_lsn string, _commit_ts timestamp_ntz",
+    )
+    # no executor writes there: as with a driver-local path on a multi-node cluster
+    write = delta_sink(target, "blind-v1", facts, metrics_path=os.path.join(workdir, "metrics"))
+    with caplog.at_level("WARNING", logger="mssql_cdc.sink"):
+        write(df, 0)
+        write(df, 1)
+    assert caplog.text.count("found no metrics file") == 1
+    rows = spark.read.format("delta").load(facts).collect()
+    assert [r["retention_headroom_hours"] for r in rows] == [None, None]
 
 
 def test_a_type_bronze_cannot_take_says_to_enable_type_widening(delta_spark, workdir):
@@ -1137,7 +1178,7 @@ def test_resnapshot_of_an_emptied_table_is_marked_by_its_event(
     assert latest(bronze, "order_id", "status", facts=fdf) == []  # the event is the rebuild point
 
 
-def test_resnapshot_recovers_a_stream_started_at_a_purged_lsn(delta_spark, workdir):
+def test_resnapshot_recovers_a_stream_started_at_a_purged_lsn(delta_spark, workdir, caplog):
     from mssql_cdc import stream
 
     spark = delta_spark
@@ -1146,12 +1187,78 @@ def test_resnapshot_recovers_a_stream_started_at_a_purged_lsn(delta_spark, workd
     db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=4))
     db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=5)))
     target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
-    q = stream(spark, {**options, "startingLsn": given}).to_delta(
-        target, "given-v1", ckpt, facts, trigger={"availableNow": True}, on_data_loss="resnapshot"
-    )
+    with caplog.at_level("INFO", logger="mssql_cdc.pipeline"):
+        q = stream(spark, {**options, "startingLsn": given}).to_delta(
+            target,
+            "given-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            on_data_loss="resnapshot",
+        )
     q.awaitTermination()  # recovered on the first run, before batch 0 could fail
     assert _generation(ckpt)["generation"] == 1
     assert spark.read.format("delta").load(target).where("_operation = 0").count() == 2
+    assert q.name == "given-v1.g1"
+    # the decision, with the lost range, and the read it starts, in the driver's log
+    warned = [
+        r for r in caplog.records if r.name == "mssql_cdc.pipeline" and r.levelname == "WARNING"
+    ]
+    assert len(warned) == 1 and f"changes after {given}" in warned[0].getMessage()
+    assert "generation 1, sink app_id given-v1.g1" in warned[0].getMessage()
+    assert "2 rows in" in caplog.text
+
+
+def test_a_checkpoint_python_cannot_see_raises_instead_of_resnapshotting(delta_spark, workdir):
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _orders(workdir)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+
+    def run():
+        stream(spark, options).to_delta(
+            target,
+            "hidden-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            on_data_loss="resnapshot",
+        ).awaitTermination()
+
+    run()  # the bootstrap at S, then batch 0
+    third = db.commit(CI, [(2, {"order_id": 3, "status": "new"})], at=T0 + timedelta(minutes=3))
+    run()  # batch 1 reads it
+    db.cleanup(CI, third)  # past S, not past what the checkpoint has read
+    run()  # nothing lost
+    # Spark's checkpoint where Python does not look (a /mnt/ path on Databricks classic): the
+    # bootstrap at S would pass for the stream's position, purged, and the table read again
+    os.rename(ckpt, ckpt + "-spark")
+    os.makedirs(ckpt)
+    with pytest.raises(ValueError, match="Python cannot see Spark's commits"):
+        run()
+    assert not spark.streams.active and not _events(spark, facts, "resnapshot")
+    assert _snapshots(spark.read.format("delta").load(target)) == 1
+
+
+def test_a_snapshot_counts_its_rows_however_many_commits_follow_it(
+    delta_spark, workdir, monkeypatch
+):
+    from mssql_cdc import sink, stream
+
+    spark = delta_spark
+    _, options = _orders(workdir)
+    target = os.path.join(workdir, "bronze")
+    write = sink._write
+
+    def busy(df, table, *args, **kwargs):  # auto compaction, optimized writes, other writers
+        write(df, table, *args, **kwargs)
+        for i in range(5):
+            spark.sql(f"ALTER TABLE delta.`{table}` SET TBLPROPERTIES ('test.after' = '{i}')")
+
+    monkeypatch.setattr(sink, "_write", busy)
+    assert stream(spark, options)._take_snapshot(target, CI)[1]["rows"] == 3
 
 
 def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
@@ -1170,12 +1277,25 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
         cdc.to_delta(target, "x", ckpt, bootstrap=True, snapshot="lazy")
     with pytest.raises(ValueError, match="snapshot='chunked' needs a facts_table"):
         cdc.to_delta(target, "x", ckpt, bootstrap=True, snapshot="chunked")
+    with pytest.raises(ValueError, match="snapshot_on_switch=True reads the whole table"):
+        cdc.to_delta(
+            target, "x", ckpt, "facts", bootstrap=True, snapshot="chunked", snapshot_on_switch=True
+        )
+    # executors write the metrics with Python file calls: s3: would be a local directory
+    with pytest.raises(ValueError, match="metricsPath 's3://b/m' is a URI"):
+        stream(spark, {**options, "metricsPath": "s3://b/m"}).to_delta(target, "x", ckpt, "facts")
     # the generation state is a file, and the checkpoint is read from Python
     for uri in ("abfss://c@a.dfs.core.windows.net/x", "/dbfs/ckpt/orders"):
         with pytest.raises(ValueError, match="same directory"):
             cdc.to_delta(target, "x", uri, "facts", on_data_loss="resnapshot")
     with pytest.raises(ValueError, match="facts_table"):
         cdc.to_delta(target, "x", ckpt, on_data_loss="resnapshot")
+    # a purge while the query runs would be skipped past, out of the next pre-flight's sight
+    for off in ("false", "no", "off"):
+        with pytest.raises(ValueError, match="needs failOnDataLoss true"):
+            stream(spark, {**options, "failOnDataLoss": off}).to_delta(
+                target, "x", ckpt, "facts", on_data_loss="resnapshot"
+            )
     assert not spark.streams.active
     for name in ("offsets", "commits"):
         os.makedirs(os.path.join(ckpt, name))
@@ -1362,6 +1482,7 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
         (2, 4, False),
         (4, 4, True),
     ]
+    assert [st["state"] for st in statuses] == ["running", "done"]  # max_waves stopped the first
     assert statuses[-1]["snapshot"] == s and not statuses[-1]["paused"]
     db.commit(CI, [(1, {"order_id": 4, "status": "new"})], at=T0 + timedelta(minutes=20))
     run()
@@ -1555,11 +1676,15 @@ def test_backfill_keeps_its_plan_and_rebuilds_a_waves_facts_from_bronze_without_
 
 
 def test_a_keyset_plans_open_last_chunk_ends_at_the_first_key_after_max_when_read(
-    delta_spark, workdir
+    delta_spark, workdir, monkeypatch
 ):
-    from mssql_cdc import stream
+    from mssql_cdc import client, stream
 
     spark = delta_spark
+    seen = []  # the isolation the plan's counts and seeks run under (client._isolated's)
+    for name in ("plan_chunks", "last_bound"):
+        real = getattr(client, name)
+        monkeypatch.setattr(client, name, lambda *a, _real=real: seen.append(a[-1]) or _real(*a))
     src = os.path.join(workdir, "src")
     db = FakeCdcDatabase(src, [CI], keys={CI: "code"})
     for i, code in enumerate("abcdef"):
@@ -1586,13 +1711,22 @@ def test_a_keyset_plans_open_last_chunk_ends_at_the_first_key_after_max_when_rea
         ).awaitTermination()
 
     run()
-    cdc.backfill(target, app_id="keys-v1", facts_table=facts, chunk_rows=2, max_waves=1)
+    # the stream's isolationLevel, in any case, as the snapshot reader takes it
+    snap = stream(spark, {**options, "isolationLevel": "SNAPSHOT"})
+    with pytest.raises(ValueError, match="'snapshot' or 'readCommitted', not 'dirty'"):
+        snap.backfill(target, app_id="keys-v1", facts_table=facts, isolation="dirty")
+    snap.backfill(target, app_id="keys-v1", facts_table=facts, chunk_rows=2, max_waves=1)
+    assert seen and set(seen) == {"snapshot"}
     [planned] = _events(spark, facts, "snapshot_plan")  # no key after MAX yet: open
     assert json.loads(planned["detail"])["chunks"] == [[None, "c"], ["c", "e"], ["e", None]]
     # inserted after S, above MAX: the stream's, and no reason for the last chunk to grow
     later = [(2, {"code": c, "status": "new"}) for c in "hg"]
     db.commit(CI, later, at=T0 + timedelta(minutes=9))
-    assert cdc.backfill(target, app_id="keys-v1", facts_table=facts)["done"]
+    seen.clear()  # the keyword wins over the option
+    assert snap.backfill(target, app_id="keys-v1", facts_table=facts, isolation="ReadCommitted")[
+        "done"
+    ]
+    assert seen and set(seen) == {None}
     chunks = {json.loads(r["detail"])["chunk"]: r for r in _events(spark, facts, "snapshot_chunk")}
     assert (json.loads(chunks[2]["detail"])["hi"], chunks[2]["rows"]) == ("g", 2)
     run()
@@ -1625,20 +1759,27 @@ def test_backfill_pauses_while_the_stream_lags_or_has_stopped(delta_spark, workd
     def backfill(hours):
         return cdc.backfill(target, app_id="slow-v1", facts_table=facts, min_headroom_hours=hours)
 
+    # started before the stream, or with a wrong app_id: nothing to wait for, said so
+    early = backfill(0)
+    assert (early["paused"], early["state"]) == (True, "no_snapshot")
     run()  # its first batch planned no range: no headroom measured yet
     paused = backfill(0)
     assert paused["paused"] and "no facts row with retention_headroom_hours" in paused["reason"]
+    assert paused["state"] == "waiting_metrics"
     db.commit(CI, [(2, {"order_id": 3, "status": "new"})], at=T0 + timedelta(minutes=3))
     run()  # headroom 0.05 h: from the watermark (T0) to the stream's position (T0 + 3 min)
     paused = backfill(1)
     assert (paused["paused"], paused["done"], paused["chunks_done"]) == (True, False, 0)
     assert "below min_headroom_hours=1" in paused["reason"]
+    assert paused["state"] == "waiting_headroom"
     later = sink._utc_now() + timedelta(hours=1)
     monkeypatch.setattr(sink, "_utc_now", lambda: later)  # the stream stopped an hour ago
-    assert "below min_headroom_hours=0.01" in backfill(0.01)["reason"]
+    stopped = backfill(0.01)
+    assert "below min_headroom_hours=0.01" in stopped["reason"]
+    assert stopped["state"] == "waiting_headroom"
     monkeypatch.undo()
     done = backfill(0.01)
-    assert done["done"] and not done["paused"]
+    assert done["done"] and not done["paused"] and done["state"] == "done"
     assert not spark.read.format("delta").load(target).where("_operation = 0").isEmpty()
 
 
@@ -1889,7 +2030,16 @@ def test_a_run_finding_the_other_mode_opened_after_its_lock_stops(delta_spark, w
     cdc = stream(spark, options)
 
     def open_(app_id, mode):  # what a run writes once it found nothing open
-        return cdc._open(target, CI, app_id, app_id, facts, 0, "bootstrap", mode=mode)
+        return cdc._open(
+            target,
+            CI,
+            app_id=app_id,
+            sink_id=app_id,
+            facts_table=facts,
+            generation=0,
+            kind="bootstrap",
+            mode=mode,
+        )
 
     # chunked first: Delta skips a rerun's open, and a full run reading it back stops
     s = open_("race0-v1", "chunked")["lsn"]
@@ -1909,7 +2059,16 @@ def test_a_run_finding_the_other_mode_opened_after_its_lock_stops(delta_spark, w
     db.commit(CI, [(2, {"order_id": 11, "status": "new"})], at=T0 + timedelta(hours=2))
     assert open_("race1-v1", "full")["lsn"] > f  # under an open of its own
     # a full one a racing run opened in a later generation: backfill neither plans nor reads
-    cdc._open(target, CI, "race0-v1", "race0-v1.g1", facts, 1, "resnapshot", mode="full")
+    cdc._open(
+        target,
+        CI,
+        app_id="race0-v1",
+        sink_id="race0-v1.g1",
+        facts_table=facts,
+        generation=1,
+        kind="resnapshot",
+        mode="full",
+    )
     with pytest.raises(ValueError, match=r"full snapshot open at .* rerun with snapshot='full'"):
         cdc.backfill(target, app_id="race0-v1", facts_table=facts)
     assert not _events(spark, facts, "snapshot_plan")
