@@ -213,6 +213,28 @@ def test_stream_resumes_from_checkpoint_with_transactions_in_order(
     assert len(after_rows) == 5 and [(r["order_id"], r["_operation"]) for r in new] == [(2, 2)]
 
 
+def test_max_commits_per_batch_of_one_reads_one_transaction_a_batch(spark, sqlserver, backend):
+    ci = sqlserver.cdc_table("one_a_batch", "id INT NOT NULL PRIMARY KEY")
+    for t in range(4):  # one transaction, two rows, each
+        sqlserver.run("INSERT INTO dbo.one_a_batch VALUES (?), (?)", (2 * t, 2 * t + 1))
+    sqlserver.wait_for_changes(ci, 8)
+    df, q = _read(spark, sqlserver, ci, maxCommitsPerBatch="1", backend=backend)
+    progress = [json.loads(p.json) if hasattr(p, "json") else p for p in q.recentProgress]
+    # nth_commit_after(start, 1) is the next commit strictly after the start: a batch each
+    assert [p["numInputRows"] for p in progress if p["numInputRows"]] == [2, 2, 2, 2]
+    rows = df.select("_start_lsn", "_seqval", "_operation").collect()
+    assert len(rows) == len(set(rows)) == 8
+
+
+def test_include_command_id_false_reads_without_the_column(spark, sqlserver, backend):
+    ci = sqlserver.cdc_table("no_command_id", "id INT NOT NULL PRIMARY KEY")
+    sqlserver.run("INSERT INTO dbo.no_command_id VALUES (1), (2)")
+    sqlserver.wait_for_changes(ci, 2)
+    df, _ = _read(spark, sqlserver, ci, includeCommandId="false", backend=backend)
+    assert "_command_id" not in df.columns
+    assert sorted((r["id"], r["_operation"]) for r in df.collect()) == [(1, 2), (2, 2)]
+
+
 def test_least_privilege_login_needs_one_grant_on_the_change_table(spark, sqlserver, backend):
     ci = sqlserver.cdc_table("priv_probe", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10)")
     sqlserver.run("INSERT INTO dbo.priv_probe VALUES (1, 'a')")
