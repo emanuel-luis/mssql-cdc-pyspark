@@ -32,7 +32,7 @@ SOURCE_TZ = os.environ.get("MSSQL_SOURCE_TZ", "auto")
 
 
 def connection_string(database: str | None = None) -> str:
-    host = os.environ.get("MSSQL_HOST", "localhost")
+    host = os.environ.get("MSSQL_HOST", "127.0.0.1")  # compose binds IPv4 only
     port = os.environ.get("MSSQL_PORT", "1433")
     user = os.environ.get("MSSQL_USER", "sa")
     pwd = os.environ["MSSQL_SA_PASSWORD"]
