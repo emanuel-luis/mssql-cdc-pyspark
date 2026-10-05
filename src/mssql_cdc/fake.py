@@ -309,7 +309,7 @@ class FakeCdcClient(CdcClient):
         # ponytail: integer keys only; the table's JSON rows keep no date type
         if key is None:
             return [(0, len(self._table(table)), None)]
-        out = {}  # bucket -> (rows, key sum)
+        out: dict[int, tuple[int, int]] = {}  # bucket -> (rows, key sum)
         for o in self._key_values(table, key, lo, hi):
             n, s = out.get(o // int(width), (0, 0))
             out[o // int(width)] = (n + 1, s + o)

@@ -873,7 +873,7 @@ class SqlCdcClient(CdcClient):
             "WHERE __$start_lsn BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)"
             ") x GROUP BY g ORDER BY b"
         )
-        points = []
+        points: list[str | None] = []
         for batch in self._change_table_batches(ci, sql, (from_lsn, to_lsn), 1000):
             points.extend(self._hex(v) for v in batch.column(0).to_pylist())
         return points
@@ -941,7 +941,7 @@ class SqlCdcClient(CdcClient):
         out = []
         for r in self._resolve(capture_instance)[1]:
             cols = self._captured_rows(r["capture_instance"])
-            types = []
+            types: list[str | None] = []
             for c in cols:
                 try:
                     types.append(

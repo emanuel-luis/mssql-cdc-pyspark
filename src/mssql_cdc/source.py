@@ -42,6 +42,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import pairwise
+from typing import TYPE_CHECKING
 
 from pyspark.sql.datasource import (
     DataSource,
@@ -64,6 +65,9 @@ except ImportError:  # pragma: no cover - older Spark
     class SupportsTriggerAvailableNow:  # type: ignore[no-redef]
         pass
 
+
+if TYPE_CHECKING:
+    from .client import CdcClient
 
 METADATA_COLUMNS = [
     ("_capture_instance", "STRING"),
@@ -294,7 +298,7 @@ class _Common:
         self.field_names = list(schema.fieldNames())
         self.source_columns = [f for f in self.field_names if f not in meta_names]
         self.schema = schema
-        self._client = None
+        self._client: CdcClient | None = None
         # driver side (ADR 0023): the capture instance names seen this run, gone ones first,
         # then oldest to newest; the type each source column is expected to have; and the
         # instances whose columns the query's schema was checked against (None: not planned yet)
