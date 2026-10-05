@@ -151,7 +151,8 @@ Where the listener runs:
   registered after its run: removing the client's last listener while another query posts
   an event hangs PySpark 4.2.0's listener bus. It ignores every other run's events. Not
   tested.
-- Databricks (classic compute, serverless, Databricks Connect): not tested.
+- Databricks classic compute and Databricks Connect: not tested. Serverless is not supported
+  yet ([Databricks](../DATABRICKS.md)).
 
 A separate job that reads the checkpoint's committed offsets and calls `advance` remains an
 option where a listener cannot run ([Extension points](../ARCHITECTURE.md#extension-points)).

@@ -33,6 +33,11 @@ Leave out the `[spark]` extra there: PySpark from PyPI conflicts with the runtim
 Spark. On Databricks, install it as a job library and add an init script for the driver's
 system libraries; both are in [Running on Databricks](../DATABRICKS.md).
 
+Of these platforms, only Databricks classic compute has run it. Databricks serverless is not
+supported yet, nor is a [metricsPath](../reference/options.md#metricspath) on an object
+store: the metrics need a local or FUSE path every node sees, which EMR and Dataproc do not
+have by default.
+
 ## Locally
 
 The `spark` extra brings PySpark and delta-spark:

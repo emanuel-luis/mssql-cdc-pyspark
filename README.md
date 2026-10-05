@@ -6,9 +6,13 @@ built on Spark's Python DataSource V2 API, plus a **completeness signal**
 
 * 100% PySpark: no JVM connector, no platform-specific APIs. Tested on local Spark 4.2 and
   on Databricks classic compute (DBR 18.2, dedicated access mode); other Spark 4.2+ runtimes
-  are untested. Databricks serverless is unsupported until tested: it refuses the DataFrame
-  cache API the sink calls on every batch, and `processingTime` triggers (it would need at
-  least `trigger={"availableNow": True}`).
+  are untested. The metrics need `metricsPath` on a local or FUSE path every node sees, such
+  as a Unity Catalog Volume. Not supported yet: Databricks serverless, which refuses the
+  DataFrame cache API the sink calls on every batch and `processingTime` triggers (it would
+  need at least `trigger={"availableNow": True}`), and a `metricsPath` on an object store
+  (`s3://`, `abfss://`...), which `to_delta` refuses. Without a shared path (EMR and
+  Dataproc have none by default) the stream runs, but the facts' metric columns stay NULL
+  and schema change events do not reach them.
 * Offsets are SQL Server commit LSNs, checkpointed by Spark. Supports
   `Trigger.AvailableNow` and per-batch limits (`maxCommitsPerBatch`).
 * Arrow end to end: the default driver (`mssql-python`) fetches straight into Arrow
