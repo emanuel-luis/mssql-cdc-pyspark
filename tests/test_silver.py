@@ -120,6 +120,23 @@ def test_changes_apply_incrementally_and_a_rerun_or_a_position_left_behind_chang
     detail = delta_spark.sql(f"DESCRIBE DETAIL delta.`{o.silver}`").first()
     assert "Current state" in detail["description"]
     assert detail["properties"]["mssql_cdc.schema_version"] == "0"
+    assert "delta.columnMapping.mode" not in detail["properties"]  # no name needs it
+
+
+def test_a_column_name_delta_refuses_without_column_mapping_gets_it_in_bronze_and_silver(
+    delta_spark, workdir
+):
+    o = Orders(delta_spark, workdir)
+    o.options["columns"] = "order_id INT, `Qty (kg)` DOUBLE"  # [Qty (kg)] in SQL Server
+    o.commit((2, {"order_id": 1, "Qty (kg)": 2.5}), (2, {"order_id": 2, "Qty (kg)": 1.0}))
+    o.commit((4, {"order_id": 1, "Qty (kg)": 3.0}), (1, {"order_id": 2, "Qty (kg)": 1.0}))
+    o.run()
+    o.apply()
+    for table in (o.bronze, o.silver):
+        detail = delta_spark.sql(f"DESCRIBE DETAIL delta.`{table}`").first()
+        assert detail["properties"]["delta.columnMapping.mode"] == "name"
+    rows = delta_spark.read.format("delta").load(o.silver).collect()
+    assert [(r["order_id"], r["Qty (kg)"]) for r in rows] == [(1, 3.0)]
 
 
 def test_snapshot_then_changes_and_the_verdict_is_the_bronze_one_read_before_the_apply(

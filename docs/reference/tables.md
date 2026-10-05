@@ -248,8 +248,8 @@ The versions, from `mssql_cdc.migrations.<kind>.MIGRATIONS`:
 
 A migration that adds columns appends them, so in a table created by an older release they
 come after `written_at` (facts), `updated_at` (control) or `_batch_id` and the captured
-columns (bronze): select columns by name. The
-library sets no other table property; type widening is yours to enable.
+columns (bronze): select columns by name. The other table properties the library sets, and
+the ones it leaves to you, are below.
 
 Jobs that share a table can upgrade one at a time: a job on an older release keeps writing
 a table a newer release migrated, and logs a WARNING. A future migration that older
@@ -259,3 +259,30 @@ migrations than it names refuse the table with a `ValueError`; no migration sets
 ```sql
 SHOW TBLPROPERTIES ops.ingestion_facts ('mssql_cdc.schema_version');
 ```
+
+## Table properties
+
+Besides `mssql_cdc.schema_version`, the library sets one property, and only where a table
+cannot work without it ([ADR 0012](../decisions/0012-delta-tables-through-the-deltatable-api.md)):
+`delta.columnMapping.mode = 'name'`, on a bronze or silver table it creates with a
+captured column whose name Delta refuses otherwise: one with a space or one of `,;{}()=`,
+such as `[Unit Price]` or `[Qty (kg)]`. Column mapping raises the table's Delta protocol, so
+every reader and writer of that table needs a Delta that supports it. A table created
+without it does not get it later: when a newer capture instance adds such a column, the
+append fails with Delta's `DELTA_INVALID_CHARACTERS_IN_COLUMN_NAMES` until you enable it.
+
+Everything else is yours to enable, where every reader and writer of the table supports it,
+since each one changes the table's protocol or how its files are laid out:
+
+- Compaction: a scheduled `OPTIMIZE` (and `VACUUM`) on bronze, silver and the facts
+  table, or optimized writes and auto compaction where the runtime has them
+  ([Streaming](../guides/streaming.md)).
+- Deletion vectors on silver (`delta.enableDeletionVectors = true`): the
+  `apply_changes` MERGE marks the rows it replaces instead of rewriting whole files. On
+  Databricks, adding row tracking (`delta.enableRowTracking = true`) lets concurrent
+  writes to different rows go through without conflict.
+- Clustering silver by its keys, with liquid clustering (`ALTER TABLE ... CLUSTER BY`)
+  where the runtime has it, or `OPTIMIZE ... ZORDER BY` the keys: a key range lives in
+  fewer files, so each MERGE rewrites fewer.
+- Type widening (`delta.enableTypeWidening = true`) on bronze, so a widened source
+  column does not stop the stream ([Schema changes](../guides/schema-changes.md#changing-a-column-type)).

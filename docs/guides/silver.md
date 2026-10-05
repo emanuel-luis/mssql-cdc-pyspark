@@ -176,7 +176,10 @@ silver, and rows that have not changed since read NULL for it.
   on the old rows. Keep the old (default) name configured: the stream follows the table's
   newest instance anyway.
 - The MERGE joins against the whole silver table, and each call scans bronze for snapshot
-  rows. Delta file statistics skip most of that scan, but it grows with bronze.
+  rows. Delta file statistics skip most of that scan, but it grows with bronze. Silver is
+  created with no Delta feature beyond the defaults: deletion vectors, clustering by the
+  keys and a scheduled `OPTIMIZE` make the MERGE cheaper, and are yours to enable
+  ([Table properties](../reference/tables.md#table-properties)).
 
 ## See also
 

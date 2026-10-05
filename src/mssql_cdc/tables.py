@@ -20,6 +20,9 @@ _CONFLICTS = {
     "MetadataChangedException",
 }
 _CONFLICT_CODES = ("DELTA_CONCURRENT", "DELTA_METADATA_CHANGED")
+# Delta refuses these in a column name unless the table maps columns by name; SQL Server
+# allows them in a bracketed one, such as [Unit Price]
+_MAPPED_ONLY = frozenset(" ,;{}()\n\t=")
 
 
 def is_conflict(exc: BaseException) -> bool:
@@ -83,6 +86,10 @@ def create_if_not_exists(
 ):
     """``columns``: ``(name, type, comment)``; ``type`` is a DDL string or a Spark DataType.
 
+    A column name Delta takes only with column mapping (a space, or one of ``,;{}()=``)
+    creates the table with ``delta.columnMapping.mode = 'name'`` (reader 2, writer 5); no
+    other name does.
+
     A no-op when the table exists: its schema, comments and properties are left as they
     are (``mssql_cdc.migrations`` changes existing tables). That includes a table another
     writer created meanwhile, such as a stream and a backfill both creating bronze: Delta
@@ -90,6 +97,9 @@ def create_if_not_exists(
     """
     from delta.tables import DeltaTable
 
+    columns = list(columns)
+    if any(_MAPPED_ONLY.intersection(c[0]) for c in columns):
+        properties = {"delta.columnMapping.mode": "name", **(properties or {})}
     builder = DeltaTable.createIfNotExists(spark)
     builder = (
         builder.location(name_or_path) if is_path(name_or_path) else builder.tableName(name_or_path)
