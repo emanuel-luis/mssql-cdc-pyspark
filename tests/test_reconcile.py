@@ -10,7 +10,6 @@ import pytest
 from mssql_cdc import apply_changes, reconcile, stream
 from mssql_cdc.fake import FakeCdcClient, FakeCdcDatabase
 
-pytestmark = pytest.mark.delta
 CI = "dbo_orders"
 T0 = datetime(2026, 10, 1, 9, 0)
 
@@ -519,7 +518,8 @@ def test_a_chunked_bootstrap_applied_by_wave_reconciles_through_snapshot_chunks(
 def test_chunk_checks_read_a_pipeline_built_snapshot_whose_rows_are_no_change_in_flight(
     delta_spark, workdir
 ):
-    # every failure _tiling_failures finds is in its table above; here, one through the reads
+    # every failure _tiling_failures finds is in its table above; here, the facts and bronze
+    # fields it gets through the reads, and the bounds the report writes
     from delta.tables import DeltaTable
 
     o = Orders(delta_spark, workdir)
@@ -549,20 +549,33 @@ def test_chunk_checks_read_a_pipeline_built_snapshot_whose_rows_are_no_change_in
 
     clean = o.reconcile(sample=0.0, facts_table=facts)
     assert clean["failures"] == {} and chunk_rows(clean) == {}
-    # a gap, and bronze holds 3 rows of a chunk with no facts row
-    gap = "event = 'snapshot_chunk' AND get_json_object(detail, '$.chunk') = 1"
-    DeltaTable.forPath(delta_spark, facts).delete(gap)
+    table = DeltaTable.forPath(delta_spark, facts)
+
+    def chunk(i):
+        return f"event = 'snapshot_chunk' AND get_json_object(detail, '$.chunk') = {i}"
+
+    table.update(chunk(0), {"min_lsn": "'0x00000000000000000000'"})  # stamped below S
+    table.delete(chunk(1))  # a gap, and bronze holds 3 rows of a chunk with no facts row
+    table.update(chunk(3), {"detail": "replace(detail, '\"lo\": 9', '\"lo\": 8')"})  # overlap
     # silver applied up to S, its rows are stamped above it: a snapshot row is no change in
     # flight, so a row silver lost is a MISMATCH
     o.silver_table().delete("order_id = 4")
     found = o.reconcile(sample=0.0, facts_table=facts)
     rows = chunk_rows(found)
-    assert set(rows) == {("CHUNK_TILING", 1), ("CHUNK_ROWS", 1)}
-    assert found["failures"] == {"CHUNK_TILING": 1, "CHUNK_ROWS": 1, "MISSING_TARGET": 1}
+    assert set(rows) == {
+        ("CHUNK_STAMP", 0),
+        ("CHUNK_TILING", 1),
+        ("CHUNK_ROWS", 1),
+        ("CHUNK_TILING", 3),
+    }
+    assert found["failures"] == {
+        "CHUNK_STAMP": 1,
+        "CHUNK_TILING": 2,
+        "CHUNK_ROWS": 1,
+        "MISSING_TARGET": 1,
+    }
     assert (found["mismatch"], found["in_flight"]) == (1, 0)
-    assert [(r["bucket_lo"], r["bucket_hi"], r["key"], r["status"]) for r in rows.values()] == [
-        (None, None, None, None)
-    ] * 2
+    assert json.loads(rows[("CHUNK_STAMP", 0)]["detail"])["lsn"] == "0x00000000000000000000"
     assert json.loads(rows[("CHUNK_ROWS", 1)]["detail"]) | {"snapshot": None} == {
         "snapshot": None,
         "chunk": 1,
@@ -571,6 +584,12 @@ def test_chunk_checks_read_a_pipeline_built_snapshot_whose_rows_are_no_change_in
     }
     assert found["match"] == found["buckets"] - 1  # the chunks' failures are no bucket's
     written = delta_spark.read.format("delta").load(o.report)
-    assert (
-        written.where(f"run_id = '{found['run_id']}' AND failure_type LIKE 'CHUNK%'").count() == 2
-    )
+    written = chunk_rows({"report": written.where(f"run_id = '{found['run_id']}'")})
+    assert {
+        k: (r["bucket_lo"], r["bucket_hi"], r["key"], r["status"]) for k, r in written.items()
+    } == {
+        ("CHUNK_STAMP", 0): (None, "3", None, None),
+        ("CHUNK_TILING", 1): (None, None, None, None),
+        ("CHUNK_ROWS", 1): (None, None, None, None),
+        ("CHUNK_TILING", 3): ("8", "12", None, None),
+    }

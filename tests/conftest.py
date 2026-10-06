@@ -23,11 +23,15 @@ def pytest_sessionstart(session):
 
 @pytest.hookimpl(tryfirst=True)  # before -m deselects by marker
 def pytest_collection_modifyitems(items):
-    """Mark every test that takes the ``spark`` fixture (directly or through another fixture):
-    ``-m "not spark and not sqlserver"`` is the loop that starts no JVM."""
+    """Mark every test that takes the ``spark`` or ``delta_spark`` fixture (directly or through
+    another fixture): ``-m "not spark and not sqlserver"`` is the loop that starts no JVM,
+    ``-m "not delta and not sqlserver"`` the one without Delta."""
     for item in items:
-        if "spark" in getattr(item, "fixturenames", ()):
+        names = getattr(item, "fixturenames", ())
+        if "spark" in names:
             item.add_marker("spark")
+        if "delta_spark" in names:
+            item.add_marker("delta")
 
 
 def pytest_collection_finish(session):

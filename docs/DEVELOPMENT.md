@@ -137,7 +137,7 @@ make test-fast                                        # no JVM: the tests that n
 uv run pytest -q -m "not delta and not sqlserver"     # the engine without Delta
 ```
 
-The second leaves out the Delta suites, and the tests elsewhere that need Delta skip. A
+The second leaves out every test that takes the `delta_spark` fixture. A
 `-m` on the command line replaces the `-m "not sqlserver"` in `pyproject.toml`, so always
 add `and not sqlserver` to it, or the run starts SQL Server containers.
 

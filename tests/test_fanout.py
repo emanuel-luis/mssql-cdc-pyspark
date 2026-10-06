@@ -50,7 +50,6 @@ def _bronze(spark, workdir, ci):
     return spark.read.format("delta").load(os.path.join(workdir, f"bronze_{ci}"))
 
 
-@pytest.mark.delta
 def test_each_capture_instance_streams_into_its_own_target(delta_spark, workdir):
     spark = delta_spark
     _, options, templates = _fake(workdir)
@@ -87,7 +86,6 @@ def test_each_capture_instance_streams_into_its_own_target(delta_spark, workdir)
         assert os.listdir(os.path.join(workdir, "ckpt", ci, "commits"))
 
 
-@pytest.mark.delta
 def test_a_failing_stream_leaves_the_others_running(delta_spark, workdir):
     from pyspark.errors import StreamingQueryException
 

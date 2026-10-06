@@ -9,8 +9,6 @@ import pytest
 
 from mssql_cdc import migrations, tables
 
-pytestmark = pytest.mark.delta
-
 
 def test_table_ref_doubles_a_backtick_in_a_path():  # the ALTER TABLEs migrations run take it
     assert tables.table_ref("/tmp/a`b") == "delta.`/tmp/a``b`"

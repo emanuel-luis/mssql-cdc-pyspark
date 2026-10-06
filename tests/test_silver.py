@@ -12,7 +12,6 @@ from mssql_cdc import apply_changes, finalization, stream
 from mssql_cdc.fake import FakeCdcClient, FakeCdcDatabase
 from mssql_cdc.sink import write_facts
 
-pytestmark = pytest.mark.delta
 CI = "dbo_orders"
 COLUMNS = "order_id INT, status STRING"
 T0 = datetime(2026, 9, 30, 9, 0)
@@ -652,16 +651,23 @@ def test_a_date_keys_ranges_delete_on_spark_what_they_bound(delta_spark, workdir
     assert sorted(tuple(r) for r in gone.collect()) == [(d[1], _lsn(110), 1), (d[3], _lsn(120), 1)]
 
 
-def test_no_range_deletes_unless_silver_has_the_snapshots_one_column_key(delta_spark, workdir):
+@pytest.mark.parametrize(
+    ("keys", "cut"),  # two key columns: the only open wave applied on a composite key
+    [(["order_id", "status"], ["order_id", "status"]), (["order_id"], ["status"])],
+)
+def test_no_range_deletes_unless_silver_has_the_snapshots_one_column_key(
+    delta_spark, workdir, keys, cut
+):
     g, S = Log(delta_spark, workdir), 100
     g.change(10, (2, 1, "new"), (2, 2, "new"))  # 2's delete is lost in a purged gap
-    g.apply()
-    g.open(S, "resnapshot", keys=["status"])  # its bounds are not cut on silver's key column
+    g.apply(keys=keys)
+    g.open(S, "resnapshot", keys=cut)  # its bounds are not cut on silver's one key column
     g.wave(S, 0, 110, [(0, None, None, [(1, "snap")])])  # a whole-table range without 2
-    g.apply()
-    assert (2, "new") in g.rows()  # left to the rebuild; each gate: test_silver_units
+    g.apply(keys=keys)
+    # the wave applied, 2 left to the rebuild; each gate: test_silver_units
+    assert {(1, "snap"), (2, "new")} <= set(g.rows())
     g.fact("resnapshot", S, {"snapshot": _lsn(S)})
-    g.apply()
+    g.apply(keys=keys)
     assert g.rows() == [(1, "snap")]
 
 

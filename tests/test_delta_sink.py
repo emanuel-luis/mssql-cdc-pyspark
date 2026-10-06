@@ -14,7 +14,6 @@ from mssql_cdc import finalization
 from mssql_cdc.fake import FakeCdcDatabase
 from mssql_cdc.sink import delta_sink
 
-pytestmark = pytest.mark.delta
 CI = "dbo_orders"
 COLUMNS = "order_id INT, status STRING"
 T0 = datetime(2026, 9, 28, 13, 50)

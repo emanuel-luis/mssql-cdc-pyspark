@@ -73,7 +73,8 @@ addopts = ["-ra", "--strict-markers", "--strict-config", "--durations=25", "-m",
 timeout = 900
 timeout_method = "thread"
 markers = [
-  "delta: needs Delta Lake jars (Maven access on first run)",
+  # Delta Lake jars need Maven access on the first run
+  "delta: needs Delta Lake (takes the delta_spark fixture; tests/conftest.py adds the marker)",
   # a -m on the command line replaces addopts' one: the JVM-free loop is
   # -m "not spark and not sqlserver" (make test-fast)
   "spark: starts the JVM (takes the spark fixture; tests/conftest.py adds the marker)",
