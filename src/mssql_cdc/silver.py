@@ -198,6 +198,13 @@ def _bound(v, key_type, lower: bool):
     return t + timedelta(microseconds=1) if lower and digits[6:].strip("0") else t
 
 
+def _range_key(keys: Sequence[str], cut) -> bool:
+    """Whether chunk ranges may delete silver's keys: bounds are cut on the snapshot's key
+    columns (``cut``, from its 'snapshot_open' row), so only when silver's key is that one
+    column (ADR 0028)."""
+    return len(keys) == 1 and cut == keys
+
+
 def _absent(spark, target: str, key: str, key_type, chunks: dict, held):
     """Synthetic deletes at each chunk's stamp L of the silver keys in its range [lo, hi)
     that it does not hold (``held``: its rows' keys), when their image is older than L. The
@@ -459,7 +466,7 @@ def apply_changes(
             )
             # bounds are cut on the snapshot's key columns: by range only on those (ADR 0028)
             cut = json.loads(opened["detail"] or "{}").get("keys") if opened else None
-            if len(keys) == 1 and cut == keys:
+            if _range_key(keys, cut):
                 key_type = pinned.schema[keys[0]].dataType
                 gone = _absent(spark, target, keys[0], key_type, new, held)
                 if gone is not None:

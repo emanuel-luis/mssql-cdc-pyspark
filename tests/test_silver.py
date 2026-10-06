@@ -3,11 +3,14 @@
 import json
 import os
 from datetime import date, datetime, timedelta
+from unittest.mock import MagicMock
 
 import pytest
+from pyspark.sql import SparkSession
 
 from mssql_cdc import apply_changes, finalization, stream
 from mssql_cdc.fake import FakeCdcClient, FakeCdcDatabase
+from mssql_cdc.sink import write_facts
 
 pytestmark = pytest.mark.delta
 CI = "dbo_orders"
@@ -167,19 +170,7 @@ def test_such_a_column_added_to_a_table_without_column_mapping_fails_before_the_
     ]
 
 
-def test_the_capture_instance_comes_from_the_options(delta_spark, workdir):
-    o = Orders(delta_spark, workdir)
-    o.commit((2, _row(1, "new")))
-    o.run()
-    with pytest.raises(ValueError, match="pass capture_instance"):
-        apply_changes(delta_spark, o.bronze, o.silver, keys=["order_id"], control_table=o.control)
-    apply_changes(delta_spark, o.bronze, o.silver, control_table=o.control, options=o.options)
-    assert o.rows() == o.source() == [(1, "new")]
-
-
-def test_snapshot_then_changes_and_the_verdict_is_the_bronze_one_read_before_the_apply(
-    delta_spark, workdir, monkeypatch
-):
+def test_snapshot_then_changes_and_the_verdict_is_the_bronze_one(delta_spark, workdir):
     o = Orders(delta_spark, workdir)
     for i in range(5):
         o.commit((2, _row(i, "new")))
@@ -197,34 +188,6 @@ def test_snapshot_then_changes_and_the_verdict_is_the_bronze_one_read_before_the
     assert o.apply(facts_table=None)["finalized_until"] is None
     applied = o.apply()
     assert applied["finalized_until"] == bronze_fu == datetime(2026, 9, 30, 10, 0)
-    assert o.rows() == o.source()
-
-    def advance_bronze():
-        q = o.run(bootstrap=True)
-        end = finalization.end_offset_from_progress(q.lastProgress)
-        return finalization.advance(delta_spark, o.control, o.bronze, end)
-
-    o.commit((1, _row(0, "new")), minutes=120)
-    later = advance_bronze()
-    assert later > bronze_fu
-
-    # bronze gets a batch and a newer verdict during the call, after it read the verdict and
-    # pinned bronze (it opens silver for the MERGE then): silver keeps the verdict it read
-    from mssql_cdc import silver
-
-    real, raced = silver.delta_table, []
-
-    def racing(spark, name):
-        if name == o.silver and not raced:
-            o.commit((2, _row(7, "new")), minutes=120)
-            raced.append(advance_bronze())
-        return real(spark, name)
-
-    monkeypatch.setattr(silver, "delta_table", racing)
-    assert o.apply()["finalized_until"] == later < raced[0]
-    assert (7, "new") not in o.rows() and o.rows() != o.source()
-    assert not finalization.is_final(delta_spark, o.control, o.silver, raced[0])
-    assert o.apply()["finalized_until"] == raced[0]  # the next call applies it
     assert o.rows() == o.source()
 
 
@@ -283,22 +246,6 @@ def test_a_chunked_resnapshot_deletes_the_keys_lost_in_the_gap_wave_by_wave(delt
     assert wave()["rebuilt"] and o.rows() == o.source() == [(i, "new") for i in (0, 2, 3, 5)]
 
 
-def test_a_bootstrap_at_the_lsn_silver_has_applied_still_rebuilds_it(delta_spark, workdir):
-    o = Orders(delta_spark, workdir)
-    o.commit((2, _row(1, "new")))
-    last = o.commit((2, _row(2, "new")))
-    o.db.cleanup(CI, last)  # 1 is only in the table now
-    o.run()
-    assert o.apply()["applied_lsn"] == last and o.rows() == [(2, "new")]
-    # bootstrap added to the same checkpoint on a quiet database: the snapshot is stamped
-    # with max_lsn, the LSN silver has already applied
-    o.run(bootstrap=True)
-    rebuilt = o.apply()
-    assert rebuilt["rebuilt"] and rebuilt["applied_lsn"] == last
-    assert o.rows() == o.source() == [(1, "new"), (2, "new")]
-    assert not o.apply()["rebuilt"]
-
-
 def test_the_resnapshot_of_an_emptied_table_empties_silver_once(delta_spark, workdir):
     o = Orders(delta_spark, workdir)
     for i in range(3):
@@ -321,10 +268,12 @@ def test_the_resnapshot_of_an_emptied_table_empties_silver_once(delta_spark, wor
     assert o.commits() == commits
 
 
-def test_keys_come_from_the_capture_instance_when_not_given(delta_spark, workdir):
+def test_keys_and_the_capture_instance_come_from_the_options_when_not_given(delta_spark, workdir):
     o = Orders(delta_spark, workdir)
     o.commit((2, _row(1, "new")))
     o.run()
+    with pytest.raises(ValueError, match="pass capture_instance"):
+        apply_changes(delta_spark, o.bronze, o.silver, keys=["order_id"], control_table=o.control)
     with pytest.raises(ValueError, match="pass keys"):
         apply_changes(delta_spark, o.bronze, o.silver, CI, control_table=o.control)
     with pytest.raises(ValueError, match="not captured columns"):
@@ -332,6 +281,10 @@ def test_keys_come_from_the_capture_instance_when_not_given(delta_spark, workdir
     # in another case than bronze's rows and the fake's instance: both match ignoring it
     ci = CI.upper()
     apply_changes(delta_spark, o.bronze, o.silver, ci, control_table=o.control, options=o.options)
+    assert o.rows() == o.source() == [(1, "new")]
+    # the capture instance from the options too, into a silver of its own, applied from scratch
+    o.silver, o.control = (os.path.join(workdir, n) for n in ("silver2", "control2"))
+    apply_changes(delta_spark, o.bronze, o.silver, control_table=o.control, options=o.options)
     assert o.rows() == o.source() == [(1, "new")]
     unkeyed = FakeCdcDatabase(os.path.join(workdir, "unkeyed"), ["dbo_x"])
     with pytest.raises(ValueError, match="no unique index"):
@@ -418,48 +371,12 @@ def test_a_bronze_without_command_id_orders_a_transaction_by_seqval(delta_spark,
 
 
 def test_a_wrong_granularity_fails_before_anything_is_written(workdir):
-    control = os.path.join(workdir, "control")
+    control, spark = os.path.join(workdir, "control"), MagicMock(spec_set=SparkSession)
     with pytest.raises(ValueError, match="granularity"):
-        apply_changes(None, "b", "s", CI, ["order_id"], control_table=control, granularity="hourly")
-    assert not os.path.exists(control)
-
-
-def test_facts_rows_that_name_bronze_otherwise_warn_then_fail_on_its_chunk_rows(
-    delta_spark, workdir, caplog
-):
-    o = Orders(delta_spark, workdir)
-    o.options["numPartitions"] = "1"  # one chunk per wave
-    for i in range(4):
-        o.commit((2, _row(i, "new")))
-
-    def run():
-        o.run(facts_table=o.facts, bootstrap=True, snapshot="chunked")
-
-    def apply(bronze):
-        return apply_changes(
-            delta_spark,
-            bronze,
-            o.silver,
-            CI,
-            ["order_id"],
-            control_table=o.control,
-            facts_table=o.facts,
+        apply_changes(
+            spark, "b", "s", CI, ["order_id"], control_table=control, granularity="hourly"
         )
-
-    run()  # opens the snapshot at S, its facts rows under o.bronze
-    o.commit((2, _row(9, "new")))
-    run()
-    elsewhere = "file:" + o.bronze  # the same table, spelled otherwise
-    apply(elsewhere)  # change rows alone: a bronze written by snapshot() has no facts row either
-    assert any(
-        "no row for target" in r.getMessage() and repr(o.bronze) in r.getMessage()
-        for r in caplog.records
-    )
-    stream(delta_spark, o.options).backfill(
-        o.bronze, app_id="orders-v1", facts_table=o.facts, chunk_rows=2, max_waves=1
-    )
-    with pytest.raises(ValueError, match=r"no 'snapshot_open' row .*Targets with one: \['"):
-        apply(elsewhere)  # its chunk rows would never be applied
+    assert not os.path.exists(control) and not spark.method_calls
 
 
 # Chunked snapshots: bronze and the facts written directly, as the stream and the backfill
@@ -524,7 +441,7 @@ class Log:
 
     def wave(self, s, wave, stamp, chunks):
         """Wave ``wave`` of the chunked snapshot at ``s``, read at ``stamp``: one bronze
-        commit, then a 'snapshot_chunk' row per (chunk, lo, hi, image)."""
+        commit, then one facts commit of a 'snapshot_chunk' row per (chunk, lo, hi, image)."""
         rows = [
             (k, st, CI, _lsn(stamp), None, 0, None, _ts(stamp), None, _lsn(s), chunk)
             for chunk, _, _, image in chunks
@@ -532,15 +449,20 @@ class Log:
         ]
         if rows:
             self._append(rows, f"{CHANGE}, _snapshot STRING, _chunk INT")
-        for chunk, lo, hi, image in chunks:
-            detail = {"snapshot": _lsn(s), "chunk": chunk, "wave": wave, "lo": lo, "hi": hi}
-            self.fact("snapshot_chunk", stamp, detail, rows=len(image), high=stamp + 1)
+        facts = [
+            self._fact(
+                "snapshot_chunk",
+                stamp,
+                {"snapshot": _lsn(s), "chunk": chunk, "wave": wave, "lo": lo, "hi": hi},
+                rows=len(image),
+                high=stamp + 1,
+            )
+            for chunk, lo, hi, image in chunks
+        ]
+        write_facts(self.spark, self.facts, facts, None, 0)
 
-    def fact(self, event, n, detail=None, rows=0, high=None):
-        from mssql_cdc import migrations
-        from mssql_cdc.sink import _FACT_FIELDS, FACTS_COLUMNS, FACTS_COMMENT, FACTS_SCHEMA
-
-        row = {
+    def _fact(self, event, n, detail=None, rows=0, high=None):
+        return {
             "app_id": "orders-v1",
             "event": event,
             "rows": rows,
@@ -550,9 +472,9 @@ class Log:
             "target": self.bronze,
             "written_at": datetime(2026, 10, 2),
         }
-        migrations.ensure(self.spark, self.facts, "facts", FACTS_COLUMNS, FACTS_COMMENT)
-        df = self.spark.createDataFrame([tuple(row.get(k) for k in _FACT_FIELDS)], FACTS_SCHEMA)
-        df.write.format("delta").mode("append").save(self.facts)
+
+    def fact(self, event, n, detail=None, rows=0, high=None):
+        write_facts(self.spark, self.facts, [self._fact(event, n, detail, rows, high)], None, 0)
 
     def open(self, s, kind="bootstrap", keys=("order_id",)):
         """The 'snapshot_open' row, as CdcStream._open writes it."""
@@ -649,37 +571,32 @@ def _t(second, micro=0):
 
 # keys k1..k6, the bounds b1 and b2 of chunks [-, b1) [b1, b2) [b2, -), and a stale key no range
 # may delete. A datetime2(7) bound has 100 ns digits; Spark keeps microseconds, so the keys of
-# b1's microsecond fall on either side of it on SQL Server: left to the rebuild.
+# b1's microsecond fall on either side of it on SQL Server: left to the rebuild. Every key type's
+# bounds: test_silver_units; the DATE ones on Spark: test_a_date_keys_ranges_...
 RANGES = {
     "INT": ([1, 2, 3, 4, 5, 6], 3, 5, None),
-    "DATE": ([date(2026, 1, d) for d in range(1, 7)], "2026-01-03", "2026-01-05", None),
     "TIMESTAMP_NTZ": (
         [_t(1), _t(2), _t(3, 123457), _t(4), _t(5, 500000), _t(6)],
         "2026-01-01 00:00:03.1234567",
         "2026-01-01T00:00:05.0000000",
         _t(3, 123456),
     ),
-    "STRING": (["a", "b", "c", "d", "e", "f"], "c", "e", None),  # Spark orders bytes, SQL not
 }
 
 
-@pytest.mark.parametrize(
-    ("key_type", "mode"),
-    [(k, "resnapshot") for k in RANGES] + [("INT", "bootstrap")],
-)
+@pytest.mark.parametrize("key_type", list(RANGES))
 def test_each_wave_deletes_the_stale_keys_of_its_ranges_and_completion_any_absent_key(
-    delta_spark, workdir, key_type, mode
+    delta_spark, workdir, key_type
 ):
     from mssql_cdc.silver import _record
 
     g, S = Log(delta_spark, workdir, key_type), 100
     (k1, k2, k3, k4, k5, k6), b1, b2, odd = RANGES[key_type]
-    by_range = key_type != "STRING"
     # silver from changes whose history lost the deletes of 2, 6, the NULL key and the odd one
     stale = [k2, k6, None] + ([odd] if odd else [])
     g.change(10, *[(2, k, "new") for k in [k1, k3, k4, k5, *stale]])
     g.apply()
-    g.open(S, mode)
+    g.open(S, "resnapshot")
     g.change(112, (1, k4, "new"))
     g.change(113, (2, k4, "again"))  # chunk 1 read in between: no k4; this outranks its delete
     g.wave(S, 0, 110, [(0, None, b1, [(k1, "snap")]), (1, b1, b2, [(k3, "snap")])])
@@ -687,7 +604,7 @@ def test_each_wave_deletes_the_stale_keys_of_its_ranges_and_completion_any_absen
     first = g.apply()
     live = [(k1, "snap"), (k3, "snap"), (k4, "again")]
     # k5 and k6 wait for chunk 2; the NULL key sorts first, but in no range unless one is whole
-    gone = [k2] if by_range else []
+    gone = [k2]
     assert g.rows() == _ordered(live + [(k5, "new")] + [(k, "new") for k in stale if k not in gone])
     assert first["finalized_until"] is None  # held while the snapshot is open
     at, rows = g.position(), g.rows()
@@ -696,44 +613,55 @@ def test_each_wave_deletes_the_stale_keys_of_its_ranges_and_completion_any_absen
 
     g.wave(S, 1, 120, [(2, b2, None, [(k5, "snap")])])
     g.apply()
-    gone += [k6] if by_range else []
+    gone += [k6]
     assert g.rows() == _ordered(
         live + [(k5, "snap")] + [(k, "new") for k in stale if k not in gone]
     )
-    g.fact(mode, S, {"snapshot": _lsn(S)})
+    g.fact("resnapshot", S, {"snapshot": _lsn(S)})
     done = g.apply()
     assert done["rebuilt"] and done["finalized_until"] is not None
     assert g.rows() == _ordered(live + [(k5, "snap")])  # absent from both: deleted
 
 
-def test_an_integer_plans_last_bound_past_bigint_still_deletes_up_to_the_last_key(
-    delta_spark, workdir
-):
-    g, S, top = Log(delta_spark, workdir, "BIGINT"), 100, 2**63 - 1
-    g.change(10, (2, 1, "new"), (2, top, "new"))
-    g.apply()
-    g.open(S, "resnapshot")
-    g.wave(S, 0, 110, [(0, None, top + 1, [(1, "snap")])])  # plan_chunks ends at MAX + 1
-    g.apply()
-    assert g.rows() == [(1, "snap")]
+def test_a_date_keys_ranges_delete_on_spark_what_they_bound(delta_spark, workdir):
+    """_absent on one silver commit: the DATE bounds' schema, the span's literals Delta prunes
+    silver by, and the join's comparisons."""
+    from pyspark.sql.types import DateType
+
+    from mssql_cdc.silver import _absent
+
+    silver, d = os.path.join(workdir, "silver"), [date(2026, 1, i) for i in range(1, 7)]
+    delta_spark.createDataFrame(
+        [
+            (d[0], _lsn(10)),  # below every range
+            (d[1], _lsn(10)),  # the first range's lower bound: gone at its stamp
+            (d[2], _lsn(115)),  # in the first range, but newer than its stamp
+            (d[3], _lsn(10)),  # the second range's lower bound, the first one's upper
+            (d[4], _lsn(10)),  # held by its chunk
+            (d[5], _lsn(10)),  # the second range's upper bound: in neither
+            (None, _lsn(10)),  # a NULL key: in no closed range
+        ],
+        "order_id DATE, _start_lsn STRING",
+    ).write.format("delta").save(silver)
+    chunks = {
+        1: (0, "2026-01-02", "2026-01-04", _lsn(110)),
+        2: (0, "2026-01-04 00:00:00.0000000", "2026-01-06T00:00:00", _lsn(120)),
+    }
+    held = delta_spark.createDataFrame([(d[4],)], "order_id DATE")
+    gone = _absent(delta_spark, silver, "order_id", DateType(), chunks, held)
+    assert sorted(tuple(r) for r in gone.collect()) == [(d[1], _lsn(110), 1), (d[3], _lsn(120), 1)]
 
 
-@pytest.mark.parametrize(
-    ("keys", "cut"),
-    [(["order_id", "status"], ["order_id", "status"]), (["order_id"], ["status"])],
-)
-def test_no_range_deletes_unless_silver_has_the_snapshots_one_column_key(
-    delta_spark, workdir, keys, cut
-):
+def test_no_range_deletes_unless_silver_has_the_snapshots_one_column_key(delta_spark, workdir):
     g, S = Log(delta_spark, workdir), 100
     g.change(10, (2, 1, "new"), (2, 2, "new"))  # 2's delete is lost in a purged gap
-    g.apply(keys=keys)
-    g.open(S, "resnapshot", keys=cut)  # its bounds are not cut on silver's one key column
+    g.apply()
+    g.open(S, "resnapshot", keys=["status"])  # its bounds are not cut on silver's key column
     g.wave(S, 0, 110, [(0, None, None, [(1, "snap")])])  # a whole-table range without 2
-    g.apply(keys=keys)
-    assert (2, "new") in g.rows()  # left to the rebuild
+    g.apply()
+    assert (2, "new") in g.rows()  # left to the rebuild; each gate: test_silver_units
     g.fact("resnapshot", S, {"snapshot": _lsn(S)})
-    g.apply(keys=keys)
+    g.apply()
     assert g.rows() == [(1, "snap")]
 
 
@@ -771,6 +699,28 @@ def test_a_legacy_snapshot_rebuilds_and_an_open_resnapshot_holds_the_verdict_unt
     assert g.rows() == [(1, "new"), (3, "paid"), (4, "new")]
     assert g.position() == (_lsn(51), _lsn(50), None, None)
 
+    # a chunked re-snapshot at 100 applies wave 0 of its two chunks; a newer one at 150, after
+    # a loss while it is open, supersedes it before its chunk 1 comes
+    g.open(100, "resnapshot")
+    g.wave(100, 0, 110, [(0, None, 3, [(1, "new")])])
+    g.apply()
+    assert g.position() == (_lsn(51), _lsn(50), _lsn(100), 0)
+    g.open(150, "resnapshot")
+    g.wave(150, 0, 160, [(0, None, None, [(1, "new"), (8, "new")])])  # 3, 4 gone in its gap
+    g.change(161, (2, 9, "new"))
+    latest = g.verdict(161)
+    newer = g.apply()
+    # its chunks apply from wave 0, the older one's missing chunk blocks nothing, and the
+    # verdict waits for the newer one
+    assert not newer["rebuilt"] and newer["finalized_until"] == released < latest
+    assert g.rows() == [(1, "new"), (8, "new"), (9, "new")]
+    assert g.position() == (_lsn(161), _lsn(50), _lsn(150), 0)
+    g.fact("resnapshot", 150, {"snapshot": _lsn(150)})
+    done = g.apply()
+    assert done["rebuilt"] and done["finalized_until"] == latest
+    assert g.rows() == [(1, "new"), (8, "new"), (9, "new")]
+    assert g.position() == (_lsn(161), _lsn(150), None, None)
+
 
 def test_a_newer_whole_snapshot_rebuilds_silver_and_an_older_one_is_ignored(delta_spark, workdir):
     g = Log(delta_spark, workdir)
@@ -782,3 +732,74 @@ def test_a_newer_whole_snapshot_rebuilds_silver_and_an_older_one_is_ignored(delt
     g.whole(30, [(4, "c")])  # older than the one silver was rebuilt from
     assert not g.apply()["rebuilt"] and g.rows() == [(1, "b")]
     assert g.position()[:2] == (_lsn(50), _lsn(50))
+
+
+def test_a_bootstrap_at_the_lsn_silver_has_applied_still_rebuilds_it(delta_spark, workdir):
+    g = Log(delta_spark, workdir)
+    g.change(2, (2, 2, "new"))  # the insert of 1 at LSN 1 was purged before the stream read it
+    assert g.apply()["applied_lsn"] == _lsn(2) and g.rows() == [(2, "new")]
+    # bootstrap added to the same checkpoint on a quiet database: the snapshot is stamped
+    # with max_lsn, the LSN silver has already applied
+    g.whole(2, [(1, "new"), (2, "new")])
+    g.fact("bootstrap", 2)
+    rebuilt = g.apply()
+    assert rebuilt["rebuilt"] and rebuilt["applied_lsn"] == _lsn(2)
+    assert g.rows() == [(1, "new"), (2, "new")]
+    assert not g.apply()["rebuilt"]
+
+
+def test_facts_rows_that_name_bronze_otherwise_warn_then_fail_on_its_chunk_rows(
+    delta_spark, workdir, caplog
+):
+    g, S = Log(delta_spark, workdir), 100
+    elsewhere = "file:" + g.bronze  # the same table, spelled otherwise
+
+    def apply():
+        return apply_changes(
+            delta_spark,
+            elsewhere,
+            g.silver,
+            CI,
+            ["order_id"],
+            control_table=g.control,
+            facts_table=g.facts,
+        )
+
+    g.open(S)  # its facts rows under g.bronze
+    g.change(101, (2, 9, "new"))
+    apply()  # change rows alone: a bronze written by snapshot() has no facts row either
+    assert any(
+        "no row for target" in r.getMessage() and repr(g.bronze) in r.getMessage()
+        for r in caplog.records
+    )
+    g.wave(S, 0, 110, [(0, None, None, [(1, "new")])])
+    with pytest.raises(ValueError, match=r"no 'snapshot_open' row .*Targets with one: \['"):
+        apply()  # its chunk rows would never be applied
+
+
+def test_a_batch_bronze_gets_during_the_call_waits_for_the_next_one_with_its_verdict(
+    delta_spark, workdir, monkeypatch
+):
+    from mssql_cdc import silver
+
+    g = Log(delta_spark, workdir)
+    g.change(10, (2, 1, "new"))
+    g.apply()
+    g.change(70, (2, 2, "new"))
+    read = g.verdict(70)
+    # bronze gets a batch and a newer verdict during the call, after it read the verdict and
+    # pinned bronze (it opens silver for the MERGE then): silver keeps the verdict it read
+    real, raced = silver.delta_table, []
+
+    def racing(spark, name):
+        if name == g.silver and not raced:
+            g.change(130, (2, 7, "new"))
+            raced.append(g.verdict(130))
+        return real(spark, name)
+
+    monkeypatch.setattr(silver, "delta_table", racing)
+    assert g.apply()["finalized_until"] == read < raced[0]
+    assert g.rows() == [(1, "new"), (2, "new")]
+    assert not finalization.is_final(delta_spark, g.control, g.silver, raced[0])
+    assert g.apply()["finalized_until"] == raced[0]  # the next call applies it
+    assert g.rows() == [(1, "new"), (2, "new"), (7, "new")]
