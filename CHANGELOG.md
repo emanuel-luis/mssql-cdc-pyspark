@@ -12,6 +12,8 @@ compatibility" line.
 
 ## [Unreleased]
 
+## [0.2.0rc2] - 2026-10-06
+
 State compatibility: offsets and checkpoints unchanged. Control migration 4 rewrites the
 comment of `finalized_until` (metadata only), the next time `finalization.advance` or
 `apply_changes` opens the control table. A migration interrupted between its change and its
@@ -506,6 +508,7 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.0rc1...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.0rc2...HEAD
+[0.2.0rc2]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.0rc1...v0.2.0rc2
 [0.2.0rc1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.1.0...v0.2.0rc1
 [0.1.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/releases/tag/v0.1.0
