@@ -195,6 +195,18 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
   a fourth part, `idle`, runs t1 and then the destructive t7, both `continue-on-error`, on
   its own server. Each part uploads its results as the `lab-results-<part>` artifact.
 
+`.github/workflows/security.yml` checks the supply chain on every pull request, every push
+to `main` and weekly:
+
+* `pip-audit`: every package `uv.lock` pins, for every extra and group, against the known
+  vulnerabilities; one fails the job.
+* `zizmor`: the workflows; a finding of medium severity or higher fails the job.
+* `lowest-direct`: `uv sync --resolution lowest-direct` on Python 3.10 installs the lowest
+  version of each direct dependency that `pyproject.toml` allows (`pyarrow`, `mssql-python`,
+  the dev group), then runs the test files that start no JVM.
+* `scorecard`: the OpenSSF Scorecard, from `main` only (a push, the weekly run or a manual
+  one); its results go to the repository's code scanning alerts and to scorecard.dev.
+
 ## Releasing
 
 See [Releasing](RELEASING.md).

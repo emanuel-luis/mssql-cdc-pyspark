@@ -12,6 +12,15 @@ compatibility" line.
 
 ## [Unreleased]
 
+### Changed
+
+- CI: a `security` workflow checks the supply chain on every pull request, every push to
+  `main` and weekly. `pip-audit` checks every package `uv.lock` pins against the known
+  vulnerabilities; `zizmor` audits the workflows and fails on a finding of medium severity
+  or higher; a job installs the lowest version of each direct dependency the package
+  declares (`uv sync --resolution lowest-direct`, Python 3.10) and runs the tests that
+  start no JVM; the OpenSSF Scorecard runs from `main` and publishes its results.
+
 ## [0.2.0] - 2026-10-06
 
 The first final release of the 0.2 line: the same code as 0.2.0rc2. Its changes are listed

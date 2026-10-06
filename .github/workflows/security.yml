@@ -1,0 +1,97 @@
+name: security
+
+# Supply-chain checks: known vulnerabilities in what uv.lock pins (pip-audit), the workflows
+# themselves (zizmor), the lowest versions of the direct dependencies the package declares,
+# and the OpenSSF Scorecard. docs/DEVELOPMENT.md, "CI".
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions: {}
+
+concurrency:
+  # per event: a push to main would otherwise cancel a weekly or manual run left pending
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pip-audit:
+    name: pip-audit (known vulnerabilities in uv.lock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with: { python-version: "3.11" }
+      # Every package uv.lock pins, for every extra and group (dev and docs included), with
+      # its hashes: pip-audit checks exactly that set and resolves nothing itself.
+      - run: uv export --frozen --all-extras --all-groups --no-emit-project -o "$RUNNER_TEMP/locked.txt"
+      - run: uvx pip-audit==2.10.1 --disable-pip --progress-spinner off -r "$RUNNER_TEMP/locked.txt"
+
+  zizmor:
+    name: zizmor (GitHub Actions workflows)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with: { python-version: "3.11" }
+      - name: Audit the workflows (fails on a finding of medium severity or higher)
+        run: uvx zizmor==1.30.1 --format=github --min-severity=medium .github/workflows
+        env:
+          # the online audits: impostor commits, known-vulnerable actions, stale refs
+          GH_TOKEN: ${{ github.token }}
+
+  lowest-direct:
+    name: lowest-direct (the declared dependency floors, fast tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with: { python-version: "3.10", activate-environment: true }
+      # Resolved again, not from uv.lock's pins: the lowest version each direct dependency
+      # allows (pyarrow, mssql-python and the dev group), the highest of everything else.
+      # uv rewrites uv.lock in this checkout only.
+      - run: uv sync --resolution lowest-direct
+      # The test files that start no JVM. With a spark marker, -m "not spark and not sqlserver".
+      - run: >-
+          pytest -q tests/test_client_sql.py tests/test_reader_units.py tests/test_sink_units.py
+          tests/test_lsn.py tests/test_fits.py tests/test_package.py
+          tests/test_docs_options.py tests/test_docs_tables.py
+
+  scorecard:
+    name: OpenSSF Scorecard
+    # Results are published from the default branch only: a push to main, the weekly run, a
+    # manual run on main. Scorecard verifies this job before publishing: only these actions,
+    # no run steps, no env.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write  # upload the SARIF to code scanning
+      id-token: write  # publish the results (the badge and the Scorecard API)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+      - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with: { sarif_file: results.sarif }
