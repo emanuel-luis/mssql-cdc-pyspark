@@ -961,7 +961,7 @@ wheels = [
 
 [[package]]
 name = "mssql-cdc-pyspark"
-version = "0.2.0rc2"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "mssql-python" },

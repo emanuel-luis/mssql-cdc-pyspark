@@ -12,6 +12,19 @@ compatibility" line.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-06
+
+The first final release of the 0.2 line: the same code as 0.2.0rc2. Its changes are listed
+under 0.2.0rc2 and 0.2.0rc1 below. Both release candidates were validated against a
+production SQL Server 2016 from Databricks (DBR 18.2): chunked snapshots next to a running
+stream, silver applied wave by wave and `reconcile` matching every bucket, on a 34-million
+and a 100-million-row table with 0.2.0rc1 and again on the 34-million-row one with 0.2.0rc2.
+
+State compatibility: offsets and checkpoints unchanged since 0.1.0. Tables written by 0.1.0
+migrate the next time the library opens them, through the migrations listed in the State
+compatibility lines of 0.2.0rc1 and 0.2.0rc2; `tests/compat/0.1.0` resumes such state with
+this release.
+
 ## [0.2.0rc2] - 2026-10-06
 
 State compatibility: offsets and checkpoints unchanged. Control migration 4 rewrites the
@@ -508,7 +521,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.0rc2...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.1.0...v0.2.0
 [0.2.0rc2]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.0rc1...v0.2.0rc2
 [0.2.0rc1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.1.0...v0.2.0rc1
 [0.1.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/releases/tag/v0.1.0
