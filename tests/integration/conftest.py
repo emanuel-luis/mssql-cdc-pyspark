@@ -1,7 +1,8 @@
 """A throwaway SQL Server 2022 with CDC (testcontainers), for tests marked ``sqlserver``.
 
 Needs Docker. The default ``pytest`` run deselects these; run them with
-``uv run pytest -m sqlserver``. Without a reachable Docker daemon they skip; once the
+``uv run pytest -m sqlserver``. Without a reachable Docker daemon they skip, or fail with
+``MSSQL_CDC_TEST_SQLSERVER=require`` (CI): a run that skipped them all is no pass. Once the
 daemon answers, any container or setup failure fails the run.
 
 ``MSSQL_CDC_TEST_BACKEND=arrow-odbc`` runs only the tests that take the ``backend`` fixture,
@@ -16,6 +17,7 @@ import time
 import pytest
 
 BACKEND = os.environ.get("MSSQL_CDC_TEST_BACKEND", "mssql-python")
+REQUIRE = os.environ.get("MSSQL_CDC_TEST_SQLSERVER") == "require"
 IMAGE = "mcr.microsoft.com/mssql/server:2022-latest"
 PASSWORD = "It_Str0ng_Passw0rd!"  # throwaway container on a random port
 DATABASE = "cdc_it"
@@ -160,11 +162,12 @@ def backend():
 
 @pytest.fixture(scope="session")
 def sqlserver():
-    docker = pytest.importorskip("docker")
     try:
+        import docker
+
         docker.from_env().ping()
-    except Exception as exc:  # noqa: BLE001 - any Docker error means skip
-        pytest.skip(f"Docker daemon unavailable: {exc}")
+    except Exception as exc:  # noqa: BLE001 - no docker package or daemon: skip, or fail if required
+        (pytest.fail if REQUIRE else pytest.skip)(f"Docker daemon unavailable: {exc}")
 
     from testcontainers.core.container import DockerContainer
     from testcontainers.core.wait_strategies import LogMessageWaitStrategy

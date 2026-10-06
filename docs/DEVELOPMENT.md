@@ -130,6 +130,17 @@ MSSQL_CDC_TEST_BACKEND=arrow-odbc uv run --extra arrow-odbc pytest -q -m sqlserv
 The last line runs the integration tests that take the `backend` fixture with `arrow-odbc`;
 it needs unixODBC and ODBC Driver 18 ([Installation](getting-started/installation.md#arrow-odbc)).
 
+Quick loops while editing:
+
+```bash
+make test-fast                                        # no JVM: the tests that need no Spark
+uv run pytest -q -m "not delta and not sqlserver"     # the engine without Delta
+```
+
+The second leaves out the Delta suites, and the tests elsewhere that need Delta skip. A
+`-m` on the command line replaces the `-m "not sqlserver"` in `pyproject.toml`, so always
+add `and not sqlserver` to it, or the run starts SQL Server containers.
+
 * `tests/test_source_fake.py` is the main safety net: real Spark streaming,
   simulated SQL Server.
 * `tests/test_client_sql.py` pins generated T-SQL.
@@ -138,8 +149,10 @@ it needs unixODBC and ODBC Driver 18 ([Installation](getting-started/installatio
   through [testcontainers](https://testcontainers-python.readthedocs.io/), with the
   server clock in `America/Sao_Paulo`, and runs the source against it. It needs a
   running Docker daemon (Docker Engine, or Docker Desktop on Windows) and skips without
-  one; the first run pulls the SQL Server image. The default `pytest` run leaves
-  these tests out.
+  one, or fails with `MSSQL_CDC_TEST_SQLSERVER=require`, as CI sets it; the first run
+  pulls the SQL Server image. The default `pytest` run leaves these tests out.
+  `test_fake_parity.py` applies one history to SQL Server and to the fake and compares
+  what the source reads from each, so the fake the unit tests run on stays true to CDC.
 
 ## Lint, format, types
 
@@ -165,16 +178,22 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
 
 `.github/workflows/ci.yml`:
 
-* `lint`: `ruff check`, `ruff format --check` and `mypy`; the other jobs wait for it.
-* `unit`: pytest with Delta on Ubuntu, Java 17; Python 3.11 on every push, 3.10 to 3.13 on
-  the weekly schedule.
-* `integration`: `pytest -m sqlserver` (testcontainers on the runner's Docker), then the
-  tests that take the `backend` fixture again with `MSSQL_CDC_TEST_BACKEND=arrow-odbc`, after
-  installing ODBC Driver 18.
-* `lab`: a SQL Server 2022 service container with Agent, then the workload, the lab checks
-  and `examples/local_pipeline.py` (the list is in `ci.yml`). t1 and the destructive t7 run only on the weekly schedule or a manual dispatch ("Run
-  workflow"), and are `continue-on-error`. Results are uploaded as the `lab-results`
-  artifact.
+* `lint`: `ruff check`, `ruff format --check` and `mypy`; the other jobs wait for it, and
+  only for it: `unit`, `integration` and `lab` run side by side.
+* `unit`: pytest with Delta on Ubuntu, Java 17, in three shards: `tests/test_silver.py`,
+  `tests/test_delta_sink.py`, and every other file (`--ignore` of those two, so a new test
+  file or compat version lands there). Each test gets 300 s (`--timeout=300`). Python 3.11
+  on every push, 3.10 to 3.13 on the weekly schedule.
+* `integration`: one leg per backend, both `pytest -m sqlserver` with testcontainers on the
+  runner's Docker. `mssql-python` runs every test; `arrow-odbc` installs ODBC Driver 18 and
+  runs the tests that take the `backend` fixture, with `MSSQL_CDC_TEST_BACKEND=arrow-odbc`.
+  `MSSQL_CDC_TEST_SQLSERVER=require` fails a leg without Docker instead of skipping it
+  whole, and `MSSQL_CDC_TEST_DELTA=require` does the same without Delta.
+* `lab`: one part per job, each on a fresh SQL Server 2022 service container with Agent
+  after `lab.workload setup`: `core` (the seed, t2 to t7, t9 and `examples/local_pipeline.py`),
+  `t10` and `t10-resnapshot`. On the weekly schedule or a manual dispatch ("Run workflow")
+  a fourth part, `idle`, runs t1 and then the destructive t7, both `continue-on-error`, on
+  its own server. Each part uploads its results as the `lab-results-<part>` artifact.
 
 ## Releasing
 
