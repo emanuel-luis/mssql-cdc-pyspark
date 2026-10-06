@@ -15,7 +15,13 @@ from typing import ClassVar
 
 import pytest
 
-from mssql_cdc import HAS_ADMISSION_CONTROL, DataLossError, MssqlCdcDataSource
+from mssql_cdc import (
+    HAS_ADMISSION_CONTROL,
+    DataLossError,
+    MssqlCdcDataSource,
+    is_data_loss,
+    is_schema_changed,
+)
 from mssql_cdc.fake import FakeCdcDatabase
 from mssql_cdc.finalization import candidate, end_offset_from_progress
 
@@ -131,13 +137,16 @@ def test_idle_dummy_entries_advance_offset_and_finalization(spark, workdir):
 
 
 def test_retention_guard_fails_loudly(spark, workdir):
+    from pyspark.errors import StreamingQueryException
+
     db = _db(workdir, n_tx=2)
     _run(spark, workdir)
     db.commit(CI, [(2, _order(700))], at=T0 + timedelta(hours=1))
     last = db.commit(CI, [(2, _order(701))], at=T0 + timedelta(hours=2))
     db.cleanup(CI, last)  # cleanup purged the commit the stream still needs
-    with pytest.raises(Exception, match="re-snapshot is required"):
+    with pytest.raises(StreamingQueryException, match="re-snapshot is required") as stopped:
         _run(spark, workdir)
+    assert is_data_loss(stopped.value)  # the DataLossError the source raised
 
 
 def test_cleanup_between_planning_and_read_fails_the_task(spark, workdir):
@@ -350,10 +359,16 @@ def test_snapshot_reads_the_current_rows_in_key_ranges(spark, workdir):
     db = FakeCdcDatabase(src, [CI], keys={CI: "order_id"})
     for i in range(10):
         db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
-    db.commit(CI, [(3, {"order_id": 3, "status": "new"}), (4, {"order_id": 3, "status": "paid"})])
-    db.commit(CI, [(1, {"order_id": 5, "status": "new"})])
-    db.commit(CI, [(2, {"order_id": None, "status": "no key"})])  # a unique index allows one NULL
-    at = db.idle(at=T0 + timedelta(hours=1))
+    db.commit(
+        CI,
+        [(3, {"order_id": 3, "status": "new"}), (4, {"order_id": 3, "status": "paid"})],
+        at=T0 + timedelta(minutes=10),
+    )
+    db.commit(CI, [(1, {"order_id": 5, "status": "new"})], at=T0 + timedelta(minutes=11))
+    db.commit(  # a unique index allows one NULL
+        CI, [(2, {"order_id": None, "status": "no key"})], at=T0 + timedelta(minutes=12)
+    )
+    at = db.idle(at=T0 + timedelta(hours=1))  # commit times stay in LSN order
     opts = {
         "backend": "fake",
         "fakePath": src,
@@ -681,7 +696,7 @@ def test_partitions_split_at_the_newer_start_without_empty_ranges(spark, workdir
     ids = sorted(r["order_id"] for r in _rows(reader, _plan(reader, before, c[9])))
     assert ids == list(range(10))
     # S on an edge: a batch that starts at S, one that ends below it, one that ends at it
-    assert plan(below, c[9])[0] == (v2, s, plan(below, c[9])[0][2])
+    assert plan(below, c[9])[0][:2] == (v2, s)
     assert {ci for ci, _, _ in plan(below, c[9])} == {v2}
     assert {ci for ci, _, _ in plan(c[1], c[4])} == {CI}
     edge = plan(c[3], c[5])
@@ -770,6 +785,8 @@ def test_a_type_change_fails_the_batch_before_it_reads(spark, workdir):
 
 
 def test_a_running_query_stops_at_a_type_change(spark, workdir):
+    from pyspark.errors import StreamingQueryException
+
     db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI], columns={CI: COLUMNS})
     for i in range(3):
         db.commit(CI, [(2, _order(i))], at=T0 + timedelta(minutes=i))
@@ -789,8 +806,11 @@ def test_a_running_query_stops_at_a_type_change(spark, workdir):
         command = "ALTER TABLE dbo.orders ALTER COLUMN amount decimal(20,4)"
         db.ddl(CI, "amount", command, new_type="DECIMAL(20,4)")
         db.commit(CI, [(2, _order(3, amount="1.2345"))])
-        with pytest.raises(Exception, match="Restart the query to re-infer the schema"):
+        with pytest.raises(
+            StreamingQueryException, match="Restart the query to re-infer the schema"
+        ) as stopped:
             q.processAllAvailable()
+        assert is_schema_changed(stopped.value)  # the SchemaChangedError the source raised
     finally:
         q.stop()
     assert spark.sql(f"SELECT COUNT(*) FROM {name}").first()[0] == 3  # nothing of that batch
@@ -1042,6 +1062,15 @@ def _chunk_reader(src, schema, chunks, lsn, **options):
     return MssqlCdcSnapshotReader(opts, schema)
 
 
+def test_a_snapshot_never_reads_uncommitted_rows():
+    from pyspark.sql.types import IntegerType, StructField, StructType
+
+    schema = StructType([StructField("order_id", IntegerType())])
+    message = r"isolationLevel must be 'readCommitted' or 'snapshot', not 'readuncommitted'.*NOLOCK"
+    with pytest.raises(ValueError, match=message):
+        _chunk_reader("unused", schema, [[0, None, None]], None, isolationLevel="readUncommitted")
+
+
 @pytest.mark.parametrize(
     ("key", "values", "above", "chunk_rows", "kind", "sizes"),
     [
@@ -1195,8 +1224,6 @@ def test_chunk_rows_are_stamped_numbered_and_leave_metrics(spark, workdir):
     assert got == [(0, 0), (0, 1), (1, 2), (2, 4), (2, 5)]
     later = client.max_lsn()  # the queued commit's
     assert later > lsn and db.commit(CI, [(2, {"order_id": 10})]) > later  # LSNs keep order
-    with pytest.raises(ValueError, match="NOLOCK"):
-        _chunk_reader(src, df.schema, chunks, lsn, isolationLevel="readUncommitted")
 
 
 def _rows_of(reader, partition):

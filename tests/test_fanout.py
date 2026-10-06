@@ -1,7 +1,11 @@
-"""start_many: one to_delta stream per capture instance (ADR 0027). Skipped without Delta."""
+"""start_many: one to_delta stream per capture instance (ADR 0027). The engine tests are
+skipped without Delta; the rest run start_many and await_all on autospecced mocks."""
 
 import os
+from contextlib import contextmanager
 from datetime import datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import DEFAULT, call, create_autospec, patch
 
 import pytest
 
@@ -16,7 +20,6 @@ from mssql_cdc import (
 )
 from mssql_cdc.fake import FakeCdcDatabase
 
-pytestmark = pytest.mark.delta
 T0 = datetime(2026, 9, 28, 13, 50)
 COLUMNS = {"dbo_orders": "order_id INT, status STRING", "dbo_customers": "id INT, name STRING"}
 
@@ -47,6 +50,7 @@ def _bronze(spark, workdir, ci):
     return spark.read.format("delta").load(os.path.join(workdir, f"bronze_{ci}"))
 
 
+@pytest.mark.delta
 def test_each_capture_instance_streams_into_its_own_target(delta_spark, workdir):
     spark = delta_spark
     _, options, templates = _fake(workdir)
@@ -83,6 +87,7 @@ def test_each_capture_instance_streams_into_its_own_target(delta_spark, workdir)
         assert os.listdir(os.path.join(workdir, "ckpt", ci, "commits"))
 
 
+@pytest.mark.delta
 def test_a_failing_stream_leaves_the_others_running(delta_spark, workdir):
     from pyspark.errors import StreamingQueryException
 
@@ -111,7 +116,92 @@ def test_a_failing_stream_leaves_the_others_running(delta_spark, workdir):
         stop_all(queries)
     assert not customers.isActive
 
-    # a start that raises stops the queries started before it
-    with pytest.raises(Exception, match="dbo_missing"):
-        start_many(spark, options, ["dbo_customers", "dbo_missing"], **templates)
-    assert "dbo_customers-v1" not in [q.name for q in spark.streams.active]
+
+# -- start_many and await_all on autospecced mocks --------------------------------------
+TEMPLATES = {"target": "bronze_{ci}", "app_id": "{ci}-v1", "checkpoint": "ckpt/{ci}"}
+
+
+def _queries(n):
+    from pyspark.sql.streaming import StreamingQuery
+
+    return [create_autospec(StreamingQuery, instance=True) for _ in range(n)]
+
+
+@contextmanager
+def _mocked(started):
+    """stream() and migrations.ensure autospecced, each to_delta returning, or raising, the
+    next of ``started``. Yields the stream() and ensure mocks, and how many times ensure had
+    run as each stream was made."""
+    from mssql_cdc import fanout, migrations
+    from mssql_cdc.pipeline import CdcStream
+
+    with (
+        patch.object(
+            fanout, "stream", autospec=True, return_value=create_autospec(CdcStream, instance=True)
+        ) as stream,
+        patch.object(migrations, "ensure", autospec=True) as ensure,
+    ):
+        ensured: list[int] = []
+        stream.side_effect = lambda spark, options: ensured.append(ensure.call_count) or DEFAULT
+        stream.return_value.to_delta.side_effect = started
+        yield stream, ensure, ensured
+
+
+def test_start_many_gives_each_stream_its_options_over_the_shared_ones():
+    from mssql_cdc.sink import FACTS_COLUMNS, FACTS_COMMENT
+
+    spark, trigger = object(), {"availableNow": True}
+    shared = {"backend": "fake", "NumPartitions": "4", "columns": "id INT", "CaptureInstance": "x"}
+    own = {"dbo_orders": {"NUMPARTITIONS": "1", "captureINSTANCE": "y"}, "dbo_customers": {}}
+    q1, q2 = _queries(2)
+    with _mocked([q1, q2]) as (stream, ensure, ensured):
+        queries = start_many(spark, shared, own, facts_table="facts", trigger=trigger, **TEMPLATES)
+    assert queries == {"dbo_orders": q1, "dbo_customers": q2}
+    # one of each option whatever its case: the stream's own wins, captureInstance is its name
+    orders = {"NUMPARTITIONS": "1", "captureInstance": "dbo_orders"}
+    customers = {"NumPartitions": "4", "captureInstance": "dbo_customers"}
+    assert stream.call_args_list == [
+        call(spark, {"backend": "fake", "columns": "id INT", **orders}),
+        call(spark, {"backend": "fake", "NumPartitions": "4", "columns": "id INT", **customers}),
+    ]
+    assert stream.return_value.to_delta.call_args_list == [
+        call(f"bronze_{ci}", f"{ci}-v1", f"ckpt/{ci}", facts_table="facts", trigger=trigger)
+        for ci in own
+    ]
+    # the facts table once, before the first stream: writers creating it together conflict
+    ensure.assert_called_once_with(spark, "facts", "facts", FACTS_COLUMNS, FACTS_COMMENT)
+    assert ensured == [1, 1]
+
+
+def test_a_start_that_raises_stops_the_queries_started_before_it():
+    [q1] = _queries(1)
+    missing = ValueError("Capture instance 'dbo_missing' not found")
+    with _mocked([q1, missing]) as (_, ensure, _), pytest.raises(ValueError) as raised:
+        start_many(object(), {"backend": "fake"}, ["dbo_customers", "dbo_missing"], **TEMPLATES)
+    assert raised.value is missing  # raised as it was
+    q1.stop.assert_called_once_with()
+    ensure.assert_not_called()  # no facts_table
+
+
+def test_await_all_waits_for_each_query_within_one_timeout(monkeypatch):
+    from pyspark.errors import StreamingQueryException
+
+    from mssql_cdc import fanout
+
+    failed, slow, late = _queries(3)
+    error = StreamingQueryException("boom")
+    failed.awaitTermination.side_effect = error  # read back through exception()
+    failed.exception.return_value = error
+    slow.exception.return_value = late.exception.return_value = None
+    clock = iter([100.0, 100.0, 107.5, 111.0])  # the deadline at 110: 10 s, then 2.5, then none
+    monkeypatch.setattr(fanout, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    queries = {"a": failed, "b": slow, "c": late}
+    assert await_all(queries, timeout=10) == {"a": error}
+    failed.awaitTermination.assert_called_once_with(10)
+    slow.awaitTermination.assert_called_once_with(3)  # whole seconds, rounded up
+    late.awaitTermination.assert_not_called()  # past the deadline: still running
+    for query in queries.values():
+        query.reset_mock()
+    assert await_all(queries) == {"a": error}  # no timeout: each until it stops
+    for query in queries.values():
+        query.awaitTermination.assert_called_once_with()
