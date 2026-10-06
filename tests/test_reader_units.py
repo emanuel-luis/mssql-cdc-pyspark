@@ -1,26 +1,30 @@
 """The stream reader's own logic without a SparkSession (pyspark is imported, never started):
 what crosses to the executors, read()'s cleanup, offsets and option checks."""
 
+import pickle
 import re
-import threading
+import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import create_autospec
 
 import pytest
 
 from mssql_cdc import HAS_ADMISSION_CONTROL
-from mssql_cdc.client import Backend, SqlCdcClient
+from mssql_cdc.client import Backend, CdcClient, SqlCdcClient
 from mssql_cdc.fake import FakeCdcClient, FakeCdcDatabase
 
-pytestmark = pytest.mark.skipif(not HAS_ADMISSION_CONTROL, reason="needs Spark 4.2+")
+# only the tests that use ReadAllAvailable or ReadMaxRows: the rest run on any Spark 4
+needs_admission_control = pytest.mark.skipif(not HAS_ADMISSION_CONTROL, reason="needs Spark 4.2+")
 
 CI = "dbo_orders"
 T0 = datetime(2026, 9, 28, 13, 50, 0)
 
 
-def _reader(path="unused", **options):
+def _reader(path="unused", legacy=False, **options):
     from pyspark.sql.types import IntegerType, StructField, StructType
 
-    from mssql_cdc.source import MssqlCdcStreamReader
+    from mssql_cdc.source import MssqlCdcLegacyStreamReader, MssqlCdcStreamReader
 
     opts = {
         "backend": "fake",
@@ -29,7 +33,18 @@ def _reader(path="unused", **options):
         "numPartitions": "1",
         **{k: str(v) for k, v in options.items()},
     }
-    return MssqlCdcStreamReader(opts, StructType([StructField("order_id", IntegerType())]))
+    cls = MssqlCdcLegacyStreamReader if legacy else MssqlCdcStreamReader
+    return cls(opts, StructType([StructField("order_id", IntegerType())]))
+
+
+def _source_time(monkeypatch, slept: list) -> None:
+    """mssql_cdc.source's own ``time`` (it uses sleep and perf_counter) sleeps into ``slept``
+    instead: the process-wide time.sleep, which Spark's and py4j's threads use, stays real."""
+    from mssql_cdc import source
+
+    monkeypatch.setattr(
+        source, "time", SimpleNamespace(sleep=slept.append, perf_counter=time.perf_counter)
+    )
 
 
 def _db(path, n_tx=3):
@@ -59,20 +74,11 @@ def _lsn(n: int) -> str:
     return f"0x{n:020X}"
 
 
-class Live:
-    """A client with a live connection (an unpicklable lock) whose read fails midway."""
-
-    def __init__(self):
-        self.connection, self.closed = threading.Lock(), False
-
-    def set_clock(self, zone, offset_min):
-        pass
-
-    def iter_changes(self, *args):
-        raise RuntimeError("connection reset")
-
-    def close(self):
-        self.closed = True
+def _live():
+    """A client with a live connection, which cannot be pickled, whose read fails midway."""
+    live = create_autospec(CdcClient, instance=True)
+    live.iter_changes.side_effect = RuntimeError("connection reset")
+    return live
 
 
 # -- options ------------------------------------------------------------------------------
@@ -199,25 +205,27 @@ def test_an_unknown_option_is_warned_about(caplog):
 def test_a_reader_reaches_the_executors_without_its_client():
     from pyspark import cloudpickle
 
-    reader = _reader()
-    reader._client = Live()
-    with pytest.raises(TypeError):
+    reader, live = _reader(), _live()
+    reader._client = live
+    with pytest.raises(pickle.PicklingError):
         cloudpickle.dumps(reader._client)  # what Spark would fail on
     assert cloudpickle.loads(cloudpickle.dumps(reader))._client is None
-    assert isinstance(reader._client, Live)  # the driver keeps its own
+    assert reader._client is live  # the driver keeps its own
 
 
 def test_a_failed_read_closes_its_client():
     from mssql_cdc.source import LsnRange
 
-    reader, live = _reader(), Live()
+    reader, live = _reader(), _live()
     reader._client = live
     with pytest.raises(RuntimeError, match="connection reset"):
         list(reader.read(LsnRange(CI, _lsn(1), _lsn(2))))
-    assert live.closed and reader._client is None
+    live.close.assert_called_once_with()
+    assert reader._client is None
 
 
 # -- offsets -----------------------------------------------------------------------------
+@needs_admission_control
 def test_latest_on_a_database_capture_has_not_written_to_starts_before_the_instance(tmp_path):
     from pyspark.sql.streaming.datasource import ReadAllAvailable, ReadMaxRows
 
@@ -253,85 +261,122 @@ def test_latest_with_no_max_lsn_and_no_instance_start_asks_to_retry(monkeypatch)
         reader.initialOffset()
 
 
-class Counting:
-    """The calls latestOffset and reportLatestOffset make, each a query on SQL Server."""
-
-    def __init__(self, max_lsn):
-        self.max, self.calls = max_lsn, []
-
-    def max_lsn(self):
-        self.calls.append("max_lsn")
-        return self.max
-
-    def nth_commit_after(self, lsn, n):  # fewer than n commits after lsn: None
-        self.calls.append("nth_commit_after")
-
-    def lsn_to_time(self, lsn):
-        self.calls.append("lsn_to_time")
-        return "2026-09-28T13:50:00.000"
+def _counting(max_lsn):
+    """A driver client: latestOffset and reportLatestOffset's calls, each a query on SQL Server,
+    are its ``method_calls``. Fewer than n commits after an LSN: nth_commit_after is None."""
+    client = create_autospec(CdcClient, instance=True)
+    client.max_lsn.return_value = max_lsn
+    client.nth_commit_after.return_value = None
+    client.lsn_to_time.return_value = "2026-09-28T13:50:00.000"
+    return client
 
 
+def _called(client) -> list[str]:
+    return [name for name, _, _ in client.method_calls]
+
+
+@needs_admission_control
 def test_an_idle_stream_asks_sql_server_for_max_lsn_alone_each_poll():
     from pyspark.sql.streaming.datasource import ReadMaxRows
 
-    reader, client = _reader(), Counting(_lsn(5))
+    reader, client = _reader(), _counting(_lsn(5))
     reader._client = client
     start = {"lsn": _lsn(5), "commit_ts": "2026-09-28T13:50:00.000"}
     for _ in range(3):  # Spark's polls, every 10 ms or so without a trigger
         assert reader.latestOffset(start, ReadMaxRows(10)) == start
         assert reader.reportLatestOffset()["lsn"] == _lsn(5)
-    assert client.calls == ["max_lsn", "lsn_to_time", "max_lsn", "max_lsn"]
-    client.calls.clear()
-    client.max = _lsn(9)  # capture moved: planned up to it, and reported
+    assert _called(client) == ["max_lsn", "lsn_to_time", "max_lsn", "max_lsn"]
+    client.reset_mock()  # the calls, not what they return
+    client.max_lsn.return_value = _lsn(9)  # capture moved: planned up to it, and reported
     assert reader.latestOffset(start, ReadMaxRows(10))["lsn"] == _lsn(9)
     assert reader.reportLatestOffset()["lsn"] == _lsn(9)
-    assert client.calls == ["max_lsn", "nth_commit_after", "lsn_to_time", "lsn_to_time"]
+    assert _called(client) == ["max_lsn", "nth_commit_after", "lsn_to_time", "lsn_to_time"]
+
+
+def test_without_admission_control_the_source_reads_with_the_legacy_reader(monkeypatch):
+    from pyspark.sql.types import IntegerType, StructField, StructType
+
+    from mssql_cdc import source
+
+    options = {"captureInstance": CI, "columns": "order_id INT", "numPartitions": "1"}
+    schema = StructType([StructField("order_id", IntegerType())])
+    for admission, reader in [
+        (True, source.MssqlCdcStreamReader),
+        (False, source.MssqlCdcLegacyStreamReader),  # Spark 4.0/4.1
+    ]:
+        monkeypatch.setattr(source, "HAS_ADMISSION_CONTROL", admission)
+        assert type(source.MssqlCdcDataSource(options).streamReader(schema)) is reader
 
 
 # -- driver-side retries (ADR 0029) ---------------------------------------------------------
 def _broken(error):
     """A driver client whose every call to SQL Server raises ``error``."""
-
-    class Broken(Counting):
-        closed = False
-
-        def max_lsn(self):
-            raise error
-
-        def close(self):
-            self.closed = True
-
-    return Broken(None)
+    client = create_autospec(CdcClient, instance=True)
+    for name in CdcClient.__abstractmethods__:  # the queries; not close()
+        getattr(client, name).side_effect = error
+    return client
 
 
-def test_a_transient_error_on_the_driver_is_retried_on_a_new_connection(monkeypatch, caplog):
-    from mssql_python.exceptions import OperationalError
+def _read_all():
     from pyspark.sql.streaming.datasource import ReadAllAvailable
 
-    from mssql_cdc import source
+    return ReadAllAvailable()
 
+
+@pytest.mark.parametrize(
+    ("legacy", "method", "call"),
+    [
+        pytest.param(
+            False,
+            "latestOffset",
+            lambda r, lsns: r.latestOffset({"lsn": lsns[0], "commit_ts": ""}, _read_all()),
+            marks=needs_admission_control,
+            id="latestOffset",
+        ),
+        pytest.param(False, "initialOffset", lambda r, lsns: r.initialOffset(), id="initialOffset"),
+        pytest.param(
+            False,
+            "partitions",
+            lambda r, lsns: r.partitions({"lsn": lsns[0], "commit_ts": ""}, {"lsn": lsns[-1]}),
+            id="partitions",
+        ),
+        pytest.param(  # it returns nothing: the max_lsn it keeps
+            False,
+            "prepareForTriggerAvailableNow",
+            lambda r, lsns: (r.prepareForTriggerAvailableNow(), r._target),
+            id="prepareForTriggerAvailableNow",
+        ),
+        pytest.param(True, "latestOffset", lambda r, lsns: r.latestOffset(), id="legacy"),
+    ],
+)
+def test_a_transient_error_on_the_driver_is_retried_on_a_new_connection(
+    tmp_path, monkeypatch, caplog, legacy, method, call
+):
+    from mssql_python.exceptions import OperationalError
+
+    _, lsns = _db(str(tmp_path), n_tx=3)
+    expected = call(_reader(str(tmp_path), legacy), lsns)  # on a connection that works
     broken = _broken(OperationalError("Communication link failure", "TCP Provider: reset"))
-    fresh, slept = Counting(_lsn(9)), []
+    fresh, slept = FakeCdcClient(str(tmp_path)), []
     monkeypatch.setattr("mssql_cdc.client.make_client", lambda options: fresh)
-    monkeypatch.setattr(source.time, "sleep", slept.append)
-    reader = _reader()
+    _source_time(monkeypatch, slept)
+    reader = _reader(str(tmp_path), legacy)
     reader._client = broken  # the connection a failover broke
-    start = {"lsn": _lsn(5), "commit_ts": "2026-09-28T13:50:00.000"}
     with caplog.at_level("WARNING", logger="mssql_cdc.source"):
-        assert reader.latestOffset(start, ReadAllAvailable())["lsn"] == _lsn(9)
-    assert broken.closed and reader._client is fresh
+        assert call(reader, lsns) == expected
+    broken.close.assert_called_once_with()
+    assert reader._client is fresh
     assert len(slept) == 1 and 1 <= slept[0] <= 2
     [warning] = [r.getMessage() for r in caplog.records]
-    assert "latestOffset failed" in warning and "Communication link failure" in warning
+    assert f"{method} failed" in warning and "Communication link failure" in warning
     assert "retry 1 of 3 on a new connection" in warning
 
 
 def test_the_driver_gives_up_after_three_retries_and_never_retries_a_decision(monkeypatch):
-    from mssql_cdc import source
     from mssql_cdc.client import DataLossError
 
     slept: list[float] = []
-    monkeypatch.setattr(source.time, "sleep", slept.append)
+    _source_time(monkeypatch, slept)
 
     def connections(error) -> list:  # every client make_client opens, each failing with error
         made: list = []
@@ -343,7 +388,7 @@ def test_the_driver_gives_up_after_three_retries_and_never_retries_a_decision(mo
     made = connections(RuntimeError("State: 08S01, Native error: 10054, Message: TCP reset"))
     with pytest.raises(RuntimeError, match="08S01"):
         _reader().reportLatestOffset()
-    assert len(made) == 4 and all(c.closed for c in made[:3])  # the first and 3 retries
+    assert len(made) == 4 and all(c.close.called for c in made[:3])  # the first and 3 retries
     assert len(slept) == 3 and 1 <= slept[0] <= 2 and 2 <= slept[1] <= 4 and 4 <= slept[2] <= 8
     for error in (DataLossError("gone"), ValueError("State: 08S01"), PermissionError("grant")):
         made = connections(error)
@@ -504,7 +549,7 @@ def test_the_fake_retries_a_replace_that_a_reader_holds_up(tmp_path, monkeypatch
             raise PermissionError(13, "The process cannot access the file", dst)
         real(src, dst)
 
-    monkeypatch.setattr(fake.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fake, "time", SimpleNamespace(sleep=lambda s: None))  # its only use
     monkeypatch.setattr(fake.os, "replace", held)
     db, lsns = _db(str(tmp_path), n_tx=3)
     refused.clear()

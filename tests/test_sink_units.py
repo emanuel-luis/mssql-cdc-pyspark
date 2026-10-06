@@ -3,6 +3,7 @@
 import json
 import os
 from datetime import datetime
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -83,6 +84,9 @@ def test_a_data_skipped_event_row_carries_the_gap():
 
 
 def test_a_facts_key_that_is_no_column_raises_before_anything_is_written():
-    # spark is never reached: projecting would have written NULL read_mb
+    from pyspark.sql import SparkSession
+
+    spark = MagicMock(spec_set=SparkSession)
     with pytest.raises(ValueError, match=r"unknown facts columns: \['read_MB'\]"):
-        write_facts(None, "facts", [{"app_id": "x", "read_MB": 1.0}], None, 0)
+        write_facts(spark, "facts", [{"app_id": "x", "read_MB": 1.0}], None, 0)
+    assert not spark.method_calls  # never reached: projecting would have written NULL read_mb

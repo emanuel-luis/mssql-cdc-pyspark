@@ -3,8 +3,10 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import MagicMock, create_autospec
 
 import pytest
+from pyspark.sql.streaming import StreamingQueryManager
 
 from mssql_cdc import finalization, tables
 from mssql_cdc.finalization import candidate, end_offset_from_progress, table_ref, truncate
@@ -42,12 +44,19 @@ def test_table_ref():
     )
 
 
-def _tracker(monkeypatch, advance):
+def _tracker(monkeypatch, side_effect=None, module=None):
+    """A started tracker of run-1 on a session that has only ``streams``, with ``advance``
+    autospecced (``side_effect``: what it does). ``module``: the session class's module,
+    e.g. Spark Connect's. Returns the tracker, ``advance`` and the session."""
+    advance = create_autospec(finalization.advance, side_effect=side_effect)
     monkeypatch.setattr(finalization, "advance", advance)
-    session = SimpleNamespace(streams=SimpleNamespace(removeListener=lambda listener: None))
+    session = MagicMock(spec_set=["streams"])
+    session.streams = create_autospec(StreamingQueryManager, instance=True)
+    if module:
+        type(session).__module__ = module  # each mock has a class of its own
     tracker = finalization.FinalizationListener(session, "run-1", "ctl", "bronze_orders")
     tracker._worker.start()
-    return tracker
+    return tracker, advance, session
 
 
 def _progress(ts, run="run-1"):
@@ -63,8 +72,7 @@ def _until(done):
 
 
 def test_tracker_worker_skips_other_runs_and_same_period(monkeypatch):
-    calls = []
-    tracker = _tracker(monkeypatch, lambda s, c, t, end, g: calls.append(end["commit_ts"]))
+    tracker, advance, session = _tracker(monkeypatch)
 
     def progress(ts, run="run-1"):
         tracker.onQueryProgress(SimpleNamespace(progress=_progress(ts, run)))
@@ -77,7 +85,19 @@ def test_tracker_worker_skips_other_runs_and_same_period(monkeypatch):
     progress("14:05")
     tracker.onQueryTerminated(SimpleNamespace(runId="run-1"))
     assert tracker.join(timeout=30)
-    assert calls == ["2026-09-28T13:10:00.000", "2026-09-28T14:05:00.000"]
+    ends = [c.args[3]["commit_ts"] for c in advance.call_args_list]
+    assert ends == ["2026-09-28T13:10:00.000", "2026-09-28T14:05:00.000"]
+    session.streams.removeListener.assert_called_once_with(tracker)
+
+
+def test_on_spark_connect_the_tracker_leaves_its_listener_registered(monkeypatch):
+    # PySpark 4.2.0's Connect client can hang removing its last listener (see _run)
+    tracker, advance, session = _tracker(monkeypatch, module="pyspark.sql.connect.session")
+    tracker._offer(_progress("13:10"))
+    tracker._stop()
+    assert tracker.join(timeout=30)
+    advance.assert_called_once()  # what was left is applied first
+    session.streams.removeListener.assert_not_called()
 
 
 def test_a_failing_tracker_keeps_its_error_and_logs_one_error_per_streak(monkeypatch, caplog):
@@ -88,7 +108,7 @@ def test_a_failing_tracker_keeps_its_error_and_logs_one_error_per_streak(monkeyp
         if failing[0]:
             raise PermissionError("no MODIFY on the control table")
 
-    tracker = _tracker(monkeypatch, advance)
+    tracker, _, _ = _tracker(monkeypatch, advance)
 
     def logged():
         return [r for r in caplog.records if r.name == "mssql_cdc.finalization"]
@@ -117,7 +137,10 @@ class ConcurrentAppendException(Exception):  # named as delta.exceptions' is
 
 def test_a_control_merge_retries_only_concurrent_commits_until_its_deadline(monkeypatch):
     sleeps, calls = [], []
-    monkeypatch.setattr(time, "sleep", sleeps.append)
+    # tables' own time (sleep and monotonic): Spark's and py4j's threads keep the real sleep
+    monkeypatch.setattr(
+        tables, "time", SimpleNamespace(sleep=sleeps.append, monotonic=time.monotonic)
+    )
 
     def merge(*errors):
         def run():
@@ -146,8 +169,10 @@ def test_a_control_merge_retries_only_concurrent_commits_until_its_deadline(monk
 
 
 def test_is_final_takes_an_aware_period_end_in_utc(monkeypatch):
-    monkeypatch.setattr(finalization, "finalized_until", lambda *a: datetime(2026, 9, 28, 14))
+    until = create_autospec(finalization.finalized_until, return_value=datetime(2026, 9, 28, 14))
+    monkeypatch.setattr(finalization, "finalized_until", until)
     brt = timezone(timedelta(hours=-3))
     assert finalization.is_final(None, "ctl", "t", datetime(2026, 9, 28, 11, tzinfo=brt))
     assert not finalization.is_final(None, "ctl", "t", datetime(2026, 9, 28, 12, tzinfo=brt))
     assert finalization.is_final(None, "ctl", "t", datetime(2026, 9, 28, 14))
+    until.assert_called_with(None, "ctl", "t")

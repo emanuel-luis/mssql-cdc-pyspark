@@ -190,13 +190,15 @@ def test_timezone_detected_names_are_validated():
 
 
 def test_injection_is_rejected():
-    client = SqlCdcClient(Recorder())
-    with pytest.raises(ValueError):
+    rec = Recorder()
+    client = SqlCdcClient(rec)
+    with pytest.raises(ValueError, match="Invalid capture instance"):
         list(client.iter_changes("dbo_orders]; DROP TABLE x --", "0x01", "0x02", [], True, 10))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Invalid column name"):
         list(client.iter_changes("dbo_orders", "0x01", "0x02", ["a]; --"], True, 10))
-    with pytest.raises(ValueError):
-        SqlCdcClient(Recorder(), source_timezone="UTC'; DROP")
+    with pytest.raises(ValueError, match="Invalid sourceTimeZone"):
+        SqlCdcClient(rec, source_timezone="UTC'; DROP")
+    assert not rec.calls  # refused before any query was sent
 
 
 def test_a_capture_instance_takes_any_letter_but_no_bracket_or_control_character():
@@ -335,8 +337,10 @@ def test_captured_columns_errors_point_to_columns_option():
         SqlCdcClient(Rows([_col(1, "shape", "geography")])).captured_columns("dbo_orders")
     with pytest.raises(ValueError, match="not found"):
         SqlCdcClient(Rows([])).captured_columns("dbo_orders")
-    with pytest.raises(ValueError):
-        SqlCdcClient(Rows([])).captured_columns("dbo_orders]; DROP TABLE x --")
+    sent = Rows([])
+    with pytest.raises(ValueError, match="Invalid capture instance"):
+        SqlCdcClient(sent).captured_columns("dbo_orders]; DROP TABLE x --")
+    assert not sent.calls
 
     class Denied(Recorder):
         def batches(self, sql, params, batch_size):
@@ -496,8 +500,10 @@ def test_capture_instances_lists_the_table_s_instances_oldest_first():
     tied = [dict(r, start_lsn=_bin(V2)) for r in ORDERS]
     names = [i.name for i in SqlCdcClient(Cdc(tied, CAPTURED)).capture_instances("dbo_orders")]
     assert names == ["dbo_orders", "dbo_orders_v2"]
-    with pytest.raises(ValueError):
+    sent = len(rec.calls)
+    with pytest.raises(ValueError, match="Invalid capture instance"):
         SqlCdcClient(rec).capture_instances("dbo_orders]; DROP TABLE x --")
+    assert len(rec.calls) == sent
 
 
 def test_captured_columns_are_read_once_per_instance_until_forgotten():
@@ -615,8 +621,10 @@ def test_ddl_history_keeps_the_batch_range():
     )
     assert (commit_time, ("0x0000002A000001000200",)) in rec.calls
     assert ("EXEC sys.sp_cdc_get_ddl_history @capture_instance = ?", ("dbo_orders",)) in rec.calls
-    with pytest.raises(ValueError):
+    sent = len(rec.calls)
+    with pytest.raises(ValueError, match="Invalid capture instance"):
         client.ddl_history("dbo_orders]; DROP TABLE x --", "0x01", "0x02")
+    assert len(rec.calls) == sent
 
 
 def test_present_columns_match_the_source_table_by_column_id():
@@ -791,7 +799,7 @@ def test_source_table_matches_the_capture_instance_ignoring_case():
         client.source_table("DBO_ORDERS")
 
 
-def test_snapshot_queries():
+def test_source_table_takes_the_key_and_first_lsn_from_the_help_listing():
     class Help(Recorder):
         def batches(self, sql, params, batch_size):
             self.calls.append((sql, tuple(params)))
@@ -832,101 +840,187 @@ def test_snapshot_queries():
     with pytest.raises(ValueError, match="not found"):
         client.source_table("dbo_missing")
 
-    assert client.key_range("sales", "orders", "order_id") == (None, None)  # empty table
-    assert rec.calls[-1][0] == (
+
+def test_key_range_is_two_seeks_and_none_on_an_empty_table():
+    rec = Recorder()
+    assert SqlCdcClient(rec).key_range("sales", "orders", "order_id") == (None, None)
+    sql = (
         "SELECT (SELECT MIN([order_id]) FROM [sales].[orders]) AS lo, "
         "(SELECT MAX([order_id]) FROM [sales].[orders]) AS hi"
     )
+    assert rec.calls == [(sql, ())]
 
-    def where(lo, hi, keys=("order_id",), types=None):
-        cols = ["order_id", "status"]
-        list(client.iter_table("sales", "orders", cols, keys, types, lo, hi, 100))
-        sql, params = rec.calls[-1]
-        return sql.removeprefix("SELECT [order_id], [status] FROM [sales].[orders]"), params
 
-    # one integer key: inlined bounds, no parameters
-    assert where(None, None) == ("", ()) and where(None, None, keys=()) == ("", ())
-    assert where(None, (10,)) == (" WHERE ([order_id] < 10 OR [order_id] IS NULL)", ())
-    assert where((10,), (20,))[0] == (
-        " WHERE [order_id] >= 10 AND ([order_id] < 20 OR [order_id] IS NULL)"
-    )
-    assert where((20,), None) == (" WHERE [order_id] >= 20", ())
-    # a composite key: bounds bound as text and CAST to the declared types and collations, the
-    # range cut into seekable pieces (an equality prefix and one range each) joined by UNION ALL
-    s = " UNION ALL SELECT [order_id], [status] FROM [sales].[orders]"
-    keys, types = ("region", "id"), ("varchar(10) COLLATE Greek_CI_AS", "int")
-    v, i = "CAST(? COLLATE Greek_CI_AS AS varchar(10))", "CAST(? AS int)"
-    # inside one leading value: one piece, one seek
-    assert where(("n", 5), ("n", 9), keys, types) == (
-        f" WHERE [region] = {v} AND [id] >= {i} AND ([id] < {i} OR [id] IS NULL)",
-        ("n", "5", "9"),
-    )
-    # text CAST reads back exactly (arrow-odbc binds nothing else): datetime takes 3 digits,
-    # a zero decimal is no '0E-10', binary goes as hex like an LSN
-    sql, params = where(
-        (datetime(2026, 9, 28, 10, 0, 0, 6667), Decimal("0E-10"), b"\n\x0b"),
-        None,
-        ("t", "m", "b"),
-        ("datetime", "decimal(18,10)", "varbinary(4)"),
-    )
-    assert sql.startswith(
-        " WHERE [t] = CAST(? AS datetime) AND [m] = CAST(? AS decimal(18,10)) "
-        "AND [b] >= CONVERT(varbinary(4), ?, 1)"
-    )
-    assert params[:3] == ("2026-09-28T10:00:00.006", "0.0000000000", "0x0a0b")
-    # across leading values: the rest of 'n', what lies between, the start of 's'. The first
-    # also checks < ('s', 1) and the last > 'n': both hold unless 'n' = 's' in SQL (a
-    # case-insensitive 'n' and 'N'), and then the first piece alone reads the range
-    below = (
-        f"(([region] < {v} OR [region] IS NULL)"
-        f" OR ([region] = {v} AND ([id] < {i} OR [id] IS NULL)))"
-    )
-    assert where(("n", 5), ("s", 1), keys, types) == (
+def _where(lo, hi, keys=("order_id",), types=None):
+    """The query iter_table sends for [lo, hi) past its SELECT, and its parameters."""
+    rec = Recorder()
+    cols = ["order_id", "status"]
+    list(SqlCdcClient(rec).iter_table("sales", "orders", cols, keys, types, lo, hi, 100))
+    [(sql, params)] = rec.calls
+    return sql.removeprefix("SELECT [order_id], [status] FROM [sales].[orders]"), params
+
+
+# a composite key: bounds bound as text and CAST to the declared types and collations, the
+# range cut into seekable pieces (an equality prefix and one range each) joined by UNION ALL
+_S = " UNION ALL SELECT [order_id], [status] FROM [sales].[orders]"
+_KEYS, _TYPES = ("region", "id"), ("varchar(10) COLLATE Greek_CI_AS", "int")
+_V, _I = "CAST(? COLLATE Greek_CI_AS AS varchar(10))", "CAST(? AS int)"
+# (region, id) < (u, v), row by row
+_BELOW = (
+    f"(([region] < {_V} OR [region] IS NULL)"
+    f" OR ([region] = {_V} AND ([id] < {_I} OR [id] IS NULL)))"
+)
+_AT = datetime(2026, 9, 28, 10, 0, 0, 6667)
+_BELOW3 = (  # (a, b, c) < (4, 5, 6)
+    "(([a] < 4 OR [a] IS NULL) OR ([a] = 4 AND ([b] < 5 OR [b] IS NULL)) "
+    "OR ([a] = 4 AND [b] = 5 AND ([c] < 6 OR [c] IS NULL)))"
+)
+
+
+@pytest.mark.parametrize(
+    ("lo", "hi", "keys", "types", "where", "params"),
+    [
+        # one integer key: inlined bounds, no parameters
+        (None, None, ("order_id",), None, "", ()),
+        (None, None, (), None, "", ()),
+        (None, (10,), ("order_id",), None, " WHERE ([order_id] < 10 OR [order_id] IS NULL)", ()),
         (
-            f" WHERE [region] = {v} AND [id] >= {i} AND {below}"
-            f"{s} WHERE [region] > {v} AND ([region] < {v} OR [region] IS NULL)"
-            f"{s} WHERE [region] = {v} AND ([id] < {i} OR [id] IS NULL) AND [region] > {v}"
+            (10,),
+            (20,),
+            ("order_id",),
+            None,
+            " WHERE [order_id] >= 10 AND ([order_id] < 20 OR [order_id] IS NULL)",
+            (),
         ),
-        ("n", "5", "s", "s", "1", "n", "s", "s", "1", "n"),  # in the order of the ? marks
-    )
-    assert where(None, ("s", 1), keys, types) == (
+        ((20,), None, ("order_id",), None, " WHERE [order_id] >= 20", ()),
+        # inside one leading value: one piece, one seek
         (
-            f" WHERE ([region] < {v} OR [region] IS NULL)"
-            f"{s} WHERE [region] = {v} AND ([id] < {i} OR [id] IS NULL)"
+            ("n", 5),
+            ("n", 9),
+            _KEYS,
+            _TYPES,
+            f" WHERE [region] = {_V} AND [id] >= {_I} AND ([id] < {_I} OR [id] IS NULL)",
+            ("n", "5", "9"),
         ),
-        ("s", "s", "1"),
-    )
-    assert where(("n", 5), None, keys, types) == (
-        f" WHERE [region] = {v} AND [id] >= {i}{s} WHERE [region] > {v}",
-        ("n", "5", "n"),
-    )
-    # three columns: the deepest piece first, integers inlined
-    sql, _ = where((1, 2, 3), (4, 5, 6), ("a", "b", "c"))
-    assert [p.split(" WHERE ")[1].split(" AND (([a]")[0] for p in sql.split(" UNION ALL ")] == [
-        "[a] = 1 AND [b] = 2 AND [c] >= 3",
-        "[a] = 1 AND [b] > 2",
-        "[a] > 1 AND ([a] < 4 OR [a] IS NULL)",
-        "[a] = 4 AND ([b] < 5 OR [b] IS NULL) AND [a] > 1",
-        "[a] = 4 AND [b] = 5 AND ([c] < 6 OR [c] IS NULL) AND [a] > 1",
-    ]
-    # NULL bounds (defensive: SQL Server refuses a CDC index over nullable columns), sorting
-    # first as in ORDER BY
-    assert where((None, 5), (None, 9), keys, types) == (
-        f" WHERE [region] IS NULL AND [id] >= {i} AND ([id] < {i} OR [id] IS NULL)",
-        ("5", "9"),
-    )
-    assert where(("n", None), None, keys, types) == (
-        f" WHERE [region] = {v} AND 1 = 1{s} WHERE [region] > {v}",
-        ("n", "n"),
-    )
-    with pytest.raises(ValueError):
-        where(("1; DROP TABLE x",), None)
-    with pytest.raises(ValueError):
-        where(None, None, keys=("a]; DROP TABLE x --",))
-    with pytest.raises(ValueError):
-        where(("n",), None, keys=("region",), types=("int) OR 1=1 --",))
-    with pytest.raises(ValueError):
-        where(("n",), None, keys=("region",), types=("varchar(5) COLLATE x AS int) --",))
+        # text CAST reads back exactly (arrow-odbc binds nothing else): datetime takes 3
+        # digits, a zero decimal is no '0E-10', binary goes as hex like an LSN
+        (
+            (_AT, Decimal("0E-10"), b"\n\x0b"),
+            None,
+            ("t", "m", "b"),
+            ("datetime", "decimal(18,10)", "varbinary(4)"),
+            (
+                " WHERE [t] = CAST(? AS datetime) AND [m] = CAST(? AS decimal(18,10)) "
+                "AND [b] >= CONVERT(varbinary(4), ?, 1)"
+                f"{_S} WHERE [t] = CAST(? AS datetime) AND [m] > CAST(? AS decimal(18,10))"
+                f"{_S} WHERE [t] > CAST(? AS datetime)"
+            ),
+            ("2026-09-28T10:00:00.006", "0.0000000000", "0x0a0b")
+            + ("2026-09-28T10:00:00.006", "0.0000000000", "2026-09-28T10:00:00.006"),
+        ),
+        # across leading values: the rest of 'n', what lies between, the start of 's'. The
+        # first also checks < ('s', 1) and the last > 'n': both hold unless 'n' = 's' in SQL
+        # (a case-insensitive 'n' and 'N'), and then the first piece alone reads the range
+        (
+            ("n", 5),
+            ("s", 1),
+            _KEYS,
+            _TYPES,
+            (
+                f" WHERE [region] = {_V} AND [id] >= {_I} AND {_BELOW}"
+                f"{_S} WHERE [region] > {_V} AND ([region] < {_V} OR [region] IS NULL)"
+                f"{_S} WHERE [region] = {_V} AND ([id] < {_I} OR [id] IS NULL) AND [region] > {_V}"
+            ),
+            ("n", "5", "s", "s", "1", "n", "s", "s", "1", "n"),  # in the order of the ? marks
+        ),
+        (
+            None,
+            ("s", 1),
+            _KEYS,
+            _TYPES,
+            (
+                f" WHERE ([region] < {_V} OR [region] IS NULL)"
+                f"{_S} WHERE [region] = {_V} AND ([id] < {_I} OR [id] IS NULL)"
+            ),
+            ("s", "s", "1"),
+        ),
+        (
+            ("n", 5),
+            None,
+            _KEYS,
+            _TYPES,
+            f" WHERE [region] = {_V} AND [id] >= {_I}{_S} WHERE [region] > {_V}",
+            ("n", "5", "n"),
+        ),
+        # three columns: the deepest piece first, integers inlined
+        (
+            (1, 2, 3),
+            (4, 5, 6),
+            ("a", "b", "c"),
+            None,
+            (
+                f" WHERE [a] = 1 AND [b] = 2 AND [c] >= 3 AND {_BELOW3}"
+                f"{_S} WHERE [a] = 1 AND [b] > 2 AND {_BELOW3}"
+                f"{_S} WHERE [a] > 1 AND ([a] < 4 OR [a] IS NULL)"
+                f"{_S} WHERE [a] = 4 AND ([b] < 5 OR [b] IS NULL) AND [a] > 1"
+                f"{_S} WHERE [a] = 4 AND [b] = 5 AND ([c] < 6 OR [c] IS NULL) AND [a] > 1"
+            ),
+            (),
+        ),
+        # NULL bounds (defensive: SQL Server refuses a CDC index over nullable columns),
+        # sorting first as in ORDER BY
+        (
+            (None, 5),
+            (None, 9),
+            _KEYS,
+            _TYPES,
+            f" WHERE [region] IS NULL AND [id] >= {_I} AND ([id] < {_I} OR [id] IS NULL)",
+            ("5", "9"),
+        ),
+        (
+            ("n", None),
+            None,
+            _KEYS,
+            _TYPES,
+            f" WHERE [region] = {_V} AND 1 = 1{_S} WHERE [region] > {_V}",
+            ("n", "n"),
+        ),
+    ],
+    ids=[
+        "open",
+        "no-key",
+        "below",
+        "between",
+        "from",
+        "one-leading-value",
+        "text-cast",
+        "across-leading-values",
+        "composite-below",
+        "composite-from",
+        "three-columns",
+        "null-leading",
+        "null-trailing",
+    ],
+)
+def test_a_snapshot_range_reads_seekable_pieces(lo, hi, keys, types, where, params):
+    assert _where(lo, hi, keys, types) == (where, params)
+
+
+@pytest.mark.parametrize(
+    ("lo", "keys", "types", "error"),
+    [
+        (("1; DROP TABLE x",), ("order_id",), None, r"invalid literal for int\(\)"),  # inlined
+        (None, ("a]; DROP TABLE x --",), None, "Invalid column name"),
+        (("n",), ("region",), ("int) OR 1=1 --",), "Invalid SQL type"),
+        (("n",), ("region",), ("varchar(5) COLLATE x AS int) --",), "Invalid SQL type"),
+    ],
+    ids=["integer-bound", "key", "type", "collation"],
+)
+def test_a_snapshot_range_refuses_injection_before_any_query(lo, keys, types, error):
+    rec = Recorder()
+    with pytest.raises(ValueError, match=error):
+        list(SqlCdcClient(rec).iter_table("sales", "orders", ["id"], keys, types, lo, None, 100))
+    assert not rec.calls
 
 
 def test_key_tiles_and_types_for_composite_or_non_integer_keys():
@@ -944,10 +1038,12 @@ def test_key_tiles_and_types_for_composite_or_non_integer_keys():
         )
         and params == ()
     )  # only the first key of tiles 2..n crosses the network; no key column is named __$...
-    with pytest.raises(ValueError):
+    sent = len(rec.calls)
+    with pytest.raises(ValueError, match="Invalid column name"):
         client.key_tiles("sales", "orders", ["id]) a; DROP TABLE x --"], 3)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"invalid literal for int\(\)"):  # inlined as one
         client.key_tiles("sales", "orders", ["id"], "3; DROP TABLE x")
+    assert len(rec.calls) == sent
 
     class Meta(Recorder):  # captured columns, then sys.columns
         def __init__(self, collations):
@@ -997,7 +1093,8 @@ def test_key_tiles_and_types_for_composite_or_non_integer_keys():
     )
     assert SqlCdcClient(meta).key_types("dbo_orders", ["id", "at"]) == ["bigint", "datetime2(7)"]
     assert "sys.columns" not in meta.calls[-1][0]  # no string key, no collation lookup
-    with pytest.raises(ValueError):
+    # a collation is inlined unquoted, so the one sys.columns names is checked too
+    with pytest.raises(ValueError, match="Invalid collation: 'x; DROP'"):
         SqlCdcClient(Meta([{"name": "region", "collation_name": "x; DROP"}])).key_types(
             "dbo_orders", ["region"]
         )
@@ -1029,19 +1126,21 @@ def test_chunk_planning_queries():
         "OFFSET 5 ROWS FETCH NEXT 1 ROWS ONLY"
     )
 
-    rec = Rows([{"region": "z", "id": 7}])
-    assert SqlCdcClient(rec).key_max("sales", "orders", keys) == ("z", 7)
-    assert rec.calls[-1] == (
+    top = Rows([{"region": "z", "id": 7}])
+    assert SqlCdcClient(top).key_max("sales", "orders", keys) == ("z", 7)
+    assert top.calls[-1] == (
         "SELECT TOP (1) [region], [id] FROM [sales].[orders] ORDER BY [region] DESC, [id] DESC",
         (),
     )
-    rec = Rows([{"name": "orders", "rows": "1234                ", "reserved": "80 KB"}])
-    assert SqlCdcClient(rec).row_estimate("sales", "orders") == 1234  # char(20), public
-    assert rec.calls[-1] == ("EXEC sys.sp_spaceused @objname = ?", ("[sales].[orders]",))
-    with pytest.raises(ValueError):
+    spaced = Rows([{"name": "orders", "rows": "1234                ", "reserved": "80 KB"}])
+    assert SqlCdcClient(spaced).row_estimate("sales", "orders") == 1234  # char(20), public
+    assert spaced.calls[-1] == ("EXEC sys.sp_spaceused @objname = ?", ("[sales].[orders]",))
+    sent = len(rec.calls)
+    with pytest.raises(ValueError, match="Invalid column name"):
         client.key_bound("sales", "orders", ["id]) p; DROP TABLE x --"], None, None, None, 5)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"invalid literal for int\(\)"):  # inlined as one
         client.key_bound("sales", "orders", ["id"], None, None, None, "5; DROP TABLE x")
+    assert len(rec.calls) == sent
 
 
 def test_a_chunk_reads_under_read_committed_or_snapshot_never_nolock():
@@ -1194,10 +1293,12 @@ def test_key_buckets_count_and_sum_the_key_per_floored_bucket_in_one_query():
         "SELECT CAST(0 AS bigint) AS b, COUNT_BIG(*) AS n, CAST(NULL AS decimal(38,0)) AS s "
         "FROM [sales].[orders]"
     )
-    with pytest.raises(ValueError):
+    sent = len(rec.calls)
+    with pytest.raises(ValueError, match="Invalid column name"):
         client.key_buckets("sales", "orders", "id]; DROP TABLE x --", "int", 10)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"invalid literal for int\(\)"):  # inlined as one
         client.key_buckets("sales", "orders", "id", "int", "10; DROP TABLE x")
+    assert len(rec.calls) == sent
 
 
 def test_an_integer_plan_counts_and_seeks_one_slice_of_the_key():
@@ -1210,12 +1311,14 @@ def test_an_integer_plan_counts_and_seeks_one_slice_of_the_key():
     )
     client.key_buckets("sales", "orders", "id", "int", 10, None, 30)
     assert "WHERE [id] IS NOT NULL AND [id] < 30) x" in rec.calls[-1][0]
-    rec = Rows([{"lo": 3, "hi": 9}])
-    assert SqlCdcClient(rec).key_range("sales", "orders", "id", 0, 10) == (3, 9)
+    ranged = Rows([{"lo": 3, "hi": 9}])
+    assert SqlCdcClient(ranged).key_range("sales", "orders", "id", 0, 10) == (3, 9)
     t = "[sales].[orders] WHERE [id] >= 0 AND [id] < 10"
-    assert rec.calls[-1] == (
+    assert ranged.calls[-1] == (
         f"SELECT (SELECT MIN([id]) FROM {t}) AS lo, (SELECT MAX([id]) FROM {t}) AS hi",
         (),
     )
-    with pytest.raises(ValueError):  # bounds are inlined as integers only
+    sent = len(rec.calls)
+    with pytest.raises(ValueError, match=r"invalid literal for int\(\)"):  # inlined as one
         client.key_buckets("sales", "orders", "id", "int", 10, "0; DROP TABLE x")
+    assert len(rec.calls) == sent
