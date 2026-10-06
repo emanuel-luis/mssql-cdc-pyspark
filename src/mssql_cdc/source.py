@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import json
 import logging
 import os
 import random
@@ -306,8 +307,6 @@ def union_columns(instances) -> str:
 def _write_metrics(path: str, name: str, metrics: dict) -> None:
     """One JSON per partition, ``<name>.json``; a task retry overwrites its file. Best
     effort: a metric must never fail a read."""
-    import json
-
     target = os.path.join(path, f"{name}.json")
     try:
         os.makedirs(path, exist_ok=True)
@@ -327,8 +326,6 @@ def _write_event(
     and ``key`` (default its LSN), which a replanned batch reproduces, so it rewrites the same
     file. ``gap``: a 'data_skipped' event's ``lost_from_ts`` and ``lost_to_ts`` (ADR 0018).
     Best effort, like the metrics."""
-    import json
-
     try:
         os.makedirs(path, exist_ok=True)
         name = os.path.join(path, f"event-{kind}-{key or lsn}.json")
@@ -338,6 +335,35 @@ def _write_event(
         os.replace(name + ".tmp", name)
     except OSError as exc:
         _log.warning("mssql_cdc: could not write the %s event file in %s: %s", kind, path, exc)
+
+
+def _possible_skip(client, partition: LsnRange, min_lsn: str) -> dict:
+    """The 'data_skipped' event of a range CDC cleanup reached while it was read
+    (failOnDataLoss=false, ADR 0018): its changes below ``min_lsn`` may be missing, not
+    certainly, so ``certain`` is false. It rides in the partition's metrics file, so a
+    retried task rewrites it and the sink removes a dead attempt's before the read."""
+    try:
+        at = client.lsn_to_time(min_lsn)
+    except Exception:  # noqa: BLE001 - recording the loss must never fail the read
+        at = None
+    read = f"{partition.from_lsn}..{partition.to_lsn}"
+    detail = {
+        "from": partition.from_lsn,
+        "to": min_lsn,
+        "certain": False,
+        "reason": f"CDC cleanup moved min_lsn past the start of the range {read} while it "
+        "was read: its changes below min_lsn may be missing",
+    }
+    return {
+        "event": "data_skipped",
+        "capture_instance": partition.capture_instance,
+        "lsn": min_lsn,
+        "commit_ts": at,
+        "detail": json.dumps(detail),
+        # from the batch's start offset, as the driver's row, to where cleanup had got
+        "lost_from_ts": partition.start_ts,
+        "lost_to_ts": at,
+    }
 
 
 def _position(client, min_lsn: str, to_lsn: str) -> dict:
@@ -401,6 +427,9 @@ class LsnRange(InputPartition):
     offset_min: int | None = None
     # the batch's last range: it alone measures the stream's position for the facts (ADR 0020)
     last: bool = False
+    # the commit time of the batch's start offset: where a loss the task finds after its read
+    # starts (ADR 0018)
+    start_ts: str | None = None
 
 
 class MssqlCdcDataSource(DataSource):
@@ -673,6 +702,8 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 ranges += self._split(client, inst, lo, hi)
         if ranges:  # it ends at the batch's end offset, unless cleanup left nothing up to it
             ranges[-1].last = True
+        for r in ranges:
+            r.start_ts = start.get("commit_ts") or None
         for kind, ci, lsn, ts, detail in events:
             _log.warning("mssql_cdc: %s on %s at %s: %s", kind, ci, lsn, detail)
             if self.metrics_path:  # for the sink to fold into the facts
@@ -683,7 +714,8 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 gap = {"lost_from_ts": start.get("commit_ts") or None, "lost_to_ts": ts}
                 # named by the instance and where the gap starts, which a replan reproduces;
                 # M may have moved on by then, and two instances' gaps can end at the same M
-                key, detail = f"{ci}-{lo}", f"{lo}..{low}"
+                key = f"{ci}-{lo}"
+                detail = json.dumps({"from": lo, "to": low, "certain": True})  # purged: lost
                 _write_event(self.metrics_path, "data_skipped", ci, low, ts, detail, key, **gap)
         return ranges
 
@@ -925,6 +957,8 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 }
                 if partition.last:  # the batch's position: four queries once, not in every range
                     metrics.update(_position(client, min_lsn, partition.to_lsn))
+                if partition.from_lsn < min_lsn:  # failOnDataLoss=false: the facts keep it too
+                    metrics["data_skipped"] = _possible_skip(client, partition, min_lsn)
                 _write_metrics(
                     self.metrics_path, f"{partition.from_lsn}-{partition.to_lsn}", metrics
                 )
@@ -1064,8 +1098,6 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         schema, table, keys = source.schema, source.table, source.keys
         given_keys = _opt(self.options, "snapshotKeys")
         if given_keys:  # reconcile()'s keys, which bound its ranges: not always the index's
-            import json
-
             keys = [str(k) for k in json.loads(given_keys)]
         # a captured column the table no longer has reads NULL, like its later change rows
         present = client.present_columns(ci, self.source_columns)
@@ -1078,8 +1110,6 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
             ]
 
         if self.chunks:
-            import json
-
             from .client import _key_tuple
 
             plan = json.loads(self.chunks)

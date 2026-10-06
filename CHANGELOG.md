@@ -25,7 +25,9 @@ and no migration sets that property yet
 amendment,
 [ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)).
 Facts migration 10 rewrites the comments of `event`, `lost_from_ts`, `lost_to_ts`, `detail`,
-`batch_id` and the table (metadata only), and `event` gains the value `'data_skipped'`
+`batch_id` and the table (metadata only), and `event` gains the value `'data_skipped'`;
+facts migration 11 rewrites those of `event`, `lost_from_ts` and `detail` again, for the
+possible skips a task records (metadata only)
 ([ADR 0018](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0018-automatic-resnapshot-after-data-loss/) amendment 3). The state contract
 also covers the silver and reconcile schemas, the facts `event` values and the keys of a
 snapshot row's `detail` and of a backfill wave's userMetadata, keys that are only ever added
@@ -70,9 +72,16 @@ rows always did.
   ([ADR 0012](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0012-delta-tables-through-the-deltatable-api/) amendment).
 - With `failOnDataLoss=false`, a batch whose planning skips changes CDC cleanup purged
   writes a `data_skipped` facts row: the batch's `batch_id`, `rows` 0, `min_lsn` = `max_lsn`
-  the `min_lsn` it resumed at, the LSNs skipped in `detail` and the gap in `lost_from_ts`
-  and `lost_to_ts`, as on a `resnapshot` row. It needs a facts table and `metricsPath`
-  (`to_delta` sets it); a skip a task finds after its read is still only logged
+  the `min_lsn` it resumed at, the LSNs skipped in `detail` (JSON `{from, to, certain}`,
+  `certain` true) and the gap in `lost_from_ts` and `lost_to_ts`, as on a `resnapshot` row.
+  It needs a facts table and `metricsPath` (`to_delta` sets it)
+  ([ADR 0018](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0018-automatic-resnapshot-after-data-loss/) amendment 3).
+- A task that finds, after reading its range, that CDC cleanup ran meanwhile (the
+  executor-side retention guard, `failOnDataLoss=false`) writes a `data_skipped` facts row
+  too, the loss possible rather than certain: `detail` `{from, to, certain: false, reason}`,
+  `min_lsn` = `max_lsn` the `min_lsn` it found, and `lost_from_ts`/`lost_to_ts` from the
+  batch's start offset to that `min_lsn`. It rides in the partition's metrics file, so a
+  retried task or a replayed batch writes it once; it used to be only logged
   ([ADR 0018](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0018-automatic-resnapshot-after-data-loss/) amendment 3).
 - A compatibility test against the state released versions wrote: `tests/compat/<version>`
   holds a checkpoint with two generations and the bronze, silver, facts and control tables

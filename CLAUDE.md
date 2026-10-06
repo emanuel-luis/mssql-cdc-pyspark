@@ -130,7 +130,9 @@ notes/             Local only, gitignored: research notes in Portuguese (context
    on the executor, after reading a range, if `fn_cdc_get_min_lsn(ci)` moved past its
    `from_lsn` (cleanup ran meanwhile; the change table does not fail on purged ranges).
    Raise `DataLossError` unless `failOnDataLoss=false`. Silent skipping is data loss: the
-   driver's skip leaves a `'data_skipped'` facts row with the gap (ADR 0018).
+   driver's skip leaves a `'data_skipped'` facts row with the gap (`certain` true in
+   `detail`), and so does the executor's, through its metrics file, as a possible loss
+   (`certain` false) (ADR 0018).
    A third check, `to_delta(on_data_loss="resnapshot")`'s pre-flight, applies the driver's
    test before the query starts and re-snapshots into a new generation instead (ADR 0018).
    With two capture instances, `ci` is the instance the range reads; the pre-flight uses the

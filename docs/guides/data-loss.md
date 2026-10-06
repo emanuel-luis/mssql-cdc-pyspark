@@ -41,10 +41,12 @@ the message names it as the other possible cause ([Schema changes](schema-change
 
 The option `failOnDataLoss=false` skips ahead to what cleanup left instead. The skip logs a
 WARNING naming the capture instance and the LSN range skipped, in the driver's log or, when
-a task finds it after its read, that executor's. A skip found while planning also leaves a
+a task finds it after its read, that executor's. Either also leaves a
 [`data_skipped` row](#the-events-in-the-facts) with the gap in the facts table, when the
 stream has one and a [metricsPath](../reference/options.md#metricspath) (`to_delta` sets
-it); one a task finds after its read is only logged. The query goes on and
+it). A skip found while planning is certain: those changes are gone. One a task finds after
+its read is possible, not certain: cleanup ran while the task read its range, and some of
+the range's changes may be missing, and the task cannot tell which. The query goes on and
 `finalized_until` moves past the gap. Nothing rebuilds downstream: silver keeps what the
 skipped changes would have changed, a row deleted in the gap included, until a new
 snapshot. Use it only where losing the changes is acceptable and a snapshot is not.
@@ -226,12 +228,23 @@ snapshot was reused). A `'resnapshot'` row also carries the gap:
 
 With `failOnDataLoss=false`, a batch that skipped purged changes has a `'data_skipped'` row
 instead, with its `batch_id` and `rows` = 0: `min_lsn` = `max_lsn` is the `min_lsn` the
-batch resumed at, `detail` the LSNs skipped (`from..to`), and `lost_from_ts` and
-`lost_to_ts` the gap as above, from the batch's start offset. It is not a snapshot:
-nothing rebuilds from it.
+batch resumed at, `lost_from_ts` and `lost_to_ts` the gap as above, from the batch's start
+offset, and `detail` JSON:
+
+- `{"from", "to", "certain": true}` when planning found the gap: `from` the first LSN not
+  read, `to` the `min_lsn` reading resumed at;
+- `{"from", "to", "certain": false, "reason"}` when a task found, after reading a range,
+  that cleanup had run meanwhile: `from` the range's first LSN, `to` the `min_lsn` the task
+  found (also `min_lsn` = `max_lsn` of the row). The range's changes below `to` may be
+  missing; `lost_to_ts` is `to`'s commit time.
+
+A batch can have both, and one possible row per range that found it. A retried task
+rewrites its own, and a replayed batch writes none twice. It is not a snapshot: nothing
+rebuilds from it.
 
 ```sql
-SELECT written_at, app_id, event, rows, lost_from_ts, lost_to_ts
+SELECT written_at, app_id, event, rows, lost_from_ts, lost_to_ts,
+       get_json_object(detail, '$.certain') AS certain
 FROM ops.ingestion_facts
 WHERE target = 'bronze.orders' AND event IN ('resnapshot', 'data_skipped')
 ORDER BY written_at DESC

@@ -351,6 +351,38 @@ SKIP_COMMENTS = {
 }
 
 
+# Migration 11 (2026-10-06): a task that finds CDC cleanup ran while it read a range writes a
+# 'data_skipped' row too, the loss possible rather than certain, and detail becomes JSON with
+# 'certain' (ADR 0018, Amendment 3). Comments only; the creation columns take these, over
+# migration 10's.
+POSSIBLE_COMMENTS = {
+    "event": SKIP_COMMENTS["event"]
+    .replace(
+        "lost_from_ts and lost_to_ts the gap, detail the LSNs skipped.",
+        "lost_from_ts and lost_to_ts the gap, detail the LSNs skipped and certain true. A task "
+        "that finds cleanup ran while it read a range of the batch writes one too, with "
+        "certain false: changes of that range may be missing, not certainly; min_lsn = "
+        "max_lsn is the min_lsn it found.",
+    )
+    .replace(
+        "the target lacks the skipped changes",
+        "the target lacks the skipped changes, or may lack them,",
+    ),
+    "lost_from_ts": SKIP_COMMENTS["lost_from_ts"].replace(
+        "and are missing from the target.",
+        "and are missing from the target (or may be, when detail says certain false).",
+    ),
+    "detail": SKIP_COMMENTS["detail"].replace(
+        "On 'data_skipped' rows, 'from..to': the first LSN not read and the min_lsn reading "
+        "resumed at.",
+        "On 'data_skipped' rows, JSON {from, to, certain}: the first LSN not read and the "
+        "min_lsn reading resumed at, certain true; or, from a task that found cleanup had run "
+        "while it read a range, the range's first LSN and the min_lsn it found, certain false, "
+        "and a reason.",
+    ),
+}
+
+
 def _end_offset(spark, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT  # the comments new tables are created with
 
@@ -407,4 +439,5 @@ MIGRATIONS: list[Migration] = [
         lambda spark, table: set_comments(spark, table, LOCK_COMMENTS),
     ),
     Migration("skipped changes", _skipped_changes),
+    Migration("possible skips", lambda spark, table: set_comments(spark, table, POSSIBLE_COMMENTS)),
 ]

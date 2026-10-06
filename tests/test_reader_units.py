@@ -415,7 +415,7 @@ def test_a_skip_while_planning_leaves_a_data_skipped_event_with_the_gap(tmp_path
     reader = _reader(str(tmp_path), failOnDataLoss="false", metricsPath=metrics)
     start = {"lsn": lsns[0], "commit_ts": T0.isoformat(timespec="milliseconds")}
     [planned] = reader.partitions(start, {"lsn": lsns[-1]})
-    db.cleanup(CI, lsns[3])  # found by the task after its read: logged only
+    db.cleanup(CI, lsns[3])  # found by the task after its read: in its metrics file
     list(reader.read(planned))
     events = [n for n in sorted(os.listdir(metrics)) if n.startswith("event-")]
     lo = reader.client.increment_lsn(lsns[0])
@@ -427,10 +427,51 @@ def test_a_skip_while_planning_leaves_a_data_skipped_event_with_the_gap(tmp_path
             "capture_instance": CI,
             "lsn": lsns[2],
             "commit_ts": at,
-            "detail": f"{reader.client.increment_lsn(lsns[0])}..{lsns[2]}",
+            "detail": json.dumps({"from": lo, "to": lsns[2], "certain": True}),
             "lost_from_ts": start["commit_ts"],  # the last offset processed, as a re-snapshot's
             "lost_to_ts": at,
         }
+
+
+def test_a_skip_found_after_the_read_is_a_possible_data_skipped_event_of_the_partition(
+    tmp_path,
+):
+    import json
+    import os
+
+    from mssql_cdc.sink import _fold_metrics
+
+    db, lsns = _db(str(tmp_path), n_tx=4)
+    metrics = str(tmp_path / "metrics")
+    reader = _reader(str(tmp_path), failOnDataLoss="false", metricsPath=metrics)
+    start = {"lsn": lsns[0], "commit_ts": T0.isoformat(timespec="milliseconds")}
+    [planned] = reader.partitions(start, {"lsn": lsns[-1]})  # nothing purged yet
+    db.cleanup(CI, lsns[2])  # while the task reads
+    list(reader.read(planned))
+    list(reader.read(planned))  # a retried task rewrites its file
+    [name] = os.listdir(metrics)  # the partition's metrics file: no event file of its own
+    assert name == f"{planned.from_lsn}-{planned.to_lsn}.json"
+    with open(os.path.join(metrics, name), encoding="utf-8") as fh:
+        skipped = json.load(fh)["data_skipped"]
+    at = (T0 + timedelta(minutes=2)).isoformat(timespec="milliseconds")
+    detail = json.loads(skipped.pop("detail"))
+    assert skipped == {
+        "event": "data_skipped",
+        "capture_instance": CI,
+        "lsn": lsns[2],  # the min_lsn it found
+        "commit_ts": at,
+        "lost_from_ts": start["commit_ts"],  # the batch's start offset, as the driver's row
+        "lost_to_ts": at,
+    }
+    read = f"{planned.from_lsn}..{planned.to_lsn}"
+    assert detail == {
+        "from": planned.from_lsn,
+        "to": lsns[2],
+        "certain": False,
+        "reason": f"CDC cleanup moved min_lsn past the start of the range {read} while it was "
+        "read: its changes below min_lsn may be missing",
+    }
+    assert len(_fold_metrics(metrics)["data_skipped"]) == 1  # one facts row
 
 
 def test_a_replanned_skip_rewrites_its_event_file_with_the_new_min_lsn(tmp_path):

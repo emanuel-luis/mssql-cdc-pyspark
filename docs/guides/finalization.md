@@ -173,10 +173,10 @@ option where a listener cannot run ([Extension points](../ARCHITECTURE.md#extens
   of the facts' `resnapshot` row are missing from bronze's change history
   ([Data loss](data-loss.md)). Silver, rebuilt from the snapshot, is complete up to its own
   verdict.
-- With `failOnDataLoss=false` the verdict moves past skipped changes. A skip found while
-  planning leaves a `data_skipped` facts row with the gap (it needs the facts table and a
-  [metricsPath](../reference/options.md#metricspath)); one a task finds after its read
-  leaves only a warning in that executor's log ([Data loss](data-loss.md)).
+- With `failOnDataLoss=false` the verdict moves past skipped changes. A skip leaves a
+  `data_skipped` facts row with the gap (it needs the facts table and a
+  [metricsPath](../reference/options.md#metricspath)); one a task finds after its read says
+  the loss is possible, not certain (`certain` false in `detail`) ([Data loss](data-loss.md)).
 - With a named zone that has daylight saving (`sourceTimeZone`, or `auto` on SQL Server
   2022), `granularity="minute"` is unsafe across a fall-back: commits in the second pass of
   the repeated hour get commit times an hour early, in minutes already declared final. Use

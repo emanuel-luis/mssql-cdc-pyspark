@@ -57,6 +57,7 @@ def test_fold_metrics_skips_unreadable_files_and_ends_at_the_largest_to_lsn(tmp_
         "read_seconds": 2.0,
         "read_mb": 3.0,
         "network_wait_ms": 8,
+        "data_skipped": [],  # no partition found cleanup had run while it read
     }
     # one partition did not measure its wait: a sum without it would understate the batch's
     _write(path, "early.json", to_lsn="0x00000000000000000001", seconds=0, bytes=0)

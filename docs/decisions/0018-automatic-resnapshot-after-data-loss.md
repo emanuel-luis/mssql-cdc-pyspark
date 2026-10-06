@@ -5,7 +5,8 @@
 **Amended:** 2026-10-02T20:30:12-03:00, a chunked re-snapshot opens at S and is read by `backfill()` (see the Amendment, ADR 0028)  
 **Amended:** 2026-10-03T18:10:05-03:00, a full re-snapshot opens too, under the mode lock of ADR 0028's Amendment (see Amendment 2)  
 **Amended:** 2026-10-05T12:46:11-03:00, a skip with `failOnDataLoss=false` leaves a `'data_skipped'` facts row with the gap (see Amendment 3)  
-**Amended:** 2026-10-05T20:51:10-03:00, the `'data_skipped'` event file is named by the capture instance and the gap's start, which a replanned batch reproduces (Amendment 3)
+**Amended:** 2026-10-05T20:51:10-03:00, the `'data_skipped'` event file is named by the capture instance and the gap's start, which a replanned batch reproduces (Amendment 3)  
+**Amended:** 2026-10-06T07:45:42-03:00, the executor guard's skip is recorded too, as a possible loss (`certain` false), through the partition's metrics file (Amendment 3)
 
 ## Context
 CDC cleanup deletes change rows by age (three days by default) whether or not the stream
@@ -172,16 +173,31 @@ on which capture instance or how much was lost.
   a `'data_skipped'` event file through the path that carries `'schema_change'` and
   `'capture_instance_switched'` (ADR 0023), and the sink writes it as an event row of the
   batch in the batch's own commit: `batch_id` the batch's, `rows` 0, `min_lsn` = `max_lsn` =
-  M, `detail` `'<from>..<M>'`, `lost_from_ts` the commit time of the batch's start offset,
-  `lost_to_ts` M's commit time, the same columns a `'resnapshot'` row fills. Written after
+  M, `detail` `{"from": <from>, "to": <M>, "certain": true}` (`'<from>..<M>'` until
+  2026-10-06, unreleased, when the executor's rows below needed `certain`), `lost_from_ts`
+  the commit time of the batch's start offset, `lost_to_ts` M's commit time, the same
+  columns a `'resnapshot'` row fills. Written after
   the schema checks, so a batch they fail leaves none; it needs `metricsPath`, as the other
   events do. The file is named by the capture instance and `<from>`
   (`event-data_skipped-<ci>-<from>.json`), not by M: a replayed batch has the same `<from>`
   but may find a newer M, so it rewrites the file instead of adding a second row, and both
   instances of a batch that crosses a switch can skip to one M. Facts migration 10 gives `event`, `lost_from_ts`, `lost_to_ts`, `detail`,
   `batch_id` and the table their new comments.
-* The executor guard, which finds cleanup running mid-read, only logs: rows of the range
-  may be missing, not certainly, and the task cannot tell which.
+* The executor guard finds cleanup that ran mid-read: rows of the range may be missing, not
+  certainly, and the task cannot tell which. It first only logged, which left no lasting
+  trace either (2026-10-06): now, with `metricsPath`, the task also puts a `'data_skipped'`
+  event in its partition's metrics file, `detail` `{"from": <range's first LSN>, "to": <M
+  it found>, "certain": false, "reason": ...}`, `min_lsn` = `max_lsn` = M, `lost_from_ts`
+  the commit time of the batch's start offset (carried on the range as `start_ts`) and
+  `lost_to_ts` M's, as on the driver's row. The sink takes it out of the folded metrics as an
+  event row in the batch's commit. The metrics file, not an event file: a retried task
+  rewrites it under the same name, and the sink removes a dead attempt's before the read, so
+  a replayed batch writes the row once, while a stale event file of a dead attempt would
+  survive a replan whose ranges start elsewhere. Facts migration 11 rewrites the comments of
+  `event`, `lost_from_ts` and `detail`.
+  - Considered: an `event-data_skipped-<ci>-<from>.json` file like the driver's. Simpler in
+    the sink, but such files outlive a dead attempt, and a replan after more cleanup cuts the
+    ranges elsewhere, so a stale possible row would stand next to the replay's certain one.
 * `apply_changes` and `finalized_until` are unchanged: a skip leaves no snapshot to rebuild
   from, so silver keeps what the skipped changes would have changed until a new snapshot,
   and the verdict moves past the gap. A helper that reads the gaps waits for a consumer

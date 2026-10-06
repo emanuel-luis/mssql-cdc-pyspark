@@ -62,7 +62,8 @@ Every column's comment is in [Tables](../reference/tables.md). Times are UTC, as
   the change in `detail` ([Schema changes](schema-changes.md)).
 - `data_skipped`: purged changes skipped with `failOnDataLoss=false`, with the `batch_id` of
   the batch that skipped them, `rows = 0`, the gap in `lost_from_ts` and `lost_to_ts` and
-  the LSNs skipped in `detail` ([Data loss](data-loss.md)).
+  the LSNs skipped in `detail`, whose `certain` is false when a task found cleanup ran while
+  it read: changes may be missing, not certainly ([Data loss](data-loss.md)).
 
 Statistics over micro-batches filter `event IS NULL`.
 

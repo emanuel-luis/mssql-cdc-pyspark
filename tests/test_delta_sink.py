@@ -238,10 +238,10 @@ def test_facts_table_at_version_0_gains_every_column_and_the_current_comments(de
         "one row per non-empty batch",
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(spark, old, "facts") == 10
+    assert migrations.migrate(spark, old, "facts") == 11
     cols, description = _comments(spark, old)
     assert all(name in cols and cols[name][1] for name, _, _ in added)
-    # migrations 5 to 10 rewrote the comments whose meaning changed: as a new table has them
+    # migrations 5 to 11 rewrote the comments whose meaning changed: as a new table has them
     assert {n: cols[n][1] for n, _, _ in FACTS_COLUMNS} == {n: c for n, _, c in FACTS_COLUMNS}
     assert description == FACTS_COMMENT
 
@@ -373,6 +373,52 @@ def test_a_quiet_table_is_measured_from_the_end_offset_and_its_empty_batches_wri
     assert [r["retention_headroom_hours"] for r in rows] == [70.0, 70.25, 70.5]
     # capture had processed dbo_other's commit at T0 + 30 min when every batch was read
     assert [r["ingestion_lag_seconds"] for r in rows] == [1800.0, 900.0, 0.0]
+
+
+def test_cleanup_during_the_read_leaves_one_possible_data_skipped_row(delta_spark, workdir):
+    spark = delta_spark
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
+    lsns = [
+        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
+        for i in range(4)
+    ]
+    target, facts, metrics = (os.path.join(workdir, n) for n in ("bronze", "facts", "metrics"))
+    sink = delta_sink(target, "possible-v1", facts, metrics_path=metrics)
+
+    def write(df, batch_id):
+        db.cleanup(CI, lsns[2])  # the batch is planned already: its task reads after cleanup
+        sink(df, batch_id)
+        sink(df, batch_id)  # a replay of the batch: read again, written once
+
+    q = (
+        spark.readStream.format("mssql_cdc")
+        .option("backend", "fake")
+        .option("fakePath", os.path.join(workdir, "src"))
+        .option("captureInstance", CI)
+        .option("columns", COLUMNS)
+        .option("numPartitions", "1")
+        .option("failOnDataLoss", "false")
+        .option("metricsPath", metrics)
+        .load()
+        .writeStream.foreachBatch(write)
+        .option("checkpointLocation", os.path.join(workdir, "ckpt"))
+        .trigger(availableNow=True)
+        .start()
+    )
+    q.awaitTermination()
+    assert spark.read.format("delta").load(target).count() == 2  # commits 0 and 1 were purged
+    rows = spark.read.format("delta").load(facts).collect()
+    assert sorted((r["event"] or "", r["batch_id"], r["rows"]) for r in rows) == [
+        ("", 0, 2),
+        ("data_skipped", 0, 0),
+    ]
+    [skip] = [r for r in rows if r["event"]]
+    assert skip["min_lsn"] == skip["max_lsn"] == lsns[2]  # the min_lsn the task found
+    assert skip["lost_to_ts"] == T0 + timedelta(minutes=2)
+    detail = json.loads(skip["detail"])
+    assert (detail["to"], detail["certain"]) == (lsns[2], False)
+    assert "may be missing" in detail["reason"]
+    assert not os.listdir(metrics)
 
 
 def test_stream_facade_declares_the_options_once(delta_spark, workdir):
