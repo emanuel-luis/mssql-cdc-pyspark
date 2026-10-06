@@ -27,11 +27,11 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 
 ## 0.2.1 (patch): tests and supply chain
 
-- [ ] Faster suites and CI: unit tests off the critical path, long jobs in parallel, a
+- [x] Faster suites and CI: unit tests off the critical path, long jobs in parallel, a
       lighter test session, pure tests where the engine is not needed (target: CI in about
-      30 minutes).
-- [ ] `tests/compat/0.2.0`: the state the 0.2.0 wheel wrote.
-- [ ] Supply-chain checks in CI: `pip-audit`, `zizmor` (Actions), OpenSSF Scorecard, and a
+      30 minutes). Locally the unit suite went from 68 to 28 minutes with 277 to 420 tests.
+- [x] `tests/compat/0.2.0`: the state the 0.2.0 wheel wrote.
+- [x] Supply-chain checks in CI: `pip-audit`, `zizmor` (Actions), OpenSSF Scorecard, and a
       job that installs the lowest direct dependency versions the package declares
       (`uv sync --resolution lowest-direct`) and runs the fast tests.
 - [ ] Report to Spark: stopping a PySpark `foreachBatch` query mid-batch (as `to_delta` does)
@@ -41,7 +41,8 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
       trace). The query has already terminated, so nothing is lost; Spark's built-in `rate`
       source hits it too, and `spark.driver.extraJavaOptions=-Xss16m` silences it. Found in
       v4.2.0, unchanged on master; no JIRA yet.
-- [ ] Fixes found by the test review.
+- [x] Fixes found by the test review, and pyarrow 19 or later (18 crashes on Windows when
+      imported before `mssql_python`).
 
 ## 0.2.2 (patch): time and reconcile
 

@@ -58,8 +58,9 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
    of the tag (for 0.1.0, replace `unreleased` in `## [0.1.0] - unreleased` with it), keep
    an empty `## [Unreleased]` above it, check the "State compatibility" line, and update
    the links at the bottom. Bump the two install pins to the new version: the `%pip
-   install mssql-cdc-pyspark==...` line of `examples/databricks_notebook.py` and the
-   `pypi` library and `%pip` line in [`DATABRICKS.md`](DATABRICKS.md).
+   install mssql-cdc-pyspark==...` line of `examples/databricks_notebook.py`, the
+   `pypi` library and `%pip` line in [`DATABRICKS.md`](DATABRICKS.md) and the pin in
+   [`index.md`](index.md).
 3. Commit (`chore(release): X.Y.Z`), push to `main` and wait for CI.
 4. Tag and push the tag:
 
@@ -68,9 +69,11 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
    git push origin vX.Y.Z
    ```
 
-5. The tag starts two runs: `ci` and `release`. Approve the `pypi` deployment of the
-   `release` run ("Review deployments") only once the `ci` run on the tag is green: the
-   approval is the only thing that waits for it. Then install from PyPI in a clean
+5. The tag starts the `release` run. Approve its `pypi` deployment ("Review
+   deployments") only once the `ci` run of the release commit on `main` (step 3) is green:
+   the tag points at that commit, so it gets no `ci` run of its own (a workflow a tag
+   triggers counts as publishing, and `ci` restores caches; zizmor's cache-poisoning
+   audit). Then install from PyPI in a clean
    environment, as in the dry run without the TestPyPI index.
 6. Keep the state the release writes, so later versions are tested against it
    ([ADR 0021](decisions/0021-compatibility-policy-for-0x.md) amendment 3). On Linux (or

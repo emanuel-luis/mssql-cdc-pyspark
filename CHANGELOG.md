@@ -12,8 +12,17 @@ compatibility" line.
 
 ## [Unreleased]
 
+### Fixed
+
+- pyarrow 19 or later: with pyarrow 18 imported before `mssql_python`, the Python
+  interpreter crashes on Windows (access violation). The install pins in the Databricks
+  page, the docs home and the example notebook say 0.2.0, not 0.2.0rc1.
+
 ### Changed
 
+- CI: a release tag no longer starts its own `ci` run; the release commit's run on `main`
+  is the one the `pypi` approval waits for (docs/RELEASING.md). `zizmor` treats a workflow
+  a tag triggers as publishing, and `ci` restores caches.
 - CI: a `security` workflow checks the supply chain on every pull request, every push to
   `main` and weekly. `pip-audit` checks every package `uv.lock` pins against the known
   vulnerabilities; `zizmor` audits the workflows and fails on a finding of medium severity

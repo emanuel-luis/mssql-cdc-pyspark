@@ -3,7 +3,6 @@ name: ci
 on:
   push:
     branches: [main]
-    tags: ["v*"]  # the release commit's tag gets its own run (docs/RELEASING.md)
   pull_request:
   workflow_dispatch:
   schedule:
