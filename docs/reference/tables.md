@@ -276,7 +276,8 @@ captured column whose name Delta refuses otherwise: one with a space or one of `
 such as `[Unit Price]` or `[Qty (kg)]`. Column mapping raises the table's Delta protocol, so
 every reader and writer of that table needs a Delta that supports it. A table created
 without it does not get it later: when a newer capture instance adds such a column, the
-append fails with Delta's `DELTA_INVALID_CHARACTERS_IN_COLUMN_NAMES` until you enable it.
+stream and `apply_changes` fail before writing, until you enable it
+([Schema changes](../guides/schema-changes.md#a-column-name-that-needs-column-mapping)).
 
 Everything else is yours to enable, where every reader and writer of the table supports it,
 since each one changes the table's protocol or how its files are laid out:

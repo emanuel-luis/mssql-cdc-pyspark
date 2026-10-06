@@ -4,7 +4,8 @@
 **Date:** 2026-09-28T21:09:56-03:00  
 **Amended:** 2026-09-28T21:15:37-03:00, every time column is `TIMESTAMP_NTZ` in UTC  
 **Amended:** 2026-09-28T21:26:25-03:00, existing tables are migrated (ADR 0013)  
-**Amended:** 2026-10-05T12:04:55-03:00, column mapping on a table created with a column name Delta refuses without it; every other Delta property is the user's (see the Amendment)
+**Amended:** 2026-10-05T12:04:55-03:00, column mapping on a table created with a column name Delta refuses without it; every other Delta property is the user's (see the Amendment)  
+**Amended:** 2026-10-06T07:45:42-03:00, such a column added to an existing table without column mapping fails before the write, with the statement that enables it (see the Amendment)
 
 ## Context
 The control table was created with a `CREATE TABLE IF NOT EXISTS` string and advanced
@@ -54,8 +55,17 @@ not rename the column: the change table is read by the schema's own names.
   only they can get it; a table whose names Delta takes as they are is created as before.
 * Existing tables are left alone: setting the property is a metadata commit that conflicts
   with running streams, and no table that needed it could have been created. A column with
-  such a name that a newer capture instance adds later fails the append until the user
-  enables column mapping on the table.
+  such a name that a newer capture instance adds later fails until the user enables column
+  mapping on the table. Since 2026-10-06 it fails before the write:
+  `create_if_not_exists`, which every bronze and silver writer calls first, raises
+  `SchemaChangedError` naming the columns, saying column mapping is off on the table and
+  giving the statement that enables it, `ALTER TABLE ... SET TBLPROPERTIES
+  ('delta.columnMapping.mode' = 'name', 'delta.minReaderVersion' = '2',
+  'delta.minWriterVersion' = '5')`, instead of Delta's own error in the middle of the append
+  or of `apply_changes`. It reads the table's schema only when a column needs column
+  mapping, and its properties only when the table lacks such a column.
+  - Considered: enabling it then. The protocol upgrade locks out the table's readers and
+    writers on an older Delta, which is the table owner's call.
 * No other Delta property is set by default. Deletion vectors (with row tracking on
   Databricks), liquid clustering or `ZORDER` by silver's keys, `OPTIMIZE`, optimized writes
   and auto compaction, and type widening each raise the protocol or change the table's file
@@ -63,5 +73,6 @@ not rename the column: the change table is read by the schema's own names.
   [Tables](../reference/tables.md#table-properties).
 * Column mapping raises the table's protocol: every reader and writer of that table needs
   a Delta that supports it, a cost paid only where nothing worked before.
-* `tests/test_silver.py` streams a column named `Qty (kg)` into bronze and silver, and checks
-  that a table without such a name gets no column mapping.
+* `tests/test_silver.py` streams a column named `Qty (kg)` into bronze and silver, checks
+  that a table without such a name gets no column mapping, and that adding one to that
+  table fails before the write until the error's statement is run.

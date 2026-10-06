@@ -60,6 +60,14 @@ rows always did.
   (deletion vectors, clustering, OPTIMIZE, type widening) are documented as opt-ins under
   Tables > Table properties
   ([ADR 0012](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0012-delta-tables-through-the-deltatable-api/) amendment).
+- When a newer capture instance adds such a column to a bronze or silver table created
+  without column mapping, the stream and `apply_changes` fail before writing with a
+  `SchemaChangedError` that names the column, says column mapping is off on the table and
+  gives the `ALTER TABLE ... SET TBLPROPERTIES ('delta.columnMapping.mode' = 'name',
+  'delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5')` that enables it (an
+  upgrade of the table's Delta protocol, which its readers must support), instead of
+  Delta's own error midway; the library does not enable it
+  ([ADR 0012](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0012-delta-tables-through-the-deltatable-api/) amendment).
 - With `failOnDataLoss=false`, a batch whose planning skips changes CDC cleanup purged
   writes a `data_skipped` facts row: the batch's `batch_id`, `rows` 0, `min_lsn` = `max_lsn`
   the `min_lsn` it resumed at, the LSNs skipped in `detail` and the gap in `lost_from_ts`

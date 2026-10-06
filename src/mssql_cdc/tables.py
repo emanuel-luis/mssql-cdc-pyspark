@@ -94,12 +94,15 @@ def create_if_not_exists(
     A no-op when the table exists: its schema, comments and properties are left as they
     are (``mssql_cdc.migrations`` changes existing tables). That includes a table another
     writer created meanwhile, such as a stream and a backfill both creating bronze: Delta
-    fails the CREATE that loses the race (``DELTA_PROTOCOL_CHANGED`` on a path).
+    fails the CREATE that loses the race (``DELTA_PROTOCOL_CHANGED`` on a path). An
+    existing table without column mapping that lacks such a column raises
+    ``SchemaChangedError`` instead, before anything writes it (see ``_require_mapping``).
     """
     from delta.tables import DeltaTable
 
     columns = list(columns)
-    if any(_MAPPED_ONLY.intersection(c[0]) for c in columns):
+    mapped = [c[0] for c in columns if _MAPPED_ONLY.intersection(c[0])]
+    if mapped:
         properties = {"delta.columnMapping.mode": "name", **(properties or {})}
     builder = DeltaTable.createIfNotExists(spark)
     builder = (
@@ -116,3 +119,31 @@ def create_if_not_exists(
     except Exception:
         if not exists(spark, name_or_path):  # else another writer's CREATE won the race
             raise
+    if mapped:
+        _require_mapping(spark, name_or_path, mapped)
+
+
+def _require_mapping(spark, name_or_path: str, names: list[str]) -> None:
+    """Raise ``SchemaChangedError`` when ``names``, which Delta takes only with column
+    mapping, holds a column the table lacks and the table maps no columns: a newer capture
+    instance captures it, and the next append (``mergeSchema``) or ``apply_changes`` would
+    fail with Delta's own error midway. The library never changes an existing table's
+    protocol: the message gives the statement that does."""
+    table = delta_table(spark, name_or_path)
+    have = {f.name.lower() for f in table.toDF().schema}
+    new = [n for n in names if n.lower() not in have]
+    if not new:
+        return
+    properties = table.detail().first()["properties"] or {}
+    if properties.get("delta.columnMapping.mode", "none") != "none":  # 'name' or 'id'
+        return
+    from .client import SchemaChangedError
+
+    raise SchemaChangedError(
+        f"{name_or_path}: column mapping is off on this table, and Delta takes the new "
+        f"column(s) {', '.join(map(repr, new))} only with it. Enable it, then run again: "
+        f"ALTER TABLE {table_ref(name_or_path)} SET TBLPROPERTIES "
+        "('delta.columnMapping.mode' = 'name', 'delta.minReaderVersion' = '2', "
+        "'delta.minWriterVersion' = '5'). That upgrades the table's Delta protocol: every "
+        "reader and writer of the table then needs a Delta that supports column mapping."
+    )

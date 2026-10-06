@@ -139,6 +139,34 @@ def test_a_column_name_delta_refuses_without_column_mapping_gets_it_in_bronze_an
     assert [(r["order_id"], r["Qty (kg)"]) for r in rows] == [(1, 3.0)]
 
 
+def test_such_a_column_added_to_a_table_without_column_mapping_fails_before_the_write(
+    delta_spark, workdir
+):
+    from mssql_cdc import migrations
+    from mssql_cdc.client import SchemaChangedError
+    from mssql_cdc.sink import BRONZE_COMMENT
+
+    table, columns = os.path.join(workdir, "bronze"), [("order_id", "INT", None)]
+    migrations.ensure(delta_spark, table, "bronze", columns, BRONZE_COMMENT)  # no mapping
+    wider = [*columns, ("status", "STRING", None), ("Qty (kg)", "DOUBLE", None)]
+    with pytest.raises(SchemaChangedError, match=r"column\(s\) 'Qty \(kg\)' only") as raised:
+        migrations.ensure(delta_spark, table, "bronze", wider, BRONZE_COMMENT)  # a newer instance
+    alter = (
+        f"ALTER TABLE delta.`{table}` SET TBLPROPERTIES ('delta.columnMapping.mode' = 'name', "
+        "'delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5')"
+    )
+    assert "column mapping is off" in str(raised.value) and alter in str(raised.value)
+    assert [f.name for f in delta_spark.read.format("delta").load(table).schema] == ["order_id"]
+    delta_spark.sql(alter)  # the statement the error gives is enough
+    migrations.ensure(delta_spark, table, "bronze", wider, BRONZE_COMMENT)
+    migrations.add_columns(delta_spark, table, wider)
+    assert [f.name for f in delta_spark.read.format("delta").load(table).schema] == [
+        "order_id",
+        "status",
+        "Qty (kg)",
+    ]
+
+
 def test_the_capture_instance_comes_from_the_options(delta_spark, workdir):
     o = Orders(delta_spark, workdir)
     o.commit((2, _row(1, "new")))

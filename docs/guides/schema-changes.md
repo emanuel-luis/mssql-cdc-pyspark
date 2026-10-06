@@ -79,7 +79,9 @@ checkpoints do not change ([Architecture](../ARCHITECTURE.md#a-second-capture-in
 * A column the query reads that the new instance does not capture reads NULL from S. The
   warning and the event's `detail` name it.
 * Bronze gains the new column (every append uses `mergeSchema`); older rows read NULL for it.
-  `_capture_instance` on each row says which instance it came from.
+  `_capture_instance` on each row says which instance it came from. A name Delta takes only
+  with column mapping needs one step of yours first
+  ([below](#a-column-name-that-needs-column-mapping)).
 
 ### The procedure
 
@@ -150,6 +152,36 @@ so every row's latest image carries the new column. It reads the whole table: no
 [tables too big to snapshot](bootstrap.md). With a URI checkpoint it needs `metricsPath`, and
 `to_delta` raises a `ValueError` without it. A crash right after the switch batch takes the
 snapshot again on the replay: harmless, only slower.
+
+### A column name that needs column mapping
+
+SQL Server allows a space or one of `,;{}()=` in a bracketed column name, such as
+`[Unit Price]`; Delta takes such a name only on a table with column mapping. A bronze or
+silver table created with one has it
+([Table properties](../reference/tables.md#table-properties)). When a newer capture
+instance adds one to a table created without it, the stream fails before writing the
+batch, and `apply_changes` before changing silver:
+
+```text
+SchemaChangedError: bronze.orders: column mapping is off on this table, and Delta takes
+the new column(s) 'Unit Price' only with it. Enable it, then run again: ALTER TABLE
+bronze.orders SET TBLPROPERTIES ('delta.columnMapping.mode' = 'name',
+'delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5'). That upgrades the
+table's Delta protocol: every reader and writer of the table then needs a Delta that
+supports column mapping.
+```
+
+The library never enables it itself, because the upgrade locks out every reader and writer
+of the table on a Delta without column mapping. Check them, run the statement on bronze,
+restart the query, and run it on silver before the next `apply_changes`:
+
+```sql
+ALTER TABLE bronze.orders SET TBLPROPERTIES (
+  'delta.columnMapping.mode' = 'name',
+  'delta.minReaderVersion' = '2',
+  'delta.minWriterVersion' = '5'
+);
+```
 
 ## Changing a column type
 
@@ -229,6 +261,7 @@ longer captured, read as NULL".
 | `SchemaChangedError: The stream reaches capture instance ...` | the newer instance captures columns or types the query lacks | restart: it infers them and resumes at S |
 | `SchemaChangedError: Capture instances ... capture ... as ... and ...` | two instances type one column incompatibly | pass `columns`, or disable the older instance once read past |
 | `SchemaChangedError: ...: the type of a column changed on the source and the table cannot take the new one` | bronze cannot take the new type | enable `delta.enableTypeWidening` and restart, or use a new table |
+| `SchemaChangedError: ...: column mapping is off on this table, and Delta takes the new column(s) ... only with it` | a new column's name needs column mapping | [enable it](#a-column-name-that-needs-column-mapping) and run again |
 | `PermissionError: The login cannot read the change table ...` | no grant on the new change table | `GRANT SELECT ON cdc.[<new instance>_CT] TO <reader>` |
 | `DataLossError: ... held only by capture instance ..., disabled before the stream read them` | the old instance was disabled too early | [Data loss](data-loss.md): `on_data_loss="resnapshot"` recovers with a snapshot |
 | `ValueError: No capture instance of the table (...) captures ...` | `columns` lists a column no instance captures | fix `columns`, or capture it with a new instance |
