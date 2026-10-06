@@ -12,6 +12,10 @@ compatibility" line.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-06
+
+State compatibility: unchanged from 0.2.0 (no migration, no new event value).
+
 ### Fixed
 
 - pyarrow 19 or later: with pyarrow 18 imported before `mssql_python`, the Python
@@ -20,6 +24,13 @@ compatibility" line.
 
 ### Changed
 
+- Tests and CI: logic the streaming engine is not needed for is tested in plain unit tests
+  (specced mocks, pure functions), the test session starts Delta only for the tests that
+  take it, and `-m "not spark and not sqlserver"` runs the JVM-free tests alone. CI runs
+  the unit suite in three shards next to the integration and lab jobs instead of before
+  them: about 13 minutes instead of 48. A parity test runs one scripted change history on
+  the fake and on SQL Server 2022. `tests/compat/0.2.0` holds the state the 0.2.0 wheel
+  wrote.
 - CI: a release tag no longer starts its own `ci` run; the release commit's run on `main`
   is the one the `pypi` approval waits for (docs/RELEASING.md). `zizmor` treats a workflow
   a tag triggers as publishing, and `ci` restores caches.
@@ -539,7 +550,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.1.0...v0.2.0
 [0.2.0rc2]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.0rc1...v0.2.0rc2
 [0.2.0rc1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.1.0...v0.2.0rc1
