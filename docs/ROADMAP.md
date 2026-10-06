@@ -1,83 +1,39 @@
 # Roadmap
 
-## v0.1: validate what exists
+Small releases, one theme each, plus fixes. Under the 0.x policy (ADR 0021) a patch only
+fixes, or changes nothing users can see (tests, CI, docs); a minor may break the Python API
+(listed under "Breaking" in `CHANGELOG.md`) or add public API, such as exported types.
 
-- [x] Run `LAB.md` against SQL Server 2022: t1–t7 green (in CI; t1 and t3 also locally),
-      code and fake fixed where real CDC differed (ADRs 0008–0010).
-- [x] Delta tests passing locally (`tests/test_delta_sink.py`).
-- [x] Publish to GitHub; CI `unit`, `integration` and `lab` jobs green.
-- [x] Databricks classic (DBR 18.2, dedicated): t5, t6 `--schema`.
-- [ ] Databricks classic: t7 `--schema` (needs a lab SQL Server reachable from the cluster).
-- [x] Fill the results table in `LAB.md` with links to result files.
+## Shipped
 
-## v0.2: production concerns
+- [x] **v0.1, validate what exists**: lab checks t1–t7 green against SQL Server 2022, code
+      and fake fixed where real CDC differed (ADRs 0008–0010); Delta tests; CI `unit`,
+      `integration` and `lab` jobs; Databricks classic (DBR 18.2, dedicated): t5, t6
+      `--schema`.
+- [x] **PyPI release** of 0.1.0 (2026-10-01): package metadata, `py.typed`, `release.yml`
+      with Trusted Publishing behind a reviewed environment and a TestPyPI dry run,
+      `CHANGELOG.md` and the 0.x compatibility policy (ADR 0021); steps in `RELEASING.md`.
+- [x] **v0.2, production concerns**, shipped as 0.2.0 on 2026-10-06: bootstrap snapshot
+      (ADR 0016), re-snapshot after data loss (ADR 0018), seeding from an existing copy
+      (ADR 0025), chunked first import next to the stream with `backfill()` and
+      `reconcile()` (ADR 0028, lab check t10), schema changes and capture instance switches
+      (ADR 0023, lab check t9, also on SQL Server 2017), the silver helper (ADR 0019),
+      continuous-mode finalization (ADR 0026), retention headroom and operational metrics in
+      the facts (ADRs 0017, 0020), `arrow-odbc` in CI (ADR 0003), one stream per table with
+      `start_many` (ADR 0027). Chunked snapshots ran from Databricks against a production
+      source on a 34-million and a 100-million-row table.
+- [x] Even chunks for sparse single integer keys: a chunked snapshot's plan counts the rows
+      of each key slice on the server (ADR 0028), which supersedes NTILE tiles for them.
 
-- [x] **Initial snapshot / bootstrap**: record `max_lsn`, snapshot the table through the
-      same backend, start the stream at that LSN (ADR 0016).
-- [x] **Automatic re-snapshot after data loss**: `to_delta(on_data_loss="resnapshot")`,
-      checkpoint generations, loss events in the facts, at most one per interval (ADR 0018).
-- [x] Snapshot partitions for composite or non-integer keys: NTILE tiles of the rows,
-      bounds bound typed (ADR 0016 amendment).
-- [x] **Seeding from an existing copy**: a helper for tables too big to snapshot within the
-      CDC retention (the read takes the table's size over the link's few MB/s):
-      `CdcStream.seed(target, df, as_of)` writes the copy as the target's snapshot at the LSN
-      of the time it started, then `to_delta(bootstrap=True)` starts from it (ADR 0025).
-- [x] **Chunked first import**: `to_delta(snapshot="chunked")` starts the stream at the
-      snapshot's LSN and `backfill()` reads the table in chunks next to it, so a table no
-      longer has to be read within the retention; silver applies the waves and rebuilds at
-      completion; `reconcile()` validates silver against the source (ADR 0028). Integration
-      tests on SQL Server 2022 and lab check t10, also through a purged gap.
-- [ ] Chunked snapshots on Databricks against the production source: backfill throughput
-      next to the stream, and a weeks-long run.
-- [ ] NTILE tiles for sparse single integer keys, if uneven MIN..MAX ranges show up
-      (NTILE scans and spools the key, MIN..MAX is two seeks).
-- [x] **Schema changes**: DDL detected on the driver through `sys.sp_cdc_get_ddl_history`
-      (a type change fails the batch before it reads, other DDL is a facts event); the
-      stream follows a second capture instance of the table from its start LSN without
-      losing changes, bronze takes new columns (`mergeSchema`), optional snapshot at the
-      switch (ADR 0023, `sql/switch_capture_instance.sql`).
-- [x] Lab check t9 for the switch under a continuous writer, also against SQL Server 2017
-      (passes on 2022 CU27 and 2017 CU31; in the CI lab job); on production SQL Server 2016,
-      check that the change tables have `__$command_id` (they do: SP3, read through the
-      library on 2026-09-30).
-- [x] **Silver helper**: apply changes to a target with MERGE, latest image per key by
-      `(_start_lsn, _command_id, _seqval, _operation)`, deletes honoured, operation 0
-      (snapshot) as an upsert, rebuild from the newest snapshot after a re-snapshot; propagate
-      `finalized_until` (`apply_changes`, ADR 0019).
-- [x] **Continuous mode finalization**: `finalization.track` registers a
-      `StreamingQueryListener` that advances the verdict on progress from a worker thread,
-      off the listener bus (ADR 0026).
-- [x] Retention headroom in the facts (`retention_watermark_ts`, `retention_headroom_hours`,
-      ADR 0017), measured from the batch's end offset (`end_lsn`, `end_commit_ts`).
-- [x] **Operational metrics**: capture lag (`now - map_lsn_to_time(max_lsn)`) and ingestion
-      lag (`max_lsn` vs the batch's end offset) in the facts table (`source_max_commit_ts`,
-      `capture_lag_seconds`, `ingestion_lag_seconds`, ADR 0020); `reportLatestOffset` shows
-      `max_lsn` and its commit time in the query progress on every trigger. Batches that
-      read no rows write facts too, so facts that stop arriving mean the stream or capture
-      stopped.
-- [x] `arrow-odbc` backend covered in CI: msodbcsql18 in the `integration` job, which runs the
-      tests that take the `backend` fixture a second time with it (ADR 0003 Amendment 2).
-- [x] **Many tables**: one stream per capture instance, started together by `start_many`
-      (`await_all`, `stop_all`), with its own checkpoint, `app_id` and bronze, sharing the
-      facts table; a stream over several capture instances was rejected (ADR 0027,
-      `docs/guides/many-tables.md`).
+## 0.2.1 (patch): tests and supply chain
 
-## v0.3
-
-- [x] **PyPI release** of 0.1.0 (2026-10-01; steps in `docs/RELEASING.md`):
-  - [x] Package metadata, `py.typed`, an sdist without the tests.
-  - [x] `release.yml`: a tag publishes to PyPI with Trusted Publishing behind a reviewed
-        environment; a manual run publishes to TestPyPI.
-  - [x] `CHANGELOG.md` and the 0.x compatibility policy (ADR 0021).
-  - [x] Pending publishers on PyPI and TestPyPI, GitHub environments `pypi` and `testpypi`.
-  - [x] TestPyPI dry run, then tag `v0.1.0`.
-  - [x] `docs/DATABRICKS.md`: install with the `pypi` library type (checked on DBR 18.2).
-
-## Later
-
-- [ ] Scala/Java DSv2 `Changelog` (`TableCatalog.loadChangelog`) so
-      `SELECT ... CHANGES FROM VERSION ...` works over SQL Server (Spark 4.2+). Deferred
-      until the API settles (ADR 0022).
+- [ ] Faster suites and CI: unit tests off the critical path, long jobs in parallel, a
+      lighter test session, pure tests where the engine is not needed (target: CI in about
+      30 minutes).
+- [ ] `tests/compat/0.2.0`: the state the 0.2.0 wheel wrote.
+- [ ] Supply-chain checks in CI: `pip-audit`, `zizmor` (Actions), OpenSSF Scorecard, and a
+      job that installs the lowest direct dependency versions the package declares
+      (`uv sync --resolution lowest-direct`) and runs the fast tests.
 - [ ] Report to Spark: stopping a PySpark `foreachBatch` query mid-batch (as `to_delta` does)
       prints a `StackOverflowError` from the stream execution thread. `StreamExecution`'s
       `isInterruptionException` runs the regex `PROXY_ERROR`, whose `(.|\r\n|\r|\n)*` recurses
@@ -85,3 +41,86 @@
       trace). The query has already terminated, so nothing is lost; Spark's built-in `rate`
       source hits it too, and `spark.driver.extraJavaOptions=-Xss16m` silences it. Found in
       v4.2.0, unchanged on master; no JIRA yet.
+- [ ] Fixes found by the test review.
+
+## 0.2.2 (patch): time and reconcile
+
+- [ ] DST fall-back: `commit_ts` can go backwards in a named zone; resolve the overlap by
+      LSN order.
+- [ ] Pre-2022 fixed-offset fallback (`sourceTimeZone=auto` before SQL Server 2022): driver
+      and executors disagree after a DST change; refresh the offset per batch.
+- [ ] `reconcile` reports stream lag as `MISMATCH` where it is `IN_FLIGHT`.
+- [ ] `reconcile`'s join misses a change of a NULL key; join null-safe.
+
+## 0.3.0 (minor, Breaking): API shape
+
+- [ ] Keyword-only parameters after `facts_table` in `to_delta`, and `resnapshot` in
+      `snapshot()`.
+- [ ] `Literal` types on every mode parameter (`snapshot`, `on_data_loss`, `isolation`,
+      policies).
+- [ ] Typed public results: `TypedDict`s (still dicts) for `backfill()`, `apply_changes()`,
+      `reconcile()`, `snapshot()`.
+- [ ] Planning warnings (columns not read) also in the facts `detail`, not only in the log.
+
+## 0.4.0 (minor): typing and protocols
+
+- [ ] `typing.Protocol` for the pluggable seams: `Backend` (mssql-python, arrow-odbc, or a
+      user's own) and `CdcClient` (`SqlCdcClient`, the fake), `runtime_checkable`, exported;
+      the ABCs stay as thin bases for one release.
+- [ ] `TypedDict`s for the offset, the state payloads ADR 0021 lists (`snapshot_open`,
+      `snapshot_plan`, `snapshot_chunk`, completion, a wave's `userMetadata`) and the known
+      source options.
+- [ ] `NewType` for LSN hex strings; frozen dataclasses in place of loose internal dicts.
+- [ ] mypy strict on `src` (no untyped defs, no implicit `Any` generics, `warn_return_any`);
+      `pyright --verifytypes` in CI to keep the public API fully typed.
+
+## 0.4.1 (patch): maintenance
+
+- [ ] Split `client.py` (SQL builders, backends, planning) and `pipeline.py` (snapshot,
+      backfill, recovery) into packages without changing behaviour.
+- [ ] One place for the facts event protocol, shared by its writers and readers.
+- [ ] Property-based tests (Hypothesis) for LSN math, plan tiling and change ordering; one
+      mutation-testing pass on the core modules, results recorded.
+
+## 0.5.0 (minor): faster first import
+
+- [ ] Overlapping waves (read the next while committing the previous one's facts) and an
+      adaptive chunk size aiming at a wave duration; target: the full bootstrap's wall time.
+- [ ] silver filters chunks by wave instead of reading every chunk on each call.
+- [ ] Batches capped by bytes for LOB tables; keyset bounds instead of NTILE for full
+      snapshots.
+- [ ] Measure `arrow-odbc`'s concurrent fetch (lab t8).
+- [ ] Validation: a Databricks benchmark, and the weeks-long chunked run against the
+      production source, on its largest table.
+
+## 0.6.0 (minor): platforms
+
+- [ ] Databricks serverless: facts from the written commit instead of `persist()`.
+- [ ] Object-store `metricsPath` (`s3://`, `abfss://`) through `pyarrow.fs`.
+- [ ] Spark Connect checks; t5 and t7 on serverless and on one non-Databricks platform.
+
+## 0.7.0 (minor): credentials and privacy
+
+- [ ] `user`/`password` and Entra ID `accessToken` options, so the secret need not live in
+      the connection string.
+- [ ] The snapshot plan stops writing key values in clear into the facts table.
+
+## 0.8.0 (minor): operations at scale
+
+- [ ] Chunked snapshots of keyless tables, cut on a chosen column.
+- [ ] `snapshot_on_switch` in chunked mode.
+- [ ] `start_many()`: measure the per-stream driver cost and document a ceiling.
+- [ ] A verdict-freshness metric for alerts.
+
+## 1.0.0: stability
+
+- [ ] Frozen API and state contract; versioned docs (stable and dev).
+- [ ] Databricks classic: t7 `--schema` (needs a lab SQL Server reachable from the
+      cluster).
+- [ ] Build provenance (attestations) in the release.
+
+## After 1.0
+
+- [ ] Scala/Java DSv2 `Changelog` (`TableCatalog.loadChangelog`) so
+      `SELECT ... CHANGES FROM VERSION ...` works over SQL Server (Spark 4.2+). Deferred
+      until the API settles (ADR 0022).
