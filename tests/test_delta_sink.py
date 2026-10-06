@@ -1,10 +1,11 @@
 """Delta sink + finalization. Skipped when Delta jars are unavailable."""
 
+import inspect
 import json
 import os
-import shutil
 import time
 from datetime import datetime, timedelta, timezone
+from unittest.mock import create_autospec
 from uuid import uuid4
 
 import pytest
@@ -19,22 +20,34 @@ COLUMNS = "order_id INT, status STRING"
 T0 = datetime(2026, 9, 28, 13, 50)
 
 
-def _stream(spark, path, target, app_id, facts=None):
+def _stream(spark, path, write, **options):
+    """An ``availableNow`` run of the fake at ``path``/src into ``write``, a ``foreachBatch``
+    function, with ``options`` on top of the fake's; the checkpoint is ``path``/ckpt."""
     q = (
         spark.readStream.format("mssql_cdc")
-        .option("backend", "fake")
-        .option("fakePath", os.path.join(path, "src"))
-        .option("captureInstance", CI)
-        .option("columns", COLUMNS)
-        .option("maxCommitsPerBatch", "2")
+        .options(
+            backend="fake",
+            fakePath=os.path.join(path, "src"),
+            captureInstance=CI,
+            columns=COLUMNS,
+            **options,
+        )
         .load()
-        .writeStream.foreachBatch(delta_sink(target, app_id, facts))
+        .writeStream.foreachBatch(write)
         .option("checkpointLocation", os.path.join(path, "ckpt"))
         .trigger(availableNow=True)
         .start()
     )
     q.awaitTermination()
     return q
+
+
+def _batch(spark):
+    """A one-row batch as the source yields it, for calling a sink directly."""
+    return spark.createDataFrame(
+        [(1, 2, "0x" + "0" * 20, None)],
+        "order_id int, _operation int, _start_lsn string, _commit_ts timestamp_ntz",
+    )
 
 
 def test_sink_facts_and_monotonic_finalization(delta_spark, workdir):
@@ -45,7 +58,7 @@ def test_sink_facts_and_monotonic_finalization(delta_spark, workdir):
     target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
     control = os.path.join(workdir, "control")
 
-    q = _stream(spark, workdir, target, "orders-v1", facts)
+    q = _stream(spark, workdir, delta_sink(target, "orders-v1", facts), maxCommitsPerBatch="2")
     assert spark.read.format("delta").load(target).count() == 5
     hist = spark.sql(f"DESCRIBE HISTORY delta.`{target}`").collect()
     metas = [json.loads(h["userMetadata"]) for h in hist if h["userMetadata"]]
@@ -133,12 +146,13 @@ def test_a_failing_advance_does_not_stop_the_query(delta_spark, workdir, monkeyp
     advance, calls = finalization.advance, []
 
     def flaky(*args, **kwargs):
-        calls.append(args[3])
+        calls.append(inspect.signature(advance).bind(*args, **kwargs).arguments["end_offset"])
         if len(calls) == 1:
             raise RuntimeError("control table unavailable")
         return advance(*args, **kwargs)
 
-    monkeypatch.setattr(finalization, "advance", flaky)
+    # autospec: a call that no longer fits advance's signature fails here, not silently
+    monkeypatch.setattr(finalization, "advance", create_autospec(advance, side_effect=flaky))
     q = _running(spark, workdir, "flaky-v1")
     try:
         tracker = finalization.track(spark, q, control, "bronze_orders")
@@ -175,7 +189,7 @@ def test_tables_are_created_typed_and_commented(delta_spark, workdir):
     db.commit(CI, [(2, {"order_id": 1, "status": "new"})], at=T0)
     target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
     control = os.path.join(workdir, "control")
-    q = _stream(spark, workdir, target, "typed-v1", facts)
+    q = _stream(spark, workdir, delta_sink(target, "typed-v1", facts), maxCommitsPerBatch="2")
     finalization.advance(
         spark, control, "bronze_orders", finalization.end_offset_from_progress(q.lastProgress)
     )
@@ -258,24 +272,8 @@ def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
     os.makedirs(metrics)  # a dead attempt's file, from a split this batch does not plan
     with open(os.path.join(metrics, "stale.json"), "w", encoding="utf-8") as fh:
         json.dump({"from_lsn": last, "to_lsn": "0xFFFFFFFFFFFFFFFFFFFF", "bytes": 1e12}, fh)
-    source = {
-        "backend": "fake",
-        "fakePath": os.path.join(workdir, "src"),
-        "captureInstance": CI,
-        "columns": COLUMNS,
-        "numPartitions": "2",
-        "metricsPath": metrics,
-    }
-    q = (
-        spark.readStream.format("mssql_cdc")
-        .options(**source)
-        .load()
-        .writeStream.foreachBatch(delta_sink(target, "metrics-v1", facts, metrics_path=metrics))
-        .option("checkpointLocation", os.path.join(workdir, "ckpt"))
-        .trigger(availableNow=True)
-        .start()
-    )
-    q.awaitTermination()
+    write = delta_sink(target, "metrics-v1", facts, metrics_path=metrics)
+    _stream(spark, workdir, write, numPartitions="2", metricsPath=metrics)
     [row] = spark.read.format("delta").load(facts).collect()
     assert row["read_seconds"] > 0 and 0 < row["read_mb"] < 1e6
     assert row["end_lsn"] == last  # the stale file was removed before the batch was read
@@ -292,21 +290,8 @@ def test_capture_and_ingestion_lag_reach_the_facts(delta_spark, workdir):
         db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
     target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
     metrics = os.path.join(workdir, "metrics")
-    q = (
-        spark.readStream.format("mssql_cdc")
-        .option("backend", "fake")
-        .option("fakePath", os.path.join(workdir, "src"))
-        .option("captureInstance", CI)
-        .option("columns", COLUMNS)
-        .option("maxCommitsPerBatch", "2")
-        .option("metricsPath", metrics)
-        .load()
-        .writeStream.foreachBatch(delta_sink(target, "lag-v1", facts, metrics_path=metrics))
-        .option("checkpointLocation", os.path.join(workdir, "ckpt"))
-        .trigger(availableNow=True)
-        .start()
-    )
-    q.awaitTermination()
+    write = delta_sink(target, "lag-v1", facts, metrics_path=metrics)
+    _stream(spark, workdir, write, maxCommitsPerBatch="2", metricsPath=metrics)
     first, second = spark.read.format("delta").load(facts).orderBy("batch_id").collect()
     # capture had processed the last commit (T0 + 2 min) when either batch was read
     assert (
@@ -342,22 +327,8 @@ def test_a_quiet_table_is_measured_from_the_end_offset_and_its_empty_batches_wri
         sink(df, batch_id)
         left.append(os.listdir(metrics))
 
-    q = (
-        spark.readStream.format("mssql_cdc")
-        .option("backend", "fake")
-        .option("fakePath", os.path.join(workdir, "src"))
-        .option("captureInstance", CI)
-        .option("columns", COLUMNS)
-        .option("numPartitions", "2")
-        .option("maxCommitsPerBatch", "2")  # lsn_time_mapping rows: idle entries and dbo_other's
-        .option("metricsPath", metrics)
-        .load()
-        .writeStream.foreachBatch(write)
-        .option("checkpointLocation", os.path.join(workdir, "ckpt"))
-        .trigger(availableNow=True)
-        .start()
-    )
-    q.awaitTermination()
+    # maxCommitsPerBatch counts lsn_time_mapping rows: idle entries and dbo_other's
+    _stream(spark, workdir, write, numPartitions="2", maxCommitsPerBatch="2", metricsPath=metrics)
     rows = spark.read.format("delta").load(facts).orderBy("batch_id").collect()
     assert [r["rows"] for r in rows] == [1, 0, 1]  # batch 1 read only dbo_other and an idle entry
     assert spark.read.format("delta").load(target).count() == 2  # the empty batch wrote nothing
@@ -390,22 +361,7 @@ def test_cleanup_during_the_read_leaves_one_possible_data_skipped_row(delta_spar
         sink(df, batch_id)
         sink(df, batch_id)  # a replay of the batch: read again, written once
 
-    q = (
-        spark.readStream.format("mssql_cdc")
-        .option("backend", "fake")
-        .option("fakePath", os.path.join(workdir, "src"))
-        .option("captureInstance", CI)
-        .option("columns", COLUMNS)
-        .option("numPartitions", "1")
-        .option("failOnDataLoss", "false")
-        .option("metricsPath", metrics)
-        .load()
-        .writeStream.foreachBatch(write)
-        .option("checkpointLocation", os.path.join(workdir, "ckpt"))
-        .trigger(availableNow=True)
-        .start()
-    )
-    q.awaitTermination()
+    _stream(spark, workdir, write, numPartitions="1", failOnDataLoss="false", metricsPath=metrics)
     assert spark.read.format("delta").load(target).count() == 2  # commits 0 and 1 were purged
     rows = spark.read.format("delta").load(facts).collect()
     assert sorted((r["event"] or "", r["batch_id"], r["rows"]) for r in rows) == [
@@ -489,10 +445,7 @@ def test_migrations_bring_an_older_table_up_once(delta_spark, workdir, monkeypat
 def test_replayed_batch_is_ignored(delta_spark, workdir):
     spark = delta_spark
     target = os.path.join(workdir, "bronze")
-    df = spark.createDataFrame(
-        [(1, 2, "0x" + "0" * 20, None)],
-        "order_id int, _operation int, _start_lsn string, _commit_ts timestamp_ntz",
-    )
+    df = _batch(spark)
     write = delta_sink(target, "replay-test")
     write(df, 7)
     write(df, 7)  # same batch id replayed after a failure
@@ -500,31 +453,27 @@ def test_replayed_batch_is_ignored(delta_spark, workdir):
 
 
 def test_a_checkpoint_deleted_under_the_same_app_id_fails_instead_of_skipping(delta_spark, workdir):
-    from pyspark.errors import StreamingQueryException
-
+    # each sink is a run's: the guard reads the facts table on its first batch. Spark's own
+    # wrapping of the error (StreamingQueryException) is test_fanout's failing stream.
     spark = delta_spark
-    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
-    for i in range(3):
-        db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
     target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
-    _stream(spark, workdir, target, "reset-v1", facts)  # batches 0 and 1
-    db.commit(CI, [(2, {"order_id": 3, "status": "new"})], at=T0 + timedelta(minutes=3))
-    _stream(spark, workdir, target, "reset-v1", facts)  # a plain restart goes on: batch 2
-    assert spark.read.format("delta").load(target).count() == 4
-    shutil.rmtree(os.path.join(workdir, "ckpt"))  # batch ids start at 0 again
-    # Delta would skip batches 0 to 2 as written: rows lost, the verdict moving on
-    with pytest.raises(StreamingQueryException, match="checkpoint was deleted or rewound"):
-        _stream(spark, workdir, target, "reset-v1", facts)
-    assert spark.read.format("delta").load(target).count() == 4
+    df = _batch(spark)
+    for batch_id in range(3):  # a first run, then plain restarts that go on: batches 0 to 2
+        delta_sink(target, "reset-v1", facts)(df, batch_id)
+    assert spark.read.format("delta").load(target).count() == 3
+    # the checkpoint deleted, batch ids start at 0 again: Delta would skip batches 0 to 2 as
+    # written, rows lost and the verdict moving on
+    with pytest.raises(ValueError, match="checkpoint was deleted or rewound"):
+        delta_sink(target, "reset-v1", facts)(df, 0)
+    assert spark.read.format("delta").load(target).count() == 3
+    delta_sink(target, "reset-v1", facts)(df, 2)  # a restart replays its last batch: no error
+    assert spark.read.format("delta").load(target).count() == 3
 
 
 def test_a_batch_whose_metrics_never_arrive_warns_once(delta_spark, workdir, caplog):
     spark = delta_spark
     target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
-    df = spark.createDataFrame(
-        [(1, 2, "0x" + "0" * 20, None)],
-        "order_id int, _operation int, _start_lsn string, _commit_ts timestamp_ntz",
-    )
+    df = _batch(spark)
     # no executor writes there: as with a driver-local path on a multi-node cluster
     write = delta_sink(target, "blind-v1", facts, metrics_path=os.path.join(workdir, "metrics"))
     with caplog.at_level("WARNING", logger="mssql_cdc.sink"):
@@ -558,6 +507,7 @@ def test_the_readers_events_become_event_rows_and_new_columns_join_bronze(delta_
     target, facts, metrics = (os.path.join(workdir, n) for n in ("bronze", "facts", "metrics"))
     os.makedirs(metrics)
     added, switch = "0x0000002A000001000021", "0x0000002A000001000031"
+    purged_from, purged_to = "0x0000002A000001000001", "0x0000002A000001000011"
 
     def plan():  # what the reader leaves while it plans the batch (ADR 0023)
         for kind, lsn, ts, detail in (
@@ -567,6 +517,20 @@ def test_the_readers_events_become_event_rows_and_new_columns_join_bronze(delta_
             event = {"event": kind, "capture_instance": CI, "lsn": lsn, "commit_ts": ts}
             with open(os.path.join(metrics, f"event-{kind}-{lsn}.json"), "w") as fh:
                 json.dump({**event, "detail": detail}, fh)
+        # failOnDataLoss=false read past a purge: named by the instance and the gap's start
+        with open(os.path.join(metrics, f"event-data_skipped-{CI}-{purged_from}.json"), "w") as fh:
+            json.dump(
+                {
+                    "event": "data_skipped",
+                    "capture_instance": CI,
+                    "lsn": purged_to,
+                    "commit_ts": "2026-09-28T13:50:30.000",
+                    "detail": json.dumps({"from": purged_from, "to": purged_to, "certain": True}),
+                    "lost_from_ts": "2026-09-28T13:49:00.000",
+                    "lost_to_ts": "2026-09-28T13:50:30.000",
+                },
+                fh,
+            )
 
     df = spark.createDataFrame(
         [(CI, switch, switch, 2, 1, T0, 1, "new")],
@@ -583,9 +547,18 @@ def test_the_readers_events_become_event_rows_and_new_columns_join_bronze(delta_
     assert sorted((r["event"] or "", r["batch_id"], r["rows"]) for r in rows) == [
         ("", 3, 1),
         ("capture_instance_switched", 3, 0),
+        ("data_skipped", 3, 0),
         ("schema_change", 3, 0),
     ]  # once each
-    ddl, switched = sorted((r for r in rows if r["event"]), key=lambda r: r["min_lsn"])
+    by_event = {r["event"]: r for r in rows if r["event"]}
+    ddl, switched = by_event["schema_change"], by_event["capture_instance_switched"]
+    skipped = by_event["data_skipped"]
+    assert skipped["min_lsn"] == skipped["max_lsn"] == purged_to
+    assert (skipped["lost_from_ts"], skipped["lost_to_ts"]) == (
+        datetime(2026, 9, 28, 13, 49),
+        datetime(2026, 9, 28, 13, 50, 30),
+    )
+    assert json.loads(skipped["detail"]) == {"from": purged_from, "to": purged_to, "certain": True}
     assert ddl["min_lsn"] == ddl["max_lsn"] == ddl["end_lsn"] == added
     assert ddl["end_commit_ts"] == datetime(2026, 9, 28, 13, 51)
     assert (ddl["detail"], ddl["app_id"], ddl["target"]) == (
@@ -871,11 +844,6 @@ def test_bootstrap_snapshots_once_and_the_stream_continues_from_it(delta_spark, 
         (9, "new"),
     ]
 
-    with pytest.raises(ValueError, match="one or the other"):
-        stream(spark, {**options, "startingLsn": "latest"}).to_delta(
-            target, "x", ckpt, bootstrap=True
-        )
-
 
 def test_seed_from_a_copy_then_the_stream_continues_from_its_lsn(delta_spark, workdir, latest):
     from mssql_cdc import stream
@@ -1000,6 +968,38 @@ def _orders(workdir, n=3):
     for i in range(n):
         db.commit(CI, [(2, {"order_id": i, "status": "new"})], at=T0 + timedelta(minutes=i))
     return db, {"backend": "fake", "fakePath": src, "captureInstance": CI, "columns": COLUMNS}
+
+
+def _purge(db, minutes):
+    """Order 0 deleted at T0 + ``minutes``, then CDC cleanup up to a minute later: purged
+    before the stream read it."""
+    db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=minutes))
+    db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=minutes + 1)))
+
+
+def _purged_while_read(db, take):
+    """``CdcStream._take_snapshot`` that runs ``take``, then lets cleanup pass the snapshot's
+    LSN, as if while the table was read: order 5 inserted at T0 + 5 min, purged at 6."""
+
+    def slow(self, target, ci):
+        taken = take(self, target, ci)
+        db.commit(CI, [(2, {"order_id": 5, "status": "new"})], at=T0 + timedelta(minutes=5))
+        db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=6)))
+        return taken
+
+    return slow
+
+
+def _dies_after_the_append(write_facts):
+    """``sink.write_facts`` that raises on a wave's 'snapshot_chunk' rows: the job died after
+    the wave's append, before its facts."""
+
+    def crash(spark, table, rows, txn_app_id, version):
+        if rows[0]["event"] == "snapshot_chunk":
+            raise RuntimeError("the job died after the wave's append")
+        write_facts(spark, table, rows, txn_app_id, version)
+
+    return crash
 
 
 def test_data_loss_resnapshots_into_a_new_generation_once_per_interval(
@@ -1172,14 +1172,7 @@ def test_a_resnapshot_purged_before_it_ends_counts_as_an_attempt(
     run()
     db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=3))
     db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=4)))
-    take = CdcStream._take_snapshot
-
-    def slow(self, target, ci):  # cleanup passes the snapshot's LSN while the table is read
-        taken = take(self, target, ci)
-        db.commit(CI, [(2, {"order_id": 5, "status": "new"})], at=T0 + timedelta(minutes=5))
-        db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=6)))
-        return taken
-
+    slow = _purged_while_read(db, CdcStream._take_snapshot)
     monkeypatch.setattr(CdcStream, "_take_snapshot", slow)
     with pytest.raises(DataLossError, match="took longer"):
         run()
@@ -1320,9 +1313,8 @@ def test_a_snapshot_counts_its_rows_however_many_commits_follow_it(
     assert stream(spark, options)._take_snapshot(target, CI)[1]["rows"] == 3
 
 
-def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
+def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir, caplog):
     from mssql_cdc import stream
-    from mssql_cdc.pipeline import _last_offset
 
     _, options = _orders(workdir, n=1)
     cdc, target, ckpt = (
@@ -1330,6 +1322,15 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
         os.path.join(workdir, "bronze"),
         os.path.join(workdir, "ckpt"),
     )
+    # an option typo is named in the caller's log; the reader's warning goes to a worker's
+    with caplog.at_level("WARNING", logger="mssql_cdc.source"):
+        stream(spark, {**options, "maxCommitPerBatch": "5"})
+    [warning] = [r.getMessage() for r in caplog.records if "unknown option" in r.getMessage()]
+    assert "maxCommitPerBatch" in warning
+    with pytest.raises(ValueError, match="one or the other"):
+        stream(spark, {**options, "startingLsn": "latest"}).to_delta(
+            target, "x", ckpt, bootstrap=True
+        )
     with pytest.raises(ValueError, match="on_data_loss"):
         cdc.to_delta(target, "x", ckpt, on_data_loss="skip")
     with pytest.raises(ValueError, match="snapshot must be 'full' or 'chunked'"):
@@ -1360,6 +1361,12 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
                 target, "x", ckpt, "facts", on_data_loss="resnapshot"
             )
     assert not spark.streams.active
+
+
+def test_the_pre_flight_reads_only_offset_log_v1(workdir):
+    from mssql_cdc.pipeline import _last_offset
+
+    ckpt = os.path.join(workdir, "ckpt")
     for name in ("offsets", "commits"):
         os.makedirs(os.path.join(ckpt, name))
         with open(os.path.join(ckpt, name, "0"), "w", encoding="utf-8") as fh:
@@ -1368,17 +1375,21 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir):
         _last_offset(ckpt)
 
 
-def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
+def test_a_streams_family_is_its_app_id_and_its_generations():
+    from mssql_cdc.pipeline import _family
+
+    ours = _family("orders-v1")
+    assert ours.fullmatch("orders-v1") and ours.fullmatch("orders-v1.g12")
+    assert not ours.fullmatch("orders-v10")  # another stream's
+    assert not ours.fullmatch("orders-v1.g") and not ours.fullmatch("orders-v1x.g1")
+    assert not _family("orders.v1").fullmatch("orders-v1")  # the app_id is literal text
+
+
+def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir, monkeypatch):
     from mssql_cdc import migrations, stream, tables
-    from mssql_cdc.migrations.facts import (
-        DETAIL_COLUMNS,
-        END_COLUMNS,
-        EVENT_COLUMNS,
-        LAG_COLUMNS,
-        NETWORK_COLUMNS,
-        RETENTION_COLUMNS,
-    )
-    from mssql_cdc.sink import FACTS_COLUMNS
+    from mssql_cdc.migrations import facts as facts_migrations
+    from mssql_cdc.migrations.facts import DETAIL_COLUMNS
+    from mssql_cdc.sink import FACTS_COLUMNS, FACTS_COMMENT
 
     spark = delta_spark
     suffix = uuid4().hex[:8]
@@ -1413,24 +1424,34 @@ def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
         for name, kind in ((bronze, "bronze"), (facts, "facts"), (control, "control")):
             props = spark.sql(f"DESCRIBE DETAIL {name}").first()["properties"]
             assert props["mssql_cdc.schema_version"] == str(migrations.current_version(kind))
-        added = (
-            NETWORK_COLUMNS
-            + RETENTION_COLUMNS
-            + EVENT_COLUMNS
-            + LAG_COLUMNS
-            + END_COLUMNS
-            + DETAIL_COLUMNS
-        )
-        names = {name for name, _, _ in added}
+        # add_columns through saveAsTable, set_comments on a table name: one migration of each
+        # (the whole chain runs by path in test_facts_table_at_version_0_..., and on the
+        # released wheels' state in tests/compat)
+        names = {name for name, _, _ in DETAIL_COLUMNS}
         tables.create_if_not_exists(
             spark,
             old,
-            [c for c in FACTS_COLUMNS if c[0] not in names],
+            [(n, t, "old's") for n, t, _ in FACTS_COLUMNS if n not in names],
             properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
         )
-        # add_columns through saveAsTable, set_comments on a table name
-        assert migrations.migrate(spark, old, "facts") == migrations.current_version("facts")
-        assert {name for name, _, _ in added} <= set(spark.table(old).columns)
+        comments = {n: c for n, _, c in FACTS_COLUMNS if n == "rows"}
+        monkeypatch.setattr(
+            facts_migrations,
+            "MIGRATIONS",
+            [
+                migrations.Migration(
+                    "add", lambda s, t: migrations.add_columns(s, t, DETAIL_COLUMNS)
+                ),
+                migrations.Migration(
+                    "comment", lambda s, t: migrations.set_comments(s, t, comments, FACTS_COMMENT)
+                ),
+            ],
+        )
+        assert migrations.migrate(spark, old, "facts") == 2
+        fields = {f.name: f.metadata.get("comment") for f in spark.table(old).schema}
+        assert all(fields[n] == c for n, _, c in DETAIL_COLUMNS)
+        assert (fields["rows"], fields["app_id"]) == (comments["rows"], "old's")
+        assert spark.sql(f"DESCRIBE DETAIL {old}").first()["description"] == FACTS_COMMENT
     finally:
         for name in (bronze, facts, control, old):
             spark.sql(f"DROP TABLE IF EXISTS {name}")
@@ -1439,25 +1460,23 @@ def test_managed_tables_by_name_take_the_catalog_branches(delta_spark, workdir):
 # -- chunked snapshots next to the stream (ADR 0028) ---------------------------------------
 def _rebuilt(df, key, value, s):
     """Sorted (key, value) of the latest image per key rebuilt from snapshot ``s``: its rows,
-    whichever chunk stamped them, and the changes after ``s`` (ADR 0028)."""
-    from pyspark.sql import Window
-    from pyspark.sql import functions as F
+    whichever chunk stamped them, and the changes after ``s`` (ADR 0028). In Python, from
+    BRONZE_COMMENT's order rather than silver.apply_changes' Window: (_start_lsn, _command_id,
+    _seqval, _operation), where a snapshot row's NULLs sort first, as its operation 0 does."""
 
-    last = Window.partitionBy(key).orderBy(
-        F.col("_start_lsn").desc(),
-        F.col("_command_id").desc_nulls_last(),
-        F.col("_seqval").desc_nulls_last(),
-        F.col("_operation").desc(),
-    )
-    ours = (F.col("_operation") == 0) & (F.coalesce("_snapshot", "_start_lsn") == s)
-    after = ~F.col("_operation").isin(0, 3) & (F.col("_start_lsn") > s)
-    rows = (
-        df.where(ours | after)
-        .withColumn("n", F.row_number().over(last))
-        .where("n = 1 AND _operation != 1")
-        .collect()
-    )
-    return sorted((r[key], r[value]) for r in rows)
+    def ordered(r):
+        nullable = ((r[c] is not None, r[c]) for c in ("_command_id", "_seqval"))
+        return (r["_start_lsn"], *nullable, r["_operation"])
+
+    def kept(r):
+        if r["_operation"] == 0:  # a row of snapshot s: _snapshot NULL on an older whole one
+            return (r["_snapshot"] if r["_snapshot"] is not None else r["_start_lsn"]) == s
+        return r["_operation"] != 3 and r["_start_lsn"] > s
+
+    latest = {}
+    for r in sorted(filter(kept, df.collect()), key=ordered):
+        latest[r[key]] = r  # the key's last change wins
+    return sorted((k, r[value]) for k, r in latest.items() if r["_operation"] != 1)
 
 
 def _source(db) -> list:
@@ -1670,14 +1689,7 @@ def test_backfill_resumes_after_a_crash_between_the_append_and_its_facts(
 
     run()
     s = _events(spark, facts, "snapshot_open")[0]["min_lsn"]
-    write_facts = sink.write_facts
-
-    def crash(spark, table, rows, txn_app_id, version):
-        if rows[0]["event"] == "snapshot_chunk":
-            raise RuntimeError("the job died after the wave's append")
-        write_facts(spark, table, rows, txn_app_id, version)
-
-    monkeypatch.setattr(sink, "write_facts", crash)
+    monkeypatch.setattr(sink, "write_facts", _dies_after_the_append(sink.write_facts))
     with pytest.raises(RuntimeError, match="the job died"):
         cdc.backfill(target, app_id="crash-v1", facts_table=facts, chunk_rows=2, max_waves=1)
     monkeypatch.undo()
@@ -1730,13 +1742,7 @@ def test_backfill_keeps_its_plan_and_rebuilds_a_waves_facts_from_bronze_without_
     run()
     s = _events(spark, facts, "snapshot_open")[0]["min_lsn"]
     write_facts = sink.write_facts
-
-    def crash(spark, table, rows, txn_app_id, version):
-        if rows[0]["event"] == "snapshot_chunk":
-            raise RuntimeError("the job died after the wave's append")
-        write_facts(spark, table, rows, txn_app_id, version)
-
-    monkeypatch.setattr(sink, "write_facts", crash)
+    monkeypatch.setattr(sink, "write_facts", _dies_after_the_append(write_facts))
     with pytest.raises(RuntimeError, match="the job died"):
         cdc.backfill(target, app_id="lost-v1", facts_table=facts, chunk_rows=2, max_waves=1)
     monkeypatch.setattr(sink, "write_facts", write_facts)
@@ -1776,9 +1782,18 @@ def test_a_keyset_plans_open_last_chunk_ends_at_the_first_key_after_max_when_rea
 
     spark = delta_spark
     seen = []  # the isolation the plan's counts and seeks run under (client._isolated's)
+
+    def recording(real):  # by name: a signature change fails the call instead of misreading it
+        def record(*args, **kwargs):
+            bound = inspect.signature(real).bind(*args, **kwargs)
+            bound.apply_defaults()
+            seen.append(bound.arguments["isolation"])
+            return real(*args, **kwargs)
+
+        return create_autospec(real, side_effect=record)
+
     for name in ("plan_chunks", "last_bound"):
-        real = getattr(client, name)
-        monkeypatch.setattr(client, name, lambda *a, _real=real: seen.append(a[-1]) or _real(*a))
+        monkeypatch.setattr(client, name, recording(getattr(client, name)))
     src = os.path.join(workdir, "src")
     db = FakeCdcDatabase(src, [CI], keys={CI: "code"})
     for i, code in enumerate("abcdef"):
@@ -1965,12 +1980,8 @@ def test_a_chunked_resnapshot_opened_before_a_crash_and_purged_since_is_opened_p
             snapshot="chunked",
         ).awaitTermination()
 
-    def purge(minutes):
-        db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=minutes))
-        db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=minutes + 1)))
-
     run()
-    purge(10)
+    _purge(db, 10)
     real = pipeline._write_state
 
     def killed(checkpoint, state):  # after the open, before the new generation's state
@@ -1982,7 +1993,7 @@ def test_a_chunked_resnapshot_opened_before_a_crash_and_purged_since_is_opened_p
     with pytest.raises(RuntimeError, match="killed"):
         run()
     monkeypatch.setattr(pipeline, "_write_state", real)
-    purge(20)  # rerun after the retention: what generation 1 opened at is purged too
+    _purge(db, 20)  # rerun after the retention: what generation 1 opened at is purged too
     run()
     opens = _events(spark, facts, "snapshot_open")
     assert [o["app_id"] for o in opens] == ["crash-v1", "crash-v1.g1", "crash-v1.g2"]
@@ -2077,20 +2088,9 @@ def test_a_full_snapshot_cdc_cleanup_has_passed_gives_its_generation_to_a_chunke
             **kw,
         ).awaitTermination()
 
-    def purge(minutes):
-        db.commit(CI, [(1, {"order_id": 0, "status": "new"})], at=T0 + timedelta(minutes=minutes))
-        db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=minutes + 1)))
-
     run()
-    purge(3)
-    take = CdcStream._take_snapshot
-
-    def slow(self, target, ci):  # cleanup passes the snapshot's LSN while the table is read
-        taken = take(self, target, ci)
-        db.commit(CI, [(2, {"order_id": 5, "status": "new"})], at=T0 + timedelta(minutes=5))
-        db.cleanup(CI, db.idle(at=T0 + timedelta(minutes=6)))
-        return taken
-
+    _purge(db, 3)
+    slow = _purged_while_read(db, CdcStream._take_snapshot)
     monkeypatch.setattr(CdcStream, "_take_snapshot", slow)
     with pytest.raises(DataLossError, match="snapshot='chunked', which has no such limit"):
         run()
