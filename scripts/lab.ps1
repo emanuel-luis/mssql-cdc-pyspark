@@ -1,7 +1,7 @@
 <#
   PowerShell equivalent of the Makefile targets (Windows without make).
 
-  .\scripts\lab.ps1 install | up | down | setup | seed | stream | lint | test | lab-sql | lab-spark | lab
+  .\scripts\lab.ps1 install | up | down | setup | seed | stream | lint | test | test-fast | lab-sql | lab-spark | lab
 #>
 param([Parameter(Mandatory = $true)][string]$Target)
 $ErrorActionPreference = "Stop"
@@ -26,6 +26,8 @@ switch ($Target) {
     Run "uv run mypy"
   }
   "test"      { Run "uv run pytest -q" }
+  # the tests that start no JVM; a -m replaces addopts' one, hence both
+  "test-fast" { Run 'uv run pytest -q -m "not spark and not sqlserver"' }
   "lab-sql"   {
     Run "uv run python -m lab.checks.t2_timezone"
     Run "uv run python -m lab.checks.t3_read_semantics"

@@ -74,6 +74,9 @@ timeout = 900
 timeout_method = "thread"
 markers = [
   "delta: needs Delta Lake jars (Maven access on first run)",
+  # a -m on the command line replaces addopts' one: the JVM-free loop is
+  # -m "not spark and not sqlserver" (make test-fast)
+  "spark: starts the JVM (takes the spark fixture; tests/conftest.py adds the marker)",
   "sqlserver: integration tests against SQL Server 2022 in Docker (testcontainers)",
 ]
 

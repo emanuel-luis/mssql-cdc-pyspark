@@ -1,4 +1,4 @@
-.PHONY: install up down setup seed stream lint test lab-sql lab-spark lab
+.PHONY: install up down setup seed stream lint test test-fast lab-sql lab-spark lab
 
 install:        ## local dev install
 	uv sync
@@ -25,6 +25,9 @@ lint:           ## what CI's lint job runs
 
 test:           ## unit tests (no SQL Server needed)
 	uv run pytest -q
+
+test-fast:      ## the tests that start no JVM: safe next to a Spark suite (-m replaces addopts')
+	uv run pytest -q -m "not spark and not sqlserver"
 
 lab-sql:        ## SQL Server behaviour checks (t1 takes ~10 min, run it alone)
 	uv run python -m lab.checks.t2_timezone
