@@ -3,6 +3,7 @@
 import json
 import os
 from datetime import date, datetime, timedelta
+from decimal import Decimal as D
 
 import pytest
 
@@ -73,7 +74,7 @@ def _orders(o, n=100):
     o.apply()
 
 
-def test_equal_tables_match_in_every_bucket_and_the_report_table_is_typed_and_commented(
+def test_equal_tables_match_into_a_typed_report_then_changes_not_applied_are_classified(
     delta_spark, workdir
 ):
     o = Orders(delta_spark, workdir)
@@ -111,12 +112,6 @@ def test_equal_tables_match_in_every_bucket_and_the_report_table_is_typed_and_co
     assert (again["match"], again["hashed"]) == (10, 0) and again["run_id"] != result["run_id"]
     assert report.count() == 10  # appended only when asked
 
-
-def test_an_insert_a_delete_and_an_update_not_applied_are_found_and_classified(
-    delta_spark, workdir
-):
-    o = Orders(delta_spark, workdir)
-    _orders(o)
     silver = o.silver_table()
     silver.delete("order_id = 3")  # an insert silver never got
     silver.update("order_id = 15", {"status": "'lost'"})  # an update it missed
@@ -214,6 +209,15 @@ def test_a_string_key_is_counted_whole_and_compared_from_the_source_rows(delta_s
         '{"qty":21}': "MISSING_TARGET",
         '{"qty":-1}': "MISSING_SOURCE",
     }
+    with pytest.raises(ValueError, match=r"keys \['nope'\] are not captured columns"):
+        o.reconcile(keys=["nope"])
+
+
+@pytest.mark.parametrize("bad", [{"bucket_rows": 0}, {"sample": 1.5}, {"sample": -0.1}])
+def test_reconcile_rejects_buckets_below_one_row_and_a_sample_outside_0_to_1(bad):
+    # checked before any Spark call: no session is needed to reach it
+    with pytest.raises(ValueError, match="bucket_rows must be at least 1, and sample between"):
+        reconcile(None, {}, "silver", bronze="bronze", control_table="control", **bad)
 
 
 def test_a_report_row_with_a_key_that_is_no_column_fails_rather_than_write_null():
@@ -234,6 +238,225 @@ def test_a_date_buckets_ends_past_the_date_range_stay_in_it():
         "1970-01-01",
         -3,
     )
+
+
+def _bucket(lo, hi, fine, source, silver, moved=False):
+    return {"lo": lo, "hi": hi, "fine": fine, "moved": moved, "source": source, "silver": silver}
+
+
+@pytest.mark.parametrize(
+    "source, silver, moved, width, expected",
+    [
+        pytest.param(
+            # fine bucket 2 is silver's only, 1 has more rows in the source: a bucket closes at
+            # bucket_rows of the larger side (6 + 3 + 2), the 25 rows of 3 stay one bucket, and
+            # the sparse tail 5..9 is one bucket up to the last fine id
+            {0: (6, D(10)), 1: (3, D(15)), 3: (25, D(800)), 5: (1, D(55)), 9: (2, D(190))},
+            {0: (6, D(10)), 1: (1, D(5)), 2: (2, D(41)), 3: (25, D(800)), 5: (1, D(55))},
+            [],
+            10,
+            [
+                _bucket(0, 30, [0, 1, 2], [9, D(25)], [9, D(56)]),
+                _bucket(30, 50, [3], [25, D(800)], [25, D(800)]),
+                _bucket(50, 100, [5, 9], [3, D(245)], [1, D(55)]),
+            ],
+            id="skewed",
+        ),
+        pytest.param(
+            {0: (2, D(1)), 4: (3, D(14))},
+            {},
+            [],
+            1,
+            [_bucket(0, 5, [0, 4], [5, D(15)], [0, D(0)])],
+            id="silver empty",
+        ),
+        pytest.param(
+            {},
+            {7: (4, D(30))},
+            [],
+            1,
+            [_bucket(7, 8, [7], [0, D(0)], [4, D(30)])],
+            id="source empty",
+        ),
+        pytest.param(
+            # starts [2, 4], end 6: a fine id below the first or at the end is no bucket's,
+            # and a NULL key has none
+            {2: (5, D(10)), 3: (5, D(15)), 4: (5, D(20)), 5: (5, D(25))},
+            {2: (5, D(10)), 3: (5, D(15)), 4: (5, D(20)), 5: (5, D(25))},
+            [(None,), (1,), (3,), (6,)],
+            1,
+            [
+                _bucket(2, 4, [2, 3], [10, D(25)], [10, D(25)], moved=True),
+                _bucket(4, 6, [4, 5], [10, D(45)], [10, D(45)]),
+            ],
+            id="moved",
+        ),
+    ],
+)
+def test_fine_buckets_merge_by_the_larger_side_and_a_change_moves_only_its_bucket(
+    source, silver, moved, width, expected
+):
+    from mssql_cdc.reconcile import _merge_buckets
+
+    sides = {"source": source, "silver": silver}
+    assert _merge_buckets(sides, moved, width, bucket_rows=10) == expected
+
+
+def test_a_sample_rounds_up_and_takes_none_at_0_and_all_at_1():
+    import random
+
+    from mssql_cdc.reconcile import _sample
+
+    rng, items = random.Random(7), list(range(10))
+    assert _sample(rng, items, 0) == [] and sorted(_sample(rng, items, 1)) == items
+    some = _sample(rng, items, 0.25)  # 2.5 buckets: 3
+    assert len(set(some)) == 3 and set(some) <= set(items)
+    assert _sample(rng, [4], 0.01) == [4]  # any sample of a bucket compares one
+
+
+S, BELOW, ABOVE = (f"0x{n:020X}" for n in (16, 5, 32))
+
+
+def _c(i, lo, hi, last=False, rows=3, lsn=ABOVE):
+    """A 'snapshot_chunk' facts row's detail, with its rows and min_lsn, as _chunk_checks has it."""
+    detail = {"snapshot": S, "chunk": i, "wave": 0, "lo": lo, "hi": hi, "last": last}
+    return detail | {"rows": rows, "lsn": lsn}
+
+
+def _fail(kind, i, lo, hi, **what):
+    detail = {"snapshot": S, "chunk": i, **what}
+    return {"failure_type": kind, "bucket_lo": lo, "bucket_hi": hi, "detail": detail}
+
+
+TILED = [_c(0, None, 3), _c(1, 3, 6), _c(2, 6, None, last=True)]
+HELD = {i: (3, ABOVE) for i in range(3)}
+
+
+@pytest.mark.parametrize(
+    "complete, found, held, expected",
+    [
+        pytest.param(True, TILED, HELD, [], id="tiled"),
+        pytest.param(False, TILED[:2], {0: HELD[0], 1: HELD[1]}, [], id="open: more to come"),
+        pytest.param(
+            True,
+            [_c(i, c["lo"], c["hi"], c["last"], lsn=None) for i, c in enumerate(TILED)],
+            {i: (3, None) for i in range(3)},
+            [],
+            id="no stamp: S",
+        ),
+        pytest.param(
+            True,
+            [TILED[0], TILED[2]],
+            {0: HELD[0], 2: HELD[2]},
+            [_fail("CHUNK_TILING", 1, None, None, problem="no 'snapshot_chunk' facts row")],
+            id="a gap",
+        ),
+        pytest.param(
+            True,
+            [*TILED, TILED[1]],
+            HELD,
+            [_fail("CHUNK_TILING", 1, "3", "6", problem="2 'snapshot_chunk' facts rows")],
+            id="a chunk twice",
+        ),
+        pytest.param(
+            True,
+            [_c(0, 0, 3), *TILED[1:]],
+            HELD,
+            [_fail("CHUNK_TILING", 0, "0", "3", problem="the first chunk is not open below")],
+            id="first not open",
+        ),
+        pytest.param(
+            True,
+            [TILED[0], _c(1, 2, 6), TILED[2]],
+            HELD,
+            [
+                _fail(
+                    "CHUNK_TILING",
+                    1,
+                    "2",
+                    "6",
+                    problem="it does not start where the one before ended",
+                )
+            ],
+            id="an overlap",
+        ),
+        pytest.param(
+            True,
+            [TILED[0], _c(1, 3, 6, last=True), TILED[2]],
+            HELD,
+            [
+                _fail(
+                    "CHUNK_TILING",
+                    2,
+                    "6",
+                    None,
+                    problem="it does not start where the one before ended",
+                )
+            ],
+            id="a chunk after the last",
+        ),
+        pytest.param(
+            True,
+            [*TILED[:2], _c(2, 6, None)],
+            HELD,
+            [_fail("CHUNK_TILING", 2, "6", None, problem="the last chunk is not the plan's final")],
+            id="complete, the last not final",
+        ),
+        pytest.param(
+            False, [*TILED[:2], _c(2, 6, None)], HELD, [], id="open, the last not final yet"
+        ),
+        pytest.param(
+            True,
+            TILED,
+            {**HELD, 3: (2, ABOVE)},
+            [_fail("CHUNK_ROWS", 3, None, None, facts_rows=None, bronze_rows=2)],
+            id="complete, bronze holds a chunk with no facts row",
+        ),
+        pytest.param(
+            False,
+            TILED[:2],
+            {**HELD, 3: (2, ABOVE)},
+            [],
+            id="open, a wave's facts not written yet",
+        ),
+        pytest.param(
+            True,
+            [_c(0, None, 3, lsn=BELOW), *TILED[1:]],
+            HELD,
+            [_fail("CHUNK_STAMP", 0, None, "3", lsn=BELOW)],
+            id="facts stamped below S",
+        ),
+        pytest.param(
+            True,
+            TILED,
+            {**HELD, 1: (3, BELOW)},
+            [_fail("CHUNK_STAMP", 1, "3", "6", lsn=BELOW)],
+            id="bronze stamped below S",
+        ),
+        pytest.param(
+            True,
+            [TILED[0], _c(1, 3, 6, rows=4), TILED[2]],
+            {**HELD, 2: (1, ABOVE)},
+            [
+                _fail("CHUNK_ROWS", 1, "3", "6", facts_rows=4, bronze_rows=3),
+                _fail("CHUNK_ROWS", 2, "6", None, facts_rows=3, bronze_rows=1),
+            ],
+            id="rows bronze does not hold",
+        ),
+        pytest.param(
+            True,
+            TILED,
+            {0: HELD[0], 1: HELD[1]},
+            [_fail("CHUNK_ROWS", 2, "6", None, facts_rows=3, bronze_rows=0)],
+            id="a chunk bronze lacks",
+        ),
+    ],
+)
+def test_chunk_checks_find_every_gap_overlap_count_and_stamp(complete, found, held, expected):
+    from mssql_cdc.reconcile import _tiling_failures
+
+    got = _tiling_failures(S, complete, found, held)
+    assert [r | {"detail": json.loads(r["detail"])} for r in got] == expected
 
 
 def test_a_chunked_bootstrap_applied_by_wave_reconciles_through_snapshot_chunks(
@@ -293,9 +516,10 @@ def test_a_chunked_bootstrap_applied_by_wave_reconciles_through_snapshot_chunks(
     assert result["silver_lsn"] == done["applied_lsn"]  # E: what silver applied, no stamp
 
 
-def test_chunk_checks_report_gaps_overlaps_counts_and_stamps_bronze_and_facts_disagree_on(
+def test_chunk_checks_read_a_pipeline_built_snapshot_whose_rows_are_no_change_in_flight(
     delta_spark, workdir
 ):
+    # every failure _tiling_failures finds is in its table above; here, one through the reads
     from delta.tables import DeltaTable
 
     o = Orders(delta_spark, workdir)
@@ -325,46 +549,28 @@ def test_chunk_checks_report_gaps_overlaps_counts_and_stamps_bronze_and_facts_di
 
     clean = o.reconcile(sample=0.0, facts_table=facts)
     assert clean["failures"] == {} and chunk_rows(clean) == {}
-    table = DeltaTable.forPath(delta_spark, facts)
-
-    def chunk(i):
-        return f"event = 'snapshot_chunk' AND get_json_object(detail, '$.chunk') = {i}"
-
-    table.update(chunk(0), {"min_lsn": "'0x00000000000000000000'"})  # stamped below S
-    table.delete(chunk(1))  # a gap: and bronze holds rows of a chunk with no facts row
-    table.update(chunk(2), {"rows": "rows + 1"})  # a count bronze does not hold
-    table.update(chunk(3), {"detail": "replace(detail, '\"lo\": 9', '\"lo\": 8')"})  # overlap
-    found = o.reconcile(sample=0.0, facts_table=facts)
-    rows = chunk_rows(found)
-    assert set(rows) == {
-        ("CHUNK_STAMP", 0),
-        ("CHUNK_TILING", 1),
-        ("CHUNK_ROWS", 1),
-        ("CHUNK_ROWS", 2),
-        ("CHUNK_TILING", 3),
-    }
-    assert found["failures"] == {"CHUNK_STAMP": 1, "CHUNK_TILING": 2, "CHUNK_ROWS": 2}
-    overlap = rows[("CHUNK_TILING", 3)]
-    assert (overlap["bucket_lo"], overlap["bucket_hi"], overlap["key"], overlap["status"]) == (
-        "8",
-        "12",
-        None,
-        None,
-    )
-    assert json.loads(rows[("CHUNK_ROWS", 2)]["detail"]) | {"snapshot": None} == {
-        "snapshot": None,
-        "chunk": 2,
-        "facts_rows": 4,
-        "bronze_rows": 3,
-    }
-    assert json.loads(rows[("CHUNK_ROWS", 1)]["detail"])["facts_rows"] is None
-    assert found["match"] == found["buckets"]  # silver itself still equals the table
-    written = delta_spark.read.format("delta").load(o.report)
-    assert (
-        written.where(f"run_id = '{found['run_id']}' AND failure_type LIKE 'CHUNK%'").count() == 5
-    )
+    # a gap, and bronze holds 3 rows of a chunk with no facts row
+    gap = "event = 'snapshot_chunk' AND get_json_object(detail, '$.chunk') = 1"
+    DeltaTable.forPath(delta_spark, facts).delete(gap)
     # silver applied up to S, its rows are stamped above it: a snapshot row is no change in
     # flight, so a row silver lost is a MISMATCH
     o.silver_table().delete("order_id = 4")
-    lost = o.reconcile(sample=0.0)
-    assert (lost["mismatch"], lost["in_flight"], lost["failures"]) == (1, 0, {"MISSING_TARGET": 1})
+    found = o.reconcile(sample=0.0, facts_table=facts)
+    rows = chunk_rows(found)
+    assert set(rows) == {("CHUNK_TILING", 1), ("CHUNK_ROWS", 1)}
+    assert found["failures"] == {"CHUNK_TILING": 1, "CHUNK_ROWS": 1, "MISSING_TARGET": 1}
+    assert (found["mismatch"], found["in_flight"]) == (1, 0)
+    assert [(r["bucket_lo"], r["bucket_hi"], r["key"], r["status"]) for r in rows.values()] == [
+        (None, None, None, None)
+    ] * 2
+    assert json.loads(rows[("CHUNK_ROWS", 1)]["detail"]) | {"snapshot": None} == {
+        "snapshot": None,
+        "chunk": 1,
+        "facts_rows": None,
+        "bronze_rows": 3,
+    }
+    assert found["match"] == found["buckets"] - 1  # the chunks' failures are no bucket's
+    written = delta_spark.read.format("delta").load(o.report)
+    assert (
+        written.where(f"run_id = '{found['run_id']}' AND failure_type LIKE 'CHUNK%'").count() == 2
+    )

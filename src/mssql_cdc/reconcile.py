@@ -249,6 +249,14 @@ def _range_buckets(spark, client, source, key, kind, target, bronze, lower, buck
         "silver": {b: (n, s) for b, n, s in in_silver},
     }
     moved = _after(changes, lower).select(fine).distinct().collect()
+    return _merge_buckets(sides, moved, width, bucket_rows), fine
+
+
+def _merge_buckets(sides: dict, moved, width: int, bucket_rows: int) -> list[dict]:
+    """The fine buckets of ``sides`` (``{"source"|"silver": {fine id: (rows, key_sum)}}``)
+    merged in order until each holds ``bucket_rows`` rows of the larger side, as
+    ``_range_buckets`` returns them; a bucket is ``moved`` when a fine id in ``moved`` (the
+    one-column rows ``collect()`` returns) falls in it."""
     ids = sorted(sides["source"].keys() | sides["silver"].keys())
     starts, rows = [], bucket_rows
     for b in ids:
@@ -271,7 +279,7 @@ def _range_buckets(spark, client, source, key, kind, target, bronze, lower, buck
     for (b,) in moved:
         if b is not None and starts[0] <= b < end:
             buckets[bisect_right(starts, b) - 1]["moved"] = True
-    return buckets, fine
+    return buckets
 
 
 def reconcile(
@@ -514,8 +522,6 @@ def _differences(ours, theirs, keys, columns, how, changes, lower):
 def _chunk_checks(spark, bronze: str, facts_table: str) -> list[dict]:
     """The chunk rows of the report for bronze's newest chunked snapshot (see the module
     docstring): ``bucket_lo``, ``bucket_hi``, ``failure_type`` and ``detail``, one per failure."""
-    from collections import Counter
-
     from pyspark.sql import functions as F
 
     from .tables import exists
@@ -554,6 +560,16 @@ def _chunk_checks(spark, bronze: str, facts_table: str) -> list[dict]:
             .agg(F.count(F.lit(1)), F.min("_start_lsn"))
             .collect()
         }
+    return _tiling_failures(s, complete, found, held)
+
+
+def _tiling_failures(s: str, complete: bool, found: list[dict], held: dict) -> list[dict]:
+    """``_chunk_checks``'s rows for the snapshot at ``s``: its 'snapshot_chunk' facts rows
+    ``found`` (their detail with ``rows`` and ``lsn``, the facts row's ``min_lsn``) against
+    ``held``, bronze's ``{chunk: (rows, lowest _start_lsn)}``; ``complete``: a 'bootstrap' or
+    'resnapshot' row closed it."""
+    from collections import Counter
+
     out: list[dict] = []
 
     def fail(kind: str, i: int, chunk: dict | None, **what) -> None:
