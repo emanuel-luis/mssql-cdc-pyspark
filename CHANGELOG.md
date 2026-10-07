@@ -12,6 +12,63 @@ compatibility" line.
 
 ## [Unreleased]
 
+State compatibility: offsets and checkpoints unchanged. Facts migration 12 rewrites the
+comment of `detail` (metadata only), the next time a stream opens the facts table; a
+micro-batch row's `detail` gains the key `warnings`, an added payload
+([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)
+amendment 6). Rows written before, and batches without warnings, keep `detail` NULL. No new
+event value, no other payload key changed.
+
+### Breaking
+
+- Options, flags and modes are keyword-only
+  ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)
+  amendment 5). A positional call now raises `TypeError` before anything runs. To migrate,
+  pass the same values by name:
+  - `stream(...).to_delta(target, app_id, checkpoint, facts_table=None, *, ...)`: everything
+    after `facts_table` (`trigger`, `query_name`, `bootstrap`, `on_data_loss`,
+    `resnapshot_interval_days`, `snapshot_on_switch`, `snapshot`) by keyword, e.g.
+    `to_delta("bronze.orders", "orders-v1", ckpt, "ops.facts", bootstrap=True)`.
+  - `stream(...).snapshot(target, *, resnapshot=False, ...)`: `snapshot(t, True)` becomes
+    `snapshot(t, resnapshot=True)`.
+  - `apply_changes(spark, bronze, target, *, capture_instance=None, keys=None, ...)`:
+    `apply_changes(spark, b, s, "dbo_orders", ["order_id"], ...)` becomes
+    `apply_changes(spark, b, s, capture_instance="dbo_orders", keys=["order_id"], ...)`.
+  - `reconcile(spark, options, silver, *, keys=None, ...)`.
+  - `granularity` of `finalization.advance()`, `finalization.track()` and
+    `finalization.candidate()`: `advance(spark, control, table, end, "day")` becomes
+    `advance(spark, control, table, end, granularity="day")`.
+  - `sink.delta_sink(target, app_id, facts_table=None, *, metrics_path=None)` and
+    `spark.get_spark(app_name, master, *, delta=True)`.
+- For type checkers only: `snapshot()`, `seed()`, `backfill()`, `apply_changes()` and
+  `reconcile()` now return `TypedDict`s instead of `dict`. Code annotated to take their
+  result as `dict` should take the new type or `Mapping[str, Any]`. At run time they are
+  the same dicts.
+
+### Added
+
+- `mssql_cdc.types`, exported from `mssql_cdc`:
+  - `Literal` aliases for the mode parameters: `SnapshotMode`, `OnDataLoss`, `Isolation`,
+    `Granularity`, and `BackfillState` for `backfill()`'s `state`.
+  - `TypedDict`s for the results, plain dicts at run time: `Offset` (of `snapshot()` and
+    `seed()`), `BackfillStatus`, `ApplyResult`, `ReconcileResult`.
+
+  The signatures use them, so a type checker flags a misspelt mode or result key. A wrong
+  mode still raises `ValueError` naming the allowed values.
+- A micro-batch row of the facts table (`event` NULL) now carries the warnings the reader
+  logged on the driver in `detail`, as JSON `{"warnings": [...]}`, only when there are any:
+  columns it does not read (computed columns, or columns a newer capture instance captures
+  that `columns` leaves out), unknown options, and the UTC offset it converts commit times
+  with on a server older than SQL Server 2022. Before, they were only in the driver's worker
+  log. Needs `metricsPath`, like the other metrics
+  ([ADR 0023](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0023-schema-changes-and-capture-instance-switching/)
+  amendment 6).
+
+### Changed
+
+- `finalization.advance()` and `finalization.candidate()` take the offset as any mapping
+  (`Mapping[str, Any]`), so an `Offset` and a parsed progress offset both type-check.
+
 ## [0.2.2] - 2026-10-07
 
 State compatibility: unchanged from 0.2.1 (offsets keep their format; no migration, no new
