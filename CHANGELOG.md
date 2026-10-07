@@ -44,6 +44,20 @@ writes `keys` and `plan` later in its JSON object; readers take keys by name.
   `SourceOptions` or any mapping (they took `dict`), so every call that type-checked before
   still does.
 
+### Changed
+
+- Typing: every function, method and attribute of the package is annotated; mypy checks
+  `src` in strict mode, and `pyright --verifytypes` scores the public API 100%
+  type-complete (76% before). CI's `lint` job fails on a mypy error or a lower score
+  ([ADR 0031](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0031-strict-typing-gates/)).
+  A type checker now sees the types of `spark` parameters, options, the clients' methods and
+  the helpers' results, which it saw as unknown. Behaviour is unchanged.
+- Typing: `CdcClient.max_lsn()` returns `Lsn | None`, as it did at run time (NULL on a
+  database capture has not written to yet), and `WaveChunk.high_lsn` is `str | None` (null
+  when the chunk's task could not read `max_lsn`). Both types are new in this release.
+- Typing: pyright joins the dev group, pinned by `uv.lock`; `make lint` and
+  `scripts/lab.ps1 lint` run its `--verifytypes` as CI does.
+
 ### Deprecated
 
 - Nothing. `Backend` and `CdcClient` were ABCs in 0.3; they are now the protocols themselves,

@@ -159,7 +159,8 @@ add `and not sqlserver` to it, or the run starts SQL Server containers.
 ```bash
 uv run ruff check                  # lint; --fix applies the safe fixes
 uv run ruff format                 # format; CI runs it with --check
-uv run mypy                        # type-check src/
+uv run mypy                        # type-check src/ (strict) and tests/typing_*.py
+uv run pyright --verifytypes mssql_cdc --ignoreexternal  # the public API fully typed
 ```
 
 `make lint` (or `scripts\lab.ps1 lint`) runs what CI's `lint` job runs. The versions
@@ -178,8 +179,9 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
 
 `.github/workflows/ci.yml`:
 
-* `lint`: `ruff check`, `ruff format --check` and `mypy`; the other jobs wait for it, and
-  only for it: `unit`, `integration` and `lab` run side by side.
+* `lint`: `ruff check`, `ruff format --check`, `mypy` and `pyright --verifytypes` (a type
+  completeness below 100% fails); the other jobs wait for it, and only for it: `unit`,
+  `integration` and `lab` run side by side.
 * `unit`: pytest with Delta on Ubuntu, Java 17, in three shards: `tests/test_silver.py`,
   `tests/test_delta_sink.py`, and every other file (`--ignore` of those two, so a new test
   file or compat version lands there). Each test gets 300 s (`--timeout=300`). Python 3.11

@@ -22,6 +22,7 @@ lint:           ## what CI's lint job runs
 	uv run ruff check
 	uv run ruff format --check
 	uv run mypy
+	uv run pyright --verifytypes mssql_cdc --ignoreexternal
 
 test:           ## unit tests (no SQL Server needed)
 	uv run pytest -q

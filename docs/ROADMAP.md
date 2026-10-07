@@ -73,8 +73,8 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
       `snapshot_plan`, `snapshot_chunk`, completion, a wave's `userMetadata`) and the known
       source options.
 - [x] `NewType` for LSN hex strings; frozen dataclasses in place of loose internal dicts.
-- [ ] mypy strict on `src` (no untyped defs, no implicit `Any` generics, `warn_return_any`);
-      `pyright --verifytypes` in CI to keep the public API fully typed.
+- [x] mypy strict on `src` (no untyped defs, no implicit `Any` generics, `warn_return_any`);
+      `pyright --verifytypes` in CI to keep the public API fully typed (ADR 0031).
 
 ## 0.4.1 (patch): maintenance
 

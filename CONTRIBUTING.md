@@ -1,9 +1,10 @@
 # Contributing
 
 1. Read `CLAUDE.md` (invariants) and `docs/ARCHITECTURE.md`.
-2. `uv sync`, then `uv run ruff check`, `uv run ruff format`, `uv run mypy` and
-   `uv run pytest -q`; with Docker running, also `uv run pytest -m sqlserver`. CI runs the
-   first three (the formatter with `--check`) in its `lint` job before anything else.
+2. `uv sync`, then `uv run ruff check`, `uv run ruff format`, `uv run mypy`,
+   `uv run pyright --verifytypes mssql_cdc --ignoreexternal` and `uv run pytest -q`; with
+   Docker running, also `uv run pytest -m sqlserver`. CI runs the first four (the formatter
+   with `--check`) in its `lint` job before anything else.
 3. Behaviour changes in the source need a test in `tests/test_source_fake.py`; T-SQL
    changes need `tests/test_client_sql.py` updates and a lab check run.
 4. Design changes need an ADR in `docs/decisions/`.

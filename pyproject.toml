@@ -47,6 +47,7 @@ dev = [
     "testcontainers>=4.15",
     "ruff>=0.16",
     "mypy>=2.0",
+    "pyright>=1.1.414",
 ]
 # The documentation site (ADR 0024): `uv run --group docs zensical build --strict`.
 docs = [
@@ -97,10 +98,9 @@ extend-select = ["BLE"]  # every broad except says why: `# noqa: BLE001 - reason
 [tool.mypy]
 files = ["src", "tests/typing_*.py"]  # the latter: the public API's types
 python_version = "3.10"
-check_untyped_defs = true  # the bodies of unannotated functions too
-warn_unused_configs = true
-warn_unused_ignores = true
-warn_redundant_casts = true
+# every def annotated, no bare generics, no Any returned as a typed value, a name imported
+# into a module exported only through its __all__, strict equality...
+strict = true
 enable_error_code = ["ignore-without-code"]
 
 [[tool.mypy.overrides]]

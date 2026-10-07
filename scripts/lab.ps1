@@ -24,6 +24,7 @@ switch ($Target) {
     Run "uv run ruff check"
     Run "uv run ruff format --check"
     Run "uv run mypy"
+    Run "uv run pyright --verifytypes mssql_cdc --ignoreexternal"
   }
   "test"      { Run "uv run pytest -q" }
   # the tests that start no JVM; a -m replaces addopts' one, hence both
