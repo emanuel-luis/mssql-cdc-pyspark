@@ -109,16 +109,25 @@ class SnapshotCompletionDetail(TypedDict):
     """The newest stamp of its chunks."""
 
 
+# functional syntax: "from" is a keyword. The reference reads code statically and lists no
+# member of it, so DataSkippedDetail's docstring names these in an Attributes section.
 _DataSkipped = TypedDict("_DataSkipped", {"from": str, "to": str, "certain": bool})
 
 
 class DataSkippedDetail(_DataSkipped, total=False):
-    """``detail`` of a ``'data_skipped'`` facts row (ADR 0018): ``from``, the first LSN not
-    read, and ``to``, the ``min_lsn`` reading resumed at, ``certain`` true; or, from a task
-    that found cleanup had run while it read a range, the range's first LSN and the
-    ``min_lsn`` it found, ``certain`` false, and a ``reason``."""
+    """``detail`` of a ``'data_skipped'`` facts row (ADR 0018): from the driver, ``certain``
+    true; or, from a task that found cleanup had run while it read a range, ``certain`` false
+    and a ``reason``.
+
+    Attributes:
+        from (str): The first LSN not read; from a task, its range's first LSN.
+        to (str): The ``min_lsn`` reading resumed at; from a task, the one it found.
+        certain (bool): True when the changes are lost (the driver's check), false when they
+            may be (a task's).
+    """
 
     reason: str
+    """Why the task flagged its range, from a task only; text for people, which may change."""
 
 
 class BatchDetail(TypedDict):
