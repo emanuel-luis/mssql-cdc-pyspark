@@ -46,10 +46,10 @@ matched. `report` holds one row per bucket and one per key or chunk that failed;
    side read is in bronze, or still only in the change table, is IN_FLIGHT: silver has not
    applied it yet, the stream has not read it yet, or the source read came before it. What
    silver read is its `applied_lsn` in the control table. Once the source is read, the keys
-   the change table holds after bronze's position (its newest change, or the LSN of a newer
-   snapshot) up to `sys.fn_cdc_get_max_lsn()` read then are read too, through the capture
-   instances the stream reads. Run again later; it clears once the stream and silver catch
-   up.
+   the change table holds after bronze's position (its newest change, or the LSN of a chunked
+   snapshot the stream started from) up to `sys.fn_cdc_get_max_lsn()` read then are read
+   too, through the capture instances the stream reads. Run again later; it clears once the
+   stream and silver catch up.
 4. **Chunks.** With `facts_table`, bronze's newest [chunked snapshot](bootstrap.md#chunked-snapshots)
    is checked against its facts rows, without reading SQL Server:
    - CHUNK_TILING: the chunks leave a gap or overlap: a chunk missing or recorded twice, the

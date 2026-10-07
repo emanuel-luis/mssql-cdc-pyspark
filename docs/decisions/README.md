@@ -9,7 +9,7 @@
 | [0005](0005-ordering-over-atomicity.md) | Data first, verdict after, monotonic | accepted | 2026-09-28T16:13:29-03:00 |  |
 | [0006](0006-file-backed-fake-for-engine-tests.md) | A file-backed CDC fake to test the real Spark engine | accepted | 2026-09-28T16:13:29-03:00 |  |
 | [0007](0007-infer-columns-from-cdc-metadata.md) | Infer captured columns from CDC metadata | accepted | 2026-09-28T17:03:21-03:00 | 2026-09-28T18:11:50-03:00, 2026-10-01T17:55:59-03:00, 2026-10-05T12:19:45-03:00 |
-| [0008](0008-detect-source-time-zone.md) | Detect the server time zone by name | accepted | 2026-09-28T17:05:54-03:00 | 2026-09-28T20:19:40-03:00, 2026-09-28T21:44:31-03:00, 2026-10-05T00:15:23-03:00, 2026-10-06T21:44:52-03:00 |
+| [0008](0008-detect-source-time-zone.md) | Detect the server time zone by name | accepted | 2026-09-28T17:05:54-03:00 | 2026-09-28T20:19:40-03:00, 2026-09-28T21:44:31-03:00, 2026-10-05T00:15:23-03:00, 2026-10-06T21:44:52-03:00, 2026-10-07T00:06:28-03:00 |
 | [0009](0009-read-change-tables-directly.md) | Read the change table directly, re-check retention after the read | accepted | 2026-09-28T17:39:20-03:00 | 2026-09-28T18:11:50-03:00 |
 | [0010](0010-heartbeat-for-quiet-databases.md) | Idle lag of ~5 minutes; an optional Agent heartbeat for less | accepted | 2026-09-28T19:03:23-03:00 |  |
 | [0011](0011-num-partitions-from-cores.md) | `numPartitions` defaults to the compute's cores | accepted | 2026-09-28T20:55:34-03:00 | 2026-09-29T23:02:40-03:00 |
@@ -29,7 +29,7 @@
 | [0025](0025-seed-from-an-existing-copy.md) | Seed a target from an existing copy of the table | accepted | 2026-10-01T16:53:59-03:00 | 2026-10-01T19:44:50-03:00, 2026-10-02T20:30:12-03:00 |
 | [0026](0026-continuous-finalization-listener.md) | Continuous-mode finalization through a streaming query listener | accepted | 2026-10-01T16:36:15-03:00 | 2026-10-01T19:44:50-03:00 |
 | [0027](0027-fan-out-one-stream-per-table.md) | Many tables: one stream per capture instance, started by a fan-out helper | accepted | 2026-10-01T16:30:09-03:00 |  |
-| [0028](0028-chunked-snapshot-next-to-the-stream.md) | Chunked snapshots read next to the running stream | accepted | 2026-10-02T20:30:12-03:00 | 2026-10-03T14:30:38-03:00, 2026-10-03T18:10:05-03:00, 2026-10-04T17:20:07-03:00, 2026-10-06T21:14:15-03:00 |
+| [0028](0028-chunked-snapshot-next-to-the-stream.md) | Chunked snapshots read next to the running stream | accepted | 2026-10-02T20:30:12-03:00 | 2026-10-03T14:30:38-03:00, 2026-10-03T18:10:05-03:00, 2026-10-04T17:20:07-03:00, 2026-10-06T21:14:15-03:00, 2026-10-07T00:06:28-03:00 |
 | [0029](0029-driver-retries-and-lock-timeout.md) | Driver-side retries, and an optional lock timeout | accepted | 2026-10-05T12:23:04-03:00 |  |
 
 New ADRs: copy the format, next number, one decision per file. Put the time the

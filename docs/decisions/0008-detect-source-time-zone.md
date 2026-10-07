@@ -6,7 +6,8 @@
 (see Amendment)  
 **Amended:** 2026-09-28T21:44:31-03:00, a named zone is converted per range, not per row (see Amendment 2)  
 **Amended:** 2026-10-05T00:15:23-03:00, the fallback is unsound across a daylight-saving transition, also across runs; the driver ships its offset to the executors and warns (see Amendment 3)  
-**Amended:** 2026-10-06T21:44:52-03:00, a fall-back's repeated hour is read in LSN order; the fallback's offset is read again for each batch (see Amendment 4)
+**Amended:** 2026-10-06T21:44:52-03:00, a fall-back's repeated hour is read in LSN order; the fallback's offset is read again for each batch (see Amendment 4)  
+**Amended:** 2026-10-07T00:06:28-03:00, the second pass misread once cleanup removed the commits around the drop; idle polls of the Spark 4.0/4.1 reader read `max_lsn` alone; the lookback's cost backed by `tests/integration` (see Amendment 4)
 
 ## Context
 `cdc.lsn_time_mapping.tran_end_time` is a timezone-less `datetime` in the server clock.
@@ -91,8 +92,16 @@ inside the repeated hour read the same offset.
   repeats. That commit and those after it within 3 hours take the offset in force 3 hours
   after their time; every other commit keeps `AT TIME ZONE`. Commit times then follow LSN
   order across the change, right on both sides of it.
-* A commit's time depends only on the commits up to it, so a replay converts it the same,
-  and a commit read live in the hour's first pass reads it as the first.
+* A commit's time depends only on the commits up to it, so a replay converts it the same
+  while the mapping still holds the commit before the drop and the drop itself, and a commit
+  read live in the hour's first pass reads it as the first.
+* CDC cleanup deletes the mapping's rows below the low watermark. Once it has deleted the
+  commit before the drop, or the drop, the later commits of the second pass show no drop
+  and come out an hour early, behind times already emitted. Only a stream that lags by about
+  the retention reads them after that: cleanup must land in the repeated hour, past the
+  drop and not past the stream's position, or the retention guard fails the batch. Not
+  handled: what the mapping lost is gone, and a stream that far behind is a retention
+  problem first.
 * The second pass is misread only when the last commit before the change reads at most a
   minute later than the first after it, which needs almost an hour without a commit around
   the change: the capture job writes an entry about every 5 minutes while idle (lab t1).
@@ -102,12 +111,16 @@ inside the repeated hour read the same offset.
   row, and one more query per range finds where the clock went back: a `LAG` over the
   mapping from 3 hours before the range to its end, a seek on its key. `lsn_to_time` reads
   the mapping's row itself, the row `sys.fn_cdc_map_lsn_to_time` reads (NULL for an LSN
-  that is no commit's alike), and looks back only when its time repeats: still one query,
-  6 logical reads on a mapping of 216,000 commits, 80 to 92 at a repeated time.
+  that is no commit's alike), and looks back only when its time repeats: still one query of
+  seeks. On a mapping of 20,009 commits it reads its own row alone, and at a repeated time
+  the commits from 3 hours before it too, none of the 20,000 older ones (`tests/integration`).
 
 **The fallback.** Amendment 3 read the server's offset once per run. The driver now reads
 it again for each new batch, in `latestOffset` before the batch's end offset, and the
 ranges `partitions()` plans carry it, so a long run follows a daylight-saving change from its
 next batch and a batch's offsets and rows share one offset. A change of the offset is
-logged as a WARNING; idle polls read nothing. A batch that spans the change, or reads
-commits from before it, still gets the wrong offset for some: Amendment 3's warning stands.
+logged as a WARNING. An idle poll reads `max_lsn` alone: the Spark 4.0/4.1 reader, whose
+`latestOffset` gets no start offset, reads the server's offset and the commit time only
+when `max_lsn` moved past the LSN it returned last (`tests/test_reader_units.py`). A batch
+that spans the change, or reads commits from before it, still gets the wrong offset for
+some: Amendment 3's warning stands.

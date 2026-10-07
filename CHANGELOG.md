@@ -29,7 +29,8 @@ event value).
   reads the server's UTC offset again for each new batch instead of once per run, and sends
   it with the batch. A long run follows a daylight-saving change from its next batch, and a
   batch's end offset and rows use the same offset. A warning is logged when the offset
-  changes.
+  changes. On Spark 4.0/4.1 an idle poll now sends `max_lsn` alone; before, it also read
+  the commit time on every poll.
 - `reconcile()` no longer reports stream lag as an integrity failure. A difference explained
   by a change the stream has not read yet is now `IN_FLIGHT`, not `MISMATCH`,
   `MISSING_TARGET`, `MISSING_SOURCE` or `RECORD_DIFF`. Once the source is read, it reads the

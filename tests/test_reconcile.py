@@ -229,6 +229,20 @@ def test_changes_the_stream_has_not_read_yet_are_in_flight_and_a_real_difference
     assert raced[0] > after["source_lsn"] and (after["in_flight"], after["mismatch"]) == (1, 0)
 
 
+def test_a_snapshot_above_the_streams_position_leaves_the_changes_below_it_in_flight(
+    delta_spark, workdir
+):
+    # snapshot_on_switch's: a whole snapshot at max_lsn after the batch, while the stream's
+    # checkpoint stays at the batch's end. The insert in between is in neither bronze's
+    # changes nor what the stream has read
+    o = Orders(delta_spark, workdir)
+    _orders(o)
+    o.commit((2, {"order_id": 100, "status": "new"}))
+    stream(delta_spark, o.options)._take_snapshot(o.bronze, CI)  # at the insert's LSN
+    found = o.reconcile(sample=1.0)
+    assert (found["mismatch"], found["in_flight"], found["failures"]) == (0, 1, {})
+
+
 def test_unread_keys_are_each_instances_changes_after_bronze_up_to_max_lsn(workdir):
     import pyarrow as pa
 

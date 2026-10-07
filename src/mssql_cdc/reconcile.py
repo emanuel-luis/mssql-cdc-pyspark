@@ -30,12 +30,13 @@ COMMITTED, Tier 2 reads through the snapshot reader under the ``isolationLevel``
   the changes applied). A bucket or a key that differs while a change to it (not a snapshot
   row) after the older of the two is in bronze, or only in the change table yet, is
   IN_FLIGHT: check it again later. Once the source is read, bronze is pinned and its change
-  table read after bronze's position (its newest change, or the S of a newer snapshot) up to
-  ``max_lsn`` read then, through the capture instances the stream reads: the changes the
-  stream has not read yet. Only a commit capture has not harvested yet (its lag, seconds)
-  cannot be seen: a MISMATCH that causes clears on the next run. While a chunked snapshot is
-  open, the keys of the chunks silver lacks are MISSING_TARGET. Equal counts are a MATCH
-  even then.
+  table read after bronze's position (its newest change, or the S of a chunked snapshot,
+  which the stream reads from; not a whole snapshot's, which ``snapshot_on_switch`` takes
+  above the stream's position) up to ``max_lsn`` read then, through the capture instances
+  the stream reads: the changes the stream has not read yet. Only a commit capture has not
+  harvested yet (its lag, seconds) cannot be seen: a MISMATCH that causes clears on the next
+  run. While a chunked snapshot is open, the keys of the chunks silver lacks are
+  MISSING_TARGET. Equal counts are a MATCH even then.
 * Chunks, with ``facts_table``: bronze's newest chunked snapshot (ADR 0028) is checked
   against its 'snapshot_chunk' facts rows, without reading SQL Server. CHUNK_TILING: the
   chunks leave a gap or overlap (each starts where the one before ended, the first open
@@ -250,10 +251,11 @@ def _moved(spark, client, instances, bronze: str, keys: list[str], lower: str):
     _, changes = _latest(spark, bronze)
     upper = client.max_lsn() or ZERO_LSN  # after bronze: at or past every change it holds
     held = _after(changes, lower).select(*[F.col(_q(k)) for k in keys])
-    # bronze's position: its newest change, or the S of a newer snapshot the stream reads from
-    snap = "_snapshot" in changes.columns
-    s = F.coalesce("_snapshot", "_start_lsn") if snap else F.col("_start_lsn")
-    at = F.when(F.col("_operation") == 0, s).otherwise(F.col("_start_lsn"))
+    # bronze's position: its newest change, or the S of a chunked snapshot, which the stream
+    # reads from. Not a whole snapshot's S: snapshot_on_switch takes one at max_lsn after the
+    # batch, above the stream's position. From behind, the read only finds more IN_FLIGHT.
+    chunk = F.col("_chunk").isNotNull() if "_chunk" in changes.columns else F.lit(False)
+    at = F.when(chunk, F.col("_snapshot")).when(F.col("_operation") != 0, F.col("_start_lsn"))
     newest = _one(changes.where(F.col("_start_lsn") > lower).select(F.max(at)))
     target = to_arrow_schema(held.schema, timezone="UTC")
     unread = _unread(client, instances, keys, max(newest or lower, lower), upper, target)

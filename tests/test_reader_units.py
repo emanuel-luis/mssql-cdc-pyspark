@@ -299,6 +299,19 @@ def test_an_idle_stream_asks_sql_server_for_max_lsn_alone_each_poll():
     ]
 
 
+def test_an_idle_legacy_stream_asks_sql_server_for_max_lsn_alone_each_trigger():
+    reader, client = _reader(legacy=True), _counting(_lsn(5))
+    reader._client = client
+    end = reader.latestOffset()
+    for _ in range(2):  # Spark 4.0/4.1's triggers, every 10 ms or so on an idle stream
+        assert reader.latestOffset() == end
+    assert _called(client) == ["max_lsn", "refresh_clock", "lsn_to_time", "max_lsn", "max_lsn"]
+    client.reset_mock()
+    client.max_lsn.return_value = _lsn(9)  # capture moved: a new batch, its clock read again
+    assert reader.latestOffset()["lsn"] == _lsn(9)
+    assert _called(client) == ["max_lsn", "refresh_clock", "lsn_to_time"]
+
+
 def test_without_admission_control_the_source_reads_with_the_legacy_reader(monkeypatch):
     from pyspark.sql.types import IntegerType, StructField, StructType
 

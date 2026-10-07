@@ -5,7 +5,8 @@
 **Amended:** 2026-10-03T14:30:38-03:00, chunks planned once from per-slice counts and fixed in a `'snapshot_plan'` row; a wave's facts rebuilt from bronze; one snapshot mode per run, locked while a snapshot is open; per-wave range deletes in silver, in re-snapshots and on datetime2 keys (see the Amendment)
 **Amended:** 2026-10-03T18:10:05-03:00, a full snapshot opens once per run and stops holding the mode once CDC cleanup passes it; a wave rebuilt from the chunks bronze holds; a keyset plan's open last chunk closed when read (see the Amendment)
 **Amended:** 2026-10-04T17:20:07-03:00, the plan counted and sought under the backfill's isolation, so `isolation="snapshot"` planning does not wait for writers' locks (see the Amendment)
-**Amended:** 2026-10-06T21:14:15-03:00, `reconcile` takes a difference the change table explains, after what the stream read, as IN_FLIGHT too, and finds a NULL key's change (see Amendment 2)
+**Amended:** 2026-10-06T21:14:15-03:00, `reconcile` takes a difference the change table explains, after what the stream read, as IN_FLIGHT too, and finds a NULL key's change (see Amendment 2)  
+**Amended:** 2026-10-07T00:06:28-03:00, bronze's position is never a whole snapshot's S, which `snapshot_on_switch` takes above the stream's (see Amendment 2)
 
 ## Context
 A snapshot taken before the stream starts (ADR 0016) has to be read within the CDC
@@ -362,11 +363,16 @@ never made its difference IN_FLIGHT. CDC refuses a unique index over nullable co
 
 * Once the source is read (the counts, then the rows of the buckets compared), bronze is
   pinned and `sys.fn_cdc_get_max_lsn()` read. The change table's changes after bronze's
-  position (its newest change, or the S of a newer snapshot, which the stream reads from) up
-  to that LSN are what the stream has not read yet; their keys count with bronze's changes
-  after the older of E and M. They are read through each capture instance's piece of the
-  range, as the stream reads them (ADR 0023), with `iter_changes` on the key columns: the
-  change table the stream already reads (invariant 11), no new grant and no new T-SQL.
+  position (its newest change, or the S of a chunked snapshot, which the stream reads from)
+  up to that LSN are what the stream has not read yet; their keys count with bronze's
+  changes after the older of E and M. They are read through each capture instance's piece
+  of the range, as the stream reads them (ADR 0023), with `iter_changes` on the key columns:
+  the change table the stream already reads (invariant 11), no new grant and no new T-SQL.
+* Not a whole snapshot's S: `to_delta(snapshot_on_switch=True)` takes one at `max_lsn` after
+  the batch that read the switch, while the stream's checkpoint stays at the batch's end, so
+  a commit in between would be in neither bronze's changes nor the read. Reading from the
+  newest change instead only finds more IN_FLIGHT, and costs more only while silver has not
+  applied a bootstrap or a re-snapshot.
 * Still unseen: a commit the capture job has not harvested yet, in no change table (its lag,
   seconds). A MISMATCH that causes clears on the next run.
 * That join is null-safe (`<=>`), as reconcile's and silver's other key joins already were,
@@ -386,7 +392,8 @@ never made its difference IN_FLIGHT. CDC refuses a unique index over nullable co
 `tests/test_reconcile.py`: an insert, a delete and an update only the change table holds
 IN_FLIGHT, then with bronze holding part of the lag, a real difference next to them still
 RECORD_DIFF, and a commit after M that the count sees; the change table read per capture
-instance from bronze's position up to the LSN read after the source (pure, on the fake); a
+instance from bronze's position up to the LSN read after the source (pure, on the fake); an
+insert below a whole snapshot appended above the stream's position IN_FLIGHT; a
 NULL key's change in bronze IN_FLIGHT, a real difference of it RECORD_DIFF, both named
 `null`. `tests/integration`: the same lag on SQL Server 2022, read by the stream's
 least-privilege login.

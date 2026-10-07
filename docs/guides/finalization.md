@@ -182,7 +182,9 @@ option where a listener cannot run ([Extension points](../ARCHITECTURE.md#extens
   back get the offset after the change, so commit times keep commit order and any
   granularity holds. The exception needs almost an hour without a commit around the change,
   which the capture job's entries about every 5 minutes rule out while it runs: the second
-  pass then comes out an hour early, at most a minute behind the commit before it
+  pass then comes out an hour early, at most a minute behind the commit before it. So does
+  the rest of the second pass for a stream that lags by about the CDC retention, when
+  cleanup has already removed the commits around the change from `cdc.lsn_time_mapping`
   ([ADR 0008](../decisions/0008-detect-source-time-zone.md)).
 
 ## See also

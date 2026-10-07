@@ -1028,10 +1028,15 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
 class MssqlCdcLegacyStreamReader(_BaseReader):  # pragma: no cover - Spark < 4.2
     """Spark 4.0/4.1 without admission control: every batch reads up to max_lsn."""
 
+    _last: dict | None = None  # the offset latestOffset returned last
+
     @_retrying
     def latestOffset(self) -> dict:  # type: ignore[override]  # Spark < 4.2 signature; stubs are 4.2
-        self.client.refresh_clock()  # once per trigger, so for every batch too
-        return self._offset(self._max_lsn())
+        lsn = self._max_lsn()
+        if self._last is None or self._last["lsn"] != lsn:  # a new batch; an idle poll: max_lsn
+            self.client.refresh_clock()  # its end offset and the ranges planned take one clock
+            self._last = self._offset(lsn)
+        return self._last
 
 
 # --------------------------------------------------------------------------- #

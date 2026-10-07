@@ -518,6 +518,12 @@ def test_commit_times_follow_lsn_order_across_a_fall_back(sqlserver, backend):
             "CONVERT(binary(10), ?, 1), 2, 1, ?)",
             (lsn, lsn, i),
         )
+    cur.execute(  # 20,000 commits before them, one a minute, all EDT: a mapping to seek in
+        "INSERT INTO cdc.lsn_time_mapping (start_lsn, tran_begin_time, tran_end_time, tran_id) "
+        "SELECT CONVERT(binary(10), CONCAT('0x00000000', FORMAT(n, 'X8'), '0001'), 1), t, t, 0x01 "
+        "FROM (SELECT n, DATEADD(minute, CAST(n AS int) - 20000, '2025-11-01T18:00:00') AS t "
+        f"FROM {_ROWS} WHERE n <= 20000) f"
+    )
     utc = [u for _, u in history]
     client = make_client(
         {
@@ -540,6 +546,22 @@ def test_commit_times_follow_lsn_order_across_a_fall_back(sqlserver, backend):
         assert read(5, 6) == utc[5:7]  # its drop is before the range
         assert read(2, 3) == utc[2:4]  # the first reading, the clock not yet back
         assert read(8, 8) == utc[8:]  # one offset: DATEADD
+        sent: list = []
+        scalar = client._b.scalar
+
+        def record(sql, params=()):
+            sent.append((sql, params))
+            return scalar(sql, params)
+
+        client._b.scalar = record
+        # one query of seeks: its own row of the 20,009, and at a repeated time the commits
+        # from 3 hours before it too (8 on 2022), none of the 20,000 older ones
+        for i, most in ((8, 1), (5, len(history))):
+            sent.clear()
+            client.lsn_to_time(lsns[i])
+            [(sql, params)] = sent
+            _, plan = _plan(sqlserver, sql, params, "cdc_fall_back")
+            assert _rows_read(plan) <= most, (i, _rows_read(plan))
     finally:
         client.close()
         db.close()
@@ -846,9 +868,9 @@ def test_snapshot_tiles_composite_and_string_keys(spark, sqlserver, name, backen
     )
 
 
-def _plan(sqlserver, sql, params=()):
+def _plan(sqlserver, sql, params=(), database=None):
     """Rows and actual plan (STATISTICS XML) of one query."""
-    conn = sqlserver.connect()
+    conn = sqlserver.connect(database) if database else sqlserver.connect()
     try:
         cur = conn.cursor()
         cur.execute("SET STATISTICS XML ON")
