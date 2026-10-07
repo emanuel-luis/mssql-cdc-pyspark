@@ -1,0 +1,23 @@
+{
+  "mssql_cdc": "0.2.1",
+  "pyspark": "4.2.0",
+  "delta_spark": "4.4.0",
+  "options": {
+    "captureInstance": "dbo_orders",
+    "maxCommitsPerBatch": "1"
+  },
+  "app_id": "compat",
+  "key": "order_id",
+  "value": "status",
+  "tables": {
+    "bronze": "compat.bronze",
+    "silver": "compat.silver",
+    "facts": "compat.facts",
+    "control": "compat.control"
+  },
+  "chunked": {
+    "bronze": "compat.bronze_chunked",
+    "app_id": "compat-chunked",
+    "ckpt": "ckpt-chunked"
+  }
+}
