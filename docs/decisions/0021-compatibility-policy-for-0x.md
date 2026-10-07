@@ -8,7 +8,8 @@
 **Amended:** 2026-10-05T12:49:29-03:00, the state contract covers the silver and reconcile schemas, the facts `event` values, the JSON of snapshot rows and a backfill wave's userMetadata, whose keys are only added; the public surface is what `docs/reference/api.md` lists (amendment 4)  
 **Amended:** 2026-10-05T20:51:10-03:00, the kept state includes a chunked snapshot left open, and the `fake` backend's files in it stay readable (amendment 3)  
 **Amended:** 2026-10-07T01:34:59-03:00, the API shape from 0.3.0: options and flags keyword-only, modes typed as `Literal`s, results as `TypedDict`s whose keys are only added (amendment 5)  
-**Amended:** 2026-10-07T01:41:18-03:00, a micro-batch row's `detail` is a payload too, with the added key `warnings` (amendment 6, ADR 0023 Amendment 6)
+**Amended:** 2026-10-07T01:41:18-03:00, a micro-batch row's `detail` is a payload too, with the added key `warnings` (amendment 6, ADR 0023 Amendment 6)  
+**Amended:** 2026-10-07T09:14:31-03:00, the payloads and the source options get types, and a 'data_skipped' row's `detail` joins the listed payloads (amendment 7)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -48,7 +49,10 @@ The Python API, on the other hand, is young and will change.
       `read_seconds`, `read_mb`
       ([ADR 0028](0028-chunked-snapshot-next-to-the-stream.md));
     - `detail` of a micro-batch row (`event` NULL): `warnings`, added in 0.3.0
-      (amendment 6).
+      (amendment 6);
+    - `detail` of `'data_skipped'`: `from`, `to`, `certain`, and from a task that found
+      cleanup had run while it read, `reason`
+      ([ADR 0018](0018-automatic-resnapshot-after-data-loss.md), amendment 7).
 
     Keys are only added: never renamed, removed or given another meaning. A reader takes a
     key added after its payload first shipped with a default (`.get`), so rows an older
@@ -152,3 +156,42 @@ warnings the reader logged on the driver, when there were any
 payload, no change to a shipped one: rows written before, and batches without warnings,
 keep `detail` NULL, so a query reads the key with a default. The key is state; the messages
 in the list are text for people and may change in any release.
+
+## Amendment 7: types for the payloads and the options
+0.4.0 types what the library writes and reads back. The payloads listed above were dicts
+built inline at each writer and parsed at each reader, so a writer that dropped or misspelt a
+key failed only when a later call, maybe a later release, read the row.
+
+* Every listed payload is a `TypedDict` in `mssql_cdc.payloads`, the row payloads also
+  exported from `mssql_cdc` for queries of the facts table: `SnapshotOpenDetail`,
+  `SnapshotPlanDetail`, `SnapshotChunkDetail`, `SnapshotCompletionDetail`,
+  `DataSkippedDetail`, `BatchDetail` and `WaveMetadata` (its chunks `WaveChunk`). Writers
+  build them as these types, so mypy fails one that leaves out a key; readers annotate what
+  `json.loads` returns and keep their `.get` defaults. `tests/test_payloads.py` keeps every
+  key listed here in its type. The types describe the state, they do not change it: keys,
+  formats and meanings are as before, and the rule stays that a key is only added.
+* A key a payload does not always have, a chunked open's `keys` and `plan` or a task's
+  `reason`, or one added after its payload first shipped, is optional in its type. Not
+  through `NotRequired`, which `typing` has from Python 3.11 while the package supports
+  3.10 without depending on `typing_extensions`: the required keys sit in a private base
+  class and the optional ones in a `total=False` subclass, which gives the same keys at run
+  time on every version.
+* A 'data_skipped' row's `detail`, written since 0.2.0 and documented with the facts table,
+  joins the list: no release reads it back, but a query of the facts does. Its `reason` is
+  text for people, like the warnings.
+* `SourceOptions`, a `TypedDict` with `total=False`, names every source option with a `str`
+  value, as Spark passes them, and `KNOWN_OPTIONS` is derived from it, so the two cannot
+  drift. The functions that take options (`stream`, `reconcile`, `apply_changes`,
+  `start_many`) take `SourceOptions | Mapping[str, Any]`: wider than 0.3's `dict`, so every
+  call that type-checked still does, and a dict annotated as `SourceOptions` gets its names
+  checked. Considered: `Literal` values for `backend`, `isolationLevel` or the booleans; the
+  reader takes them in any case, and booleans in several spellings, so a `Literal` would
+  refuse values that run.
+* Considered: frozen dataclasses for the payloads. They are JSON that other releases and
+  users' queries read, so a dataclass would need converting both ways. Internal records
+  nothing persists are frozen dataclasses instead: the chunks `backfill()` counts, and the
+  chunks a 'snapshot_chunk' row announces to `apply_changes`.
+* A chunked 'snapshot_open' row now writes `keys` and `plan` after `lost_to_ts` rather than
+  after `kind`. A JSON object has no order, and every reader takes its keys by name.
+* `tests/typing_payloads.py`, checked by mypy with `tests/typing_api.py`, pins the payloads'
+  key types and keeps a misspelt option in a `SourceOptions` a type error.

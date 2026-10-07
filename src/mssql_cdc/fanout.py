@@ -19,18 +19,20 @@ import math
 import time
 from collections.abc import Iterable, Mapping
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .pipeline import stream
 
 if TYPE_CHECKING:
     from pyspark.sql.streaming import StreamingQuery
 
+    from .source import SourceOptions
+
 
 def start_many(
     spark,
-    options: dict,
-    capture_instances: Iterable[str] | Mapping[str, dict],
+    options: SourceOptions | Mapping[str, Any],
+    capture_instances: Iterable[str] | Mapping[str, SourceOptions | Mapping[str, Any]],
     *,
     target: str,
     app_id: str,

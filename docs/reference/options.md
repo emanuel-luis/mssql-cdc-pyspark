@@ -31,6 +31,11 @@ Spark does. A boolean option is true for `true`, `1`, `yes` or `y` and false for
 `no` or `n`, in any case; anything else raises `ValueError` naming the option, so a typo such as
 `failOnDataLoss=ture` never turns a guard off.
 
+For a type checker to flag a misspelt name before anything runs, annotate the dict as a
+[`SourceOptions`](api.md#mssql_cdc.source.SourceOptions), which knows every source option
+below with this spelling and a string value (`options: SourceOptions = {...}`). It is a plain
+dict at run time, and every function that takes options takes any mapping too.
+
 ## Source options
 
 | Option | Default | Read by |

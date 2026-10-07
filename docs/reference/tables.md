@@ -119,6 +119,19 @@ are state a later release reads back: a release only adds keys, never renames or
 one, so a query that parses `detail` keeps working across upgrades
 ([ADR 0021](../decisions/0021-compatibility-policy-for-0x.md)).
 
+Their types, `TypedDict`s exported from `mssql_cdc`, for Python that reads them
+(`d: SnapshotChunkDetail = json.loads(row["detail"])`):
+
+| Payload | Type |
+|---|---|
+| `detail` of a 'snapshot_open' row | [`SnapshotOpenDetail`](api.md#mssql_cdc.payloads.SnapshotOpenDetail) |
+| `detail` of a 'snapshot_plan' row | [`SnapshotPlanDetail`](api.md#mssql_cdc.payloads.SnapshotPlanDetail) |
+| `detail` of a 'snapshot_chunk' row | [`SnapshotChunkDetail`](api.md#mssql_cdc.payloads.SnapshotChunkDetail) |
+| `detail` of a chunked snapshot's 'bootstrap' or 'resnapshot' row | [`SnapshotCompletionDetail`](api.md#mssql_cdc.payloads.SnapshotCompletionDetail) |
+| `detail` of a 'data_skipped' row | [`DataSkippedDetail`](api.md#mssql_cdc.payloads.DataSkippedDetail) |
+| `detail` of a micro-batch row | [`BatchDetail`](api.md#mssql_cdc.payloads.BatchDetail) |
+| `userMetadata` of a wave's commit in bronze | [`WaveMetadata`](api.md#mssql_cdc.payloads.WaveMetadata) |
+
 The kinds of row, and the Delta `txnAppId` and `txnVersion` that make each write idempotent:
 
 | Row | `event` | `batch_id` | `rows` | `app_id` | Idempotency key |

@@ -27,12 +27,15 @@ from abc import abstractmethod
 from collections.abc import Iterator, Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 import pyarrow as pa
 
 from . import lsn as _lsn
 from .lsn import Lsn
+
+if TYPE_CHECKING:
+    from .payloads import IntExtent, SnapshotExtent
 
 _log = logging.getLogger(__name__)
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
@@ -324,7 +327,7 @@ def _key_tuple(bound) -> tuple | None:
     return tuple(bound) if isinstance(bound, list) else (bound,)
 
 
-def snapshot_plan(client: CdcClient, capture_instance: str, source: SourceTable) -> dict:
+def snapshot_plan(client: CdcClient, capture_instance: str, source: SourceTable) -> SnapshotExtent:
     """What a chunked snapshot's chunks tile, read after its LSN S was recorded (ADR 0028): a
     key a row lacks below MIN or above MAX was inserted after S, so the stream has it.
 
@@ -356,7 +359,7 @@ def plan_chunks(
     client: CdcClient,
     capture_instance: str,
     source: SourceTable,
-    extent: dict,
+    extent: SnapshotExtent,
     chunk_rows: int,
     isolation: str | None = None,
 ) -> list[list]:
@@ -417,7 +420,7 @@ def _int_chunks(
     schema: str,
     table: str,
     key: str,
-    extent: dict,
+    extent: IntExtent,
     chunk_rows: int,
     isolation: str | None = None,
 ) -> list[list]:

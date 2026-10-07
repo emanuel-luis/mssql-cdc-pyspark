@@ -58,10 +58,11 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from . import finalization, migrations
 from .sink import BRONZE_COLUMN_COMMENTS
@@ -70,6 +71,9 @@ from .types import ApplyResult, Granularity
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
+
+    from .payloads import SnapshotChunkDetail
+    from .source import SourceOptions
 
 _log = logging.getLogger(__name__)
 _warned: set[tuple[str, str]] = set()  # (what, table) warned about once in this process
@@ -108,7 +112,7 @@ def _warn_once(what: str, table: str, message: str, *args) -> None:
         _log.warning(message, *args)
 
 
-def _source_keys(capture_instance: str, options: dict | None) -> list[str]:
+def _source_keys(capture_instance: str, options: Mapping[str, Any] | None) -> list[str]:
     if not options:
         raise ValueError(
             "pass keys, or the stream's options to read them from the capture instance's "
@@ -151,9 +155,21 @@ def _record(
     )
 
 
-def _chunks(facts, snapshot: str) -> dict[int, tuple]:
-    """The chunks of ``snapshot`` its 'snapshot_chunk' facts rows announce, by index:
-    ``(wave, lo, hi, stamp)``. They are written after the chunks' bronze rows."""
+@dataclass(frozen=True, slots=True)
+class _Chunk:
+    """A chunk a 'snapshot_chunk' facts row announces."""
+
+    wave: int
+    lo: Any
+    hi: Any
+    """Its key range [lo, hi), JSON bounds; None: open."""
+    stamp: str
+    """The LSN it was read under."""
+
+
+def _chunks(facts, snapshot: str) -> dict[int, _Chunk]:
+    """The chunks of ``snapshot`` its 'snapshot_chunk' facts rows announce, by index. They
+    are written after the chunks' bronze rows."""
     from pyspark.sql import functions as F
 
     rows = (
@@ -164,10 +180,10 @@ def _chunks(facts, snapshot: str) -> dict[int, tuple]:
         .select("detail", "min_lsn")
         .collect()
     )  # ponytail: every chunk of the snapshot on each call; filter by wave if it shows up
-    chunks: dict[int, tuple] = {}
+    chunks: dict[int, _Chunk] = {}
     for row in rows:
-        d = json.loads(row["detail"])
-        chunks[int(d["chunk"])] = (int(d["wave"]), d.get("lo"), d.get("hi"), row["min_lsn"])
+        d: SnapshotChunkDetail = json.loads(row["detail"])
+        chunks[int(d["chunk"])] = _Chunk(int(d["wave"]), d.get("lo"), d.get("hi"), row["min_lsn"])
     return chunks
 
 
@@ -207,7 +223,7 @@ def _range_key(keys: Sequence[str], cut) -> bool:
     return len(keys) == 1 and cut == keys
 
 
-def _absent(spark, target: str, key: str, key_type, chunks: dict, held):
+def _absent(spark, target: str, key: str, key_type, chunks: dict[int, _Chunk], held):
     """Synthetic deletes at each chunk's stamp L of the silver keys in its range [lo, hi)
     that it does not hold (``held``: its rows' keys), when their image is older than L. The
     chunk saw every commit up to L, so those keys were gone by then. Only for an integer,
@@ -227,9 +243,9 @@ def _absent(spark, target: str, key: str, key_type, chunks: dict, held):
     if not isinstance(key_type, (IntegralType, DateType, TimestampNTZType)):
         return None
     ranges = []
-    for _, lo, hi, stamp in chunks.values():
+    for c in chunks.values():
         try:
-            ranges.append((_bound(lo, key_type, True), _bound(hi, key_type, False), stamp))
+            ranges.append((_bound(c.lo, key_type, True), _bound(c.hi, key_type, False), c.stamp))
         except OverflowError:  # a lower bound past the last microsecond: no key surely inside
             continue
     if not ranges:
@@ -270,7 +286,7 @@ def apply_changes(
     keys: Sequence[str] | None = None,
     control_table: str,
     facts_table: str | None = None,
-    options: dict | None = None,
+    options: SourceOptions | Mapping[str, Any] | None = None,
     granularity: Granularity = "hour",
 ) -> ApplyResult:
     """Bring ``target`` up to the capture instance's changes in ``bronze``, a table fed by
@@ -418,7 +434,7 @@ def apply_changes(
     else:
         base = change & (F.col("_start_lsn") > applied)
     after = wave_from if not rebuild and open_from == s_open and wave_from is not None else -1
-    new = {c: v for c, v in chunks.items() if v[0] > after} if is_open else {}
+    new = {i: c for i, c in chunks.items() if c.wave > after} if is_open else {}
     rows = pinned.where(base)
     if new:  # the open snapshot's waves that arrived since the last call
         waves = pinned.where(
@@ -513,7 +529,7 @@ def apply_changes(
     rebuilt = snapshot if rebuild else rebuilt_from
     progress: tuple = (None, None)
     if is_open:
-        wave = max([after, *(v[0] for v in new.values())])
+        wave = max([after, *(c.wave for c in new.values())])
         progress = (s_open, wave if wave >= 0 else None)
     if (position, rebuilt, *progress) != (applied, rebuilt_from, open_from, wave_from):
         _record(spark, control_table, target, position, rebuilt, *progress)

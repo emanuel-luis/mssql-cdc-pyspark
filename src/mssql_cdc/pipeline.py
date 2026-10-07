@@ -61,6 +61,7 @@ import re
 import time
 from collections.abc import Mapping
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -72,6 +73,16 @@ if TYPE_CHECKING:
     from pyspark.sql.streaming import StreamingQuery
 
     from .client import CdcClient, SourceTable
+    from .payloads import (
+        SnapshotChunkDetail,
+        SnapshotCompletionDetail,
+        SnapshotKind,
+        SnapshotOpenDetail,
+        SnapshotPlanDetail,
+        WaveChunk,
+        WaveMetadata,
+    )
+    from .source import SourceOptions
 
 _log = logging.getLogger(__name__)
 _URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")  # a scheme; a Windows drive has one letter
@@ -91,7 +102,7 @@ _SNAPSHOT_FACTS = (
 )
 
 
-def _opt(options: dict, key: str):
+def _opt(options: Mapping[str, Any], key: str):
     return next((v for k, v in options.items() if k.lower() == key.lower()), None)
 
 
@@ -130,7 +141,7 @@ def _write_state(checkpoint: str, state: dict) -> None:
     os.replace(path + ".tmp", path)  # a crash leaves the old state or the new one
 
 
-def _instances(options: dict, ci: str) -> list[str]:
+def _instances(options: Mapping[str, Any], ci: str) -> list[str]:
     """``ci`` and the other capture instances of its source table, lower-cased (SQL Server
     resolves names ignoring case): after a switch the target holds rows of each (ADR 0023)."""
     from .client import make_client
@@ -159,7 +170,7 @@ def _family(app_id: str) -> re.Pattern:
     return re.compile(re.escape(app_id) + r"(\.g\d+)?")
 
 
-def _mode(detail: str | None) -> str:
+def _mode(detail: str | None) -> SnapshotMode:
     """The mode a 'snapshot_open' facts row was opened in: 'full' or 'chunked'."""
     return "full" if json.loads(detail or "{}").get("mode") == "full" else "chunked"
 
@@ -179,12 +190,29 @@ def _unfinished(target: str, lsn: str, mode: str, generation: int | None, what: 
     )
 
 
-def _bounds(chunk: dict) -> dict:
-    """A chunk's place in its plan; ``last``: the plan's final chunk."""
-    return {k: chunk.get(k, False) for k in ("chunk", "lo", "hi", "last")}
+class _Opened(Offset):
+    """A snapshot opened for a generation (``CdcStream._opened``): its offset and more."""
+
+    mode: SnapshotMode
+    generation: int | None
+    done: bool
+    """A 'bootstrap' or 'resnapshot' row of the generation at or after its LSN."""
 
 
-def _plan_of(rows: list, snapshot: str) -> dict | None:
+@dataclass(frozen=True, slots=True)
+class _ChunkRead:
+    """A chunk of a chunked snapshot in its target: what ``backfill()`` counts."""
+
+    chunk: int
+    wave: int
+    last: bool
+    """The plan's final chunk."""
+    rows: int | None
+    lsn: str
+    """The stamp it was read under."""
+
+
+def _plan_of(rows: list, snapshot: str) -> SnapshotPlanDetail | None:
     """The detail of the 'snapshot_plan' facts row of ``snapshot`` among ``rows``, or None:
     ``{snapshot, kind, keys, chunk_rows, chunks}``, chunk i from ``chunks[i][0]`` to
     ``chunks[i][1]`` (``client.plan_chunks``)."""
@@ -194,7 +222,7 @@ def _plan_of(rows: list, snapshot: str) -> dict | None:
     return None
 
 
-def _earlier_wave(spark, target: str, key: str, wave: int) -> dict | None:
+def _earlier_wave(spark, target: str, key: str, wave: int) -> WaveMetadata | None:
     """The userMetadata of the commit that appended wave ``wave`` of ``key`` to ``target``,
     from its history; None once log cleanup has dropped it."""
     from pyspark.sql import functions as F
@@ -239,7 +267,7 @@ def _last_offset(checkpoint: str) -> dict | None:
 
 
 class CdcStream:
-    def __init__(self, spark: SparkSession, options: dict):
+    def __init__(self, spark: SparkSession, options: SourceOptions | Mapping[str, Any]):
         from . import register  # lazy: the package imports this module
         from .source import warn_unknown
 
@@ -499,7 +527,7 @@ class CdcStream:
             return None
         return {"lsn": row["lsn"], "commit_ts": _iso(row["ts"])}
 
-    def _opened(self, facts_table: str, target: str, sink_id: str) -> dict | None:
+    def _opened(self, facts_table: str, target: str, sink_id: str) -> _Opened | None:
         """The snapshot opened for the generation whose sink app_id is ``sink_id``, open or
         complete: its chunked 'snapshot_open' row, else its newest full one (each full run
         writes its own). Its offset, ``mode``, ``generation`` and ``done`` (a 'bootstrap' or
@@ -542,7 +570,9 @@ class CdcStream:
         with closing(make_client(self.options)) as client:
             return _lost(client, self._capture_instance(), lsn) is not None
 
-    def _reusable(self, facts_table: str, target: str, sink_id: str, chunked: bool) -> dict | None:
+    def _reusable(
+        self, facts_table: str, target: str, sink_id: str, chunked: bool
+    ) -> _Opened | None:
         """The snapshot opened for generation ``sink_id`` that a run starts the generation
         from instead of taking one: a chunked one, open or complete; in a chunked run a full
         one too once complete (an emptied table's: no rows to find it by). A full one still
@@ -613,11 +643,11 @@ class CdcStream:
         sink_id: str,
         facts_table: str,
         generation: int,
-        kind: str,
+        kind: SnapshotKind,
         lost_from_ts: datetime | None = None,
         lost_to_ts: datetime | None = None,
-        mode: str = "chunked",
-    ) -> dict:
+        mode: SnapshotMode = "chunked",
+    ) -> _Opened:
         """Open a ``kind`` snapshot ('bootstrap' or 'resnapshot') for generation
         ``generation`` (sink ``sink_id``) in ``mode``: record an LSN S (and, for a chunked
         one, what its chunks tile) in a 'snapshot_open' facts row before the table is read,
@@ -637,15 +667,16 @@ class CdcStream:
             source = client.source_table(ci)
             lsn = snapshot_lsn(client, source)  # first: the plan's MIN and MAX come after S
             plan = snapshot_plan(client, ci, source) if mode == "chunked" else None
-            offset = {"lsn": lsn, "commit_ts": client.lsn_to_time(lsn) or ""}
-        detail = {
+            offset: Offset = {"lsn": lsn, "commit_ts": client.lsn_to_time(lsn) or ""}
+        detail: SnapshotOpenDetail = {
             "mode": mode,
             "kind": kind,
-            **({"keys": source.keys, "plan": plan} if mode == "chunked" else {}),
             "generation": generation,
             "lost_from_ts": _iso(lost_from_ts) or None,
             "lost_to_ts": _iso(lost_to_ts) or None,
         }
+        if plan is not None:  # a chunked one's
+            detail["keys"], detail["plan"] = source.keys, plan
         write_event(
             self.spark,
             facts_table,
@@ -661,7 +692,12 @@ class CdcStream:
             lost_to_ts=lost_to_ts,
             detail=json.dumps(detail),
         )
-        stored = self._opened(facts_table, target, sink_id) or {**offset, "mode": mode}
+        stored = self._opened(facts_table, target, sink_id) or {
+            **offset,
+            "mode": mode,
+            "generation": generation,
+            "done": False,
+        }
         if stored["mode"] != mode:
             what = f"another run opened it before this one opened a {mode} one, which stops"
             raise _unfinished(target, stored["lsn"], stored["mode"], generation, what)
@@ -800,7 +836,7 @@ class CdcStream:
                 return None
             lost_to = _ts(client.lsn_to_time(low))
             # opened by a recovery that stopped before writing its state
-            done: Mapping[str, Any] | None = self._reusable(facts_table, target, next_id, chunked)
+            done: Offset | None = self._reusable(facts_table, target, next_id, chunked)
             # purged too, as a full re-snapshot's would be: open past it, a generation on
             while done and _lost(client, ci, done["lsn"]):
                 n, next_id = n + 1, _generation(checkpoint, app_id, n + 2)[1]
@@ -837,7 +873,7 @@ class CdcStream:
             next_id,
         )
         _write_state(checkpoint, {**state, "recovering": start})
-        offset: Mapping[str, Any]
+        offset: Offset
         if chunked:  # nothing read here, so nothing to purge meanwhile; a newer open supersedes
             offset = done or self._open(
                 target,
@@ -1166,7 +1202,8 @@ class CdcStream:
                 "reason": f"{target} has no chunked snapshot opened by {app_id}'s stream",
             }
         top = max(opens, key=lambda r: r["min_lsn"])  # a newer open supersedes an older one
-        s, sink_id, info = top["min_lsn"], top["app_id"], json.loads(top["detail"])
+        s, sink_id = top["min_lsn"], top["app_id"]
+        info: SnapshotOpenDetail = json.loads(top["detail"])
         plan = _plan_of(rows, s)
         if plan and chunk_rows is not None and int(chunk_rows) != plan["chunk_rows"]:
             _log.warning(
@@ -1177,15 +1214,15 @@ class CdcStream:
                 target,
                 plan["chunk_rows"],
             )
-        chunks = sorted(
-            (
-                {**d, "rows": r["rows"], "lsn": r["min_lsn"]}
-                for r in rows
-                if r["event"] == "snapshot_chunk"
-                and (d := json.loads(r["detail"]))["snapshot"] == s
-            ),
-            key=lambda c: c["chunk"],
-        )
+        chunks: list[_ChunkRead] = []
+        for r in rows:
+            if r["event"] != "snapshot_chunk":
+                continue
+            d: SnapshotChunkDetail = json.loads(r["detail"])
+            if d["snapshot"] == s:
+                c = _ChunkRead(d["chunk"], d["wave"], d.get("last", False), r["rows"], r["min_lsn"])
+                chunks.append(c)
+        chunks.sort(key=lambda c: c.chunk)
         status: BackfillStatus = {
             "snapshot": s,
             "chunks_done": len(chunks),
@@ -1211,7 +1248,7 @@ class CdcStream:
                     f"not on {info['keys']} as when the snapshot at {s} opened: its chunks no "
                     "longer tile the table. Take a new snapshot."
                 )
-            while not (chunks and chunks[-1].get("last")):
+            while not (chunks and chunks[-1].last):
                 if (max_waves is not None and waves >= max_waves) or (
                     max_seconds is not None and time.monotonic() - t0 >= max_seconds
                 ):
@@ -1243,16 +1280,21 @@ class CdcStream:
                         f"sys.fn_cdc_get_max_lsn() is {lsn}, below the snapshot's {s}: is this "
                         "the database the snapshot was opened on (not a readable secondary)?"
                     )
-                first = last["chunk"] + 1 if last else 0
+                first = last.chunk + 1 if last else 0
                 every = plan["chunks"]
-                if every[-1][1] is None and info["plan"].get("max") is not None:
+                extent = info["plan"]
+                if (
+                    every[-1][1] is None
+                    and extent["kind"] == "keyset"
+                    and extent["max"] is not None
+                ):
                     # a keyset plan's last chunk ends at the first key after MAX, and there was
                     # none at planning: sought again, so that rows inserted above MAX since,
                     # the stream's, do not pile up in the last chunk
-                    end = last_bound(client, ci, source, info["plan"]["max"], isolated)
+                    end = last_bound(client, ci, source, extent["max"], isolated)
                     every = [*every[:-1], [every[-1][0], end]]
                 planned = [[i, *every[i]] for i in range(first, min(first + max(1, k), len(every)))]
-                wave = last["wave"] + 1 if last else 0
+                wave = last.wave + 1 if last else 0
                 _log.info(
                     "mssql_cdc: backfill of %s (snapshot %s, %s): wave %s, chunks %s to %s of %s, "
                     "stamped %s",
@@ -1289,14 +1331,20 @@ class CdcStream:
                     s,
                     sink_id,
                     wave,
-                    sum(c["rows"] or 0 for c in read),
+                    sum(c.rows or 0 for c in read),
                     time.monotonic() - t1,
                     len(chunks),
                     len(every),
                 )
-        done = bool(chunks) and bool(chunks[-1].get("last"))
+        done = bool(chunks) and chunks[-1].last
         if done:  # also after a crash between the last wave's facts and this row
-            rows_in = sum(c["rows"] or 0 for c in chunks)
+            rows_in = sum(c.rows or 0 for c in chunks)
+            completion: SnapshotCompletionDetail = {
+                "snapshot": s,
+                "chunks": len(chunks),
+                "rows": rows_in,
+                "last_lsn": max(c.lsn for c in chunks),
+            }
             sink.write_event(
                 self.spark,
                 facts_table,
@@ -1315,14 +1363,7 @@ class CdcStream:
                 duration_ms=round((sink._utc_now() - top["written_at"]).total_seconds() * 1000),
                 lost_from_ts=top["lost_from_ts"],
                 lost_to_ts=top["lost_to_ts"],
-                detail=json.dumps(
-                    {
-                        "snapshot": s,
-                        "chunks": len(chunks),
-                        "rows": rows_in,
-                        "last_lsn": max(c["lsn"] for c in chunks),
-                    }
-                ),
+                detail=json.dumps(completion),
             )
         total = len(chunks) if done else len(plan["chunks"]) if plan else None
         if done:
@@ -1335,7 +1376,7 @@ class CdcStream:
         client: CdcClient,
         ci: str,
         source: SourceTable,
-        info: dict,
+        info: SnapshotOpenDetail,
         top: Row,
         target: str,
         facts_table: str,
@@ -1351,7 +1392,7 @@ class CdcStream:
 
         s, rows = top["min_lsn"], int(chunk_rows or 1_000_000)
         started_at, t0 = sink._utc_now(), time.monotonic()
-        detail = {
+        detail: SnapshotPlanDetail = {
             "snapshot": s,
             "kind": info["plan"]["kind"],
             "keys": source.keys,
@@ -1434,11 +1475,11 @@ class CdcStream:
         client: CdcClient,
         metrics: str | None,
         isolation: str | None,
-    ) -> list[dict]:
+    ) -> list[_ChunkRead]:
         """Read the ``planned`` chunks stamped ``lsn``, append them to ``target`` and record
-        them in the facts; ``every``: the plan's chunks. Returns them as ``{chunk, wave, lo,
-        hi, last, rows, lsn}``: those of the commit that holds the wave, which an earlier
-        attempt may have made with other chunks (``_committed``)."""
+        them in the facts; ``every``: the plan's chunks. Returns those of the commit that
+        holds the wave, which an earlier attempt may have made with other chunks
+        (``_committed``)."""
         from pyspark.sql import functions as F
 
         from .sink import _files, _remove, _utc_now, bronze_rows, write_facts
@@ -1470,7 +1511,7 @@ class CdcStream:
                     read[m["chunk"]] = m
                 except (OSError, ValueError, KeyError):
                     continue
-            tag: dict = {
+            tag: WaveMetadata = {
                 "backfill": f"{app_id}#snap.{snapshot}",
                 "wave": wave,
                 "lsn": lsn,
@@ -1522,7 +1563,7 @@ class CdcStream:
                     "read_seconds": c["read_seconds"],
                     "read_mb": c["read_mb"],
                     "event": "snapshot_chunk",
-                    "detail": json.dumps({"snapshot": snapshot, "wave": wave, **_bounds(c)}),
+                    "detail": json.dumps(_chunk_detail(snapshot, wave, c)),
                     "target": target,
                 }
                 for c in tag["chunks"]
@@ -1533,11 +1574,13 @@ class CdcStream:
         if metrics:  # folded into the facts
             _remove(_files(metrics))
         return [
-            {"wave": wave, **_bounds(c), "rows": c["rows"], "lsn": tag["lsn"]}
+            _ChunkRead(c["chunk"], wave, c.get("last", False), c["rows"], tag["lsn"])
             for c in tag["chunks"]
         ]
 
-    def _append_wave(self, target: str, snapshot: str, rows, tag: dict, every: list) -> dict:
+    def _append_wave(
+        self, target: str, snapshot: str, rows, tag: WaveMetadata, every: list
+    ) -> WaveMetadata:
         """Append a wave's ``rows`` to ``target`` in one commit with ``tag`` as its
         userMetadata, once per (snapshot, wave). Returns the tag of the commit that holds
         them: this one's or, when Delta skipped the append, the earlier attempt's
@@ -1574,7 +1617,9 @@ class CdcStream:
             )
         return earlier
 
-    def _committed(self, target: str, snapshot: str, tag: dict, every: list) -> dict | None:
+    def _committed(
+        self, target: str, snapshot: str, tag: WaveMetadata, every: list
+    ) -> WaveMetadata | None:
         """The tag of the commit an earlier attempt of ``tag``'s wave made to ``target``
         before it stopped short of its facts rows: from the history (``_earlier_wave``) or,
         once log cleanup has dropped it, rebuilt from its rows. None when there is none.
@@ -1609,7 +1654,7 @@ class CdcStream:
         if not held:
             return None
         lsn = min(low for _, low in held.values())  # the wave's stamp, on every row
-        chunks = [
+        chunks: list[WaveChunk] = [
             {
                 "chunk": i,
                 "lo": every[i][0],
@@ -1623,6 +1668,18 @@ class CdcStream:
             for i in range(first, max(held) + 1)
         ]
         return {**tag, "lsn": lsn, "chunks": chunks}
+
+
+def _chunk_detail(snapshot: str, wave: int, c: WaveChunk) -> SnapshotChunkDetail:
+    """A 'snapshot_chunk' row's detail; ``last`` false when an older release's tag lacks it."""
+    return {
+        "snapshot": snapshot,
+        "wave": wave,
+        "chunk": c["chunk"],
+        "lo": c["lo"],
+        "hi": c["hi"],
+        "last": c.get("last", False),
+    }
 
 
 def _snapshot_after_switch(sink, options: dict, ci: str, target: str, metrics: str):
@@ -1642,6 +1699,6 @@ def _snapshot_after_switch(sink, options: dict, ci: str, target: str, metrics: s
     return write
 
 
-def stream(spark: SparkSession, options: dict) -> CdcStream:
+def stream(spark: SparkSession, options: SourceOptions | Mapping[str, Any]) -> CdcStream:
     """The CDC stream described by ``options`` (the data source options)."""
     return CdcStream(spark, options)

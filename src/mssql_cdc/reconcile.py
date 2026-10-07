@@ -58,16 +58,21 @@ import math
 import random
 import uuid
 from bisect import bisect_right
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import closing
 from datetime import date, timedelta
 from decimal import Decimal
 from itertools import pairwise
+from typing import TYPE_CHECKING, Any
 
 from . import migrations
 from .silver import _by_key, _one, _q, _source_keys
 from .tables import delta_table, table_ref
 from .types import ReconcileResult
+
+if TYPE_CHECKING:
+    from .payloads import SnapshotChunkDetail
+    from .source import SourceOptions
 
 REPORT_COMMENT = (
     "Report of mssql-cdc-pyspark's reconcile(), which compares a silver table with its SQL "
@@ -337,7 +342,7 @@ def _merge_buckets(sides: dict, moved, width: int, bucket_rows: int) -> list[dic
 
 def reconcile(
     spark,
-    options: dict,
+    options: SourceOptions | Mapping[str, Any],
     silver: str,
     *,
     keys: Sequence[str] | None = None,
@@ -602,11 +607,12 @@ def _chunk_checks(spark, bronze: str, facts_table: str) -> list[dict]:
         return []
     s = max(opens)  # a newer open abandons an older one
     complete = any(r["event"] in ("bootstrap", "resnapshot") and r["max_lsn"] == s for r in rows)
-    found = [
-        d | {"rows": r["rows"], "lsn": r["min_lsn"]}
-        for r in rows
-        if r["event"] == "snapshot_chunk" and (d := json.loads(r["detail"]))["snapshot"] == s
-    ]
+    found: list[dict] = []
+    for r in rows:
+        if r["event"] == "snapshot_chunk":
+            d: SnapshotChunkDetail = json.loads(r["detail"])
+            if d["snapshot"] == s:
+                found.append({**d, "rows": r["rows"], "lsn": r["min_lsn"]})
     # bronze after the facts: it holds every wave they announce, whose rows commit first
     held: dict = {}
     pinned = _latest(spark, bronze)[1] if exists(spark, bronze) else None

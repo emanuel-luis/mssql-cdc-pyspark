@@ -62,6 +62,10 @@ or renaming one is a break listed under "Breaking" in the changelog.
       show_root_toc_entry: false
       members: [Offset, BackfillStatus, ApplyResult, ReconcileResult, SnapshotMode, OnDataLoss, Isolation, Granularity, BackfillState]
 
+::: mssql_cdc.source.SourceOptions
+    options:
+      show_if_no_docstring: true
+
 ## Protocols
 
 The seams a client and a driver plug into
@@ -78,6 +82,20 @@ it without inheriting, listed under "Breaking" in the changelog.
 ::: mssql_cdc.CdcClient
 
 ::: mssql_cdc.Lsn
+
+## Payloads
+
+The JSON in the facts table's `detail` and in the `userMetadata` of a chunked snapshot's
+wave commits ([Tables](tables.md#facts)), as `TypedDict`s for what `json.loads` returns.
+The row payloads are exported from `mssql_cdc`; the nested types are in `mssql_cdc.payloads`.
+Their keys are state: a release only adds one.
+
+::: mssql_cdc.payloads
+    options:
+      show_root_toc_entry: false
+      inherited_members: true
+      show_if_no_docstring: true
+      members: [SnapshotOpenDetail, SnapshotPlanDetail, SnapshotChunkDetail, SnapshotCompletionDetail, DataSkippedDetail, BatchDetail, WaveMetadata, WaveChunk, SnapshotExtent, IntExtent, KeysetExtent, SnapshotKind]
 
 ## Errors
 

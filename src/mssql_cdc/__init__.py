@@ -16,10 +16,19 @@ try:
     )
     from .fanout import await_all, start_many, stop_all
     from .lsn import Lsn
+    from .payloads import (
+        BatchDetail,
+        DataSkippedDetail,
+        SnapshotChunkDetail,
+        SnapshotCompletionDetail,
+        SnapshotOpenDetail,
+        SnapshotPlanDetail,
+        WaveMetadata,
+    )
     from .pipeline import stream
     from .reconcile import reconcile
     from .silver import apply_changes
-    from .source import HAS_ADMISSION_CONTROL, OPERATIONS, MssqlCdcDataSource
+    from .source import HAS_ADMISSION_CONTROL, OPERATIONS, MssqlCdcDataSource, SourceOptions
     from .types import (
         ApplyResult,
         BackfillState,
@@ -49,8 +58,10 @@ __all__ = [
     "Backend",
     "BackfillState",
     "BackfillStatus",
+    "BatchDetail",
     "CdcClient",
     "DataLossError",
+    "DataSkippedDetail",
     "Granularity",
     "Isolation",
     "Lsn",
@@ -59,7 +70,13 @@ __all__ = [
     "OnDataLoss",
     "ReconcileResult",
     "SchemaChangedError",
+    "SnapshotChunkDetail",
+    "SnapshotCompletionDetail",
     "SnapshotMode",
+    "SnapshotOpenDetail",
+    "SnapshotPlanDetail",
+    "SourceOptions",
+    "WaveMetadata",
     "apply_changes",
     "await_all",
     "is_data_loss",

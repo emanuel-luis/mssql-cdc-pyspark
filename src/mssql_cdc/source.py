@@ -47,7 +47,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 
 from pyspark.sql.datasource import (
     DataSource,
@@ -75,6 +75,7 @@ except ImportError:  # pragma: no cover - older Spark
 
 if TYPE_CHECKING:
     from .client import CdcClient
+    from .payloads import DataSkippedDetail
 
 METADATA_COLUMNS = [
     ("_capture_instance", "STRING"),
@@ -147,32 +148,37 @@ def _positive_int(options, name: str, default=None, allowed="a positive integer"
     return n
 
 
+class SourceOptions(TypedDict, total=False):
+    """The source options (docs/reference/options.md), every one optional to a type checker
+    and a string, as Spark passes them. A plain dict at run time: the functions that take
+    options take any mapping of them too, and a name in another case (``startinglsn``)
+    still works there, though only this spelling type-checks."""
+
+    captureInstance: str
+    connectionString: str
+    backend: str
+    sourceTimeZone: str
+    connectTimeout: str
+    lockTimeoutMs: str
+    startingLsn: str
+    maxCommitsPerBatch: str
+    numPartitions: str
+    failOnDataLoss: str
+    includeCommandId: str
+    columns: str
+    arrowBatchSize: str
+    metricsPath: str
+    schemaChangePolicy: str
+    isolationLevel: str
+    snapshotChunks: str
+    snapshotKeys: str
+    snapshotLsn: str
+    fakePath: str
+
+
 # Every option the source reads, in lower case (Spark's option names ignore case); any other
 # is warned about, since a misspelt one would silently leave its default in force.
-KNOWN_OPTIONS = frozenset(
-    {
-        "captureinstance",
-        "connectionstring",
-        "backend",
-        "sourcetimezone",
-        "connecttimeout",
-        "locktimeoutms",
-        "startinglsn",
-        "maxcommitsperbatch",
-        "numpartitions",
-        "failondataloss",
-        "includecommandid",
-        "columns",
-        "arrowbatchsize",
-        "metricspath",
-        "schemachangepolicy",
-        "isolationlevel",
-        "snapshotchunks",
-        "snapshotkeys",
-        "snapshotlsn",
-        "fakepath",
-    }
-)
+KNOWN_OPTIONS = frozenset(k.lower() for k in SourceOptions.__optional_keys__)
 
 
 def warn_unknown(options) -> str | None:
@@ -348,7 +354,7 @@ def _possible_skip(client, partition: LsnRange, min_lsn: str) -> dict:
     except Exception:  # noqa: BLE001 - recording the loss must never fail the read
         at = None
     read = f"{partition.from_lsn}..{partition.to_lsn}"
-    detail = {
+    detail: DataSkippedDetail = {
         "from": partition.from_lsn,
         "to": min_lsn,
         "certain": False,
@@ -751,8 +757,10 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 # named by the instance and where the gap starts, which a replan reproduces;
                 # M may have moved on by then, and two instances' gaps can end at the same M
                 key = f"{ci}-{lo}"
-                detail = json.dumps({"from": lo, "to": low, "certain": True})  # purged: lost
-                _write_event(self.metrics_path, "data_skipped", ci, low, ts, detail, key, **gap)
+                skip: DataSkippedDetail = {"from": lo, "to": low, "certain": True}  # purged: lost
+                _write_event(
+                    self.metrics_path, "data_skipped", ci, low, ts, json.dumps(skip), key, **gap
+                )
         return ranges
 
     @staticmethod

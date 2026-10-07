@@ -22,7 +22,7 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-from mssql_cdc.silver import _absent, _bound, _range_key
+from mssql_cdc.silver import _absent, _bound, _Chunk, _range_key
 
 BIGINT = 2**63 - 1
 INTEGRAL = [ByteType(), ShortType(), IntegerType(), LongType()]  # bound as BIGINT
@@ -115,7 +115,7 @@ def _stubs():
 )
 def test_no_range_deletes_on_a_key_of_another_type(key_type):
     spark, held = _stubs()
-    chunks = {0: (0, None, "c", STAMP), 1: (0, "c", None, STAMP)}
+    chunks = {0: _Chunk(0, None, "c", STAMP), 1: _Chunk(0, "c", None, STAMP)}
     assert _absent(spark, "silver", "k", key_type, chunks, held) is None
     assert not spark.method_calls and not held.method_calls
 
@@ -123,6 +123,6 @@ def test_no_range_deletes_on_a_key_of_another_type(key_type):
 def test_no_range_deletes_when_every_lower_bound_overflows():
     spark, held = _stubs()
     last = "9999-12-31 23:59:59.9999999"
-    chunks = {0: (0, last, None, STAMP), 1: (1, last, None, STAMP)}
+    chunks = {0: _Chunk(0, last, None, STAMP), 1: _Chunk(1, last, None, STAMP)}
     assert _absent(spark, "silver", "k", TimestampNTZType(), chunks, held) is None
     assert not spark.method_calls and not held.method_calls

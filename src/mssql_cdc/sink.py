@@ -78,6 +78,7 @@ from .migrations.facts import (
     SKIP_COMMENTS,
     WARNING_COMMENTS,
 )
+from .payloads import BatchDetail
 from .tables import is_path
 
 _log = logging.getLogger(__name__)
@@ -542,7 +543,7 @@ def delta_sink(
                     duration_ms=duration_ms,
                     **_headroom(folded.get("retention_watermark_ts"), position),
                     ingestion_lag_seconds=_lag(folded.get("source_max_commit_ts"), position),
-                    detail=json.dumps({"warnings": warnings}) if warnings else None,
+                    detail=json.dumps(BatchDetail(warnings=warnings)) if warnings else None,
                     target=target,
                     written_at=_utc_now(),
                 )
