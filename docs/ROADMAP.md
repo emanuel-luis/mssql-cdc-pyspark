@@ -46,12 +46,12 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 
 ## 0.2.2 (patch): time and reconcile
 
-- [ ] DST fall-back: `commit_ts` can go backwards in a named zone; resolve the overlap by
+- [x] DST fall-back: `commit_ts` can go backwards in a named zone; resolve the overlap by
       LSN order.
-- [ ] Pre-2022 fixed-offset fallback (`sourceTimeZone=auto` before SQL Server 2022): driver
+- [x] Pre-2022 fixed-offset fallback (`sourceTimeZone=auto` before SQL Server 2022): driver
       and executors disagree after a DST change; refresh the offset per batch.
-- [ ] `reconcile` reports stream lag as `MISMATCH` where it is `IN_FLIGHT`.
-- [ ] `reconcile`'s join misses a change of a NULL key; join null-safe.
+- [x] `reconcile` reports stream lag as `MISMATCH` where it is `IN_FLIGHT`.
+- [x] `reconcile`'s join misses a change of a NULL key; join null-safe.
 
 ## 0.3.0 (minor, Breaking): API shape
 

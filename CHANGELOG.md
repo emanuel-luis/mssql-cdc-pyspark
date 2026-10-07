@@ -12,6 +12,37 @@ compatibility" line.
 
 ## [Unreleased]
 
+State compatibility: unchanged from 0.2.1 (offsets keep their format; no migration, no new
+event value).
+
+### Fixed
+
+- With a named source time zone that has daylight saving (`sourceTimeZone`, or `auto` on
+  SQL Server 2022), commits in the hour a fall-back repeats now keep commit order. SQL
+  Server's `AT TIME ZONE` reads a repeated time with the offset before the change, so
+  commits made after the clock went back got commit times an hour early, behind the commits
+  before them, and their rows could land in periods `finalized_until` had already declared
+  final. Those commits now get the offset after the change
+  ([ADR 0008](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0008-detect-source-time-zone/)
+  amendment 4).
+- Before SQL Server 2022 (`sourceTimeZone=auto`, fixed-offset fallback), the driver now
+  reads the server's UTC offset again for each new batch instead of once per run, and sends
+  it with the batch. A long run follows a daylight-saving change from its next batch, and a
+  batch's end offset and rows use the same offset. A warning is logged when the offset
+  changes.
+- `reconcile()` no longer reports stream lag as an integrity failure. A difference explained
+  by a change the stream has not read yet is now `IN_FLIGHT`, not `MISMATCH`,
+  `MISSING_TARGET`, `MISSING_SOURCE` or `RECORD_DIFF`. Once the source is read, it reads the
+  keys in the change table from bronze's position up to `sys.fn_cdc_get_max_lsn()` read
+  then, through the capture instances the stream reads. This is the change table the stream
+  already reads, so no new grant is needed. Only a commit the capture job has not harvested
+  yet stays unseen
+  ([ADR 0028](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0028-chunked-snapshot-next-to-the-stream/)
+  amendment 2).
+- `reconcile()` now finds a change to a key whose value is NULL (the join is null-safe), so
+  that key's difference is `IN_FLIGHT` instead of `RECORD_DIFF` or `MISSING_*`. The report's
+  `key` now names it, `{"code":null}`, instead of `{}`.
+
 ## [0.2.1] - 2026-10-06
 
 State compatibility: unchanged from 0.2.0 (no migration, no new event value).
