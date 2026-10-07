@@ -82,7 +82,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
       backfill, recovery) into packages without changing behaviour.
 - [x] One place for the facts event protocol, shared by its writers and readers
       (`mssql_cdc.events`).
-- [ ] Property-based tests (Hypothesis) for LSN math, plan tiling and change ordering; one
+- [x] Property-based tests (Hypothesis) for LSN math, plan tiling and change ordering; one
       mutation-testing pass on the core modules, results recorded.
 
 ## 0.5.0 (minor): faster first import

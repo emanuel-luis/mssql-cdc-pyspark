@@ -108,3 +108,22 @@ enable_error_code = ["ignore-without-code"]
 # pyspark, delta and mssql_python ship py.typed; these do not.
 module = ["pyarrow.*", "arrow_odbc.*"]
 ignore_missing_imports = true
+
+[tool.mutmut]
+# A mutation-testing pass over the pure core (docs/DEVELOPMENT.md): mutmut is no dependency,
+# `uv run --with mutmut==3.8.0 mutmut run <globs>` runs it on Linux, macOS or WSL.
+source_paths = ["src"]
+only_mutate = [
+  "src/mssql_cdc/lsn.py",
+  "src/mssql_cdc/client/_planning.py",
+  "src/mssql_cdc/client/_validators.py",
+  "src/mssql_cdc/silver.py",
+  "src/mssql_cdc/reconcile.py",
+]
+also_copy = ["docs", "CHANGELOG.md"]  # read by test_docs_options.py and test_package.py
+# The tests that start no JVM, less the one that scans the source text: it would read the
+# mutants' strings as options.
+pytest_add_cli_args_test_selection = [
+  "-m", "not spark and not sqlserver", "tests",
+  "--deselect", "tests/test_docs_options.py::test_every_option_the_code_reads_is_known",
+]

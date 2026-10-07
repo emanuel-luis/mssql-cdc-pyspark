@@ -28,6 +28,10 @@ compatibility" line.
   joins the dev group, pinned by `uv.lock`): LSN round trips, canonical form and order;
   chunk plans tiling random key distributions; each key's latest image in silver whatever
   the order of its change rows; the spellings a boolean option takes. Behaviour is unchanged.
+- Tests: one mutation-testing pass (mutmut, configured in `pyproject.toml` and run through
+  `uv run --with`, not a dependency) over the LSN helpers, chunk planning, validators and
+  the pure silver and reconcile helpers, and tests for the gaps it found; scores and the
+  equivalent mutants are in the development guide. Behaviour is unchanged.
 
 ## [0.4.0] - 2026-10-07
 

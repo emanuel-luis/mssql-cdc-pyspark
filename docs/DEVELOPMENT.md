@@ -159,6 +159,79 @@ add `and not sqlserver` to it, or the run starts SQL Server containers.
   `test_fake_parity.py` applies one history to SQL Server and to the fake and compares
   what the source reads from each, so the fake the unit tests run on stays true to CDC.
 
+## Mutation testing
+
+[mutmut](https://github.com/boxed/mutmut) makes one small change to the code at a time (a
+mutant) and runs the tests that reach it: a mutant the tests still pass is a change they
+would not notice. One pass covers the pure core: `lsn.py`, the chunk planning
+(`client/_planning.py`), the validators of what is inlined into T-SQL
+(`client/_validators.py`), and the helpers of `silver.py` and `reconcile.py` that the tests
+without a JVM cover. The config is `[tool.mutmut]` in `pyproject.toml`; mutmut is not a
+dependency. It forks, so it runs on Linux, macOS or WSL, and it copies the tree to `mutants/`
+(gitignored): run it in a clone on a local disk.
+
+```bash
+uv run --with mutmut==3.8.0 mutmut run 'mssql_cdc.lsn.*' 'mssql_cdc.client._planning.*' \
+  'mssql_cdc.client._validators.*' 'mssql_cdc.silver.x__bound__*' \
+  'mssql_cdc.silver.x__range_key__*' 'mssql_cdc.reconcile.x__bound__*' \
+  'mssql_cdc.reconcile.x__report_row__*' 'mssql_cdc.reconcile.x__sample__*' \
+  'mssql_cdc.reconcile.x__merge_buckets__*' 'mssql_cdc.reconcile.x__tiling_failures__*' \
+  'mssql_cdc.reconcile.x__unread__*'
+uv run --with mutmut==3.8.0 mutmut results    # the survivors; mutmut show <name> shows one
+```
+
+The globs keep the run to those functions. Left out: the rest of `silver.py` and
+`reconcile.py` (`_absent` past its early returns too), which needs Spark, and the tests that
+start a JVM, the latest-image property among them. The tests are the JVM-free loop
+(`-m "not spark and not sqlserver"`) less `test_every_option_the_code_reads_is_known`, which
+scans the source text and would read the mutants' strings as options.
+
+The pass of 2026-10-07 (mutmut 3.8.0, Python 3.13 on WSL, under 5 minutes on 16 cores): 879
+mutants, 805 killed (3 by a timeout), 74 survived, a score of 91.6%. Tests added for the 50
+that were real gaps kill them when the survivors run again; the 24 left are equivalent.
+
+| Module | Mutants | Survived the pass | Survive now | Score now |
+|---|---:|---:|---:|---:|
+| `lsn.py` | 58 | 3 | 0 | 100% |
+| `client/_planning.py` | 366 | 56 | 15 | 95.9% |
+| `client/_validators.py` | 35 | 1 | 0 | 100% |
+| `silver.py`: `_bound`, `_range_key` | 52 | 3 | 3 | 94.2% |
+| `reconcile.py`: `_bound`, `_report_row`, `_sample`, `_merge_buckets`, `_tiling_failures`, `_unread` | 368 | 11 | 6 | 98.4% |
+| Total | 879 | 74 | 24 | 97.3% |
+
+The survivors that mattered, each killed now:
+
+* Chunk planning dropped the source's schema, the capture instance, the key types or the
+  backfill's isolation on the way to a read, or wrote a `datetime` key's bounds with 6
+  digits (`CAST` to `datetime` reads 3); the fake ignores all of them.
+  `test_every_planning_read_takes_the_source_capture_instance_key_types_and_isolation` pins
+  them, and the whole-table plan of a table with no unique index or a key no bound is bound
+  as, and a key after MAX that reads back as MAX.
+* An integer plan that does not count a slice 2 wide again, does not clamp a finer slice to
+  its slice's start, or writes float bounds: two explicit examples and an integer check in
+  `test_an_integer_plan_tiles_the_keys_up_to_max`.
+* A capture instance of 100 characters, a sysname's length, refused.
+* `reconcile`: a moved key at the first bucket's start, an open chunked snapshot with no
+  chunk row yet, and a failure after a missing chunk, which `break` for `continue` hid.
+* The messages of the LSN errors.
+
+The equivalent ones, left as they are:
+
+* `cast("list[str]", ...)` with another type or `None` (6): `cast` does nothing at run time.
+* `_int_chunks`: the end of a slice when `cut` has none (4), which never happens; a grid
+  computed over one key more, and counting again a slice of exactly `chunk_rows` rows (2):
+  both change how finely a key is counted, not how the plan tiles it.
+* `snapshot_plan`: `(hi,)` for a NULL MAX, and reading the key types for it (2): MAX stays
+  NULL.
+* `_json_key`: `t or "XXXX"` for `t or ""` (1): neither is a `datetime` type.
+* `silver._bound`: `replace(" ", "T")` changed (2), which `fromisoformat` does not need (it
+  takes any separator), and `strip("XX0XX")` (1), which strips the same digits.
+* `_merge_buckets`: a fine bucket missing on one side counted as 1 row, not 0 (2): the other
+  side holds at least one, so the larger is the same.
+* `_tiling_failures`: `default=-2` (1): with no chunk, the range is empty either way.
+* `_unread`: `include_command_id` None or True, and batches of 100,001 rows (3): the keys are
+  the last columns either way.
+
 ## Lint, format, types
 
 ```bash
