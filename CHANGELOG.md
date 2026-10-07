@@ -24,6 +24,10 @@ compatibility" line.
   Code moved only: every name imports from `mssql_cdc.pipeline` as before
   (`mssql_cdc.sink.write_event` too), the `mssql_cdc.pipeline` logger keeps its name, and
   every facts row and query result is the same.
+- Tests: `tests/test_properties.py` checks properties over inputs Hypothesis generates (it
+  joins the dev group, pinned by `uv.lock`): LSN round trips, canonical form and order;
+  chunk plans tiling random key distributions; each key's latest image in silver whatever
+  the order of its change rows; the spellings a boolean option takes. Behaviour is unchanged.
 
 ## [0.4.0] - 2026-10-07
 

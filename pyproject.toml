@@ -41,6 +41,7 @@ arrow-odbc = ["arrow-odbc>=10"]
 dev = [
     "pytest>=8",
     "pytest-timeout>=2",
+    "hypothesis>=6.168.5",
     "pyspark>=4.2",
     "delta-spark>=4.4",
     "faker>=30",

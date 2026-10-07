@@ -144,6 +144,11 @@ add `and not sqlserver` to it, or the run starts SQL Server containers.
 * `tests/test_source_fake.py` is the main safety net: real Spark streaming,
   simulated SQL Server.
 * `tests/test_client_sql.py` pins generated T-SQL.
+* `tests/test_properties.py` checks properties over inputs
+  [Hypothesis](https://hypothesis.readthedocs.io/) generates: LSN math, chunk plans tiling
+  the key space, each key's latest image in silver, the boolean options' spellings. The
+  examples are derandomized, so a failure shows again on the next run, with the smallest
+  input Hypothesis found.
 * `tests/test_delta_sink.py` needs Delta.
 * `tests/integration` starts a throwaway SQL Server 2022 with CDC and SQL Server Agent
   through [testcontainers](https://testcontainers-python.readthedocs.io/), with the

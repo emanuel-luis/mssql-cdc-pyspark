@@ -192,6 +192,27 @@ def _by_key(df: DataFrame, other: DataFrame, keys: Sequence[str], how: str) -> D
     return a.join(b, [F.col(f"a.{_q(k)}").eqNullSafe(F.col(f"b.{_q(k)}")) for k in keys], how)
 
 
+def _latest(
+    rows: DataFrame, keys: Sequence[str], columns: Sequence[str], command_id: bool
+) -> DataFrame:
+    """Each key's latest row in ``rows``, its ``columns`` and ``_operation``: the last by
+    ``(_start_lsn, _command_id, _seqval, _operation)``, without ``_command_id`` when
+    ``command_id`` is False (a bronze written with ``includeCommandId=false``)."""
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    order = [F.col("_start_lsn").desc()]
+    if command_id:
+        order.append(F.col("_command_id").desc_nulls_last())
+    order += [F.col("_seqval").desc_nulls_last(), F.col("_operation").desc()]
+    last = Window.partitionBy(*[F.col(_q(k)) for k in keys]).orderBy(*order)
+    return (
+        rows.withColumn("_mssql_cdc_rank", F.row_number().over(last))
+        .where(F.col("_mssql_cdc_rank") == 1)
+        .select(*[F.col(_q(c)) for c in columns], "_operation")
+    )
+
+
 def _bound(v: Any, key_type: DataType, lower: bool) -> int | date | datetime | None:
     """A chunk bound of the facts as a value of ``key_type`` that puts each Spark key on the
     side SQL Server put it, or past the keys it cannot; None: open. A datetime2(7) bound has
@@ -310,7 +331,6 @@ def apply_changes(
     "bronze_found"}``;
     ``bronze_found`` is False when ``bronze`` does not exist (nothing was applied).
     """
-    from pyspark.sql import Window
     from pyspark.sql import functions as F
 
     finalization._check_granularity(granularity)  # before any write, not at the verdict
@@ -499,10 +519,7 @@ def apply_changes(
                 if gone is not None:
                     rows = rows.unionByName(gone, allowMissingColumns=True)
         columns_out = [*names, "_start_lsn", "_commit_ts"]
-        order = [F.col("_start_lsn").desc()]
-        if "_command_id" in columns:
-            order.append(F.col("_command_id").desc_nulls_last())
-        else:
+        if "_command_id" not in columns:
             _warn_once(
                 "no _command_id",
                 bronze,
@@ -510,13 +527,7 @@ def apply_changes(
                 "transaction are ordered by _seqval (__$seqval)",
                 bronze,
             )
-        order += [F.col("_seqval").desc_nulls_last(), F.col("_operation").desc()]
-        last = Window.partitionBy(*[F.col(_q(k)) for k in keys]).orderBy(*order)
-        latest = (
-            rows.withColumn("_mssql_cdc_rank", F.row_number().over(last))
-            .where(F.col("_mssql_cdc_rank") == 1)
-            .select(*[F.col(_q(c)) for c in columns_out], "_operation")
-        )
+        latest = _latest(rows, keys, columns_out, "_command_id" in columns)
         values: dict[str, str | Column] = {_q(c): f"s.{_q(c)}" for c in columns_out}
         newer = "s._start_lsn > t._start_lsn"  # never an older image over a newer one
         gone_op = "(s._operation IN (1, 3))"  # a 3 outranked by no 4 of its key: the key moved

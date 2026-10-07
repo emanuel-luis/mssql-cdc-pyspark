@@ -212,6 +212,10 @@ notes/             Local only, gitignored: research notes in Portuguese (context
   output schema. The fake must keep matching real CDC semantics (see `docs/DESIGN.md`);
   when a lab check reveals a difference, fix the fake too.
 * `tests/test_client_sql.py` pins the T-SQL shape.
+* `tests/test_properties.py` checks invariants over Hypothesis-generated inputs (LSN math,
+  chunk plan tiling, silver's latest image, boolean options), derandomized and capped; all
+  but the silver one start no JVM. A new invariant of pure logic gets a property there; prove it fails by
+  breaking the code it guards once.
 * `tests/integration` runs the source against a throwaway SQL Server 2022 (testcontainers,
   server clock in `America/Sao_Paulo`). `uv run pytest -m sqlserver`; needs Docker. The
   default run deselects it. Add a test there for anything that depends on how SQL Server
