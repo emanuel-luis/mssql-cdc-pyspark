@@ -33,6 +33,7 @@ def test_fold_metrics_skips_unreadable_files_and_ends_at_the_largest_to_lsn(tmp_
         retention_watermark_ts="2026-09-25T14:00:00",
         source_max_commit_ts="2026-09-28T14:01:00",
         capture_lag_seconds=4.0,
+        warnings=["option 'maxCommitPerBatch' is not one this source reads"],
     )
     _write(
         path,
@@ -59,6 +60,8 @@ def test_fold_metrics_skips_unreadable_files_and_ends_at_the_largest_to_lsn(tmp_
         "read_mb": 3.0,
         "network_wait_ms": 8,
         "data_skipped": [],  # no partition found cleanup had run while it read
+        # the driver's, which the batch's last range carried
+        "warnings": ["option 'maxCommitPerBatch' is not one this source reads"],
     }
     # one partition did not measure its wait: a sum without it would understate the batch's
     _write(path, "early.json", to_lsn="0x00000000000000000001", seconds=0, bytes=0)
