@@ -8,12 +8,19 @@ Append only; see ``mssql_cdc.migrations``. For example::
     ]
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from .base import Migration, add_columns, set_comments
+
+if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
 
 
 # Migration 1 (2026-09-30): a stream follows a newer capture instance of its table (ADR 0023):
 # _capture_instance names the one each row came from, and _command_id is numbered per instance.
-def _capture_instance_comments(spark, table: str) -> None:
+def _capture_instance_comments(spark: SparkSession, table: str) -> None:
     from ..sink import BRONZE_COLUMN_COMMENTS, BRONZE_COMMENT
     from ..tables import delta_table
 
@@ -25,7 +32,7 @@ def _capture_instance_comments(spark, table: str) -> None:
 # Migration 2 (2026-10-02): chunked snapshots (ADR 0028). Snapshot rows say which snapshot they
 # belong to (_snapshot) and which chunk of it read them (_chunk); a chunk's rows are stamped
 # with their own LSN, so the snapshot is no longer the largest _start_lsn of operation 0.
-def _snapshot_columns(spark, table: str) -> None:
+def _snapshot_columns(spark: SparkSession, table: str) -> None:
     from ..sink import BRONZE_COLUMN_COMMENTS, BRONZE_COMMENT
 
     added = [("_snapshot", "STRING"), ("_chunk", "INT")]

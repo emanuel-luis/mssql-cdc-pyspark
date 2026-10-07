@@ -33,7 +33,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, get_args
 
-from pyspark.sql.streaming import StreamingQueryListener
+from pyspark.sql.streaming.listener import StreamingQueryListener
 
 from . import migrations
 from .migrations.control import APPLIED_COLUMNS, OPEN_COMMENTS, VERDICT_COMMENTS, WAVE_COLUMNS
@@ -41,12 +41,13 @@ from .tables import delta_table, retrying, table_ref  # noqa: F401 - table_ref r
 from .types import Granularity, Offset
 
 if TYPE_CHECKING:
-    from pyspark.sql import SparkSession
+    from pyspark.sql import Column, SparkSession
     from pyspark.sql.streaming.listener import (
         QueryProgressEvent,
         QueryStartedEvent,
         QueryTerminatedEvent,
     )
+    from pyspark.sql.streaming.query import StreamingQuery
 
 _log = logging.getLogger(__name__)
 _GRANULARITIES = get_args(Granularity)
@@ -78,19 +79,20 @@ def candidate(
     return truncate(datetime.fromisoformat(end_offset["commit_ts"]), granularity)
 
 
-def end_offset_from_progress(progress, *, source_index: int = 0) -> Offset | None:
+def end_offset_from_progress(
+    progress: Mapping[str, Any] | None, *, source_index: int = 0
+) -> Offset | None:
     """Extract the end offset from a StreamingQueryProgress (object or dict); ``source_index``
     is keyword-only."""
     if progress is None:
         return None
-    data = json.loads(progress.json) if hasattr(progress, "json") else progress
+    data: Mapping[str, Any] = json.loads(progress.json) if hasattr(progress, "json") else progress
     sources = data.get("sources") or []
     if len(sources) <= source_index:
         return None
     end = sources[source_index].get("endOffset")
-    if isinstance(end, str):
-        end = json.loads(end)
-    return end
+    offset: Offset | None = json.loads(end) if isinstance(end, str) else end  # the source's JSON
+    return offset
 
 
 CONTROL_COMMENT = (
@@ -164,7 +166,7 @@ def advance(
             ],
             "table_name STRING, cand TIMESTAMP_NTZ, end_lsn STRING, end_ts TIMESTAMP_NTZ, now TIMESTAMP_NTZ",
         )
-        changes = {
+        changes: dict[str, str | Column] = {  # as DeltaMergeBuilder takes it
             "finalized_until": "s.cand",
             "end_lsn": "s.end_lsn",
             "end_commit_ts": "s.end_ts",
@@ -237,10 +239,10 @@ class FinalizationListener(StreamingQueryListener):
         self._session, self._run_id = spark, str(run_id)
         self._control, self._table, self._granularity = control_table, table_name, granularity
         self._cond = threading.Condition()
-        self._progress: Any = None  # the newest progress not yet applied
+        self._progress: Mapping[str, Any] | None = None  # the newest progress not yet applied
         self._stopped = False
         self.last_error: Exception | None = None
-        self.failures = 0
+        self.failures: int = 0
         self._warned = 0.0  # time.monotonic() of the streak's last log
         self._worker = threading.Thread(
             target=self._run, name=f"mssql-cdc-finalization {table_name}", daemon=True
@@ -257,7 +259,7 @@ class FinalizationListener(StreamingQueryListener):
         if str(event.runId) == self._run_id:
             self._stop()
 
-    def _offer(self, progress) -> None:
+    def _offer(self, progress: Mapping[str, Any] | None) -> None:
         if progress is not None:
             with self._cond:
                 self._progress = progress
@@ -329,7 +331,7 @@ class FinalizationListener(StreamingQueryListener):
 
 def track(
     spark: SparkSession,
-    query,
+    query: StreamingQuery,
     control_table: str,
     table_name: str,
     *,

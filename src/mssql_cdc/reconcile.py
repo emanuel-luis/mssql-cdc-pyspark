@@ -58,7 +58,7 @@ import math
 import random
 import uuid
 from bisect import bisect_right
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import closing
 from datetime import date, timedelta
 from decimal import Decimal
@@ -71,6 +71,11 @@ from .tables import delta_table, table_ref
 from .types import ReconcileResult
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+    from pyspark.sql import Column, DataFrame, SparkSession
+    from pyspark.sql.types import StructField
+
+    from .client import CaptureInstance, CdcClient, SourceTable
     from .payloads import SnapshotChunkDetail
     from .source import SourceOptions
 
@@ -197,7 +202,7 @@ def _ordinal_sql(kind: str, key: str) -> str:
     return f"CAST(datediff({_q(key)}, DATE'1970-01-01') AS BIGINT)"
 
 
-def _bound(kind: str, o: int):
+def _bound(kind: str, o: int) -> int | str | None:
     """The key at ordinal ``o``, as JSON holds it: a snapshotChunks bound, a report column. A
     bucket's ends can pass a date key's range (9999-12-31): below it, its first day; above, None
     (open), which is the same rows."""
@@ -208,13 +213,15 @@ def _bound(kind: str, o: int):
     return (_EPOCH + timedelta(days=max(o, _DAYS[0]))).isoformat()
 
 
-def _latest(spark, table: str):
+def _latest(spark: SparkSession, table: str) -> tuple[int, DataFrame]:
     """``table``'s latest version and a read pinned to it."""
-    version = int(delta_table(spark, table).history(1).first()["version"])
+    latest = delta_table(spark, table).history(1).first()
+    assert latest is not None  # an existing table has a version
+    version = int(latest["version"])
     return version, spark.sql(f"SELECT * FROM {table_ref(table)} VERSION AS OF {version}")
 
 
-def _after(bronze, lower: str):
+def _after(bronze: DataFrame, lower: str) -> DataFrame:
     """``bronze``'s changes after ``lower``: what one side may not hold yet. Snapshot rows are
     no change: a chunk's stamp can be above all silver applied once it is rebuilt."""
     from pyspark.sql import functions as F
@@ -222,7 +229,14 @@ def _after(bronze, lower: str):
     return bronze.where((F.col("_operation") != 0) & (F.col("_start_lsn") > lower))
 
 
-def _unread(client, instances, keys: list[str], after: str, upper: str, target) -> set[tuple]:
+def _unread(
+    client: CdcClient,
+    instances: Sequence[CaptureInstance],
+    keys: list[str],
+    after: str,
+    upper: str,
+    target: pa.Schema,
+) -> set[tuple[Any, ...]]:
     """The keys of the changes in (``after``, ``upper``] of the change tables, as tuples of
     ``keys`` cast to ``target`` (their Arrow schema): each capture instance's piece of the
     range, as the stream reads them (ADR 0023)."""
@@ -230,7 +244,7 @@ def _unread(client, instances, keys: list[str], after: str, upper: str, target) 
 
     from .source import _BaseReader, _to_schema
 
-    found: set[tuple] = set()
+    found: set[tuple[Any, ...]] = set()
     if upper <= after:
         return found
     n = len(keys)
@@ -244,7 +258,14 @@ def _unread(client, instances, keys: list[str], after: str, upper: str, target) 
     return found
 
 
-def _moved(spark, client, instances, bronze: str, keys: list[str], lower: str):
+def _moved(
+    spark: SparkSession,
+    client: CdcClient,
+    instances: Sequence[CaptureInstance],
+    bronze: str,
+    keys: list[str],
+    lower: str,
+) -> DataFrame:
     """The keys of the changes after ``lower``, which one side may not hold yet, as a
     DataFrame of ``keys``: bronze's (its latest version), and the change table's after
     bronze's position up to ``max_lsn`` read now, which the stream has not read yet. Called
@@ -269,7 +290,7 @@ def _moved(spark, client, instances, bronze: str, keys: list[str], lower: str):
     return held.unionByName(spark.createDataFrame(list(unread), held.schema)) if unread else held
 
 
-def _report_row(row: dict) -> tuple:
+def _report_row(row: Mapping[str, Any]) -> tuple[Any, ...]:
     """``row`` as a tuple in REPORT_COLUMNS order; a key that is no column fails, rather
     than leave its column NULL."""
     unknown = row.keys() - set(_NAMES)
@@ -282,7 +303,15 @@ def _sample(rng: random.Random, items: list[int], fraction: float) -> list[int]:
     return rng.sample(items, math.ceil(fraction * len(items)))
 
 
-def _range_buckets(client, source, key, kind, target, changed, bucket_rows):
+def _range_buckets(
+    client: CdcClient,
+    source: SourceTable,
+    key: str,
+    kind: str,
+    target: DataFrame,
+    changed: Callable[[], DataFrame],
+    bucket_rows: int,
+) -> tuple[list[dict[str, Any]], Column]:
     """Tier 1 for an integer or date key: buckets of about ``bucket_rows`` rows, as dicts of
     ordinals ``lo``/``hi`` [lo, hi), (rows, key_sum) of ``source``/``silver``, ``moved`` (a
     key of ``changed()``, called after the count, is in it) and the ``fine`` bucket ids it
@@ -293,7 +322,9 @@ def _range_buckets(client, source, key, kind, target, changed, bucket_rows):
     o = F.expr(sql)
     lo, hi = client.key_range(source.schema, source.table, key)
     # silver's of the raw column, which Delta can answer from its file stats
-    low, high = target.agg(F.min(F.col(_q(key))), F.max(F.col(_q(key)))).first()
+    extent = target.agg(F.min(F.col(_q(key))), F.max(F.col(_q(key)))).first()
+    assert extent is not None  # a global aggregate always returns one row
+    low, high = extent
     ends = [v if kind == "int" else (v - _EPOCH).days for v in (lo, hi, low, high) if v is not None]
     if not ends:  # both empty
         return [], F.lit(None)
@@ -310,20 +341,26 @@ def _range_buckets(client, source, key, kind, target, changed, bucket_rows):
     return _merge_buckets(sides, moved, width, bucket_rows), fine
 
 
-def _merge_buckets(sides: dict, moved, width: int, bucket_rows: int) -> list[dict]:
+def _merge_buckets(
+    sides: Mapping[str, Mapping[int, tuple[int, Any]]],
+    moved: Iterable[tuple[Any, ...]],
+    width: int,
+    bucket_rows: int,
+) -> list[dict[str, Any]]:
     """The fine buckets of ``sides`` (``{"source"|"silver": {fine id: (rows, key_sum)}}``)
     merged in order until each holds ``bucket_rows`` rows of the larger side, as
     ``_range_buckets`` returns them; a bucket is ``moved`` when a fine id in ``moved`` (the
     one-column rows ``collect()`` returns) falls in it."""
     ids = sorted(sides["source"].keys() | sides["silver"].keys())
-    starts, rows = [], bucket_rows
+    starts: list[int] = []
+    rows = bucket_rows
     for b in ids:
         if rows >= bucket_rows:
             starts.append(b)
             rows = 0
         rows += max(sides["source"].get(b, (0,))[0], sides["silver"].get(b, (0,))[0])
     end = ids[-1] + 1
-    buckets = [
+    buckets: list[dict[str, Any]] = [
         {"lo": a * width, "hi": z * width, "fine": [], "moved": False}
         | {side: [0, Decimal(0)] for side in sides}
         for a, z in zip(starts, [*starts[1:], end])
@@ -341,7 +378,7 @@ def _merge_buckets(sides: dict, moved, width: int, bucket_rows: int) -> list[dic
 
 
 def reconcile(
-    spark,
+    spark: SparkSession,
     options: SourceOptions | Mapping[str, Any],
     silver: str,
     *,
@@ -388,7 +425,7 @@ def reconcile(
     silver_lsn = _one(control.where(F.col("table_name") == silver).select("applied_lsn"))
     version, target = _latest(spark, silver)
 
-    def json_or_null(v) -> str | None:
+    def json_or_null(v: object) -> str | None:
         return None if v is None else json.dumps(v)
 
     with closing(make_client(options)) as client:
@@ -401,9 +438,10 @@ def reconcile(
         source_lsn = client.max_lsn() or ZERO_LSN  # M, before the source is read
         lower = min(source_lsn, silver_lsn or ZERO_LSN)
 
-        def changed(after: str = lower):  # called once the source is read
+        def changed(after: str = lower) -> DataFrame:  # called once the source is read
             return _moved(spark, client, instances, bronze, keys, after)
 
+        parts: list[tuple[object, object]]  # each bucket's [lo, hi), JSON bounds
         if kind:
             found, fine = _range_buckets(
                 client, source, keys[0], kind, target, changed, bucket_rows
@@ -413,7 +451,7 @@ def reconcile(
             rows = client.key_buckets(source.schema, source.table, None, None, 1)[0][1]
             moved = _one(changed().select(F.lit(True)))
             found = [{"source": [rows, None], "silver": [target.count(), None], "moved": moved}]
-            tiles: list | None = []  # the first key of each range after the first
+            tiles: list[object] | None = []  # the first key of each range after the first
             if rows > bucket_rows:
                 types = client.key_types(ci, keys)
                 # ponytail: NTILE reads and spools the whole key; keyset bounds if it shows up.
@@ -438,13 +476,16 @@ def reconcile(
             chosen = sorted(chosen + _sample(rng, match, sample))
         else:
             chosen = sorted(_sample(rng, list(range(len(parts))), sample))
-        failures = None
+        failures: DataFrame | None = None
         if chosen:
             read_lsn = client.max_lsn() or ZERO_LSN  # M again, before the rows are read
+            # no chunk metrics: they are backfill()'s, and a stream's directory folds them
+            read_options: dict[str, Any] = {
+                k: v for k, v in options.items() if k.lower() != "metricspath"
+            }
             rows_read = (
                 spark.read.format("mssql_cdc_snapshot")
-                # no chunk metrics: they are backfill()'s, and a stream's directory folds them
-                .options(**{k: v for k, v in options.items() if k.lower() != "metricspath"})
+                .options(**read_options)
                 .option("snapshotChunks", json.dumps([[i, *parts[i]] for i in chosen]))
                 .option("snapshotKeys", json.dumps(keys))  # the bounds' columns
                 .option("snapshotLsn", read_lsn)
@@ -474,7 +515,7 @@ def reconcile(
 
     common = {"run_id": run_id, "run_at": run_at, "silver": silver}
     common |= {"silver_version": version, "silver_lsn": silver_lsn}
-    rows_out = []
+    rows_out: list[tuple[Any, ...]] = []
     for i, b in enumerate(found):
         lo, hi = parts[i] if kind else (None, None)
         row = common | {
@@ -492,7 +533,7 @@ def reconcile(
     chunks = _chunk_checks(spark, bronze, facts_table) if facts_table else []
     rows_out += [_report_row(common | c) for c in chunks]
     report = spark.createDataFrame(rows_out, _SCHEMA)
-    counts: dict = {}
+    counts: dict[str, int] = {}
     for c in chunks:
         counts[c["failure_type"]] = counts.get(c["failure_type"], 0) + 1
     if failures is not None:
@@ -525,13 +566,20 @@ def reconcile(
     }
 
 
-def _differences(ours, theirs, keys, columns, how, moved):
+def _differences(
+    ours: DataFrame,
+    theirs: DataFrame,
+    keys: Sequence[str],
+    columns: Sequence[StructField],
+    how: str,
+    moved: DataFrame,
+) -> DataFrame:
     """The keys whose rows differ between the source's rows ``ours`` and silver's ``theirs``
     (both with ``_rc_idx``), by hash: ``key``, ``_rc_idx``, ``failure_type``, ``detail``;
     IN_FLIGHT when the key is in ``moved`` (``_moved``'s)."""
     from pyspark.sql import functions as F
 
-    def side(df, *extra):
+    def side(df: DataFrame, *extra: str) -> DataFrame:
         have = set(df.columns)
         values = [
             (F.col(_q(f.name)) if f.name in have else F.lit(None)).cast(f.dataType).alias(f.name)
@@ -540,7 +588,7 @@ def _differences(ours, theirs, keys, columns, how, moved):
         digest = F.sha2(F.to_json(F.struct(*values)), 256).alias("_rc_hash")
         return df.select(*values, digest, "_rc_idx", *extra)
 
-    def col(alias: str, name: str):
+    def col(alias: str, name: str) -> Column:
         return F.col(f"{alias}.{_q(name)}")
 
     s, t = side(ours).alias("s"), side(theirs, "_start_lsn").alias("t")
@@ -582,7 +630,7 @@ def _differences(ours, theirs, keys, columns, how, moved):
     )
 
 
-def _chunk_checks(spark, bronze: str, facts_table: str) -> list[dict]:
+def _chunk_checks(spark: SparkSession, bronze: str, facts_table: str) -> list[dict[str, Any]]:
     """The chunk rows of the report for bronze's newest chunked snapshot (see the module
     docstring): ``bucket_lo``, ``bucket_hi``, ``failure_type`` and ``detail``, one per failure."""
     from pyspark.sql import functions as F
@@ -607,14 +655,14 @@ def _chunk_checks(spark, bronze: str, facts_table: str) -> list[dict]:
         return []
     s = max(opens)  # a newer open abandons an older one
     complete = any(r["event"] in ("bootstrap", "resnapshot") and r["max_lsn"] == s for r in rows)
-    found: list[dict] = []
+    found: list[dict[str, Any]] = []
     for r in rows:
         if r["event"] == "snapshot_chunk":
             d: SnapshotChunkDetail = json.loads(r["detail"])
             if d["snapshot"] == s:
                 found.append({**d, "rows": r["rows"], "lsn": r["min_lsn"]})
     # bronze after the facts: it holds every wave they announce, whose rows commit first
-    held: dict = {}
+    held: dict[int, tuple[int, str | None]] = {}
     pinned = _latest(spark, bronze)[1] if exists(spark, bronze) else None
     if pinned is not None and "_chunk" in pinned.columns:
         snap = pinned.where((F.col("_operation") == 0) & (F.col("_snapshot") == s))
@@ -627,16 +675,21 @@ def _chunk_checks(spark, bronze: str, facts_table: str) -> list[dict]:
     return _tiling_failures(s, complete, found, held)
 
 
-def _tiling_failures(s: str, complete: bool, found: list[dict], held: dict) -> list[dict]:
+def _tiling_failures(
+    s: str,
+    complete: bool,
+    found: list[dict[str, Any]],
+    held: Mapping[int, tuple[int, str | None]],
+) -> list[dict[str, Any]]:
     """``_chunk_checks``'s rows for the snapshot at ``s``: its 'snapshot_chunk' facts rows
     ``found`` (their detail with ``rows`` and ``lsn``, the facts row's ``min_lsn``) against
     ``held``, bronze's ``{chunk: (rows, lowest _start_lsn)}``; ``complete``: a 'bootstrap' or
     'resnapshot' row closed it."""
     from collections import Counter
 
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
 
-    def fail(kind: str, i: int, chunk: dict | None, **what) -> None:
+    def fail(kind: str, i: int, chunk: Mapping[str, Any] | None, **what: object) -> None:
         lo, hi = (chunk["lo"], chunk["hi"]) if chunk else (None, None)
         out.append(
             {

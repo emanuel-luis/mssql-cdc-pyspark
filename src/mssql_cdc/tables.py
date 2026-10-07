@@ -5,8 +5,13 @@ from __future__ import annotations
 
 import random
 import time
-from collections.abc import Callable, Iterable
-from typing import TypeVar
+from collections.abc import Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, TypeAlias, TypeVar
+
+if TYPE_CHECKING:
+    from delta.tables import DeltaTable
+    from pyspark.sql import SparkSession
+    from pyspark.sql.types import DataType
 
 T = TypeVar("T")
 _RETRY_SECONDS = 60  # how long a commit that loses to concurrent ones is retried
@@ -61,7 +66,7 @@ def table_ref(name_or_path: str) -> str:
     return "delta.`" + name_or_path.replace("`", "``") + "`"
 
 
-def delta_table(spark, name_or_path: str):
+def delta_table(spark: SparkSession, name_or_path: str) -> DeltaTable:
     from delta.tables import DeltaTable
 
     if is_path(name_or_path):
@@ -69,7 +74,7 @@ def delta_table(spark, name_or_path: str):
     return DeltaTable.forName(spark, name_or_path)
 
 
-def exists(spark, name_or_path: str) -> bool:
+def exists(spark: SparkSession, name_or_path: str) -> bool:
     if is_path(name_or_path):
         from delta.tables import DeltaTable
 
@@ -77,13 +82,17 @@ def exists(spark, name_or_path: str) -> bool:
     return spark.catalog.tableExists(name_or_path)
 
 
+ColumnDef: TypeAlias = tuple[str, "str | DataType", "str | None"]
+"""A column to create: ``(name, type, comment)``; ``type`` is a DDL string or a Spark DataType."""
+
+
 def create_if_not_exists(
-    spark,
+    spark: SparkSession,
     name_or_path: str,
-    columns: Iterable[tuple],
+    columns: Iterable[ColumnDef],
     comment: str | None = None,
-    properties: dict | None = None,
-):
+    properties: Mapping[str, str] | None = None,
+) -> None:
     """``columns``: ``(name, type, comment)``; ``type`` is a DDL string or a Spark DataType.
 
     A column name Delta takes only with column mapping (a space, or one of ``,;{}()=``)
@@ -123,7 +132,7 @@ def create_if_not_exists(
         _require_mapping(spark, name_or_path, mapped)
 
 
-def _require_mapping(spark, name_or_path: str, names: list[str]) -> None:
+def _require_mapping(spark: SparkSession, name_or_path: str, names: list[str]) -> None:
     """Raise ``SchemaChangedError`` when ``names``, which Delta takes only with column
     mapping, holds a column the table lacks and the table maps no columns: a newer capture
     instance captures it, and the next append (``mergeSchema``) or ``apply_changes`` would
@@ -134,7 +143,9 @@ def _require_mapping(spark, name_or_path: str, names: list[str]) -> None:
     new = [n for n in names if n.lower() not in have]
     if not new:
         return
-    properties = table.detail().first()["properties"] or {}
+    detail = table.detail().first()
+    assert detail is not None  # DESCRIBE DETAIL returns one row
+    properties = detail["properties"] or {}
     if properties.get("delta.columnMapping.mode", "none") != "none":  # 'name' or 'id'
         return
     from .client import SchemaChangedError

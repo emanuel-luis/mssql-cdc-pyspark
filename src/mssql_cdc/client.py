@@ -24,10 +24,10 @@ import logging
 import re
 import unicodedata
 from abc import abstractmethod
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast, runtime_checkable
 
 import pyarrow as pa
 
@@ -53,7 +53,7 @@ class SchemaChangedError(RuntimeError):
     restart it to re-infer the schema (ADR 0023)."""
 
 
-def _raised(exc: BaseException, error: type) -> bool:
+def _raised(exc: BaseException, error: type[BaseException]) -> bool:
     # Raised in the data source, it reaches the caller as Spark's exception, whose text holds
     # the Python worker's traceback, ending in "mssql_cdc.client.<error>: <message>".
     return isinstance(exc, error) or f"{error.__module__}.{error.__qualname__}:" in str(exc)
@@ -171,7 +171,7 @@ def _spark_type(sql_type: str, precision: int, scale: int) -> str:
     return _SPARK_TYPES[t]
 
 
-def _sql_type(col: dict) -> str | None:
+def _sql_type(col: Mapping[str, Any]) -> str | None:
     """Declared type of a captured column (a ``sys.sp_cdc_get_captured_columns`` row), to CAST
     a bound key value to. None when a bound cannot round-trip: ``time`` comes back as Arrow
     time64[ns], which has no Python value, and a type without a Spark mapping is untested."""
@@ -194,7 +194,7 @@ def _check_type(sql_type: str) -> str:
     return sql_type
 
 
-def _text(v, sql_type: str) -> str:
+def _text(v: object, sql_type: str) -> str:
     """A key bound as text that ``CAST(? AS sql_type)`` reads back as ``v``. ISO 8601 reads the
     same under any DATEFORMAT and language; ``datetime`` takes at most 3 fractional digits."""
     if isinstance(v, datetime):
@@ -206,8 +206,13 @@ def _text(v, sql_type: str) -> str:
 
 
 def _key_select(
-    select: str, keys: Sequence[str], types, lo, hi, piece=lambda sql: sql
-) -> tuple[str, list]:
+    select: str,
+    keys: Sequence[str],
+    types: Sequence[str] | None,
+    lo: Sequence[Any] | None,
+    hi: Sequence[Any] | None,
+    piece: Callable[[str], str] = lambda sql: sql,
+) -> tuple[str, list[str]]:
     """``select`` (no WHERE) over the rows with ``lo <= (keys) < hi`` in the order ORDER BY
     sorts them: column by column, NULL first. A None bound is open. Returns the query and
     its parameters, in the order of the ``?`` marks. ``piece`` wraps each SELECT of the
@@ -230,7 +235,7 @@ def _key_select(
     ks = [f"[{_check_column(k)}]" for k in keys]
     n = len(ks)
 
-    def cmp(i: int, op: str, v) -> tuple[str, list]:  # one column against one bound value
+    def cmp(i: int, op: str, v: Any) -> tuple[str, list[str]]:  # one column against one bound
         k = ks[i]
         if v is None:  # NULL sorts first: nothing is below it, everything is at or above it
             nulls = {"=": f"{k} IS NULL", ">": f"{k} IS NOT NULL", ">=": "1 = 1", "<": "1 = 0"}
@@ -247,23 +252,24 @@ def _key_select(
                 x, params = f"CAST(? {f'COLLATE {coll} ' if coll else ''}AS {t})", [_text(v, t)]
         return (f"({k} {op} {x} OR {k} IS NULL)" if op == "<" else f"{k} {op} {x}"), params
 
-    def conj(parts, wrap=False) -> tuple[str, list]:
+    def conj(parts: list[tuple[str, list[str]]], wrap: bool = False) -> tuple[str, list[str]]:
         sql = " AND ".join(s for s, _ in parts)
         return (f"({sql})" if wrap and len(parts) > 1 else sql), [v for _, ps in parts for v in ps]
 
     p = 0  # leading values both bounds share
     while lo is not None and hi is not None and p < n - 1 and lo[p] == hi[p]:
         p += 1
-    eq = [cmp(i, "=", lo[i]) for i in range(p)]  # p > 0 only with both bounds
+    eq = [cmp(i, "=", lo[i]) for i in range(p)] if lo is not None else []  # p > 0: both bounds
 
-    def chain(bound, j: int, op: str) -> list:  # keys p..j-1 equal to bound, key j op bound
+    # keys p..j-1 equal to bound, key j op bound
+    def chain(bound: Sequence[Any], j: int, op: str) -> list[tuple[str, list[str]]]:
         return [cmp(i, "=", bound[i]) for i in range(p, j)] + [cmp(j, op, bound[j])]
 
-    def below(bound) -> tuple[str, list]:  # (keys p..) < bound, row by row
+    def below(bound: Sequence[Any]) -> tuple[str, list[str]]:  # (keys p..) < bound, row by row
         terms = [conj(chain(bound, j, "<"), wrap=True) for j in range(p, n)]
         return "(" + " OR ".join(s for s, _ in terms) + ")", [v for _, t in terms for v in t]
 
-    pieces = []  # key p: equal to lo's, between lo's and hi's, equal to hi's
+    pieces: list[list[tuple[str, list[str]]]] = []  # key p: = lo's, between lo's and hi's, = hi's
     if lo is not None:
         pieces += [
             eq + chain(lo, j, ">" if j < n - 1 else ">=") + ([below(hi)] if hi is not None else [])
@@ -276,7 +282,8 @@ def _key_select(
             eq + chain(hi, j, "<") + ([cmp(p, ">", lo[p])] if lo is not None else [])
             for j in range(p + 1, n)
         ]
-    sql, params = [], []
+    sql: list[str] = []
+    params: list[str] = []
     for part in pieces:
         where, ps = conj(part)
         sql.append(piece(f"{select} WHERE {where}" if where else select))
@@ -284,7 +291,7 @@ def _key_select(
     return " UNION ALL ".join(sql), params
 
 
-def _int_range(k: str, lo, hi, joiner: str) -> str:
+def _int_range(k: str, lo: int | None, hi: int | None, joiner: str) -> str:
     """`` <joiner> k >= lo AND k < hi`` for integer bounds, inlined (None: open); '' for none."""
     parts = [f"{k} {op} {int(v)}" for op, v in ((">=", lo), ("<", hi)) if v is not None]
     return f" {joiner} " + " AND ".join(parts) if parts else ""
@@ -308,11 +315,11 @@ def _isolated(sql: str, isolation: str | None, lock_timeout_ms: int | None = Non
     return sql if lock_timeout_ms is None else f"SET LOCK_TIMEOUT {int(lock_timeout_ms)}; " + sql
 
 
-def _json_key(values: Sequence, types) -> object:
+def _json_key(values: Sequence[Any], types: Sequence[str | None] | None) -> object:
     """A key as JSON, for a chunk bound (``snapshotChunks``, the facts' detail): a scalar for
     one column, a list for several. A value JSON has no type for becomes the text ``CAST``
     reads back (``_text``, typed by ``types``), binary its hex."""
-    out = []
+    out: list[object] = []
     for v, t in zip(values, types or [None] * len(values)):
         if not (v is None or isinstance(v, (bool, int, float, str))):
             v = "0x" + bytes(v).hex() if isinstance(v, (bytes, bytearray)) else _text(v, t or "")
@@ -320,7 +327,7 @@ def _json_key(values: Sequence, types) -> object:
     return out[0] if len(out) == 1 else out
 
 
-def _key_tuple(bound) -> tuple | None:
+def _key_tuple(bound: object) -> tuple[Any, ...] | None:
     """A chunk bound from JSON back to the key tuple ``iter_table`` takes; None: open."""
     if bound is None:
         return None
@@ -335,7 +342,7 @@ def snapshot_plan(client: CdcClient, capture_instance: str, source: SourceTable)
     ``{"kind": "keyset", "max": MAX}``; ``max`` None (an empty table, no unique index, a key
     type no bound can be bound as): one chunk, the whole table. ``plan_chunks`` cuts it."""
     s, t, keys = source.schema, source.table, source.keys
-    top: tuple | None = None
+    top: tuple[Any, ...] | None = None
     if len(keys) == 1:
         lo, hi = client.key_range(s, t, keys[0])
         if lo is not None and all(isinstance(v, int) and not isinstance(v, bool) for v in (lo, hi)):
@@ -362,7 +369,7 @@ def plan_chunks(
     extent: SnapshotExtent,
     chunk_rows: int,
     isolation: str | None = None,
-) -> list[list]:
+) -> list[list[Any]]:
     """Every chunk ``[lo, hi)`` (JSON bounds) of a chunked snapshot whose ``snapshot_plan`` is
     ``extent``, of at most about ``chunk_rows`` rows each, planned once before its first wave
     (ADR 0028). They tile the key space up to MAX: the first is open below (NULL first), each
@@ -381,9 +388,9 @@ def plan_chunks(
         return _int_chunks(client, s, t, keys[0], extent, chunk_rows, isolation)
     if extent["max"] is None:
         return [[None, None]]
-    types: list = client.key_types(capture_instance, keys)  # all set: the extent has a MAX
+    types = cast("list[str]", client.key_types(capture_instance, keys))  # all set: a MAX
     top = _key_tuple(extent["max"])
-    out: list[list] = []
+    out: list[list[Any]] = []
     lo = None
     while True:
         bound = client.key_bound(s, t, keys, types, _key_tuple(lo), top, chunk_rows, isolation)
@@ -399,12 +406,12 @@ def last_bound(
     client: CdcClient,
     capture_instance: str,
     source: SourceTable,
-    top,
+    top: object,
     isolation: str | None = None,
 ) -> object:
     """The end of a keyset plan's last chunk: the first key after MAX (``top``, as JSON) now,
     as JSON; None (open) when there is none. ``isolation``: as ``iter_table``'s."""
-    types: list = client.key_types(capture_instance, source.keys)  # all set: there is a MAX
+    types = cast("list[str]", client.key_types(capture_instance, source.keys))  # all set: a MAX
     after = client.key_bound(
         source.schema, source.table, source.keys, types, _key_tuple(top), None, 1, isolation
     )
@@ -423,7 +430,7 @@ def _int_chunks(
     extent: IntExtent,
     chunk_rows: int,
     isolation: str | None = None,
-) -> list[list]:
+) -> list[list[Any]]:
     """An integer key's chunks: its rows counted per slice of a fixed grid in one GROUP BY
     (``key_buckets``, about ``_SLICES`` slices per ``chunk_rows``), then consecutive slices
     packed into chunks of at most ``chunk_rows`` rows, so empty and sparse slices join their
@@ -431,7 +438,7 @@ def _int_chunks(
     seeks for its MIN and MAX, then a GROUP BY of its rows), down to one value a slice. Every
     bound but the last is the start of a slice holding rows: no chunk starts empty."""
 
-    def cut(a, b, lo: int, hi: int, rows: int) -> list[tuple[int, int]]:
+    def cut(a: int | None, b: int | None, lo: int, hi: int, rows: int) -> list[tuple[int, int]]:
         # (start, rows) of the slices of [a, b) holding rows, on a grid of width w over lo..hi
         n = min(_MAX_SLICES, max(1, -(-_SLICES * rows // chunk_rows)))
         w = max(1, -(-(hi - lo + 1) // n))
@@ -441,7 +448,9 @@ def _int_chunks(
             x = i * w if a is None else max(i * w, a)
             y = (i + 1) * w if b is None else min((i + 1) * w, b)
             big = count > chunk_rows and w > 1
-            inner = client.key_range(schema, table, key, x, y, isolation) if big else (None,)
+            inner: tuple[Any, ...] = (
+                client.key_range(schema, table, key, x, y, isolation) if big else (None,)
+            )
             if inner[0] is not None:
                 out += cut(x, y, inner[0], inner[1], count)
             else:
@@ -450,8 +459,9 @@ def _int_chunks(
 
     # keys above MAX are the stream's; below MIN, the first chunk's (it is open below)
     end = extent["hi"] + 1
-    bounds: list[list] = []
-    start, rows = None, 0
+    bounds: list[list[Any]] = []
+    start: int | None = None
+    rows = 0
     for x, count in cut(None, end, extent["lo"], extent["hi"], extent["rows"]):
         if rows and rows + count > chunk_rows:
             bounds.append([start, x])
@@ -474,8 +484,9 @@ class CdcClient(Protocol):
     """
 
     @abstractmethod
-    def max_lsn(self) -> Lsn:
-        """``sys.fn_cdc_get_max_lsn()``: the last LSN capture has processed."""
+    def max_lsn(self) -> Lsn | None:
+        """``sys.fn_cdc_get_max_lsn()``: the last LSN capture has processed; None (NULL) on a
+        database capture has not written to yet."""
 
     @abstractmethod
     def min_lsn(self, capture_instance: str) -> Lsn:
@@ -531,8 +542,14 @@ class CdcClient(Protocol):
 
     @abstractmethod
     def key_range(
-        self, schema: str, table: str, key: str, lo=None, hi=None, isolation: str | None = None
-    ) -> tuple:
+        self,
+        schema: str,
+        table: str,
+        key: str,
+        lo: int | None = None,
+        hi: int | None = None,
+        isolation: str | None = None,
+    ) -> tuple[Any, Any]:
         """(MIN, MAX) of ``key`` in the table; (None, None) when it is empty. ``lo``/``hi``:
         an integer key's rows in ``[lo, hi)`` only (None: open). ``isolation``: as
         ``iter_table``'s."""
@@ -542,7 +559,9 @@ class CdcClient(Protocol):
         """Declared SQL type of each key column, to CAST bounds to; None where it cannot."""
 
     @abstractmethod
-    def key_tiles(self, schema: str, table: str, keys: Sequence[str], n: int) -> list[tuple]:
+    def key_tiles(
+        self, schema: str, table: str, keys: Sequence[str], n: int
+    ) -> list[tuple[Any, ...]]:
         """The first key of tiles 2..n of the table's rows ordered by ``keys``
         (``NTILE(n)``, NULL first): the lower bounds that split it into ranges of about the
         same number of rows. Fewer when the table has fewer than ``n`` rows."""
@@ -558,7 +577,7 @@ class CdcClient(Protocol):
         lo: int | None = None,
         hi: int | None = None,
         isolation: str | None = None,
-    ) -> list[tuple]:
+    ) -> list[tuple[int, int, Decimal | None]]:
         """``(bucket, rows, key_sum)`` of the table's rows grouped by ``floor(o / width)``,
         ``o`` the key's ordinal: an integer key itself (``kind`` "int"), a date its day number
         from 1970-01-01 ("date"); ``key_sum`` sums ``o``. A NULL key is in no bucket. ``key``
@@ -574,8 +593,8 @@ class CdcClient(Protocol):
         columns: Sequence[str],
         keys: Sequence[str],
         types: Sequence[str] | None,
-        lo: tuple | None,
-        hi: tuple | None,
+        lo: tuple[Any, ...] | None,
+        hi: tuple[Any, ...] | None,
         batch_size: int,
         isolation: str | None = None,
     ) -> Iterator[pa.RecordBatch]:
@@ -591,7 +610,7 @@ class CdcClient(Protocol):
         """About how many rows the table has, from metadata, not a count."""
 
     @abstractmethod
-    def key_max(self, schema: str, table: str, keys: Sequence[str]) -> tuple | None:
+    def key_max(self, schema: str, table: str, keys: Sequence[str]) -> tuple[Any, ...] | None:
         """The last key of the table in ORDER BY's order; None when it is empty."""
 
     @abstractmethod
@@ -601,11 +620,11 @@ class CdcClient(Protocol):
         table: str,
         keys: Sequence[str],
         types: Sequence[str] | None,
-        lo: tuple | None,
-        hi: tuple | None,
+        lo: tuple[Any, ...] | None,
+        hi: tuple[Any, ...] | None,
         n: int,
         isolation: str | None = None,
-    ) -> tuple | None:
+    ) -> tuple[Any, ...] | None:
         """The key that leaves ``n`` rows in ``[lo, key)``: the (n + 1)-th of the rows with
         ``lo <= (keys) < hi`` in ORDER BY's order. None when they are ``n`` or fewer.
         ``isolation``: as ``iter_table``'s."""
@@ -699,12 +718,12 @@ _MAX_BATCH_BYTES = 64 * 1024 * 1024  # about the most an Arrow batch from either
 class MssqlPythonBackend(Backend):
     """Microsoft ``mssql-python`` driver with native Arrow fetch (>= 1.5.0)."""
 
-    def __init__(self, connection_string: str, timeout: int = 30):
+    def __init__(self, connection_string: str, timeout: int = 30) -> None:
         import mssql_python  # imported lazily: this runs on driver and executors
 
         self._conn = mssql_python.connect(connection_string, autocommit=True, timeout=timeout)
 
-    def batches(self, sql, params, batch_size):
+    def batches(self, sql: str, params: Sequence[str], batch_size: int) -> Iterator[pa.RecordBatch]:
         # batch_size is a row count; the bytes are bounded as ArrowOdbcBackend's are, so a
         # table of (max) columns does not build gigabyte batches in a Python worker
         cur = self._conn.cursor()
@@ -723,7 +742,7 @@ class MssqlPythonBackend(Backend):
         finally:
             cur.close()
 
-    def scalar(self, sql, params=()):
+    def scalar(self, sql: str, params: Sequence[str] = ()) -> Any:
         cur = self._conn.cursor()
         try:
             cur.execute(sql, tuple(params))
@@ -732,7 +751,7 @@ class MssqlPythonBackend(Backend):
         finally:
             cur.close()
 
-    def close(self):
+    def close(self) -> None:
         self._conn.close()
 
 
@@ -759,7 +778,7 @@ class ArrowOdbcBackend(Backend):
         connection_string: str,
         timeout: int = 30,
         max_bytes_per_batch: int = _MAX_BATCH_BYTES,
-    ):
+    ) -> None:
         import arrow_odbc
 
         # The same connection string as mssql-python's, which names no driver.
@@ -768,7 +787,7 @@ class ArrowOdbcBackend(Backend):
         self._conn = arrow_odbc.connect(connection_string, login_timeout_sec=timeout)
         self._max_bytes = max_bytes_per_batch
 
-    def batches(self, sql, params, batch_size):
+    def batches(self, sql: str, params: Sequence[str], batch_size: int) -> Iterator[pa.RecordBatch]:
         from arrow_odbc import TextEncoding
 
         reader = self._conn.read_arrow_batches(
@@ -788,14 +807,14 @@ class ArrowOdbcBackend(Backend):
             if batch.num_rows:
                 yield batch
 
-    def close(self):
+    def close(self) -> None:
         self._conn = None  # arrow_odbc.Connection has no close(): its __del__ disconnects
 
 
 # --------------------------------------------------------------------------- #
 # T-SQL implementation
 # --------------------------------------------------------------------------- #
-def _check_tz(name) -> str:
+def _check_tz(name: object) -> str:
     if not isinstance(name, str) or not _TZ_RE.fullmatch(name):
         raise ValueError(f"Invalid sourceTimeZone: {name!r}")
     return name
@@ -807,14 +826,14 @@ _SHIFT_HOURS = 3  # no zone moves its clock by more, or twice within them
 class SqlCdcClient(CdcClient):
     def __init__(
         self, backend: Backend, source_timezone: str = "auto", lock_timeout_ms: int | None = None
-    ):
+    ) -> None:
         self._b = backend
         self._lock_timeout_ms = lock_timeout_ms  # on every read of the source table (ADR 0029)
         self._tz = None if source_timezone.lower() == "auto" else _check_tz(source_timezone)
         self._offset_min: int | None = None  # set instead of _tz by the pre-2022 fallback
         self._resolved_table: tuple[str, str] | None = None  # (schema, table) _resolve found
         # capture_instances' cache: the kept captured column rows, the computed column names
-        self._columns: dict[tuple[str, str], tuple[list[dict], tuple[str, ...]]] = {}
+        self._columns: dict[tuple[str, str], tuple[list[dict[str, Any]], tuple[str, ...]]] = {}
 
     # -- helpers --------------------------------------------------------------
     @property
@@ -853,11 +872,11 @@ class SqlCdcClient(CdcClient):
         sign, minutes = ("+" if self._offset_min >= 0 else "-"), abs(self._offset_min)
         return f"UTC{sign}{minutes // 60:02d}:{minutes % 60:02d}"
 
-    def clock(self):
+    def clock(self) -> tuple[str | None, int | None]:
         _ = self.timezone  # resolves the zone, or the fallback's offset
         return self._tz, self._offset_min
 
-    def set_clock(self, zone, offset_min):
+    def set_clock(self, zone: str | None, offset_min: int | None) -> None:
         if zone is not None:
             self._tz = _check_tz(zone)  # inlined into the T-SQL like a configured one
         if offset_min is not None:
@@ -866,7 +885,7 @@ class SqlCdcClient(CdcClient):
     def _server_offset(self) -> int:
         return int(self._b.scalar("SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())"))
 
-    def refresh_clock(self):
+    def refresh_clock(self) -> None:
         # The pre-2022 fallback's offset only: it is the server's current one, so a run that
         # kept the first would convert with it past a daylight-saving change (ADR 0008).
         if self._tz is None and self._offset_min is not None:
@@ -954,7 +973,7 @@ class SqlCdcClient(CdcClient):
             "ORDER BY tran_end_time DESC), 0x00000000000000000000)"
         )
 
-    def _range_utc(self, from_lsn: str, to_lsn: str) -> tuple[str, list]:
+    def _range_utc(self, from_lsn: str, to_lsn: str) -> tuple[str, list[str]]:
         """_commit_ts of the change rows of [from_lsn, to_lsn] (``m``, the mapping) and its
         parameters: one DATEADD when one offset holds for the range, else row by row, and
         with the fall-back drops a commit of the range can follow (two queries here, run
@@ -965,7 +984,7 @@ class SqlCdcClient(CdcClient):
         offset = self._range_offset(from_lsn, to_lsn)
         if offset is not None:
             return self._utc("m.tran_end_time", offset_min=offset), []
-        drops: list = []
+        drops: list[str] = []
         for batch in self._b.batches(
             "SELECT CONVERT(varchar(22), x.start_lsn, 1) AS l, CONVERT(varchar(23), x.t, 126) AS t "
             "FROM (SELECT MIN(tran_end_time) AS t0 FROM cdc.lsn_time_mapping WHERE start_lsn "
@@ -1004,21 +1023,21 @@ class SqlCdcClient(CdcClient):
         )
         return None if value is None else int(value)
 
-    def _hex(self, value) -> Lsn | None:
+    def _hex(self, value: str | bytes | None) -> Lsn | None:
         return None if value is None else _lsn.normalize(value)
 
     # -- metadata -------------------------------------------------------------
-    def max_lsn(self):
+    def max_lsn(self) -> Lsn | None:
         return self._hex(self._b.scalar("SELECT CONVERT(varchar(22), sys.fn_cdc_get_max_lsn(), 1)"))
 
-    def min_lsn(self, capture_instance):
+    def min_lsn(self, capture_instance: str) -> Lsn:
         value = self._hex(
             self._b.scalar(
                 "SELECT CONVERT(varchar(22), sys.fn_cdc_get_min_lsn(?), 1)",
                 (_check_capture_instance(capture_instance),),
             )
         )
-        if value in (None, _lsn.ZERO_LSN):
+        if value is None or value == _lsn.ZERO_LSN:
             raise ValueError(
                 f"Capture instance {capture_instance!r} not found, the login lacks "
                 "permission to read it, or capture has not processed its creation yet "
@@ -1027,23 +1046,31 @@ class SqlCdcClient(CdcClient):
             )
         return value
 
-    def increment_lsn(self, lsn):
-        return self._hex(
-            self._b.scalar(
-                "SELECT CONVERT(varchar(22), sys.fn_cdc_increment_lsn(CONVERT(binary(10), ?, 1)), 1)",
-                (lsn,),
-            )
+    def increment_lsn(self, lsn: str) -> Lsn:
+        return cast(  # NULL only for a NULL lsn
+            Lsn,
+            self._hex(
+                self._b.scalar(
+                    "SELECT CONVERT(varchar(22), "
+                    "sys.fn_cdc_increment_lsn(CONVERT(binary(10), ?, 1)), 1)",
+                    (lsn,),
+                )
+            ),
         )
 
-    def decrement_lsn(self, lsn):
-        return self._hex(
-            self._b.scalar(
-                "SELECT CONVERT(varchar(22), sys.fn_cdc_decrement_lsn(CONVERT(binary(10), ?, 1)), 1)",
-                (lsn,),
-            )
+    def decrement_lsn(self, lsn: str) -> Lsn:
+        return cast(  # NULL only for a NULL lsn
+            Lsn,
+            self._hex(
+                self._b.scalar(
+                    "SELECT CONVERT(varchar(22), "
+                    "sys.fn_cdc_decrement_lsn(CONVERT(binary(10), ?, 1)), 1)",
+                    (lsn,),
+                )
+            ),
         )
 
-    def lsn_to_time(self, lsn):
+    def lsn_to_time(self, lsn: str) -> str | None:
         # The mapping's own row, as sys.fn_cdc_map_lsn_to_time reads it: None for an LSN that
         # is no commit's. Its LSN orders it in a fall-back's repeated hour (_utc).
         return self._commit_time("=", lsn)
@@ -1062,7 +1089,7 @@ class SqlCdcClient(CdcClient):
         # Checkpoints written without them still resume: fromisoformat reads both forms.
         return datetime.fromisoformat(value).isoformat(timespec="milliseconds") if value else None
 
-    def time_to_lsn(self, ts_utc):
+    def time_to_lsn(self, ts_utc: datetime) -> Lsn | None:
         # tran_end_time is in the server's clock: convert UTC to it, the inverse of _utc.
         # Whole seconds: the function takes datetime, which rounds milliseconds to 1/300 s,
         # upwards too; a later LSN would skip a commit the copy lacks, an earlier one replays.
@@ -1093,7 +1120,7 @@ class SqlCdcClient(CdcClient):
         hour_after = f"DATEADD(hour, -1, {local(f'DATEADD(hour, 1, {utc})')})"
         return f"(SELECT MIN(v) FROM (VALUES ({local(utc)}), ({hour_after})) x(v))"
 
-    def nth_commit_after(self, lsn, n):
+    def nth_commit_after(self, lsn: str, n: int) -> Lsn | None:
         n = int(n)
         if n <= 0:
             raise ValueError("n must be positive")
@@ -1106,7 +1133,9 @@ class SqlCdcClient(CdcClient):
             )
         )
 
-    def split_points(self, capture_instance, from_lsn, to_lsn, n):
+    def split_points(
+        self, capture_instance: str, from_lsn: str, to_lsn: str, n: int
+    ) -> list[tuple[Lsn, Lsn, int]]:
         # Tiles of the change table's own rows, not of cdc.lsn_time_mapping's commits: those
         # are database-wide, and on a real table they left the largest range with ~2x the
         # mean rows (ADR 0015). Each bound is the last commit LSN of its tile, so a commit
@@ -1124,23 +1153,23 @@ class SqlCdcClient(CdcClient):
             "WHERE __$start_lsn BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)"
             ") x GROUP BY g ORDER BY b"
         )
-        points: list[tuple[str, str, int]] = []
+        points: list[tuple[Lsn, Lsn, int]] = []
         for batch in self._change_table_batches(ci, sql, (from_lsn, to_lsn), 1000):
             for b, after, rows in zip(*(c.to_pylist() for c in batch.columns)):
                 points.append((_lsn.normalize(b), _lsn.normalize(after), int(rows)))
         return points
 
-    def ping(self, samples=3):
+    def ping(self, samples: int = 3) -> list[float]:
         import time
 
-        times = []
+        times: list[float] = []
         for _ in range(samples):
             t0 = time.perf_counter()
             self._b.scalar("SELECT 1")
             times.append((time.perf_counter() - t0) * 1000)
         return times
 
-    def network_wait_ms(self):
+    def network_wait_ms(self) -> int | None:
         # sys.dm_exec_session_wait_stats (2016+): a session sees its own row without
         # VIEW SERVER STATE. No row yet means no wait so far.
         try:
@@ -1152,7 +1181,7 @@ class SqlCdcClient(CdcClient):
             return None
         return int(value or 0)
 
-    def _captured_rows(self, ci: str) -> list[dict]:
+    def _captured_rows(self, ci: str) -> list[dict[str, Any]]:
         # The documented API, not cdc.captured_columns: it needs only what the query
         # functions need (SELECT on the source columns, gating role if any).
         ci = _check_capture_instance(ci)
@@ -1176,8 +1205,8 @@ class SqlCdcClient(CdcClient):
             raise ValueError(not_found)
         return sorted(rows, key=lambda r: r["column_ordinal"])
 
-    def captured_columns(self, capture_instance):
-        ddl = []
+    def captured_columns(self, capture_instance: str) -> str:
+        ddl: list[str] = []
         for r in self._captured_rows(capture_instance):
             name = _check_column(r["column_name"])
             try:
@@ -1189,10 +1218,10 @@ class SqlCdcClient(CdcClient):
             ddl.append(f"`{name.replace('`', '``')}` {typ}")
         return ", ".join(ddl)
 
-    def capture_instances(self, capture_instance):
+    def capture_instances(self, capture_instance: str) -> list[CaptureInstance]:
         rows = self._resolve(capture_instance)[1]
         computed: set[int] | None = None
-        out = []
+        out: list[CaptureInstance] = []
         for r in rows:
             # An instance's columns never change, their types do (ALTER COLUMN): cached per
             # instance and creation, so not refetched every planning; forget_columns() drops
@@ -1230,7 +1259,7 @@ class SqlCdcClient(CdcClient):
             )
         return out
 
-    def _table_columns(self, r: dict) -> list[dict]:
+    def _table_columns(self, r: Mapping[str, Any]) -> list[dict[str, Any]]:
         """``sys.columns`` rows (name, column_id, is_computed) of the source table of ``r``, a
         ``_resolve`` row. sys.columns shows the columns of a table the login can SELECT."""
         sql = (
@@ -1240,10 +1269,10 @@ class SqlCdcClient(CdcClient):
         params = (r["source_schema"], r["source_table"])
         return [c for batch in self._b.batches(sql, params, 1000) for c in batch.to_pylist()]
 
-    def forget_columns(self):
+    def forget_columns(self) -> None:
         self._columns.clear()
 
-    def ddl_history(self, capture_instance, from_lsn, to_lsn):
+    def ddl_history(self, capture_instance: str, from_lsn: str, to_lsn: str) -> list[DdlChange]:
         # The documented API, not cdc.ddl_history (invariant 11): it needs what
         # sp_cdc_get_captured_columns needs. Its ddl_lsn comes back binary, like start_lsn in
         # source_table; the few rows (one per DDL) are filtered here.
@@ -1255,7 +1284,7 @@ class SqlCdcClient(CdcClient):
             )
             for r in batch.to_pylist()
         ]
-        out = []
+        out: list[DdlChange] = []
         for r in rows:
             lsn = _lsn.normalize(r["ddl_lsn"])
             if from_lsn < lsn <= to_lsn:
@@ -1267,13 +1296,13 @@ class SqlCdcClient(CdcClient):
         # Server 2022). The last commit before it.
         return self._commit_time("<=", lsn)
 
-    def present_columns(self, capture_instance, columns):
+    def present_columns(self, capture_instance: str, columns: Sequence[str]) -> list[str]:
         # A dropped captured column stays in the capture instance; one added back under the
         # same name is another column (a new column_id), so match by column_id, not by name.
         # A column no instance captures is not read either: its change rows could only be NULL;
         # nor is a computed column, which CDC stores as NULL in every change row.
         rows = self._resolve(capture_instance)[1]
-        captured = {}
+        captured: dict[str, int] = {}
         for r in rows:  # oldest first: the newest instance capturing a column wins
             for c in self._captured_rows(r["capture_instance"]):
                 captured[c["column_name"].lower()] = c["column_id"]
@@ -1288,8 +1317,14 @@ class SqlCdcClient(CdcClient):
 
     # -- data -----------------------------------------------------------------
     def iter_changes(
-        self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size
-    ):
+        self,
+        capture_instance: str,
+        from_lsn: str,
+        to_lsn: str,
+        columns: Sequence[str],
+        include_command_id: bool,
+        batch_size: int,
+    ) -> Iterator[pa.RecordBatch]:
         # The change table itself, not cdc.fn_cdc_get_all_changes_<ci>: the function does
         # not return __$command_id (ADR 0009). Unlike the function, the table does not
         # reject a range that cleanup purged; the reader re-checks min_lsn after reading.
@@ -1314,7 +1349,7 @@ class SqlCdcClient(CdcClient):
         yield from self._change_table_batches(ci, sql, (*params, from_lsn, to_lsn), batch_size)
 
     # -- snapshot (ADR 0016) ----------------------------------------------------
-    def _resolve(self, capture_instance: str) -> tuple[dict | None, list[dict]]:
+    def _resolve(self, capture_instance: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         """The ``sys.sp_cdc_help_change_data_capture`` row of ``capture_instance`` (None when
         it is gone) and the rows of every instance of its table, oldest first.
 
@@ -1329,10 +1364,10 @@ class SqlCdcClient(CdcClient):
         """
         ci = _check_capture_instance(capture_instance)
 
-        def listing(sql: str, params=()) -> list[dict]:
+        def listing(sql: str, params: Sequence[str] = ()) -> list[dict[str, Any]]:
             return [r for b in self._b.batches(sql, params, 1000) for r in b.to_pylist()]
 
-        listed = None
+        listed: list[dict[str, Any]] | None = None
         if self._resolved_table is not None:
             try:
                 one = listing(
@@ -1356,9 +1391,10 @@ class SqlCdcClient(CdcClient):
                 f"Capture instance {ci!r} matches {names} ignoring case: pass the exact name."
             )
 
-        def table(r: dict) -> tuple[str, str]:
+        def table(r: Mapping[str, Any]) -> tuple[str, str]:
             return r["source_schema"], r["source_table"]
 
+        found: dict[str, Any] | None
         if rows:
             found, key = rows[0], table(rows[0])
         else:
@@ -1390,7 +1426,7 @@ class SqlCdcClient(CdcClient):
         self._resolved_table = key
         return found, same
 
-    def source_table(self, capture_instance):
+    def source_table(self, capture_instance: str) -> SourceTable:
         found, same = self._resolve(capture_instance)
         r = found or same[-1]  # gone: the table's newest instance
         keys = re.findall(r"\[([^\]]+)\]", r["index_column_list"] or "")  # "[a], [b]"
@@ -1405,7 +1441,15 @@ class SqlCdcClient(CdcClient):
         """A read of the source table: a snapshot's, a plan's or reconcile's (``_isolated``)."""
         return _isolated(sql, isolation, self._lock_timeout_ms)
 
-    def key_range(self, schema, table, key, lo=None, hi=None, isolation=None):
+    def key_range(
+        self,
+        schema: str,
+        table: str,
+        key: str,
+        lo: int | None = None,
+        hi: int | None = None,
+        isolation: str | None = None,
+    ) -> tuple[Any, Any]:
         t, k = f"[{_check_column(schema)}].[{_check_column(table)}]", f"[{_check_column(key)}]"
         t += _int_range(k, lo, hi, "WHERE")
         # two scalar subqueries: each is one seek on an index led by the key
@@ -1416,7 +1460,7 @@ class SqlCdcClient(CdcClient):
                 return row["lo"], row["hi"]
         return None, None
 
-    def key_types(self, capture_instance, keys):
+    def key_types(self, capture_instance: str, keys: Sequence[str]) -> list[str | None]:
         rows = self._captured_rows(capture_instance)
         by_name = {r["column_name"]: r for r in rows}
         types = [_sql_type(by_name[k]) if k in by_name else None for k in keys]
@@ -1448,7 +1492,9 @@ class SqlCdcClient(CdcClient):
                 types[i] = None
         return types
 
-    def key_tiles(self, schema, table, keys, n):
+    def key_tiles(
+        self, schema: str, table: str, keys: Sequence[str], n: int
+    ) -> list[tuple[Any, ...]]:
         # NTILE over the table's own rows, as split_points over the change table's (ADR 0015):
         # one ordered pass over the key; only the first key of each later tile comes back.
         # The helper columns take CDC's own __$ prefix, so no key column can shadow them.
@@ -1466,7 +1512,17 @@ class SqlCdcClient(CdcClient):
             for row in zip(*(c.to_pylist() for c in batch.columns))
         ]
 
-    def key_buckets(self, schema, table, key, kind, width, lo=None, hi=None, isolation=None):
+    def key_buckets(
+        self,
+        schema: str,
+        table: str,
+        key: str | None,
+        kind: str | None,
+        width: int,
+        lo: int | None = None,
+        hi: int | None = None,
+        isolation: str | None = None,
+    ) -> list[tuple[int, int, Decimal | None]]:
         # One scan (a seek with lo/hi), aggregated on the server: one row per bucket crosses
         # the network. T-SQL's integer division truncates toward zero; the CASE floors a
         # negative ordinal, so a bucket is the same range Spark computes. The __$ names cannot
@@ -1479,10 +1535,11 @@ class SqlCdcClient(CdcClient):
             )
         else:
             k = f"[{_check_column(key)}]"
-            o = {
+            ordinals: dict[str | None, str] = {
                 "int": f"CAST({k} AS bigint)",
                 "date": f"CAST(DATEDIFF(day, CAST('19700101' AS date), {k}) AS bigint)",
-            }[kind]
+            }
+            o = ordinals[kind]
             w = f"CAST({int(width)} AS bigint)"
             sql = (
                 "SELECT [__$b] AS b, COUNT_BIG(*) AS n, SUM(CAST([__$o] AS decimal(38,0))) AS s "
@@ -1496,7 +1553,18 @@ class SqlCdcClient(CdcClient):
             for row in zip(*(c.to_pylist() for c in batch.columns))
         ]
 
-    def iter_table(self, schema, table, columns, keys, types, lo, hi, batch_size, isolation=None):
+    def iter_table(
+        self,
+        schema: str,
+        table: str,
+        columns: Sequence[str],
+        keys: Sequence[str],
+        types: Sequence[str] | None,
+        lo: tuple[Any, ...] | None,
+        hi: tuple[Any, ...] | None,
+        batch_size: int,
+        isolation: str | None = None,
+    ) -> Iterator[pa.RecordBatch]:
         # READ COMMITTED, never NOLOCK: a dirty read can keep a row that a rollback then
         # removes, and no change row would ever correct it downstream.
         cols = ", ".join(f"[{_check_column(c)}]" for c in columns)
@@ -1509,7 +1577,7 @@ class SqlCdcClient(CdcClient):
         )
         yield from self._b.batches(self._source_read(sql, isolation), params, batch_size)
 
-    def row_estimate(self, schema, table):
+    def row_estimate(self, schema: str, table: str) -> int:
         # sys.sp_spaceused: public, and a lookup of the partitions' row counts, not a scan
         name = f"[{_check_column(schema)}].[{_check_column(table)}]"
         for batch in self._b.batches("EXEC sys.sp_spaceused @objname = ?", (name,), 1):
@@ -1517,7 +1585,7 @@ class SqlCdcClient(CdcClient):
                 return int(str(batch.column("rows")[0].as_py()).strip() or 0)
         return 0
 
-    def key_max(self, schema, table, keys):
+    def key_max(self, schema: str, table: str, keys: Sequence[str]) -> tuple[Any, ...] | None:
         t = f"[{_check_column(schema)}].[{_check_column(table)}]"
         k = ", ".join(f"[{_check_column(c)}]" for c in keys)
         desc = ", ".join(f"[{c}] DESC" for c in keys)
@@ -1527,7 +1595,17 @@ class SqlCdcClient(CdcClient):
                 return tuple(c[0].as_py() for c in batch.columns)
         return None
 
-    def key_bound(self, schema, table, keys, types, lo, hi, n, isolation=None):
+    def key_bound(
+        self,
+        schema: str,
+        table: str,
+        keys: Sequence[str],
+        types: Sequence[str] | None,
+        lo: tuple[Any, ...] | None,
+        hi: tuple[Any, ...] | None,
+        n: int,
+        isolation: str | None = None,
+    ) -> tuple[Any, ...] | None:
         # Each seekable piece of [lo, hi) takes its first n + 1 keys (TOP ends its seek there)
         # and the (n + 1)-th of their union is the bound: at most a few times n keys read,
         # never the range itself.
@@ -1548,7 +1626,9 @@ class SqlCdcClient(CdcClient):
                 return tuple(c[0].as_py() for c in batch.columns)
         return None
 
-    def _change_table_batches(self, ci: str, sql: str, params, batch_size: int):
+    def _change_table_batches(
+        self, ci: str, sql: str, params: Sequence[str], batch_size: int
+    ) -> Iterator[pa.RecordBatch]:
         """Batches of a query on cdc.[<ci>_CT]; a denied read names the grant it needs."""
         try:
             yield from self._b.batches(sql, params, batch_size)
@@ -1569,7 +1649,7 @@ class SqlCdcClient(CdcClient):
         exists: HAS_PERMS_BY_NAME is 0 for any object the login cannot see, a dropped one too,
         and sys.fn_cdc_get_min_lsn is 0x00 once the instance is gone."""
         try:
-            perms = self._b.scalar(
+            perms: int | None = self._b.scalar(
                 "SELECT CASE WHEN sys.fn_cdc_get_min_lsn(?) > 0x00000000000000000000 "
                 "THEN HAS_PERMS_BY_NAME(?, 'OBJECT', 'SELECT') END",
                 (ci, f"cdc.[{ci}_CT]"),
@@ -1578,14 +1658,14 @@ class SqlCdcClient(CdcClient):
             return False
         return perms == 0
 
-    def close(self):
+    def close(self) -> None:
         self._b.close()
 
 
 # --------------------------------------------------------------------------- #
 # Factory (called on the driver and inside every executor task)
 # --------------------------------------------------------------------------- #
-def make_client(options) -> CdcClient:
+def make_client(options: Mapping[str, Any]) -> CdcClient:
     opts = {k.lower(): v for k, v in dict(options).items()}
     backend = opts.get("backend", "mssql-python").lower()
     tz = opts.get("sourcetimezone", "auto")
@@ -1606,7 +1686,7 @@ def make_client(options) -> CdcClient:
     raise ValueError(f"Unknown backend {backend!r} (use mssql-python, arrow-odbc or fake)")
 
 
-def _non_negative(opts: dict, name: str, unit: str) -> int | None:
+def _non_negative(opts: Mapping[str, Any], name: str, unit: str) -> int | None:
     """Option ``name`` (``opts`` keyed in lower case) as an integer of at least 0; None when
     absent. Anything else is a ValueError naming it."""
     raw = opts.get(name.lower())

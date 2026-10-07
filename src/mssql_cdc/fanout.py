@@ -24,13 +24,14 @@ from typing import TYPE_CHECKING, Any
 from .pipeline import stream
 
 if TYPE_CHECKING:
-    from pyspark.sql.streaming import StreamingQuery
+    from pyspark.sql import SparkSession
+    from pyspark.sql.streaming.query import StreamingQuery
 
     from .source import SourceOptions
 
 
 def start_many(
-    spark,
+    spark: SparkSession,
     options: SourceOptions | Mapping[str, Any],
     capture_instances: Iterable[str] | Mapping[str, SourceOptions | Mapping[str, Any]],
     *,
@@ -38,7 +39,7 @@ def start_many(
     app_id: str,
     checkpoint: str,
     facts_table: str | None = None,
-    **to_delta_kwargs,
+    **to_delta_kwargs: Any,
 ) -> dict[str, StreamingQuery]:
     """Start one ``to_delta`` stream per capture instance; returns the queries by capture
     instance, in the order given.

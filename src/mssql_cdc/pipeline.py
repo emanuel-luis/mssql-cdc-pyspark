@@ -59,7 +59,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -69,8 +69,8 @@ from uuid import uuid4
 from .types import BackfillState, BackfillStatus, Isolation, Offset, OnDataLoss, SnapshotMode
 
 if TYPE_CHECKING:
-    from pyspark.sql import Row, SparkSession
-    from pyspark.sql.streaming import StreamingQuery
+    from pyspark.sql import Column, DataFrame, Row, SparkSession
+    from pyspark.sql.streaming.query import StreamingQuery
 
     from .client import CdcClient, SourceTable
     from .payloads import (
@@ -102,7 +102,7 @@ _SNAPSHOT_FACTS = (
 )
 
 
-def _opt(options: Mapping[str, Any], key: str):
+def _opt(options: Mapping[str, Any], key: str) -> Any:
     return next((v for k, v in options.items() if k.lower() == key.lower()), None)
 
 
@@ -124,16 +124,17 @@ def _generation(checkpoint: str, app_id: str, n: int) -> tuple[str, str]:
     return os.path.join(checkpoint, "_generations", str(n)), f"{app_id}.g{n}"
 
 
-def _read_state(checkpoint: str) -> dict | None:
+def _read_state(checkpoint: str) -> dict[str, Any] | None:
     """The generation state; None is generation 0 (always, for a URI checkpoint)."""
     path = os.path.join(checkpoint, _STATE)
     if _URI.match(checkpoint) or not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        state: dict[str, Any] = json.load(fh)  # _write_state's object
+        return state
 
 
-def _write_state(checkpoint: str, state: dict) -> None:
+def _write_state(checkpoint: str, state: Mapping[str, Any]) -> None:
     path = os.path.join(checkpoint, _STATE)
     os.makedirs(checkpoint, exist_ok=True)
     with open(path + ".tmp", "w", encoding="utf-8") as fh:
@@ -150,7 +151,7 @@ def _instances(options: Mapping[str, Any], ci: str) -> list[str]:
         return sorted({ci.lower(), *(i.name.lower() for i in client.capture_instances(ci))})
 
 
-def _lost(client, ci: str, lsn: str) -> str | None:
+def _lost(client: CdcClient, ci: str, lsn: str) -> str | None:
     """When CDC no longer holds the changes right after ``lsn``, the ``min_lsn`` of the
     capture instance that should: the one the source reads them from (ADR 0023), the newest
     instance of the table starting at or before them, else the oldest. Once an older instance
@@ -165,7 +166,7 @@ def _lost(client, ci: str, lsn: str) -> str | None:
     return low if nxt < low else None
 
 
-def _family(app_id: str) -> re.Pattern:
+def _family(app_id: str) -> re.Pattern[str]:
     """The sink app_ids of ``app_id``'s stream: its generations (ADR 0018)."""
     return re.compile(re.escape(app_id) + r"(\.g\d+)?")
 
@@ -212,17 +213,18 @@ class _ChunkRead:
     """The stamp it was read under."""
 
 
-def _plan_of(rows: list, snapshot: str) -> SnapshotPlanDetail | None:
+def _plan_of(rows: list[Row], snapshot: str) -> SnapshotPlanDetail | None:
     """The detail of the 'snapshot_plan' facts row of ``snapshot`` among ``rows``, or None:
     ``{snapshot, kind, keys, chunk_rows, chunks}``, chunk i from ``chunks[i][0]`` to
     ``chunks[i][1]`` (``client.plan_chunks``)."""
     for r in rows:
         if r["event"] == "snapshot_plan" and (d := json.loads(r["detail"]))["snapshot"] == snapshot:
-            return d
+            plan: SnapshotPlanDetail = d
+            return plan
     return None
 
 
-def _earlier_wave(spark, target: str, key: str, wave: int) -> WaveMetadata | None:
+def _earlier_wave(spark: SparkSession, target: str, key: str, wave: int) -> WaveMetadata | None:
     """The userMetadata of the commit that appended wave ``wave`` of ``key`` to ``target``,
     from its history; None once log cleanup has dropped it."""
     from pyspark.sql import functions as F
@@ -231,19 +233,21 @@ def _earlier_wave(spark, target: str, key: str, wave: int) -> WaveMetadata | Non
 
     found = delta_table(spark, target).history().where(F.col("userMetadata").contains(key))
     for (meta,) in found.select("userMetadata").collect():
-        earlier = json.loads(meta)
+        earlier: WaveMetadata = json.loads(meta)
         if earlier.get("backfill") == key and earlier.get("wave") == wave:
             return earlier
     return None
 
 
-def _version(spark, target: str) -> int:
+def _version(spark: SparkSession, target: str) -> int:
     from .tables import delta_table
 
-    return int(delta_table(spark, target).history(1).first()["version"])
+    latest = delta_table(spark, target).history(1).first()
+    assert latest is not None  # an existing table has a version
+    return int(latest["version"])
 
 
-def _last_offset(checkpoint: str) -> dict | None:
+def _last_offset(checkpoint: str) -> Offset | None:
     """The source offset of the checkpoint's last committed batch: its last processed LSN.
 
     Spark's offset log ("v1"): ``offsets/<batch>`` holds the version, the batch metadata and
@@ -263,7 +267,8 @@ def _last_offset(checkpoint: str) -> dict | None:
             f"{checkpoint}: Spark offset log version {lines[0]!r}; the "
             "on_data_loss='resnapshot' pre-flight reads only 'v1' (ADR 0018)"
         )
-    return json.loads(lines[2])
+    offset: Offset = json.loads(lines[2])  # this source's: the stream's only one
+    return offset
 
 
 class CdcStream:
@@ -271,12 +276,13 @@ class CdcStream:
         from . import register  # lazy: the package imports this module
         from .source import warn_unknown
 
-        self.spark, self.options = spark, dict(options)
+        self.spark: SparkSession = spark
+        self.options: dict[str, Any] = dict(options)
         warn_unknown(self.options)  # here, in the caller's log; the reader's goes to a worker's
         register(spark)
 
     def _capture_instance(self) -> str:
-        ci = _opt(self.options, "captureInstance")
+        ci: str | None = _opt(self.options, "captureInstance")
         if not ci:
             raise ValueError("Option 'captureInstance' is required (e.g. 'dbo_orders')")
         return ci
@@ -323,7 +329,7 @@ class CdcStream:
     def seed(
         self,
         target: str,
-        df,
+        df: DataFrame,
         as_of: str | datetime,
         *,
         app_id: str | None = None,
@@ -380,7 +386,7 @@ class CdcStream:
         with closing(make_client(self.options)) as client:
             # a computed column listed in 'columns' reads NULL in every row, a seed's too
             computed = {c.lower() for i in client.capture_instances(ci) for c in i.computed}
-            done = None
+            done: Offset | None = None
             if isinstance(as_of, datetime):
                 if as_of.tzinfo:
                     as_of = as_of.astimezone(timezone.utc).replace(tzinfo=None)
@@ -399,7 +405,7 @@ class CdcStream:
                 lsn = normalize(as_of)
             if lsn:  # a rerun's seed, even under a newer snapshot (a switch's, a reseed)
                 done = self._last_snapshot(target, ci, F.col("_start_lsn") == lsn)
-            timing: dict | None = None
+            timing: dict[str, Any] | None = None
             if done:  # a rerun: written already
                 offset, timing = done, {}
             else:
@@ -423,7 +429,7 @@ class CdcStream:
             values = {"_capture_instance": ci, "_start_lsn": lsn, "_operation": 0}
             values["_commit_ts"] = offset["commit_ts"] or None
 
-            def column(name: str):
+            def column(name: str) -> Column:
                 if name in meta:
                     return F.lit(values.get(name))
                 if name.lower() in given and name.lower() not in computed:
@@ -437,7 +443,7 @@ class CdcStream:
             self._bootstrap_event(facts_table, app_id, target, offset, timing)
         return offset
 
-    def _take_snapshot(self, target: str, ci: str) -> tuple[Offset, dict]:
+    def _take_snapshot(self, target: str, ci: str) -> tuple[Offset, dict[str, Any]]:
         """Write a new snapshot into ``target``. Returns its offset and the ``rows``,
         ``started_at`` and ``duration_ms`` of its event row in the facts table."""
         from .client import make_client
@@ -466,7 +472,14 @@ class CdcStream:
         )
         return offset, timing
 
-    def _write_snapshot(self, target: str, rows, meta: dict, started_at, t0: float) -> dict:
+    def _write_snapshot(
+        self,
+        target: str,
+        rows: DataFrame,
+        meta: Mapping[str, Any],
+        started_at: datetime,
+        t0: float,
+    ) -> dict[str, Any]:
         """Append snapshot ``rows`` to ``target`` in one commit with userMetadata ``meta``.
         Returns the ``rows``, ``started_at`` and ``duration_ms`` of its facts event row."""
         from pyspark.sql import functions as F
@@ -497,7 +510,7 @@ class CdcStream:
         }
 
     def _last_snapshot(
-        self, target: str, ci: str, where=None, chunks: bool = False
+        self, target: str, ci: str, where: Column | None = None, chunks: bool = False
     ) -> Offset | None:
         """The newest whole snapshot (or seed) of the table in ``target``, of those ``where``
         (a Column) keeps. A chunked snapshot's rows are never one: its chunks are stamped
@@ -736,7 +749,7 @@ class CdcStream:
                     kind="bootstrap",
                 )
                 return opened["lsn"]
-        timing: dict = {}
+        timing: dict[str, Any] = {}
         if offset is None:
             if facts_table:
                 self._open(
@@ -755,7 +768,7 @@ class CdcStream:
         return offset["lsn"]
 
     def _bootstrap_event(
-        self, facts_table: str, app_id: str, target: str, offset: Offset, timing: dict
+        self, facts_table: str, app_id: str, target: str, offset: Offset, timing: dict[str, Any]
     ) -> None:
         """The 'bootstrap' event of a snapshot or a seed, written once: Delta skips a rerun's,
         so a crash between the snapshot and the event only delays it."""
@@ -780,11 +793,11 @@ class CdcStream:
         app_id: str,
         checkpoint: str,
         facts_table: str,
-        state: dict | None,
+        state: dict[str, Any] | None,
         interval_days: float,
         bootstrap: bool,
         chunked: bool = False,
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         """Before the query starts: when CDC cleanup deleted changes the current generation
         has not read, re-snapshot and return the next generation's state; None otherwise.
         ``chunked``: open a chunked snapshot instead (ADR 0028); the next generation starts at
@@ -799,7 +812,7 @@ class CdcStream:
         n = state["generation"]
         spark_checkpoint, sink_id = _generation(checkpoint, app_id, n)
         # a recovery that stopped before its new state was written resumes from what it found
-        start = state.get("recovering") or _last_offset(spark_checkpoint)
+        start: Offset | None = state.get("recovering") or _last_offset(spark_checkpoint)
         if (
             start is None
             # Spark writes metadata when the query starts: seen, the first batch did not commit
@@ -950,7 +963,7 @@ class CdcStream:
         checkpoint: str,
         facts_table: str | None = None,
         *,
-        trigger: dict | None = None,
+        trigger: dict[str, Any] | None = None,
         query_name: str | None = None,
         bootstrap: bool = False,
         on_data_loss: OnDataLoss = "fail",
@@ -1173,7 +1186,7 @@ class CdcStream:
         ours = _family(app_id)
         kinds = ("snapshot_open", "snapshot_plan", "snapshot_chunk", "bootstrap", "resnapshot")
 
-        def read_facts() -> list:
+        def read_facts() -> list[Row]:
             if not exists(self.spark, facts_table):
                 return []
             facts = delta_table(self.spark, facts_table).toDF()
@@ -1470,8 +1483,8 @@ class CdcStream:
         snapshot: str,
         wave: int,
         lsn: str,
-        planned: list[list],
-        every: list[list],
+        planned: list[list[Any]],
+        every: list[list[Any]],
         client: CdcClient,
         metrics: str | None,
         isolation: str | None,
@@ -1503,7 +1516,7 @@ class CdcStream:
             # reads the wave, once: the write below takes the cached rows
             counts: dict[int, int] = dict(rows.groupBy("_chunk").count().collect())
             high = client.max_lsn()  # how far capture had got after the read: informational
-            read: dict = {}
+            read: dict[int, dict[str, Any]] = {}  # chunk -> its metrics file
             for name in _files(metrics) if metrics else []:
                 try:
                     with open(name, encoding="utf-8") as fh:
@@ -1536,7 +1549,7 @@ class CdcStream:
                 tag = self._committed(target, snapshot, tag, every) or tag
         finally:
             rows.unpersist()
-        times: dict = {}
+        times: dict[str | None, datetime | None] = {}
 
         def at(x: str | None) -> datetime | None:
             if x not in times:
@@ -1579,7 +1592,7 @@ class CdcStream:
         ]
 
     def _append_wave(
-        self, target: str, snapshot: str, rows, tag: WaveMetadata, every: list
+        self, target: str, snapshot: str, rows: DataFrame, tag: WaveMetadata, every: list[list[Any]]
     ) -> WaveMetadata:
         """Append a wave's ``rows`` to ``target`` in one commit with ``tag`` as its
         userMetadata, once per (snapshot, wave). Returns the tag of the commit that holds
@@ -1618,7 +1631,7 @@ class CdcStream:
         return earlier
 
     def _committed(
-        self, target: str, snapshot: str, tag: WaveMetadata, every: list
+        self, target: str, snapshot: str, tag: WaveMetadata, every: list[list[Any]]
     ) -> WaveMetadata | None:
         """The tag of the commit an earlier attempt of ``tag``'s wave made to ``target``
         before it stopped short of its facts rows: from the history (``_earlier_wave``) or,
@@ -1682,13 +1695,19 @@ def _chunk_detail(snapshot: str, wave: int, c: WaveChunk) -> SnapshotChunkDetail
     }
 
 
-def _snapshot_after_switch(sink, options: dict, ci: str, target: str, metrics: str):
+def _snapshot_after_switch(
+    sink: Callable[[DataFrame, int], None],
+    options: dict[str, Any],
+    ci: str,
+    target: str,
+    metrics: str,
+) -> Callable[[DataFrame, int], None]:
     """``sink``, then a snapshot of the table after the batch that first read a newer capture
     instance (``to_delta(snapshot_on_switch=True)``). Holds no session: Spark Connect pickles
     ``foreachBatch`` functions."""
     from .sink import _read_events
 
-    def write(df, batch_id):
+    def write(df: DataFrame, batch_id: int) -> None:
         switched = any(
             e.get("event") == "capture_instance_switched" for e in _read_events(metrics)[1]
         )

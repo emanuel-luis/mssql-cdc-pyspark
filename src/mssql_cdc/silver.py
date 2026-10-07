@@ -70,10 +70,12 @@ from .tables import delta_table, exists, retrying, table_ref
 from .types import ApplyResult, Granularity
 
 if TYPE_CHECKING:
-    from pyspark.sql import SparkSession
+    from pyspark.sql import Column, DataFrame, Row, SparkSession
+    from pyspark.sql.types import DataType
 
     from .payloads import SnapshotChunkDetail
     from .source import SourceOptions
+    from .tables import ColumnDef
 
 _log = logging.getLogger(__name__)
 _warned: set[tuple[str, str]] = set()  # (what, table) warned about once in this process
@@ -83,7 +85,7 @@ SILVER_COMMENT = (
     "by mssql-cdc-pyspark's apply_changes. Deleted rows are removed. How far it is applied is "
     "applied_lsn in the control table; finalized_until there says which periods are complete."
 )
-SILVER_COLUMNS = [
+SILVER_COLUMNS: list[ColumnDef] = [
     (
         "_start_lsn",
         "STRING",
@@ -101,12 +103,12 @@ def _q(name: str) -> str:
     return "`" + name.replace("`", "``") + "`"
 
 
-def _one(df):
+def _one(df: DataFrame) -> Any:
     row = df.first()
     return row[0] if row else None
 
 
-def _warn_once(what: str, table: str, message: str, *args) -> None:
+def _warn_once(what: str, table: str, message: str, *args: object) -> None:
     if (what, table) not in _warned:
         _warned.add((what, table))
         _log.warning(message, *args)
@@ -128,7 +130,7 @@ def _source_keys(capture_instance: str, options: Mapping[str, Any] | None) -> li
 
 
 def _record(
-    spark,
+    spark: SparkSession,
     control_table: str,
     target: str,
     lsn: str | None,
@@ -142,7 +144,7 @@ def _record(
         "snapshot_wave INT",
     )
     names = ("applied_lsn", "snapshot_lsn", "open_snapshot_lsn", "snapshot_wave")
-    values = {n: f"s.{n}" for n in names}
+    values: dict[str, str | Column] = {n: f"s.{n}" for n in names}
     retrying(  # trackers and other silver jobs MERGE into it too
         lambda: (
             delta_table(spark, control_table)
@@ -167,7 +169,7 @@ class _Chunk:
     """The LSN it was read under."""
 
 
-def _chunks(facts, snapshot: str) -> dict[int, _Chunk]:
+def _chunks(facts: DataFrame, snapshot: str) -> dict[int, _Chunk]:
     """The chunks of ``snapshot`` its 'snapshot_chunk' facts rows announce, by index. They
     are written after the chunks' bronze rows."""
     from pyspark.sql import functions as F
@@ -187,7 +189,7 @@ def _chunks(facts, snapshot: str) -> dict[int, _Chunk]:
     return chunks
 
 
-def _by_key(df, other, keys: Sequence[str], how: str):
+def _by_key(df: DataFrame, other: DataFrame, keys: Sequence[str], how: str) -> DataFrame:
     """``df``'s rows whose key is (``left_semi``) or is not (``left_anti``) in ``other``;
     <=>, as a unique index admits one NULL key."""
     from pyspark.sql import functions as F
@@ -196,7 +198,7 @@ def _by_key(df, other, keys: Sequence[str], how: str):
     return a.join(b, [F.col(f"a.{_q(k)}").eqNullSafe(F.col(f"b.{_q(k)}")) for k in keys], how)
 
 
-def _bound(v, key_type, lower: bool):
+def _bound(v: Any, key_type: DataType, lower: bool) -> int | date | datetime | None:
     """A chunk bound of the facts as a value of ``key_type`` that puts each Spark key on the
     side SQL Server put it, or past the keys it cannot; None: open. A datetime2(7) bound has
     100 ns digits, a key in Spark only microseconds (drivers truncate them): the keys of a
@@ -216,14 +218,21 @@ def _bound(v, key_type, lower: bool):
     return t + timedelta(microseconds=1) if lower and digits[6:].strip("0") else t
 
 
-def _range_key(keys: Sequence[str], cut) -> bool:
+def _range_key(keys: Sequence[str], cut: object) -> bool:
     """Whether chunk ranges may delete silver's keys: bounds are cut on the snapshot's key
     columns (``cut``, from its 'snapshot_open' row), so only when silver's key is that one
     column (ADR 0028)."""
     return len(keys) == 1 and cut == keys
 
 
-def _absent(spark, target: str, key: str, key_type, chunks: dict[int, _Chunk], held):
+def _absent(
+    spark: SparkSession,
+    target: str,
+    key: str,
+    key_type: DataType,
+    chunks: dict[int, _Chunk],
+    held: DataFrame,
+) -> DataFrame | None:
     """Synthetic deletes at each chunk's stamp L of the silver keys in its range [lo, hi)
     that it does not hold (``held``: its rows' keys), when their image is older than L. The
     chunk saw every commit up to L, so those keys were gone by then. Only for an integer,
@@ -242,7 +251,7 @@ def _absent(spark, target: str, key: str, key_type, chunks: dict[int, _Chunk], h
 
     if not isinstance(key_type, (IntegralType, DateType, TimestampNTZType)):
         return None
-    ranges = []
+    ranges: list[tuple[Any, Any, str]] = []
     for c in chunks.values():
         try:
             ranges.append((_bound(c.lo, key_type, True), _bound(c.hi, key_type, False), c.stamp))
@@ -350,15 +359,18 @@ def apply_changes(
             "finalized_until": finalized,
             "bronze_found": False,
         }
-    points: list = []
-    every, facts, opened, chunks = None, None, None, {}
+    points: list[str | None] = []
+    every: DataFrame | None = None
+    facts: DataFrame | None = None
+    opened: Row | None = None
+    chunks: dict[int, _Chunk] = {}
     if facts_table and exists(spark, facts_table):
         every = delta_table(spark, facts_table).toDF()
         facts = every.where(F.col("target") == bronze)
         snapshots = F.col("event").isin("bootstrap", "resnapshot")  # not the source's changes
-        newest, found = facts.agg(
-            F.max(F.when(snapshots, F.col("max_lsn"))), F.count(F.lit(1))
-        ).first()
+        counted = facts.agg(F.max(F.when(snapshots, F.col("max_lsn"))), F.count(F.lit(1))).first()
+        assert counted is not None  # a global aggregate always returns one row
+        newest, found = counted
         points.append(newest)
         if not found and ("facts", bronze) not in _warned:  # e.g. written by snapshot() alone
             _warn_once(
@@ -381,7 +393,9 @@ def apply_changes(
             )
         if opened and (points[0] is None or opened["max_lsn"] > points[0]):
             chunks = _chunks(facts, opened["max_lsn"])
-    version = int(delta_table(spark, bronze).history(1).first()["version"])
+    latest_commit = delta_table(spark, bronze).history(1).first()
+    assert latest_commit is not None  # an existing table has a version
+    version = int(latest_commit["version"])
     pinned = spark.sql(f"SELECT * FROM {table_ref(bronze)} VERSION AS OF {version}")
     # ignoring case, as SQL Server resolves the names
     instances = [capture_instance.lower()]
@@ -510,7 +524,7 @@ def apply_changes(
             .where(F.col("_mssql_cdc_rank") == 1)
             .select(*[F.col(_q(c)) for c in columns_out], "_operation")
         )
-        values = {_q(c): f"s.{_q(c)}" for c in columns_out}
+        values: dict[str, str | Column] = {_q(c): f"s.{_q(c)}" for c in columns_out}
         newer = "s._start_lsn > t._start_lsn"  # never an older image over a newer one
         gone_op = "(s._operation IN (1, 3))"  # a 3 outranked by no 4 of its key: the key moved
         merge = (
@@ -527,7 +541,7 @@ def apply_changes(
         merge.execute()
     position = max((p for p in (applied, snapshot, top) if p), default=None)
     rebuilt = snapshot if rebuild else rebuilt_from
-    progress: tuple = (None, None)
+    progress: tuple[str | None, int | None] = (None, None)
     if is_open:
         wave = max([after, *(c.wave for c in new.values())])
         progress = (s_open, wave if wave >= 0 else None)

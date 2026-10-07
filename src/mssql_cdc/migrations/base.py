@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..tables import delta_table, is_path, retrying, table_ref
+
+if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
+
+    from ..tables import ColumnDef
 
 SCHEMA_VERSION_PROPERTY = "mssql_cdc.schema_version"
 # The fewest migrations of its kind a release must know to write the table. Only a migration
@@ -20,14 +26,15 @@ _warned: set[tuple[str, int]] = set()  # (table, version) found newer than this 
 @dataclass(frozen=True)
 class Migration:
     description: str
-    apply: Callable  # (spark, name_or_path) -> None
+    apply: Callable[[SparkSession, str], None]  # (spark, name_or_path)
 
 
 def _migrations(kind: str) -> list[Migration]:
     from . import bronze, control, facts, reconcile, silver
 
     kinds = {"bronze": bronze, "control": control, "facts": facts, "reconcile": reconcile}
-    return {**kinds, "silver": silver}[kind].MIGRATIONS
+    migrations: list[Migration] = {**kinds, "silver": silver}[kind].MIGRATIONS
+    return migrations
 
 
 def current_version(kind: str) -> int:
@@ -35,7 +42,7 @@ def current_version(kind: str) -> int:
     return len(_migrations(kind))
 
 
-def migrate(spark, table: str, kind: str) -> int:
+def migrate(spark: SparkSession, table: str, kind: str) -> int:
     """Apply the migrations ``table`` has not had yet; return its version afterwards.
 
     A migration and its version stamp are two commits: one re-run after a crash between
@@ -47,9 +54,11 @@ def migrate(spark, table: str, kind: str) -> int:
     return retrying(lambda: _migrate(spark, table, kind))
 
 
-def _migrate(spark, table: str, kind: str) -> int:
+def _migrate(spark: SparkSession, table: str, kind: str) -> int:
     migrations = _migrations(kind)
-    properties = delta_table(spark, table).detail().first()["properties"] or {}
+    detail = delta_table(spark, table).detail().first()
+    assert detail is not None  # DESCRIBE DETAIL returns one row
+    properties = detail["properties"] or {}
     version = int(properties.get(SCHEMA_VERSION_PROPERTY, 0))  # unstamped = created before any
     needed = int(properties.get(MIN_VERSION_PROPERTY, 0))
     if needed > len(migrations):
@@ -80,7 +89,9 @@ def _migrate(spark, table: str, kind: str) -> int:
     return len(migrations)
 
 
-def ensure(spark, table: str, kind: str, columns, comment: str) -> None:
+def ensure(
+    spark: SparkSession, table: str, kind: str, columns: Iterable[ColumnDef], comment: str
+) -> None:
     """Create ``table`` in the latest shape of ``kind`` (stamped with its version), or
     bring an existing one up to it."""
     from ..tables import create_if_not_exists
@@ -95,7 +106,7 @@ def ensure(spark, table: str, kind: str, columns, comment: str) -> None:
     migrate(spark, table, kind)
 
 
-def add_columns(spark, table: str, columns) -> None:
+def add_columns(spark: SparkSession, table: str, columns: Iterable[ColumnDef]) -> None:
     """Add nullable ``(name, type, comment)`` columns with an empty append and
     ``mergeSchema``: a metadata-only commit; existing rows read NULL. A column the table
     already has (ignoring case, as Delta does) is skipped; with none left, nothing is written."""
@@ -119,7 +130,9 @@ def add_columns(spark, table: str, columns) -> None:
     writer.save(table) if is_path(table) else writer.saveAsTable(table)
 
 
-def set_comments(spark, table: str, columns: dict, table_comment: str | None = None) -> None:
+def set_comments(
+    spark: SparkSession, table: str, columns: Mapping[str, str], table_comment: str | None = None
+) -> None:
     """Replace the comments of existing columns ``{name: comment}``, and of the table when
     ``table_comment`` is given: metadata-only commits, for columns whose meaning changed."""
 

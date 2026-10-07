@@ -60,8 +60,9 @@ import logging
 import os
 import statistics
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
@@ -80,6 +81,11 @@ from .migrations.facts import (
 )
 from .payloads import BatchDetail
 from .tables import is_path
+
+if TYPE_CHECKING:
+    from pyspark.sql import Column, SparkSession
+
+    from .tables import ColumnDef
 
 _log = logging.getLogger(__name__)
 
@@ -142,12 +148,14 @@ BRONZE_COLUMN_COMMENTS = {
 }
 
 
-def bronze_columns(df: DataFrame) -> list[tuple]:
+def bronze_columns(df: DataFrame) -> list[ColumnDef]:
     """The bronze table's creation columns: ``df``'s fields with their comments."""
     return [(f.name, f.dataType, BRONZE_COLUMN_COMMENTS.get(f.name)) for f in df.schema]
 
 
-def bronze_rows(df: DataFrame, batch_id: int | None = None, snapshot=None) -> DataFrame:
+def bronze_rows(
+    df: DataFrame, batch_id: int | None = None, snapshot: Column | None = None
+) -> DataFrame:
     """``df`` with the columns every bronze writer adds, last and in this order: ``_batch_id``,
     ``_snapshot`` (a Column, or NULL) and ``_chunk`` (``df``'s own, else NULL)."""
     chunk = F.col("_chunk") if "_chunk" in df.columns else F.lit(None)
@@ -250,7 +258,7 @@ _FACT_FIELDS = [name for name, _, _ in FACTS_COLUMNS]
 FACTS_SCHEMA = ", ".join(f"{name} {data_type}" for name, data_type, _ in FACTS_COLUMNS)
 
 
-def _fact_tuples(rows: list[dict]) -> list[tuple]:
+def _fact_tuples(rows: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
     """Facts ``rows`` (column -> value, the rest NULL) in ``FACTS_SCHEMA``'s order. A key that
     is no column raises: projecting would drop it and write NULL."""
     unknown = sorted({k for r in rows for k in r} - set(_FACT_FIELDS))
@@ -259,7 +267,7 @@ def _fact_tuples(rows: list[dict]) -> list[tuple]:
     return [tuple(r.get(k) for k in _FACT_FIELDS) for r in rows]
 
 
-def _last_batch(spark, facts_table: str, app_id: str) -> int | None:
+def _last_batch(spark: SparkSession, facts_table: str, app_id: str) -> int | None:
     """The largest batch id ``app_id`` wrote a batch row (event NULL) for in ``facts_table``,
     an existing table; None when it wrote none."""
     from .tables import delta_table
@@ -280,7 +288,7 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def batch_facts(df: DataFrame) -> dict:
+def batch_facts(df: DataFrame) -> dict[str, Any]:
     # counts, not sums: an empty batch has 0 of each, and NULL ranges
     row = df.agg(
         F.count(F.lit(1)).alias("rows"),
@@ -297,7 +305,7 @@ def batch_facts(df: DataFrame) -> dict:
     return row.asDict()
 
 
-def _json(facts: dict) -> str:
+def _json(facts: Mapping[str, Any]) -> str:
     """Facts as the target commit's userMetadata; commit times as ISO-8601 with milliseconds."""
     return json.dumps(
         facts, separators=(",", ":"), default=lambda v: v.isoformat(timespec="milliseconds")
@@ -323,10 +331,11 @@ def _remove(names: list[str]) -> None:
             pass
 
 
-def _read_events(path: str) -> tuple[list[str], list[dict]]:
+def _read_events(path: str) -> tuple[list[str], list[dict[str, Any]]]:
     """The reader's events waiting in ``path``: the files read and their contents. An
     unreadable file is not returned, so it is never removed unfolded."""
-    names, events = [], []
+    names: list[str] = []
+    events: list[dict[str, Any]] = []
     for name in _files(path, events=True):
         try:
             with open(name, encoding="utf-8") as fh:
@@ -337,7 +346,7 @@ def _read_events(path: str) -> tuple[list[str], list[dict]]:
     return names, events
 
 
-def _event_row(event: dict, **batch) -> dict:
+def _event_row(event: Mapping[str, Any], **batch: Any) -> dict[str, Any]:
     """A facts row for one of the reader's events: in the batch that read past it, 0 rows;
     a 'data_skipped' one also has the gap (ADR 0018)."""
     ts, lost_from, lost_to = (
@@ -364,12 +373,12 @@ def _event_row(event: dict, **batch) -> dict:
     }
 
 
-def _fold_metrics(path: str) -> dict:
+def _fold_metrics(path: str) -> dict[str, Any]:
     """Fold every metrics file in ``path``: all are the current batch's (see the module doc).
     ``data_skipped``: the events of the partitions that found CDC cleanup had run while they
     read (ADR 0018), for the caller to take out as event rows; ``warnings``: the driver's,
     which the batch's last range carried, for the caller to put in the batch row's detail."""
-    picked = []
+    picked: list[dict[str, Any]] = []
     for name in _files(path):
         try:
             with open(name, encoding="utf-8") as fh:
@@ -401,7 +410,7 @@ def _fold_metrics(path: str) -> dict:
     }
 
 
-def _headroom(watermark: datetime | None, position: datetime | None) -> dict:
+def _headroom(watermark: datetime | None, position: datetime | None) -> dict[str, Any]:
     """``position``: the commit time the stream has read up to (the batch's end offset)."""
     hours = (
         None
@@ -424,7 +433,7 @@ def _write(
     version: int | None,
     metadata: str | None = None,
     merge_schema: bool = False,
-):
+) -> None:
     """Append ``df`` to ``target``; idempotent with ``app_id`` and ``version``. With
     ``merge_schema`` (bronze), a column type the table cannot take raises
     ``SchemaChangedError`` saying what to do, instead of Delta's bare "Failed to merge
@@ -474,7 +483,9 @@ def delta_sink(
     resumed = warned = False
     carried: list[str] = []  # a replayed batch's warnings: its facts row was written already
 
-    def ensure(spark, table: str, kind: str, columns, comment: str) -> None:
+    def ensure(
+        spark: SparkSession, table: str, kind: str, columns: Iterable[ColumnDef], comment: str
+    ) -> None:
         if table not in created:
             migrations.ensure(spark, table, kind, columns, comment)
             created.add(table)
@@ -564,7 +575,7 @@ def delta_sink(
 
 
 def write_event(
-    spark,
+    spark: SparkSession,
     facts_table: str,
     event: str,
     *,
@@ -614,7 +625,11 @@ def write_event(
 
 
 def write_facts(
-    spark, facts_table: str, rows: list[dict], txn_app_id: str | None, version: int
+    spark: SparkSession,
+    facts_table: str,
+    rows: list[dict[str, Any]],
+    txn_app_id: str | None,
+    version: int,
 ) -> None:
     """Append facts ``rows`` (column -> value; the rest NULL, ``written_at`` now) in one
     commit, skipped by Delta when ``txn_app_id`` already wrote ``version`` (never when None)."""

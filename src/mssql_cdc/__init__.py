@@ -1,8 +1,14 @@
 """SQL Server CDC for PySpark: a DataSource V2 streaming source plus a
 completeness ("partition finalization") signal for downstream consumers."""
 
+from __future__ import annotations
+
 import importlib.metadata
 import importlib.util
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
 
 try:
     from .client import (
@@ -40,16 +46,16 @@ try:
         ReconcileResult,
         SnapshotMode,
     )
-except ModuleNotFoundError as e:
+except ModuleNotFoundError as _missing:
     # "pyspark", or "pyspark.sql" when the parent is blocked; a PySpark that is present but
     # lacks a module (too old) keeps its own error.
-    if (e.name or "").partition(".")[0] != "pyspark" or importlib.util.find_spec("pyspark"):
+    if (_missing.name or "").partition(".")[0] != "pyspark" or importlib.util.find_spec("pyspark"):
         raise
     raise ImportError(
         "mssql_cdc needs PySpark. Run it on a Spark platform (Databricks, EMR, Dataproc, "
         'Fabric...), which ships its own, or pip install "mssql-cdc-pyspark[spark]" for a '
         "local Spark."
-    ) from e
+    ) from _missing
 
 __all__ = [
     "HAS_ADMISSION_CONTROL",
@@ -94,7 +100,7 @@ except importlib.metadata.PackageNotFoundError:  # a source tree on sys.path, no
     __version__ = "0+unknown"
 
 
-def register(spark) -> None:
+def register(spark: SparkSession) -> None:
     """Register ``format("mssql_cdc")`` (the stream) and ``format("mssql_cdc_snapshot")``
     (the tracked table's current rows) on a SparkSession.
 

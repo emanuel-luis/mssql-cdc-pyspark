@@ -59,7 +59,7 @@ def lsns(client: CdcClient, text: str) -> None:
     assert_type(normalize(text), Lsn)
     assert_type(from_int(42), Lsn)
     assert_type(ZERO_LSN, Lsn)
-    assert_type(client.max_lsn(), Lsn)
+    assert_type(client.max_lsn(), Lsn | None)  # NULL before capture's first write
     assert_type(client.increment_lsn(text), Lsn)  # any str in: an offset's, the facts'
     assert_type(client.nth_commit_after(ZERO_LSN, 1), Lsn | None)
     assert_type(client.split_points("dbo_t", text, text, 4)[0][0], Lsn)

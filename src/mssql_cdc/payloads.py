@@ -136,8 +136,8 @@ class WaveChunk(TypedDict):
     hi: Any
     last: bool
     rows: int
-    high_lsn: str
-    """``max_lsn`` after the read: informational."""
+    high_lsn: str | None
+    """``max_lsn`` after the read: informational; None when it could not be read."""
     read_seconds: float | None
     read_mb: float | None
 

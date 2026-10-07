@@ -43,7 +43,7 @@ import random
 import re
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import pairwise
@@ -74,7 +74,12 @@ except ImportError:  # pragma: no cover - older Spark
 
 
 if TYPE_CHECKING:
-    from .client import CdcClient
+    import pyarrow as pa
+    from pyspark.sql.streaming.datasource import ReadLimit
+    from pyspark.sql.types import StructType
+
+    from .client import CaptureInstance, CdcClient, DdlChange, SourceTable
+    from .lsn import Lsn
     from .payloads import DataSkippedDetail
 
 METADATA_COLUMNS = [
@@ -101,7 +106,7 @@ MIN_ROWS_PER_PARTITION = 50_000
 _log = logging.getLogger(__name__)
 
 
-def _opt(options, key: str, default=None):
+def _opt(options: Mapping[str, Any], key: str, default: Any = None) -> Any:
     lowered = {k.lower(): v for k, v in dict(options).items()}
     return lowered.get(key.lower(), default)
 
@@ -113,7 +118,7 @@ def _ddl_names(ddl: str) -> list[str]:
     """The column names of a Spark DDL list, such as ``a INT, `b c` DECIMAL(18,2)``."""
     # ponytail: cut at commas outside () and <>; one inside a backticked name or a COMMENT
     # string misplaces a piece, which matters only if that piece is a reserved name
-    names = []
+    names: list[str] = []
     for part in re.split(r",(?![^()<>]*[)>])", ddl):
         m = _DDL_NAME.match(part)
         if m and part.strip():
@@ -126,7 +131,7 @@ _BOOLEANS = {"true": True, "1": True, "yes": True, "y": True}
 _BOOLEANS |= {"false": False, "0": False, "no": False, "n": False}
 
 
-def _bool(options, name: str, default: str) -> bool:
+def _bool(options: Mapping[str, Any], name: str, default: str) -> bool:
     """Option ``name`` as a boolean, in any case; any other value is a ValueError naming it,
     so a typo such as ``ture`` never turns a guard off."""
     value = _opt(options, name, default)
@@ -136,7 +141,13 @@ def _bool(options, name: str, default: str) -> bool:
     return parsed
 
 
-def _positive_int(options, name: str, default=None, allowed="a positive integer", hint="") -> int:
+def _positive_int(
+    options: Mapping[str, Any],
+    name: str,
+    default: str | None = None,
+    allowed: str = "a positive integer",
+    hint: str = "",
+) -> int:
     """Option ``name`` as an integer of at least 1; a ValueError names it and its value."""
     value = _opt(options, name, default)
     try:
@@ -181,7 +192,7 @@ class SourceOptions(TypedDict, total=False):
 KNOWN_OPTIONS = frozenset(k.lower() for k in SourceOptions.__optional_keys__)
 
 
-def warn_unknown(options) -> str | None:
+def warn_unknown(options: Iterable[object]) -> str | None:
     """One WARNING naming the options not in ``KNOWN_OPTIONS``, returned (None when all are
     known). The readers log it where Spark runs them (a Python worker's stderr) and keep it for
     the facts; ``stream()`` logs it in the caller's process."""
@@ -240,7 +251,7 @@ def _retrying(method: _F) -> _F:
     Spark retries a failed task."""
 
     @functools.wraps(method)
-    def retried(self, *args):
+    def retried(self: _Common, *args: Any) -> Any:
         for attempt in range(_RETRIES):
             try:
                 return method(self, *args)
@@ -289,7 +300,7 @@ def _fits(old: str, new: str) -> bool:
     return False
 
 
-def union_columns(instances) -> str:
+def union_columns(instances: Iterable[CaptureInstance]) -> str:
     """Spark DDL of the columns of every capture instance (``CaptureInstance``, oldest first),
     by name in capture order, older first. A column two instances type differently takes
     the newer's type when it holds the older's values; otherwise ``SchemaChangedError``."""
@@ -297,7 +308,8 @@ def union_columns(instances) -> str:
 
     cols: dict[str, tuple[str, str, str]] = {}  # lower name -> (name, type, instance)
     for inst in instances:
-        for name, typ in zip(inst.columns, inst.column_types):
+        # every type known: _captured_columns() asks the client for the DDL first otherwise
+        for name, typ in zip(inst.columns, cast("list[str]", inst.column_types)):
             seen = cols.get(name.lower())
             if seen and not _fits(seen[1], typ):
                 raise SchemaChangedError(
@@ -311,7 +323,7 @@ def union_columns(instances) -> str:
     return ", ".join(f"`{n.replace('`', '``')}` {t}" for n, t, _ in cols.values())
 
 
-def _write_metrics(path: str, name: str, metrics: dict) -> None:
+def _write_metrics(path: str, name: str, metrics: Mapping[str, Any]) -> None:
     """One JSON per partition, ``<name>.json``; a task retry overwrites its file. Best
     effort: a metric must never fail a read."""
     target = os.path.join(path, f"{name}.json")
@@ -327,7 +339,14 @@ def _write_metrics(path: str, name: str, metrics: dict) -> None:
 
 
 def _write_event(
-    path: str, kind: str, ci: str, lsn: str, commit_ts, detail: str, key: str = "", **gap
+    path: str,
+    kind: str,
+    ci: str,
+    lsn: str,
+    commit_ts: str | None,
+    detail: str,
+    key: str = "",
+    **gap: str | None,
 ) -> None:
     """One JSON per event, for the sink to fold into the facts (ADR 0023): named by its kind
     and ``key`` (default its LSN), which a replanned batch reproduces, so it rewrites the same
@@ -344,7 +363,7 @@ def _write_event(
         _log.warning("mssql_cdc: could not write the %s event file in %s: %s", kind, path, exc)
 
 
-def _possible_skip(client, partition: LsnRange, min_lsn: str) -> dict:
+def _possible_skip(client: CdcClient, partition: LsnRange, min_lsn: str) -> dict[str, Any]:
     """The 'data_skipped' event of a range CDC cleanup reached while it was read
     (failOnDataLoss=false, ADR 0018): its changes below ``min_lsn`` may be missing, not
     certainly, so ``certain`` is false. It rides in the partition's metrics file, so a
@@ -373,19 +392,20 @@ def _possible_skip(client, partition: LsnRange, min_lsn: str) -> dict:
     }
 
 
-def _position(client, min_lsn: str, to_lsn: str) -> dict:
+def _position(client: CdcClient, min_lsn: str, to_lsn: str) -> dict[str, Any]:
     """Where the stream is once the batch's last range is read, each value best effort: what
     cleanup has deleted up to (ADR 0017), how far capture had got and how old that was when
     seen here (ADR 0020), and the commit time of the batch's end offset (ADR 0014)."""
 
-    def at(lsn):
+    def at(lsn: str) -> str | None:
         try:
             return client.lsn_to_time(lsn)
         except Exception:  # noqa: BLE001 - a metric must never fail a read
             return None
 
     try:
-        source_max = client.lsn_to_time(client.max_lsn())
+        top = client.max_lsn()  # NULL: no commit time to look up
+        source_max = client.lsn_to_time(top) if top is not None else None
         seen = datetime.now(timezone.utc).replace(tzinfo=None)  # commit times are UTC
         lag = (seen - datetime.fromisoformat(source_max)).total_seconds() if source_max else None
     except Exception:  # noqa: BLE001 - a metric must never fail a read
@@ -399,9 +419,11 @@ def _position(client, min_lsn: str, to_lsn: str) -> dict:
 
 
 _DTO = re.compile(r"(.{19})(?:\.(\d{1,7}))? ([+-]\d\d:\d\d)")
+# a schema change for the facts: (event, capture instance, LSN, commit time, detail)
+_Event = tuple[str, str, str, "str | None", str]
 
 
-def _to_schema(table, target):
+def _to_schema(table: pa.Table, target: pa.Schema) -> pa.Table:
     """Invariant 7: ``table`` cast to the Spark schema. arrow-odbc reads a ``datetimeoffset``
     as text, ``2026-09-28 13:50:01.1234567 -03:00``, which pyarrow does not parse: a TIMESTAMP
     column whose text is all in that form becomes its UTC instant first. Other text (a varchar
@@ -492,7 +514,7 @@ class MssqlCdcDataSource(DataSource):
         finally:
             client.close()
 
-    def streamReader(self, schema):
+    def streamReader(self, schema: StructType) -> DataSourceStreamReader:
         cls = MssqlCdcStreamReader if HAS_ADMISSION_CONTROL else MssqlCdcLegacyStreamReader
         return cls(dict(self.options), schema, self.default_num_partitions)
 
@@ -517,36 +539,38 @@ class MssqlCdcSnapshotDataSource(MssqlCdcDataSource):
         chunked = _opt(self.options, "snapshotChunks")
         return super().schema() + (", _chunk INT" if chunked else "")
 
-    def reader(self, schema):
+    def reader(self, schema: StructType) -> MssqlCdcSnapshotReader:
         return MssqlCdcSnapshotReader(dict(self.options), schema, self.default_num_partitions)
 
 
 class _Common:
     """What the stream and snapshot readers share: options, the schema, a lazy client."""
 
-    def __init__(self, options: dict, schema, default_num_partitions: int | None = None):
+    def __init__(
+        self, options: dict[str, str], schema: StructType, default_num_partitions: int | None = None
+    ) -> None:
         self.options = options
         unknown = warn_unknown(options)
         # warnings the driver logged that no planned batch has taken to the facts yet (_warn)
         self._warnings = [unknown] if unknown else []
-        self.capture_instance = _opt(options, "captureInstance")
+        self.capture_instance: str = _opt(options, "captureInstance")
         if not self.capture_instance:
             raise ValueError("Option 'captureInstance' is required (e.g. 'dbo_orders')")
-        self.include_command_id = _bool(options, "includeCommandId", "true")
-        self.fail_on_data_loss = _bool(options, "failOnDataLoss", "true")
+        self.include_command_id: bool = _bool(options, "includeCommandId", "true")
+        self.fail_on_data_loss: bool = _bool(options, "failOnDataLoss", "true")
         num_partitions = str(_opt(options, "numPartitions", "auto")).strip().lower()
         # auto: the session's cores (register()), else this driver node's CPUs. Each
         # partition opens its own connection to SQL Server.
-        self.num_partitions = (
+        self.num_partitions: int = (
             max(1, default_num_partitions or os.cpu_count() or 1)
             if num_partitions == "auto"
             else _positive_int(options, "numPartitions", allowed="'auto' or a positive integer")
         )
         # at least 1: with 0, mssql-python can return an empty first batch and read nothing
-        self.batch_size = _positive_int(options, "arrowBatchSize", "10000")
+        self.batch_size: int = _positive_int(options, "arrowBatchSize", "10000")
         # optional: a directory (local or FUSE, e.g. /Volumes/...) where each partition leaves
         # its metrics for delta_sink(metrics_path=...) to fold into the batch facts
-        self.metrics_path = _opt(options, "metricsPath")
+        self.metrics_path: str | None = _opt(options, "metricsPath")
         if self.metrics_path and re.match(r"[A-Za-z][A-Za-z0-9+.-]+:/", self.metrics_path):
             # written with open(): s3://m would make a local 's3:' directory on each node
             raise ValueError(
@@ -557,12 +581,12 @@ class _Common:
         policy = str(_opt(options, "schemaChangePolicy", "classify")).strip().lower()
         if policy not in SCHEMA_CHANGE_POLICIES:
             raise ValueError(f"schemaChangePolicy must be 'classify' or 'fail', not {policy!r}")
-        self.schema_change_policy = policy
-        self.explicit_columns = bool(_opt(options, "columns"))
+        self.schema_change_policy: str = policy
+        self.explicit_columns: bool = bool(_opt(options, "columns"))
         meta_names = {n for n, _ in METADATA_COLUMNS}
-        self.field_names = list(schema.fieldNames())
-        self.source_columns = [f for f in self.field_names if f not in meta_names]
-        self.schema = schema
+        self.field_names: list[str] = list(schema.fieldNames())
+        self.source_columns: list[str] = [f for f in self.field_names if f not in meta_names]
+        self.schema: StructType = schema
         self._client: CdcClient | None = None
         # driver side (ADR 0023): the capture instance names seen this run, gone ones first,
         # then oldest to newest; the type each source column is expected to have; and the
@@ -572,13 +596,13 @@ class _Common:
         self._checked: set[str] | None = None
 
     # A live DB connection must never be pickled to executors.
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
         state["_client"] = None
         return state
 
     @property
-    def client(self):
+    def client(self) -> CdcClient:
         if self._client is None:
             from .client import make_client
 
@@ -600,7 +624,7 @@ class _Common:
             _log.warning("mssql_cdc: %s", message)
         self._warnings.append(message)
 
-    def _instances(self, client) -> list:
+    def _instances(self, client: CdcClient) -> list[CaptureInstance]:
         """Every capture instance of the source table, oldest first (``CaptureInstance``).
         Looked up by the newest name seen this run first, so an instance disabled after a
         newer one took over is followed (ADR 0023)."""
@@ -619,12 +643,12 @@ class _Common:
         self._names += [i.name for i in found]
         return found
 
-    def _gone(self, instances) -> list[str]:
+    def _gone(self, instances: Sequence[CaptureInstance]) -> list[str]:
         """Instance names seen this run (or configured) that the table no longer has."""
         current = {i.name.lower() for i in instances}
         return [n for n in self._names if n.lower() not in current]
 
-    def _check_declared(self, instances) -> None:
+    def _check_declared(self, instances: Sequence[CaptureInstance]) -> None:
         """A source column no capture instance of the table captures would read NULL in every
         change row: fail instead (a typo in 'columns', or a column CDC does not capture). A
         computed one reads NULL in every row, snapshot rows too: warn."""
@@ -661,7 +685,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
     _fixed_offset: int | None = None  # the UTC offset a warning last named (pre-2022 servers)
 
     # -- offsets --------------------------------------------------------------
-    def _offset(self, lsn: str) -> dict:
+    def _offset(self, lsn: str) -> dict[str, str]:
         return {"lsn": lsn, "commit_ts": self.client.lsn_to_time(lsn) or ""}
 
     def _max_lsn(self) -> str:
@@ -669,7 +693,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
         return self.client.max_lsn() or ZERO_LSN
 
     @_retrying
-    def initialOffset(self) -> dict:
+    def initialOffset(self) -> dict[str, str]:
         start = (_opt(self.options, "startingLsn", "earliest") or "earliest").strip()
         if start.lower() == "earliest":
             # offsets hold the last *processed* LSN, so start just before min_lsn (of the
@@ -693,7 +717,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
         return self._offset(lsn)
 
     @_retrying
-    def partitions(self, start: dict, end: dict):
+    def partitions(self, start: dict[str, str], end: dict[str, str]) -> list[LsnRange]:
         if end["lsn"] <= start["lsn"]:
             return []
         client = self.client
@@ -709,15 +733,17 @@ class _BaseReader(_Common, DataSourceStreamReader):
         events = self._check_ddl(client, [i for i, _, _ in pieces], start["lsn"], to_lsn, expected)
         wanted = {c.lower() for c in self.source_columns}
         for older, inst in pairwise(instances):
-            if any(p[0] is inst and p[1] == inst.start_lsn for p in pieces):  # crosses its start
+            s = inst.start_lsn
+            if s is not None and any(p[0] is inst and p[1] == s for p in pieces):  # crosses S
                 detail = f"{older.name} -> {inst.name}"
                 kept = {c.lower() for c in inst.columns}
                 lost = [c for c in older.columns if kept and c.lower() in wanted - kept]
                 if lost:  # NULL from S on: the warning and the facts say so
                     detail += f"; no longer captured, read as NULL: {', '.join(lost)}"
-                ts = client.lsn_to_time(inst.start_lsn)
-                events.append(("capture_instance_switched", inst.name, inst.start_lsn, ts, detail))
-        ranges, skipped = [], []
+                ts = client.lsn_to_time(s)
+                events.append(("capture_instance_switched", inst.name, s, ts, detail))
+        ranges: list[LsnRange] = []
+        skipped: list[tuple[str, str, str]] = []
         gone = self._gone(instances)
         for inst, lo, hi in pieces:
             oldest = inst is instances[0]
@@ -764,12 +790,14 @@ class _BaseReader(_Common, DataSourceStreamReader):
         return ranges
 
     @staticmethod
-    def _pieces(client, instances, lo: str, hi: str) -> list[tuple]:
+    def _pieces(
+        client: CdcClient, instances: Sequence[CaptureInstance], lo: str, hi: str
+    ) -> list[tuple[CaptureInstance, str, str]]:
         """[lo, hi] cut at each newer instance's start S: (instance, from, to) with the
         older instance up to S - 1 and the newer one from S. Never an empty piece. Also
         reconcile's read of the changes the stream has not read yet."""
         usable = [instances[0], *(i for i in instances[1:] if i.start_lsn)]
-        pieces = []
+        pieces: list[tuple[CaptureInstance, str, str]] = []
         for inst, nxt in zip(usable, [*usable[1:], None]):
             s = nxt.start_lsn if nxt is not None else None
             if s is None or s > hi:
@@ -780,12 +808,13 @@ class _BaseReader(_Common, DataSourceStreamReader):
             lo = max(lo, s)
         return pieces
 
-    def _split(self, client, inst, lo: str, hi: str) -> list[LsnRange]:
+    def _split(self, client: CdcClient, inst: CaptureInstance, lo: str, hi: str) -> list[LsnRange]:
         """[lo, hi] of one instance in up to numPartitions ranges of about the same rows:
         adjacent tiles merged until each holds MIN_ROWS_PER_PARTITION, so a batch with fewer
         rows than twice that is one range."""
         cols, clock = self._columns_of(inst), client.clock()
-        ranges, rows = [], 0
+        ranges: list[LsnRange] = []
+        rows = 0
         if self.num_partitions > 1:
             for b, after, n in client.split_points(inst.name, lo, hi, self.num_partitions):
                 if b < lo:  # a bound two tiles share: its rows are in the range cut there
@@ -798,7 +827,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 lo = ranges.pop().from_lsn
         return [*ranges, LsnRange(inst.name, lo, hi, cols, *clock)]
 
-    def _columns_of(self, inst) -> list[str] | None:
+    def _columns_of(self, inst: CaptureInstance) -> list[str] | None:
         """The query's source columns ``inst`` captures; None when it has them all (or its
         columns are unknown)."""
         if not inst.columns:
@@ -807,7 +836,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
         cols = [c for c in self.source_columns if c.lower() in have]
         return None if len(cols) == len(self.source_columns) else cols
 
-    def _expected_types(self, instances) -> dict[str, str]:
+    def _expected_types(self, instances: Sequence[CaptureInstance]) -> dict[str, str]:
         """lower name -> the Spark type the query reads a source column as, to compare the
         captured types with: the schema's when inferred; with 'columns', the captured types
         at this run's first planning (the declared ones are the user's own conversions)."""
@@ -828,14 +857,21 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 }
         return self._expected
 
-    def _check_ddl(self, client, used, start: str, end: str, expected) -> list[tuple]:
+    def _check_ddl(
+        self,
+        client: CdcClient,
+        used: Sequence[CaptureInstance],
+        start: str,
+        end: str,
+        expected: Mapping[str, str],
+    ) -> list[_Event]:
         """D1 of ADR 0023: the DDL the instances read by this batch recorded in (start, end].
         A captured column whose type no longer fits the query's, or with
         schemaChangePolicy=fail any DDL, raises ``SchemaChangedError``; the rest become
         'schema_change' events."""
         from .client import SchemaChangedError
 
-        found: dict = {}
+        found: dict[Lsn, tuple[CaptureInstance, DdlChange]] = {}
         for inst in {i.name: i for i in used}.values():  # one call per instance
             for d in client.ddl_history(inst.name, start, end):
                 found.setdefault(d.lsn, (inst, d))  # recorded by both instances: once
@@ -876,7 +912,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
             ("schema_change", inst.name, d.lsn, d.commit_ts, d.command[:500]) for inst, d in changes
         ]
 
-    def _check_switch(self, newer) -> None:
+    def _check_switch(self, newer: CaptureInstance) -> None:
         """D2 of ADR 0023: read a capture instance the query's schema was not checked against
         (a newer one, at its start or skipped ahead to) only when the schema holds what it
         captures; otherwise fail before reading it, so the next load() infers the new columns.
@@ -899,7 +935,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
             for c, t in zip(newer.columns, newer.column_types)
             if c.lower() in query and not (t and _fits(t, query[c.lower()]))
         ]
-        what = []
+        what: list[str] = []
         if new:
             what.append(f"new column(s) {', '.join(new)}")
         if changed:
@@ -912,7 +948,9 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 "resumes there."
             )
 
-    def _guard_retention(self, client, capture_instance: str, from_lsn: str, gone=()) -> str:
+    def _guard_retention(
+        self, client: CdcClient, capture_instance: str, from_lsn: str, gone: Sequence[str] = ()
+    ) -> str:
         """Invariant 4: fail when change data at or after ``from_lsn`` is gone from
         ``capture_instance``. ``gone``: older instances of the table disabled meanwhile."""
         min_lsn = client.min_lsn(capture_instance)
@@ -946,7 +984,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
         return min_lsn
 
     # -- data (runs on executors) ---------------------------------------------
-    def read(self, partition: LsnRange) -> Iterator:  # type: ignore[override]  # partitions() only plans LsnRange
+    def read(self, partition: LsnRange) -> Iterator[pa.RecordBatch]:  # type: ignore[override]  # partitions() only plans LsnRange
         import pyarrow as pa
         from pyspark.sql.pandas.types import to_arrow_schema
 
@@ -1013,7 +1051,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
             client.close()
             self._client = None
 
-    def commit(self, end: dict) -> None:
+    def commit(self, end: dict[str, str]) -> None:
         # SQL Server CDC retention is time-based: there is nothing to acknowledge.
         pass
 
@@ -1021,21 +1059,23 @@ class _BaseReader(_Common, DataSourceStreamReader):
 class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
     """Spark 4.2+: admission control (maxCommitsPerBatch) and Trigger.AvailableNow."""
 
-    def __init__(self, options, schema, default_num_partitions=None):
+    def __init__(
+        self, options: dict[str, str], schema: StructType, default_num_partitions: int | None = None
+    ) -> None:
         super().__init__(options, schema, default_num_partitions)
-        self._target = None
+        self._target: str | None = None
         # Spark polls latestOffset and reportLatestOffset back to back, about every 10 ms on
         # an idle stream: the max_lsn latestOffset read last, and the offset last reported
         self._seen_max: str | None = None
-        self._reported: dict | None = None
+        self._reported: dict[str, str] | None = None
         max_commits = _opt(options, "maxCommitsPerBatch")  # 0 used to mean unlimited, silently
-        self._max_commits = (
+        self._max_commits: int | None = (
             _positive_int(options, "maxCommitsPerBatch", hint="; omit it to read up to max_lsn")
             if max_commits
             else None
         )
 
-    def getDefaultReadLimit(self):
+    def getDefaultReadLimit(self) -> ReadLimit:
         # ReadMaxRows is reused with "commits" semantics: custom ReadLimits are not
         # supported for Python sources, and a batch must end on a commit boundary.
         return ReadMaxRows(self._max_commits) if self._max_commits else ReadAllAvailable()
@@ -1045,7 +1085,7 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
         self._target = self._max_lsn()
 
     @_retrying
-    def latestOffset(self, start: dict, limit) -> dict:
+    def latestOffset(self, start: dict[str, str], limit: ReadLimit) -> dict[str, str]:
         if self._target:  # Trigger.AvailableNow: up to the max_lsn it started with
             upper = self._target
         else:
@@ -1061,7 +1101,7 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
         return self._offset(upper)
 
     @_retrying
-    def reportLatestOffset(self):
+    def reportLatestOffset(self) -> dict[str, str]:
         # Surfaces capture progress (max_lsn) as latestOffset in query progress: the one
         # latestOffset just read, and its commit time once per LSN
         lsn = self._seen_max or self._max_lsn()
@@ -1073,10 +1113,10 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
 class MssqlCdcLegacyStreamReader(_BaseReader):  # pragma: no cover - Spark < 4.2
     """Spark 4.0/4.1 without admission control: every batch reads up to max_lsn."""
 
-    _last: dict | None = None  # the offset latestOffset returned last
+    _last: dict[str, str] | None = None  # the offset latestOffset returned last
 
     @_retrying
-    def latestOffset(self) -> dict:  # type: ignore[override]  # Spark < 4.2 signature; stubs are 4.2
+    def latestOffset(self) -> dict[str, str]:  # type: ignore[override]  # Spark < 4.2 signature; stubs are 4.2
         lsn = self._max_lsn()
         if self._last is None or self._last["lsn"] != lsn:  # a new batch; an idle poll: max_lsn
             self.client.refresh_clock()  # its end offset and the ranges planned take one clock
@@ -1087,7 +1127,7 @@ class MssqlCdcLegacyStreamReader(_BaseReader):  # pragma: no cover - Spark < 4.2
 # --------------------------------------------------------------------------- #
 # Snapshot of the tracked table (ADR 0016)
 # --------------------------------------------------------------------------- #
-def snapshot_lsn(client, source) -> str:
+def snapshot_lsn(client: CdcClient, source: SourceTable | CaptureInstance) -> Lsn:
     """The LSN a snapshot is stamped with, recorded *before* the table is read.
 
     Every commit up to ``max_lsn`` is already in the table when the read starts; a commit the
@@ -1095,8 +1135,8 @@ def snapshot_lsn(client, source) -> str:
     the downstream MERGE absorbs the overlap. A capture instance that capture has not reached
     yet (``max_lsn`` below its first LSN: a quiet database, just after the enable) starts
     the stream at its first LSN instead; ``fn_cdc_get_min_lsn`` is NULL until then, the
-    instance's ``start_lsn`` in ``source`` (a ``SourceTable``) is not. ``max_lsn`` itself is
-    NULL on a database capture has not written to yet.
+    instance's ``start_lsn`` in ``source`` (a ``SourceTable`` or ``CaptureInstance``) is not.
+    ``max_lsn`` itself is NULL on a database capture has not written to yet.
     """
     max_lsn = client.max_lsn() or ZERO_LSN
     if source.start_lsn is None:
@@ -1113,30 +1153,34 @@ class KeyRange(InputPartition):
     table: str
     keys: list[str]  # []: the whole table in one partition
     types: list[str] | None  # the keys' SQL types, bounds bound as CAST(? AS type); None: integers
-    lo: tuple | None  # inclusive, one value per key; None: open, plus the rows that sort first
-    hi: tuple | None  # exclusive; None: open
+    # inclusive, one value per key; None: open, plus the rows that sort first
+    lo: tuple[Any, ...] | None
+    hi: tuple[Any, ...] | None  # exclusive; None: open
     columns: list[str] | None = None  # the source columns the table still has; None: all
     chunk: int | None = None  # its chunk of a chunked snapshot (snapshotChunks), for _chunk
 
 
-ISOLATION_LEVELS = {"readcommitted": None, "snapshot": "snapshot"}  # never READ UNCOMMITTED
+# never READ UNCOMMITTED
+ISOLATION_LEVELS: dict[str, str | None] = {"readcommitted": None, "snapshot": "snapshot"}
 
 
 class MssqlCdcSnapshotReader(_Common, DataSourceReader):
-    def __init__(self, options: dict, schema, default_num_partitions: int | None = None):
+    def __init__(
+        self, options: dict[str, str], schema: StructType, default_num_partitions: int | None = None
+    ) -> None:
         super().__init__(options, schema, default_num_partitions)
-        self.chunks = _opt(options, "snapshotChunks")
+        self.chunks: str | None = _opt(options, "snapshotChunks")
         if self.chunks:  # the chunk number, not a source column
-            self.source_columns = [c for c in self.source_columns if c != "_chunk"]
+            self.source_columns: list[str] = [c for c in self.source_columns if c != "_chunk"]
         level = str(_opt(options, "isolationLevel", "readCommitted")).strip().lower()
         if level not in ISOLATION_LEVELS:
             raise ValueError(
                 f"isolationLevel must be 'readCommitted' or 'snapshot', not {level!r}: a "
                 "snapshot never reads uncommitted rows (NOLOCK)"
             )
-        self.isolation = ISOLATION_LEVELS[level]
+        self.isolation: str | None = ISOLATION_LEVELS[level]
 
-    def partitions(self):
+    def partitions(self) -> list[KeyRange]:
         client = self.client
         from .lsn import normalize
 
@@ -1158,7 +1202,9 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         present = client.present_columns(ci, self.source_columns)
         columns = None if len(present) == len(self.source_columns) else present
 
-        def ranges(keys, types, bounds):
+        def ranges(
+            keys: list[str], types: list[str] | None, bounds: Sequence[tuple[Any, ...]]
+        ) -> list[KeyRange]:
             return [
                 KeyRange(ci, lsn, commit_ts, schema, table, keys, types, a, b, columns)
                 for a, b in pairwise([None, *bounds, None])
@@ -1171,7 +1217,8 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
             values = [
                 v for _, *ends in plan for b in ends for v in _key_tuple(b) or () if v is not None
             ]
-            types = None  # integer bounds are inlined, as an integer key's plan has them
+            # integer bounds are inlined, as an integer key's plan has them
+            types: list[str | None] | None = None
             if not all(isinstance(v, int) and not isinstance(v, bool) for v in values):
                 types = client.key_types(ci, keys)
             if values and (not keys or not set(keys) <= set(present) or None in (types or [])):
@@ -1180,8 +1227,11 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
                     "be read in ranges (no unique index, a column it no longer has, or a type "
                     "a bound cannot be bound as)"
                 )
+            set_types = cast("list[str] | None", types)  # a None one raised just above
             return [
-                KeyRange(ci, lsn, commit_ts, schema, table, keys, types, lo, hi, columns, int(i))
+                KeyRange(
+                    ci, lsn, commit_ts, schema, table, keys, set_types, lo, hi, columns, int(i)
+                )
                 for i, lo, hi in ((i, _key_tuple(a), _key_tuple(b)) for i, a, b in plan)
             ]
         if self.num_partitions <= 1 or not keys or not set(keys) <= set(present):
@@ -1200,9 +1250,10 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         types = client.key_types(ci, keys)
         if None in types:
             return ranges([], None, [])
-        return ranges(keys, types, client.key_tiles(schema, table, keys, self.num_partitions))
+        tiles = client.key_tiles(schema, table, keys, self.num_partitions)
+        return ranges(keys, cast("list[str]", types), tiles)  # no None: returned above
 
-    def read(self, partition: KeyRange) -> Iterator:  # type: ignore[override]  # partitions() only plans KeyRange
+    def read(self, partition: KeyRange) -> Iterator[pa.RecordBatch]:  # type: ignore[override]  # partitions() only plans KeyRange
         from datetime import datetime
 
         import pyarrow as pa

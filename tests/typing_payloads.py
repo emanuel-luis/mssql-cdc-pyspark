@@ -64,7 +64,7 @@ def details(text: str) -> None:
     assert_type(wave["chunks"][0]["read_mb"], float | None)
 
 
-def options(spark: SparkSession, plain: dict, mapping: Mapping[str, str]) -> None:
+def options(spark: SparkSession, plain: dict[str, Any], mapping: Mapping[str, str]) -> None:
     typed: SourceOptions = {"captureInstance": "dbo_orders", "connectionString": "Server=h"}
     stream(spark, typed)
     stream(spark, plain)

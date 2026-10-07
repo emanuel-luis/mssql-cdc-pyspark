@@ -8,9 +8,10 @@ longer hides one.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.streaming import StreamingQuery
+from pyspark.sql.streaming.query import StreamingQuery
 from typing_extensions import assert_type
 
 from mssql_cdc import (
@@ -29,7 +30,7 @@ from mssql_cdc.sink import delta_sink
 from mssql_cdc.spark import get_spark
 
 
-def results(spark: SparkSession, options: dict, copy: DataFrame) -> None:
+def results(spark: SparkSession, options: dict[str, Any], copy: DataFrame) -> None:
     cdc = stream(spark, options)
     offset = cdc.snapshot("bronze.orders", resnapshot=True)
     assert_type(offset, Offset)
@@ -62,7 +63,7 @@ def results(spark: SparkSession, options: dict, copy: DataFrame) -> None:
     assert_type(finalization.end_offset_from_progress(query.lastProgress), Offset | None)
 
 
-def old_forms(spark: SparkSession, options: dict, query: StreamingQuery) -> None:
+def old_forms(spark: SparkSession, options: dict[str, Any], query: StreamingQuery) -> None:
     cdc = stream(spark, options)
     cdc.to_delta("t", "a", "/c", "f", {"availableNow": True})  # type: ignore[call-arg]
     cdc.snapshot("t", True)  # type: ignore[call-arg]
@@ -79,7 +80,7 @@ def old_forms(spark: SparkSession, options: dict, query: StreamingQuery) -> None
     get_spark("app", "local[1]", False)  # type: ignore[call-arg]
 
 
-def wrong_modes(spark: SparkSession, options: dict) -> None:
+def wrong_modes(spark: SparkSession, options: dict[str, Any]) -> None:
     cdc = stream(spark, options)
     cdc.to_delta("t", "a", "/c", snapshot="chunks")  # type: ignore[arg-type]
     cdc.to_delta("t", "a", "/c", on_data_loss="skip")  # type: ignore[arg-type]

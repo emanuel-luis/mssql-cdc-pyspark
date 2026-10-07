@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-def available_cores(spark) -> int:
+if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
+
+
+def available_cores(spark: SparkSession) -> int:
     """Cores the session's compute runs tasks on (``defaultParallelism``); 0 when unknown,
     as on Spark Connect, which has no ``sparkContext``. ``numPartitions=auto`` then uses the
     CPU count of the node that plans, not of the process that called ``register()``."""
@@ -14,7 +19,9 @@ def available_cores(spark) -> int:
     return max(0, cores)
 
 
-def get_spark(app_name: str = "mssql-cdc", master: str = "local[*]", *, delta: bool = True):
+def get_spark(
+    app_name: str = "mssql-cdc", master: str = "local[*]", *, delta: bool = True
+) -> SparkSession:
     """Return the active SparkSession (Databricks, EMR, Fabric...) or create a
     local one, with Delta configured when ``delta-spark`` is installed (``delta``,
     keyword-only)."""

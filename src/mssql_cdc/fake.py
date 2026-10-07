@@ -36,14 +36,16 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 
 import pyarrow as pa
 
 from . import lsn as _lsn
 from .client import CaptureInstance, CdcClient, DdlChange, SourceTable
+from .lsn import Lsn
 
 _MAPPING = "lsn_time_mapping.jsonl"
 _MIN = "min_lsn.json"
@@ -54,18 +56,19 @@ _COMPUTED = "computed.json"  # table -> lower names of its computed columns
 _QUEUED = "before_read.jsonl"  # transactions the next table read commits first (tests)
 
 
-def _read_jsonl(path: str) -> list[dict]:
+def _read_jsonl(path: str) -> list[dict[str, Any]]:
     if not os.path.exists(path):
         return []
     with open(path, encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
 
 
-def _read_json(path: str) -> dict:
+def _read_json(path: str) -> dict[str, Any]:
     if not os.path.exists(path):
         return {}
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        data: dict[str, Any] = json.load(fh)  # every file holds an object
+        return data
 
 
 def _write(path: str, text: str) -> None:
@@ -82,27 +85,27 @@ def _write(path: str, text: str) -> None:
             time.sleep(0.05)
 
 
-def _write_json(path: str, value) -> None:
+def _write_json(path: str, value: object) -> None:
     _write(path, json.dumps(value))
 
 
-def _key_columns(key) -> list[str]:
+def _key_columns(key: str | Sequence[str] | None) -> list[str]:
     """``keys`` maps an instance to one column or a list of them."""
     return [key] if isinstance(key, str) else list(key or [])
 
 
-def _sort_key(values) -> tuple:
+def _sort_key(values: Iterable[Any]) -> tuple[tuple[bool, Any], ...]:
     """A key tuple in SQL Server's ORDER BY order: column by column, NULL first."""
     return tuple((v is not None, v) for v in values)
 
 
-def _parse_columns(columns) -> list[list[str]] | None:
+def _parse_columns(columns: str | Sequence[str | Sequence[str]] | None) -> list[list[str]] | None:
     """Spark DDL (``"id INT, amount DECIMAL(18,2)"``), or a list of names (typed STRING) or
     of (name, type) pairs."""
     if columns is None:
         return None
     if isinstance(columns, str):
-        out = []
+        out: list[list[str]] = []
         for part in re.split(r",(?![^()]*\))", columns):  # commas outside parentheses
             name, _, typ = part.strip().partition(" ")
             out.append([name.strip("`"), typ.strip().upper() or "STRING"])
@@ -110,7 +113,7 @@ def _parse_columns(columns) -> list[list[str]] | None:
     return [[c, "STRING"] if isinstance(c, str) else [c[0], c[1]] for c in columns]
 
 
-def _instances(path: str) -> dict:
+def _instances(path: str) -> dict[str, dict[str, Any]]:
     """Every capture instance; ones created before instances.json existed are their own table."""
     known = _read_json(os.path.join(path, _INSTANCES))
     for name in _read_json(os.path.join(path, _MIN)):
@@ -118,7 +121,7 @@ def _instances(path: str) -> dict:
     return known
 
 
-def _resolve(path: str, ci: str) -> tuple[str | None, list[tuple[str, dict]]]:
+def _resolve(path: str, ci: str) -> tuple[str | None, list[tuple[str, dict[str, Any]]]]:
     """The instance named ``ci`` (exact first, else ignoring case; None when gone) and every
     instance of its table, oldest first. A gone ``ci`` still names its table when the table
     is named after it, as ``SqlCdcClient`` follows a default instance name."""
@@ -139,18 +142,19 @@ def _resolve(path: str, ci: str) -> tuple[str | None, list[tuple[str, dict]]]:
 
 
 class FakeCdcClient(CdcClient):
-    def __init__(self, path: str):
+    def __init__(self, path: str) -> None:
         self.path = path
-        self._columns: dict[tuple, list] = {}  # capture_instances' cache, as SqlCdcClient's
+        # capture_instances' cache, as SqlCdcClient's: (name, created) -> [[column, type]]
+        self._columns: dict[tuple[str, str | None], list[list[str]]] = {}
 
     # -- state ----------------------------------------------------------------
-    def _mapping(self) -> list[dict]:
+    def _mapping(self) -> list[dict[str, Any]]:
         return _read_jsonl(os.path.join(self.path, _MAPPING))
 
-    def _changes(self, ci: str) -> list[dict]:
+    def _changes(self, ci: str) -> list[dict[str, Any]]:
         return _read_jsonl(os.path.join(self.path, "changes", f"{self._name(ci)}.jsonl"))
 
-    def _mins(self) -> dict:
+    def _mins(self) -> dict[str, Lsn]:
         return _read_json(os.path.join(self.path, _MIN))
 
     def _name(self, ci: str) -> str:
@@ -160,47 +164,49 @@ class FakeCdcClient(CdcClient):
         return ci if ci in mins else next((n for n in mins if n.lower() == ci.lower()), ci)
 
     # -- CdcClient ------------------------------------------------------------
-    def max_lsn(self):
+    def max_lsn(self) -> Lsn | None:
         m = self._mapping()
         return m[-1]["start_lsn"] if m else None  # NULL before capture's first entry, as there
 
-    def min_lsn(self, capture_instance):
+    def min_lsn(self, capture_instance: str) -> Lsn:
         mins, name = self._mins(), self._name(capture_instance)
         if name not in mins:
             raise ValueError(f"Capture instance {capture_instance!r} not found")
         return mins[name]
 
-    def increment_lsn(self, lsn):
+    def increment_lsn(self, lsn: str) -> Lsn:
         return _lsn.from_int(_lsn.to_int(lsn) + 1)
 
-    def decrement_lsn(self, lsn):
+    def decrement_lsn(self, lsn: str) -> Lsn:
         return _lsn.from_int(max(_lsn.to_int(lsn) - 1, 0))
 
-    def lsn_to_time(self, lsn):
+    def lsn_to_time(self, lsn: str) -> str | None:
         # like sys.fn_cdc_map_lsn_to_time: an entry's own LSN only, None for any other
         return next((r["tran_end_time"] for r in self._mapping() if r["start_lsn"] == lsn), None)
 
     def _time_at_or_before(self, lsn: str) -> str | None:
         """The commit time of the last entry at or before ``lsn``, as
         ``SqlCdcClient._commit_time_at_or_before``."""
-        best = None
+        best: str | None = None
         for row in self._mapping():  # in LSN order
             if row["start_lsn"] > lsn:
                 break
             best = row["tran_end_time"]
         return best
 
-    def time_to_lsn(self, ts_utc):
+    def time_to_lsn(self, ts_utc: datetime) -> Lsn | None:
         at = ts_utc.isoformat(timespec="milliseconds")  # the mapping's times are UTC here
         return max(
             (r["start_lsn"] for r in self._mapping() if r["tran_end_time"] <= at), default=None
         )
 
-    def nth_commit_after(self, lsn, n):
+    def nth_commit_after(self, lsn: str, n: int) -> Lsn | None:
         after = [r["start_lsn"] for r in self._mapping() if r["start_lsn"] > lsn]
         return after[: int(n)][-1] if after else None
 
-    def split_points(self, capture_instance, from_lsn, to_lsn, n):
+    def split_points(
+        self, capture_instance: str, from_lsn: str, to_lsn: str, n: int
+    ) -> list[tuple[Lsn, Lsn, int]]:
         # like SqlCdcClient: tiles of the capture instance's change rows, bound = last LSN,
         # with the tile's rows
         lsns = sorted(
@@ -212,27 +218,28 @@ class FakeCdcClient(CdcClient):
             return []
         n = max(1, min(int(n), len(lsns)))
         size, rem = divmod(len(lsns), n)
-        points, idx = [], 0
+        points: list[tuple[Lsn, Lsn, int]] = []
+        idx = 0
         for i in range(n):
             rows = size + (1 if i < rem else 0)
             idx += rows
             points.append((lsns[idx - 1], self.increment_lsn(lsns[idx - 1]), rows))
         return points
 
-    def _keys(self) -> dict:
+    def _keys(self) -> dict[str, Any]:
         return _read_json(os.path.join(self.path, _KEYS))
 
-    def source_table(self, capture_instance):
+    def source_table(self, capture_instance: str) -> SourceTable:
         name, same = _resolve(self.path, capture_instance)  # not found -> ValueError
         name = name or same[-1][0]  # gone: the table's newest instance
         table = same[0][1]["table"]
         return SourceTable("dbo", table, _key_columns(self._keys().get(table)), self.min_lsn(name))
 
-    def capture_instances(self, capture_instance):
+    def capture_instances(self, capture_instance: str) -> list[CaptureInstance]:
         mins = self._mins()
         same = _resolve(self.path, capture_instance)[1]
         computed = self._computed(same[0][1]["table"])
-        out = []
+        out: list[CaptureInstance] = []
         for name, meta in same:
             # cached per instance and creation like SqlCdcClient's, so that a type change the
             # reader checks without forget_columns() fails the tests as it would on a server
@@ -249,10 +256,10 @@ class FakeCdcClient(CdcClient):
             )
         return out
 
-    def forget_columns(self):
+    def forget_columns(self) -> None:
         self._columns.clear()
 
-    def ddl_history(self, capture_instance, from_lsn, to_lsn):
+    def ddl_history(self, capture_instance: str, from_lsn: str, to_lsn: str) -> list[DdlChange]:
         rows = _read_jsonl(os.path.join(self.path, "ddl", f"{self._name(capture_instance)}.jsonl"))
         return [
             DdlChange(r["lsn"], self._time_at_or_before(r["lsn"]), r["command"])
@@ -260,7 +267,7 @@ class FakeCdcClient(CdcClient):
             if from_lsn < r["lsn"] <= to_lsn
         ]
 
-    def captured_columns(self, capture_instance):
+    def captured_columns(self, capture_instance: str) -> str:
         cols = _instances(self.path).get(self._name(capture_instance), {}).get("columns")
         if not cols:
             return super().captured_columns(capture_instance)  # no metadata: 'columns' required
@@ -272,17 +279,19 @@ class FakeCdcClient(CdcClient):
     def _computed(self, table: str) -> set[str]:
         return set(_read_json(os.path.join(self.path, _COMPUTED)).get(table, []))
 
-    def present_columns(self, capture_instance, columns):
+    def present_columns(self, capture_instance: str, columns: Sequence[str]) -> list[str]:
         # ponytail: by name, so a column added back after its DROP counts as present; SQL
         # Server matches by column_id (another column). Model column ids if a test needs it.
         table = self.source_table(capture_instance).table
         absent = self._dropped(table) | self._computed(table)  # computed: NULL in change rows
         return [c for c in columns if c.lower() not in absent]
 
-    def _table(self, table: str) -> list[dict]:
+    def _table(self, table: str) -> list[dict[str, Any]]:
         return list(_read_json(os.path.join(self.path, "tables", f"{table}.json")).values())
 
-    def _key_values(self, table, key, lo=None, hi=None) -> list:
+    def _key_values(
+        self, table: str, key: str, lo: int | None = None, hi: int | None = None
+    ) -> list[Any]:
         """The table's non-NULL values of ``key`` in ``[lo, hi)`` (None: open)."""
         return [
             v
@@ -290,27 +299,44 @@ class FakeCdcClient(CdcClient):
             if v is not None and (lo is None or v >= lo) and (hi is None or v < hi)
         ]
 
-    def key_range(self, schema, table, key, lo=None, hi=None, isolation=None):
+    def key_range(
+        self,
+        schema: str,
+        table: str,
+        key: str,
+        lo: int | None = None,
+        hi: int | None = None,
+        isolation: str | None = None,
+    ) -> tuple[Any, Any]:
         keys = self._key_values(table, key, lo, hi)
         return (min(keys), max(keys)) if keys else (None, None)
 
-    def key_types(self, capture_instance, keys):
+    def key_types(self, capture_instance: str, keys: Sequence[str]) -> list[str | None]:
         return ["sql_variant"] * len(keys)  # the fake compares Python values; nothing to CAST
 
-    def key_tiles(self, schema, table, keys, n):
+    def key_tiles(
+        self, schema: str, table: str, keys: Sequence[str], n: int
+    ) -> list[tuple[Any, ...]]:
         # NTILE(n): the first (rows % n) tiles hold one row more; bound = first row of a tile
         rows = sorted((tuple(r.get(k) for k in keys) for r in self._table(table)), key=_sort_key)
         n = min(int(n), len(rows))
         if n <= 1:
             return []
         size, rem = divmod(len(rows), n)
-        starts, idx = [], 0
+        starts: list[tuple[Any, ...]] = []
+        idx = 0
         for i in range(n - 1):
             idx += size + (1 if i < rem else 0)
             starts.append(rows[idx])
         return starts
 
-    def _keys_in(self, table, keys, lo, hi) -> list[tuple]:
+    def _keys_in(
+        self,
+        table: str,
+        keys: Sequence[str],
+        lo: tuple[Any, ...] | None,
+        hi: tuple[Any, ...] | None,
+    ) -> list[tuple[Any, ...]]:
         """The table's keys with ``lo <= key < hi``, in ORDER BY's order."""
         found = sorted((tuple(r.get(k) for k in keys) for r in self._table(table)), key=_sort_key)
         return [
@@ -320,14 +346,24 @@ class FakeCdcClient(CdcClient):
             and (hi is None or _sort_key(k) < _sort_key(hi))
         ]
 
-    def row_estimate(self, schema, table):
+    def row_estimate(self, schema: str, table: str) -> int:
         return len(self._table(table))
 
-    def key_max(self, schema, table, keys):
+    def key_max(self, schema: str, table: str, keys: Sequence[str]) -> tuple[Any, ...] | None:
         found = self._keys_in(table, keys, None, None)
         return found[-1] if found else None
 
-    def key_bound(self, schema, table, keys, types, lo, hi, n, isolation=None):
+    def key_bound(
+        self,
+        schema: str,
+        table: str,
+        keys: Sequence[str],
+        types: Sequence[str] | None,
+        lo: tuple[Any, ...] | None,
+        hi: tuple[Any, ...] | None,
+        n: int,
+        isolation: str | None = None,
+    ) -> tuple[Any, ...] | None:
         found = self._keys_in(table, keys, lo, hi)
         return found[int(n)] if len(found) > int(n) else None
 
@@ -346,7 +382,17 @@ class FakeCdcClient(CdcClient):
             db.commit(tx["capture_instance"], [(op, row) for op, row in tx["changes"]], at)
         os.remove(claimed)
 
-    def key_buckets(self, schema, table, key, kind, width, lo=None, hi=None, isolation=None):
+    def key_buckets(
+        self,
+        schema: str,
+        table: str,
+        key: str | None,
+        kind: str | None,
+        width: int,
+        lo: int | None = None,
+        hi: int | None = None,
+        isolation: str | None = None,
+    ) -> list[tuple[int, int, Decimal | None]]:
         # ponytail: integer keys only; the table's JSON rows keep no date type
         if key is None:
             return [(0, len(self._table(table)), None)]
@@ -356,8 +402,19 @@ class FakeCdcClient(CdcClient):
             out[o // int(width)] = (n + 1, s + o)
         return [(b, n, Decimal(s)) for b, (n, s) in sorted(out.items())]
 
-    def iter_table(self, schema, table, columns, keys, types, lo, hi, batch_size, isolation=None):
-        def inside(row):
+    def iter_table(
+        self,
+        schema: str,
+        table: str,
+        columns: Sequence[str],
+        keys: Sequence[str],
+        types: Sequence[str] | None,
+        lo: tuple[Any, ...] | None,
+        hi: tuple[Any, ...] | None,
+        batch_size: int,
+        isolation: str | None = None,
+    ) -> Iterator[pa.RecordBatch]:
+        def inside(row: Mapping[str, Any]) -> bool:
             k = _sort_key(row.get(c) for c in keys)
             return (lo is None or k >= _sort_key(lo)) and (hi is None or k < _sort_key(hi))
 
@@ -373,8 +430,14 @@ class FakeCdcClient(CdcClient):
             yield pa.RecordBatch.from_pydict({c: [r.get(c) for r in chunk] for c in columns})
 
     def iter_changes(
-        self, capture_instance, from_lsn, to_lsn, columns, include_command_id, batch_size
-    ):
+        self,
+        capture_instance: str,
+        from_lsn: str,
+        to_lsn: str,
+        columns: Sequence[str],
+        include_command_id: bool,
+        batch_size: int,
+    ) -> Iterator[pa.RecordBatch]:
         times = {r["start_lsn"]: r["tran_end_time"] for r in self._mapping()}
         rows = [r for r in self._changes(capture_instance) if from_lsn <= r["start_lsn"] <= to_lsn]
         rows.sort(
@@ -408,7 +471,7 @@ class FakeCdcDatabase:
         keys: dict[str, str | list[str]] | None = None,
         columns: dict[str, str] | None = None,
         computed: dict[str, list[str]] | None = None,
-    ):
+    ) -> None:
         """``keys``: capture instance -> key column, or a list of them. Instances with a key
         also keep the source table's current rows (what a snapshot reads), updated by every
         commit. ``columns``: capture instance -> its captured columns as Spark DDL, what
@@ -446,7 +509,7 @@ class FakeCdcDatabase:
                 },
             )
 
-    def _append(self, rel: str, row: dict) -> None:
+    def _append(self, rel: str, row: Mapping[str, Any]) -> None:
         with open(os.path.join(self.path, rel), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
 
@@ -464,7 +527,7 @@ class FakeCdcDatabase:
         at = at or datetime.now(timezone.utc).replace(tzinfo=None)
         return at.isoformat(timespec="milliseconds")
 
-    def _same_table(self, capture_instance: str) -> list[tuple[str, dict]]:
+    def _same_table(self, capture_instance: str) -> list[tuple[str, dict[str, Any]]]:
         """Every instance of ``capture_instance``'s table; an undeclared name is its own."""
         try:
             return _resolve(self.path, capture_instance)[1]
@@ -472,7 +535,10 @@ class FakeCdcDatabase:
             return [(capture_instance, {"table": capture_instance, "columns": None})]
 
     def commit(
-        self, capture_instance: str, changes: Sequence[tuple[int, dict]], at: datetime | None = None
+        self,
+        capture_instance: str,
+        changes: Sequence[tuple[int, dict[str, Any]]],
+        at: datetime | None = None,
     ) -> str:
         """One transaction on the table ``capture_instance`` tracks (an instance of it, or the
         table's name). ``changes`` is a list of (operation, row) with CDC codes 1-4. Every
@@ -532,7 +598,10 @@ class FakeCdcDatabase:
         return start
 
     def commit_before_read(
-        self, capture_instance: str, changes: Sequence[tuple[int, dict]], at: datetime | None = None
+        self,
+        capture_instance: str,
+        changes: Sequence[tuple[int, dict[str, Any]]],
+        at: datetime | None = None,
     ) -> None:
         """Queue ``commit(capture_instance, changes, at)`` for the next snapshot read to make
         just before it reads the table: after its stamp (a chunk's L), before its SELECT."""
@@ -563,7 +632,11 @@ class FakeCdcDatabase:
 
     # -- schema changes (ADR 0023) ---------------------------------------------
     def add_capture_instance(
-        self, table_ci_name: str, columns, at: datetime | None = None, name: str | None = None
+        self,
+        table_ci_name: str,
+        columns: str | Sequence[str | Sequence[str]] | None,
+        at: datetime | None = None,
+        name: str | None = None,
     ) -> str:
         """Like sys.sp_cdc_enable_table with a new @capture_instance on the table that
         ``table_ci_name`` (an instance of it, or its name) tracks. It starts at the next
