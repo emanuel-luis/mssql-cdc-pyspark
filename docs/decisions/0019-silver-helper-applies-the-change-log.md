@@ -3,7 +3,8 @@
 **Status:** accepted  
 **Date:** 2026-09-30T11:07:22-03:00  
 **Amended:** 2026-10-02T20:30:12-03:00, chunked snapshots, snapshots named by `_snapshot` and completion events, operation 3 deletes its own key (see the Amendment, ADR 0028)  
-**Amended:** 2026-10-03T14:30:38-03:00, an open re-snapshot's waves applied, and per-wave range deletes on one integer, date or timestamp key (see Amendment 2, ADR 0028)
+**Amended:** 2026-10-03T14:30:38-03:00, an open re-snapshot's waves applied, and per-wave range deletes on one integer, date or timestamp key (see Amendment 2, ADR 0028)  
+**Amended:** 2026-10-07T04:49:27-03:00, `capture_instance` and `keys` keyword-only from 0.3.0 ([ADR 0021](0021-compatibility-policy-for-0x.md) amendment 5)
 
 ## Context
 Bronze is an append-only change log: one row per change, updates as two rows, the snapshot
@@ -14,7 +15,7 @@ reruns after a crash, and the rebuild after a re-snapshot, which is easy to miss
 nothing fails when it is skipped.
 
 ## Decision
-* `apply_changes(spark, bronze, target, capture_instance, keys, control_table=...,
+* `apply_changes(spark, bronze, target, *, capture_instance, keys, control_table=...,
   facts_table=None, options=None, granularity="hour")` in `mssql_cdc.silver`, exported from
   the package. A batch call, run after the stream (same job or another), one job per silver
   table. It reads the capture instance's bronze rows beyond its position, keeps the latest

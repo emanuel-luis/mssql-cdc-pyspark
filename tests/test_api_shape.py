@@ -5,7 +5,7 @@ results are plain dicts. No Spark (tests/typing_api.py checks the same for mypy)
 import pytest
 
 import mssql_cdc
-from mssql_cdc import apply_changes, finalization, reconcile
+from mssql_cdc import apply_changes, await_all, finalization, reconcile
 from mssql_cdc.pipeline import CdcStream
 from mssql_cdc.sink import delta_sink
 from mssql_cdc.spark import get_spark
@@ -25,6 +25,10 @@ OLD_FORMS = {
     "advance": lambda: finalization.advance(None, "c", "t", None, "day"),
     "track": lambda: finalization.track(None, None, "c", "t", "day"),
     "candidate": lambda: finalization.candidate(None, "day"),
+    "FinalizationListener": lambda: finalization.FinalizationListener(None, "r", "c", "t", "day"),
+    "join": lambda: object.__new__(finalization.FinalizationListener).join(1),
+    "end_offset_from_progress": lambda: finalization.end_offset_from_progress(None, 0),
+    "await_all": lambda: await_all({}, 1),
     "delta_sink": lambda: delta_sink("t", "a", "f", "/metrics"),
     "get_spark": lambda: get_spark("app", "local[1]", False),
 }

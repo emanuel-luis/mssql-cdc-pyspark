@@ -35,23 +35,33 @@ event value, no other payload key changed.
     `apply_changes(spark, b, s, "dbo_orders", ["order_id"], ...)` becomes
     `apply_changes(spark, b, s, capture_instance="dbo_orders", keys=["order_id"], ...)`.
   - `reconcile(spark, options, silver, *, keys=None, ...)`.
-  - `granularity` of `finalization.advance()`, `finalization.track()` and
-    `finalization.candidate()`: `advance(spark, control, table, end, "day")` becomes
-    `advance(spark, control, table, end, granularity="day")`.
+  - `granularity` of `finalization.advance()`, `finalization.track()`,
+    `finalization.candidate()` and `finalization.FinalizationListener(spark, run_id,
+    control_table, table_name, *, granularity="hour")`: `advance(spark, control, table, end,
+    "day")` becomes `advance(spark, control, table, end, granularity="day")`.
+  - `timeout` of `await_all()` and of `FinalizationListener.join()`, and `source_index` of
+    `finalization.end_offset_from_progress()`: `await_all(queries, 600)` becomes
+    `await_all(queries, timeout=600)`.
   - `sink.delta_sink(target, app_id, facts_table=None, *, metrics_path=None)` and
     `spark.get_spark(app_name, master, *, delta=True)`.
-- For type checkers only: `snapshot()`, `seed()`, `backfill()`, `apply_changes()` and
-  `reconcile()` now return `TypedDict`s instead of `dict`. Code annotated to take their
-  result as `dict` should take the new type or `Mapping[str, Any]`. At run time they are
-  the same dicts.
+- For type checkers only: `snapshot()`, `seed()`, `backfill()`, `apply_changes()`,
+  `reconcile()` and `finalization.end_offset_from_progress()` now return `TypedDict`s
+  instead of `dict`. Code annotated to take their result as `dict` should take the new type
+  or `Mapping[str, Any]`. At run time they are the same dicts.
+- For type checkers only: `backfill(isolation=)` now takes an `Isolation` and
+  `finalization.candidate(granularity=)` a `Granularity`, where they took any `str`. A `str`
+  that holds a valid value, a job parameter say, needs a check or `typing.cast(Isolation,
+  value)` to type-check. The `Literal` names the canonical spelling (`"readCommitted"`); at
+  run time both still match ignoring case.
 
 ### Added
 
 - `mssql_cdc.types`, exported from `mssql_cdc`:
   - `Literal` aliases for the mode parameters: `SnapshotMode`, `OnDataLoss`, `Isolation`,
     `Granularity`, and `BackfillState` for `backfill()`'s `state`.
-  - `TypedDict`s for the results, plain dicts at run time: `Offset` (of `snapshot()` and
-    `seed()`), `BackfillStatus`, `ApplyResult`, `ReconcileResult`.
+  - `TypedDict`s for the results, plain dicts at run time: `Offset` (of `snapshot()`,
+    `seed()` and `finalization.end_offset_from_progress()`), `BackfillStatus`,
+    `ApplyResult`, `ReconcileResult`.
 
   The signatures use them, so a type checker flags a misspelt mode or result key. A wrong
   mode still raises `ValueError` naming the allowed values.
@@ -60,7 +70,8 @@ event value, no other payload key changed.
   columns it does not read (computed columns, or columns a newer capture instance captures
   that `columns` leaves out), unknown options, and the UTC offset it converts commit times
   with on a server older than SQL Server 2022. Before, they were only in the driver's worker
-  log. Needs `metricsPath`, like the other metrics
+  log. A restart whose first batch replays one already in the facts puts them in the next
+  batch's row. Needs `metricsPath`, like the other metrics
   ([ADR 0023](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0023-schema-changes-and-capture-instance-switching/)
   amendment 6).
 

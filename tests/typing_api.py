@@ -20,6 +20,7 @@ from mssql_cdc import (
     Offset,
     ReconcileResult,
     apply_changes,
+    await_all,
     finalization,
     reconcile,
     stream,
@@ -58,6 +59,7 @@ def results(spark: SparkSession, options: dict, copy: DataFrame) -> None:
     assert_type(query, StreamingQuery)
     # an offset is what advance() takes, as end_offset_from_progress's dict is
     finalization.advance(spark, "c", "bronze.orders", offset, granularity="day")
+    assert_type(finalization.end_offset_from_progress(query.lastProgress), Offset | None)
 
 
 def old_forms(spark: SparkSession, options: dict, query: StreamingQuery) -> None:
@@ -69,6 +71,10 @@ def old_forms(spark: SparkSession, options: dict, query: StreamingQuery) -> None
     finalization.advance(spark, "c", "t", None, "day")  # type: ignore[call-arg]
     finalization.track(spark, query, "c", "t", "day")  # type: ignore[call-arg]
     finalization.candidate(None, "day")  # type: ignore[call-arg]
+    tracker = finalization.FinalizationListener(spark, "r", "c", "t", "day")  # type: ignore[call-arg]
+    tracker.join(60)  # type: ignore[call-arg]
+    finalization.end_offset_from_progress(query.lastProgress, 0)  # type: ignore[call-arg]
+    await_all({}, 600)  # type: ignore[call-arg]
     delta_sink("t", "a", "f", "/metrics")  # type: ignore[call-arg]
     get_spark("app", "local[1]", False)  # type: ignore[call-arg]
 

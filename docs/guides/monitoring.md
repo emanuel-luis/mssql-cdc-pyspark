@@ -214,7 +214,8 @@ JSON `{"warnings": [...]}`:
   it takes it and when it changes ([sourceTimeZone](../reference/options.md#sourcetimezone)).
 
 Each is logged, and recorded, once per run (the offset again when it changes), so a restarted
-stream writes them again.
+stream writes them again: in the row of its first batch, or of the next one when the first
+replays a batch whose row the crashed run had written.
 
 ```sql
 SELECT written_at, target, batch_id,

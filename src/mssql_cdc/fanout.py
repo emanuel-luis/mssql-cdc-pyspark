@@ -95,10 +95,10 @@ def start_many(
 
 
 def await_all(
-    queries: Mapping[str, StreamingQuery], timeout: float | None = None
+    queries: Mapping[str, StreamingQuery], *, timeout: float | None = None
 ) -> dict[str, Exception]:
-    """Wait until every query has stopped, or ``timeout`` seconds in all, and return the
-    error of each query that stopped with one, by capture instance.
+    """Wait until every query has stopped, or ``timeout`` seconds in all (keyword-only), and
+    return the error of each query that stopped with one, by capture instance.
 
     It raises nothing for them: raise when the result is not empty, or the run succeeds
     with a table behind. ``is_data_loss`` and ``is_schema_changed`` tell which errors need

@@ -1,7 +1,8 @@
 """The types of the public API: the values a mode parameter takes, and what the calls return.
 
 The results are ``TypedDict``s: plain dicts at run time, with keys a type checker knows. A
-minor release may add keys to them, never remove or rename one (ADR 0021).
+minor release may add keys to them; removing or renaming one is a break the changelog lists
+under "Breaking" (ADR 0021).
 """
 
 from __future__ import annotations

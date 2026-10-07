@@ -118,16 +118,22 @@ dicts, so a misspelt mode or key surfaced only at run time.
 * Leading arguments stay positional: what a call is about, such as `to_delta(target,
   app_id, checkpoint, facts_table)` ([ADR 0014](0014-network-and-read-metrics-in-facts.md)'s
   form), `apply_changes(spark, bronze, target)`, `reconcile(spark, options, silver)`,
-  `advance(spark, control_table, table_name, end_offset)`. Everything after them, options,
-  flags and modes, is keyword-only. Breaking, in 0.3.0: `to_delta` after `facts_table`;
-  `snapshot`'s `resnapshot`; `apply_changes`'s `capture_instance` and `keys`;
-  `reconcile`'s `keys`; `granularity` of `advance`, `track` and `candidate`;
-  `delta_sink`'s `metrics_path`; `get_spark`'s `delta`.
+  `advance(spark, control_table, table_name, end_offset)`, `get_spark(app_name, master)`.
+  Everything after them, options, flags and modes, is keyword-only. Breaking, in 0.3.0:
+  `to_delta` after `facts_table`; `snapshot`'s `resnapshot`; `apply_changes`'s
+  `capture_instance` and `keys`; `reconcile`'s `keys`; `granularity` of `advance`, `track`,
+  `candidate` and the `FinalizationListener` constructor; `timeout` of `await_all` and
+  `FinalizationListener.join`; `end_offset_from_progress`'s `source_index`; `delta_sink`'s
+  `metrics_path`; `get_spark`'s `delta`.
 * Every mode parameter is a `Literal` alias defined once in `mssql_cdc.types` and exported
   from `mssql_cdc`: `SnapshotMode`, `OnDataLoss`, `Isolation`, `Granularity`, and
   `BackfillState` for `backfill()`'s `state`. The run-time check stays: a wrong value raises
-  `ValueError` naming the allowed ones.
-* Results are `TypedDict`s, plain dicts at run time: `Offset` (`snapshot()`, `seed()`),
+  `ValueError` naming the allowed ones. A `Literal` names the canonical spelling; where the
+  check ignores case (`isolation`, `granularity`) it still does, so `"readcommitted"` runs
+  but does not type-check. `backfill()`'s `isolation` and `candidate`'s `granularity` took
+  any `str` before: a type-check break, listed under "Breaking".
+* Results are `TypedDict`s, plain dicts at run time: `Offset` (`snapshot()`, `seed()`,
+  `end_offset_from_progress()`),
   `BackfillStatus`, `ApplyResult`, `ReconcileResult`. Their keys are public API: a minor
   release may add one, and removing or renaming one is a break listed under "Breaking".
   Parameters that take an offset accept any mapping, so an `Offset` and a parsed progress

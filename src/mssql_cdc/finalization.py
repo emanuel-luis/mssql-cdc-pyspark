@@ -38,7 +38,7 @@ from pyspark.sql.streaming import StreamingQueryListener
 from . import migrations
 from .migrations.control import APPLIED_COLUMNS, OPEN_COMMENTS, VERDICT_COMMENTS, WAVE_COLUMNS
 from .tables import delta_table, retrying, table_ref  # noqa: F401 - table_ref re-exported
-from .types import Granularity
+from .types import Granularity, Offset
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -78,8 +78,9 @@ def candidate(
     return truncate(datetime.fromisoformat(end_offset["commit_ts"]), granularity)
 
 
-def end_offset_from_progress(progress, source_index: int = 0) -> dict | None:
-    """Extract the end offset from a StreamingQueryProgress (object or dict)."""
+def end_offset_from_progress(progress, *, source_index: int = 0) -> Offset | None:
+    """Extract the end offset from a StreamingQueryProgress (object or dict); ``source_index``
+    is keyword-only."""
     if progress is None:
         return None
     data = json.loads(progress.json) if hasattr(progress, "json") else progress
@@ -318,9 +319,10 @@ class FinalizationListener(StreamingQueryListener):
             self._warned = now
         self.last_error, self.failures = exc, n
 
-    def join(self, timeout: float | None = None) -> bool:
+    def join(self, *, timeout: float | None = None) -> bool:
         """Wait until the query has terminated and its last verdict is written (or failed,
-        and logged: see ``last_error``). False when ``timeout`` seconds pass first."""
+        and logged: see ``last_error``). False when ``timeout`` seconds pass first
+        (keyword-only)."""
         self._worker.join(timeout)
         return not self._worker.is_alive()
 

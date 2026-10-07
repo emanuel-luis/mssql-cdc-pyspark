@@ -417,6 +417,32 @@ def test_the_readers_warnings_reach_the_batch_row_once(delta_spark, workdir):
     assert [len(r["warnings"]) for r in parsed.collect()] == [2]
 
 
+def test_a_replayed_batchs_warnings_go_to_the_next_batch_row(delta_spark, workdir):
+    spark = delta_spark
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI], columns={CI: COLUMNS})
+    db.commit(CI, [(2, {"order_id": 0, "status": "new"})], at=T0)
+    target, facts, metrics = (os.path.join(workdir, n) for n in ("bronze", "facts", "metrics"))
+
+    def run(**options):  # a new run, with a sink of its own
+        sink = delta_sink(target, "replayed-v1", facts, metrics_path=metrics)
+        _stream(spark, workdir, sink, metricsPath=metrics, **options)
+
+    run()
+    # the driver died after batch 0's facts commit, before Spark recorded the batch as done
+    commits = os.path.join(workdir, "ckpt", "commits")
+    for name in ("0", ".0.crc"):
+        if os.path.exists(os.path.join(commits, name)):
+            os.remove(os.path.join(commits, name))
+    db.commit(CI, [(2, {"order_id": 1, "status": "new"})], at=T0 + timedelta(minutes=1))
+    run(statsu="x")  # restarted with a misspelt option: batch 0 replayed, then batch 1
+    rows = spark.read.format("delta").load(facts).where("event IS NULL").collect()
+    warning = "unknown option(s) statsu ignored; see docs/reference/options.md"
+    assert sorted((r["batch_id"], r["detail"]) for r in rows) == [
+        (0, None),  # the replay's facts commit is skipped
+        (1, json.dumps({"warnings": [warning]})),
+    ]
+
+
 def test_stream_facade_declares_the_options_once(delta_spark, workdir):
     from mssql_cdc import stream
 

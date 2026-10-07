@@ -54,8 +54,8 @@ returns the table's verdict, a naive UTC `datetime`, or `None` before the first 
 
 Exported from `mssql_cdc`. The mode parameters take a `Literal`, so a type checker flags a
 misspelt mode; a wrong value still raises `ValueError` naming the allowed ones. The results
-are `TypedDict`s, plain dicts at run time; a minor release may add keys to them, never remove
-one.
+are `TypedDict`s, plain dicts at run time; a minor release may add keys to them, and removing
+or renaming one is a break listed under "Breaking" in the changelog.
 
 ::: mssql_cdc.types
     options:

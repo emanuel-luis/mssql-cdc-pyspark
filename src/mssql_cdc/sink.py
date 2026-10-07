@@ -37,7 +37,8 @@
   instead: a retried task rewrites it, and a dead attempt's goes with the other partitions'.
   The reader's other warnings (columns it does not read, unknown options, a fixed UTC offset)
   ride the same way, in the batch's last partition's file, to the batch's own row:
-  ``detail`` is ``{"warnings": [...]}`` when there are any.
+  ``detail`` is ``{"warnings": [...]}`` when there are any. A restart's first batch that
+  replays one already in the facts (a skipped commit) passes them to the next batch's row.
 * Bronze appends use ``mergeSchema``: a column that a newer capture instance captures joins
   the table (older rows read NULL). A changed type fails the append unless the table has
   ``delta.enableTypeWidening`` and the change widens.
@@ -470,6 +471,7 @@ def delta_sink(
     """
     created: set[str] = set()  # once per query run, not once per batch
     resumed = warned = False
+    carried: list[str] = []  # a replayed batch's warnings: its facts row was written already
 
     def ensure(spark, table: str, kind: str, columns, comment: str) -> None:
         if table not in created:
@@ -477,9 +479,10 @@ def delta_sink(
             created.add(table)
 
     def write_batch(df: DataFrame, batch_id: int) -> None:
-        nonlocal resumed, warned
+        nonlocal resumed, warned, carried
         started_at, t0 = _utc_now(), time.monotonic()
         spark = df.sparkSession
+        replay = False  # of a batch whose facts commit Delta will skip
         # ponytail: without a facts table nothing is checked; the newest bronze commit's
         # userMetadata could stand in if that case needs it
         if facts_table and not resumed:
@@ -493,7 +496,7 @@ def delta_sink(
                     "rewound while app_id stayed the same, so Delta would skip every write up to "
                     f"batch {last} as done already. Use a new app_id, or restore the checkpoint."
                 )
-            resumed = True
+            replay, resumed = batch_id == last, True
         df = df.persist()
         try:
             if metrics_path:  # the batch is not read yet: a partition's file is a dead attempt's
@@ -512,7 +515,9 @@ def delta_sink(
             # and the partitions' (a range cleanup reached while it was read)
             names, events = _read_events(metrics_path) if metrics_path else ([], [])
             events += folded.pop("data_skipped", [])
-            warnings = folded.pop("warnings", [])  # the reader's, while it planned the batch
+            # the reader's, while it planned the batch; a replayed one's go to the next batch row
+            warnings = list(dict.fromkeys(carried + folded.pop("warnings", [])))
+            carried = warnings if replay else []
             if facts_table:
                 # a batch with no range writes no file; one that read rows always does
                 if metrics_path and not folded and facts["rows"] and not warned:

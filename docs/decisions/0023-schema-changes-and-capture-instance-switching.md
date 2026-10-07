@@ -302,6 +302,10 @@ it converts commit times with on a server older than SQL Server 2022
   (facts migration 12, a comment). They ride the batch's facts commit, so a replay writes
   them once, and a retried task rewrites its file with them. Without `metricsPath` they stay
   in the log.
+* A restarted run's first batch can replay one whose facts commit was written before the
+  crash, which Delta then skips with the new run's warnings in it. The sink knows it from the
+  facts (the batch id is the largest the `app_id` wrote, as its resume check reads) and puts
+  them in the next batch's row instead.
 * A warning is recorded as often as it is logged: once per run, and the offset again when it
   changes. One logged elsewhere (the computed columns by `load()`, the offset by the client)
   is recorded by the reader, not logged again.
@@ -312,4 +316,5 @@ it converts commit times with on a server older than SQL Server 2022
   dead attempt's partition files are removed before the read.
 * Tests: `tests/test_reader_units.py` (each warning on the batch's last range, once, and in
   its task's metrics file) and `tests/test_delta_sink.py` (a misspelt option and a column a
-  newer instance captures reach the batch's row once across a replay).
+  newer instance captures reach the batch's row once across a replay; a restart's warnings
+  reach the next batch's row when its first batch replays one already in the facts).
