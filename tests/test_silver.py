@@ -653,7 +653,7 @@ def test_a_date_keys_ranges_delete_on_spark_what_they_bound(delta_spark, workdir
     silver by, and the join's comparisons."""
     from pyspark.sql.types import DateType
 
-    from mssql_cdc.silver import _absent
+    from mssql_cdc.silver import _absent, _Chunk
 
     silver, d = os.path.join(workdir, "silver"), [date(2026, 1, i) for i in range(1, 7)]
     delta_spark.createDataFrame(
@@ -669,8 +669,8 @@ def test_a_date_keys_ranges_delete_on_spark_what_they_bound(delta_spark, workdir
         "order_id DATE, _start_lsn STRING",
     ).write.format("delta").save(silver)
     chunks = {
-        1: (0, "2026-01-02", "2026-01-04", _lsn(110)),
-        2: (0, "2026-01-04 00:00:00.0000000", "2026-01-06T00:00:00", _lsn(120)),
+        1: _Chunk(0, "2026-01-02", "2026-01-04", _lsn(110)),
+        2: _Chunk(0, "2026-01-04 00:00:00.0000000", "2026-01-06T00:00:00", _lsn(120)),
     }
     held = delta_spark.createDataFrame([(d[4],)], "order_id DATE")
     gone = _absent(delta_spark, silver, "order_id", DateType(), chunks, held)
