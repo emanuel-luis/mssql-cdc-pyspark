@@ -7,7 +7,8 @@
 **Amended:** 2026-10-05T12:35:09-03:00, every release keeps the state its wheel writes under `tests/compat/<version>`, and the current code must resume it (amendment 3)  
 **Amended:** 2026-10-05T12:49:29-03:00, the state contract covers the silver and reconcile schemas, the facts `event` values, the JSON of snapshot rows and a backfill wave's userMetadata, whose keys are only added; the public surface is what `docs/reference/api.md` lists (amendment 4)  
 **Amended:** 2026-10-05T20:51:10-03:00, the kept state includes a chunked snapshot left open, and the `fake` backend's files in it stay readable (amendment 3)  
-**Amended:** 2026-10-07T01:34:59-03:00, the API shape from 0.3.0: options and flags keyword-only, modes typed as `Literal`s, results as `TypedDict`s whose keys are only added (amendment 5)
+**Amended:** 2026-10-07T01:34:59-03:00, the API shape from 0.3.0: options and flags keyword-only, modes typed as `Literal`s, results as `TypedDict`s whose keys are only added (amendment 5)  
+**Amended:** 2026-10-07T01:41:18-03:00, a micro-batch row's `detail` is a payload too, with the added key `warnings` (amendment 6, ADR 0023 Amendment 6)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -45,7 +46,9 @@ The Python API, on the other hand, is young and will change.
     - the userMetadata of a backfill wave's bronze commit: `backfill`, `wave`, `lsn`,
       `attempt`, `chunks`, each chunk with `chunk`, `lo`, `hi`, `last`, `rows`, `high_lsn`,
       `read_seconds`, `read_mb`
-      ([ADR 0028](0028-chunked-snapshot-next-to-the-stream.md)).
+      ([ADR 0028](0028-chunked-snapshot-next-to-the-stream.md));
+    - `detail` of a micro-batch row (`event` NULL): `warnings`, added in 0.3.0
+      (amendment 6).
 
     Keys are only added: never renamed, removed or given another meaning. A reader takes a
     key added after its payload first shipped with a default (`.get`), so rows an older
@@ -135,3 +138,11 @@ dicts, so a misspelt mode or key surfaced only at run time.
   would be code kept for one release only.
 * `tests/typing_api.py`, checked by mypy, pins the result types and keeps the old forms and
   wrong modes type errors.
+
+## Amendment 6: a micro-batch row's warnings
+0.3.0 writes a micro-batch row's `detail` for the first time: JSON `{"warnings": [...]}`, the
+warnings the reader logged on the driver, when there were any
+([ADR 0023](0023-schema-changes-and-capture-instance-switching.md) Amendment 6). An added
+payload, no change to a shipped one: rows written before, and batches without warnings,
+keep `detail` NULL, so a query reads the key with a default. The key is state; the messages
+in the list are text for people and may change in any release.

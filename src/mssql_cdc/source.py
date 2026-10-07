@@ -175,15 +175,16 @@ KNOWN_OPTIONS = frozenset(
 )
 
 
-def warn_unknown(options) -> None:
-    """One WARNING naming the options not in ``KNOWN_OPTIONS``. The readers log it where
-    Spark runs them (a Python worker's stderr); ``stream()`` logs it in the caller's process."""
+def warn_unknown(options) -> str | None:
+    """One WARNING naming the options not in ``KNOWN_OPTIONS``, returned (None when all are
+    known). The readers log it where Spark runs them (a Python worker's stderr) and keep it for
+    the facts; ``stream()`` logs it in the caller's process."""
     unknown = sorted(str(k) for k in options if str(k).lower() not in KNOWN_OPTIONS)
-    if unknown:
-        _log.warning(
-            "mssql_cdc: unknown option(s) %s ignored; see docs/reference/options.md",
-            ", ".join(unknown),
-        )
+    if not unknown:
+        return None
+    message = f"unknown option(s) {', '.join(unknown)} ignored; see docs/reference/options.md"
+    _log.warning("mssql_cdc: %s", message)
+    return message
 
 
 # -- driver-side retries (ADR 0029) -------------------------------------------
@@ -430,6 +431,9 @@ class LsnRange(InputPartition):
     # the commit time of the batch's start offset: where a loss the task finds after its read
     # starts (ADR 0018)
     start_ts: str | None = None
+    # on the last range, the driver's warnings no earlier batch carried: its metrics file
+    # takes them to the batch's facts row (ADR 0023 amendment 6)
+    warnings: list[str] | None = None
 
 
 class MssqlCdcDataSource(DataSource):
@@ -516,7 +520,9 @@ class _Common:
 
     def __init__(self, options: dict, schema, default_num_partitions: int | None = None):
         self.options = options
-        warn_unknown(options)
+        unknown = warn_unknown(options)
+        # warnings the driver logged that no planned batch has taken to the facts yet (_warn)
+        self._warnings = [unknown] if unknown else []
         self.capture_instance = _opt(options, "captureInstance")
         if not self.capture_instance:
             raise ValueError("Option 'captureInstance' is required (e.g. 'dbo_orders')")
@@ -580,6 +586,14 @@ class _Common:
             with contextlib.suppress(Exception):  # a broken connection may fail to close too
                 client.close()
 
+    def _warn(self, message: str, logged: bool = False) -> None:
+        """A warning of the driver's: logged (unless ``logged`` already, elsewhere) and kept
+        until a planned batch takes it to its facts row. The log is a Python worker's stderr,
+        which jobs rarely keep; the facts are durable."""
+        if not logged:
+            _log.warning("mssql_cdc: %s", message)
+        self._warnings.append(message)
+
     def _instances(self, client) -> list:
         """Every capture instance of the source table, oldest first (``CaptureInstance``).
         Looked up by the newest name seen this run first, so an instance disabled after a
@@ -621,15 +635,25 @@ class _Common:
             )
         listed = [c for c in self.source_columns if c.lower() in computed]
         if listed:
-            _log.warning(
-                "mssql_cdc: 'columns' lists computed column(s) %s of %s, which CDC stores as "
-                "NULL in every change row: read as NULL in every row, snapshot rows too",
-                ", ".join(listed),
-                instances[-1].name,
+            self._warn(
+                f"'columns' lists computed column(s) {', '.join(listed)} of "
+                f"{instances[-1].name}, which CDC stores as NULL in every change row: read as "
+                "NULL in every row, snapshot rows too"
+            )
+        wanted = {c.lower() for c in self.source_columns}
+        left_out = {c.lower(): c for i in instances for c in i.computed if c.lower() not in wanted}
+        if left_out and not self.explicit_columns:  # load() logged it, in a worker of its own
+            self._warn(
+                f"{self.capture_instance} captures computed column(s) "
+                f"{', '.join(left_out.values())}, which CDC stores as NULL in every change row: "
+                "left out of the schema",
+                logged=True,
             )
 
 
 class _BaseReader(_Common, DataSourceStreamReader):
+    _fixed_offset: int | None = None  # the UTC offset a warning last named (pre-2022 servers)
+
     # -- offsets --------------------------------------------------------------
     def _offset(self, lsn: str) -> dict:
         return {"lsn": lsn, "commit_ts": self.client.lsn_to_time(lsn) or ""}
@@ -702,6 +726,18 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 ranges += self._split(client, inst, lo, hi)
         if ranges:  # it ends at the batch's end offset, unless cleanup left nothing up to it
             ranges[-1].last = True
+            zone, offset = client.clock()
+            if zone is None and offset is not None and offset != self._fixed_offset:
+                self._fixed_offset = offset  # the client logged it, when taken and on a change
+                self._warn(
+                    "SQL Server before 2022 names no time zone: commit times are converted "
+                    f"with its UTC offset, {offset:+d} minutes; in a zone with daylight saving "
+                    "set sourceTimeZone to its name",
+                    logged=True,
+                )
+            # to the facts with the last range's metrics; without ranges, with the next batch's
+            ranges[-1].warnings = list(dict.fromkeys(self._warnings)) or None
+            self._warnings = []
         for r in ranges:
             r.start_ts = start.get("commit_ts") or None
         for kind, ci, lsn, ts, detail in events:
@@ -842,10 +878,9 @@ class _BaseReader(_Common, DataSourceStreamReader):
         ]
         if self.explicit_columns:
             if new:
-                _log.warning(
-                    "mssql_cdc: %s captures %s, which 'columns' does not list: not read",
-                    newer.name,
-                    ", ".join(new),
+                self._warn(
+                    f"{newer.name} captures {', '.join(new)}, which 'columns' does not list: "
+                    "not read"
                 )
             return
         from .client import SchemaChangedError
@@ -961,6 +996,8 @@ class _BaseReader(_Common, DataSourceStreamReader):
                     metrics.update(_position(client, min_lsn, partition.to_lsn))
                 if partition.from_lsn < min_lsn:  # failOnDataLoss=false: the facts keep it too
                     metrics["data_skipped"] = _possible_skip(client, partition, min_lsn)
+                if partition.warnings:  # the driver's, for the batch's facts row
+                    metrics["warnings"] = partition.warnings
                 _write_metrics(
                     self.metrics_path, f"{partition.from_lsn}-{partition.to_lsn}", metrics
                 )

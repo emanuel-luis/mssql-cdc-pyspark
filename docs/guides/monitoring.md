@@ -43,6 +43,7 @@ A micro-batch row (`event` NULL):
 | Read and network | `source_rtt_ms`, `read_seconds`, `read_mb`, `network_wait_ms` | with metrics |
 | Retention | `retention_watermark_ts`, `retention_headroom_hours` | with metrics |
 | Lag | `source_max_commit_ts`, `capture_lag_seconds`, `ingestion_lag_seconds` | with metrics |
+| Warnings | `detail`, JSON `{"warnings": [...]}` | with metrics, when the reader warned ([below](#warnings)) |
 
 Event rows (`event` set) are different: `min_lsn`, `max_lsn` and `end_lsn` all hold the
 event's LSN, and the commit-time columns its commit time, whatever `rows` says. Their
@@ -197,6 +198,32 @@ ORDER BY written_at DESC;
 A `resnapshot` row is worth an alert of its own: the changes committed between
 `lost_from_ts` and `lost_to_ts` were purged before the stream read them.
 
+## Warnings
+
+The reader's warnings go to the log of the Python worker Spark runs the source in, on the
+driver, which jobs rarely keep. Those about a change on the source are event rows (above);
+the others reach the `detail` of the row of the next micro-batch with a range to read, as
+JSON `{"warnings": [...]}`:
+
+- columns it does not read: a computed column, left out of the inferred schema or listed in
+  `columns` (NULL in every row), and the columns a newer capture instance captures that
+  `columns` leaves out ([Schema changes](schema-changes.md));
+- options it does not know, a misspelt name whose default stays in force
+  ([Options](../reference/options.md));
+- the UTC offset it converts commit times with on a server older than SQL Server 2022, when
+  it takes it and when it changes ([sourceTimeZone](../reference/options.md#sourcetimezone)).
+
+Each is logged, and recorded, once per run (the offset again when it changes), so a restarted
+stream writes them again.
+
+```sql
+SELECT written_at, target, batch_id,
+       from_json(detail, 'warnings ARRAY<STRING>').warnings AS warnings
+FROM ops.ingestion_facts
+WHERE event IS NULL AND detail IS NOT NULL
+ORDER BY written_at DESC;
+```
+
 ## Live capture lag
 
 The facts cannot show a stopped capture: no batch runs, so the last `capture_lag_seconds`
@@ -257,8 +284,9 @@ stalls or errs means capture did.
 - Warnings raised while a batch is planned (a schema change, a capture instance switch,
   captured columns that `columns` leaves out) are logged by the Python worker that Spark
   runs the source in on the driver. They land in the driver's stderr log, not in handlers
-  your job attaches to the `mssql_cdc` logger. The durable channel is the facts table's
-  event rows, `schema_change`, `capture_instance_switched` and `data_skipped`, which need
+  your job attaches to the `mssql_cdc` logger. The durable channel is the facts table: the
+  event rows `schema_change`, `capture_instance_switched` and `data_skipped`, and the
+  [warnings](#warnings) in a micro-batch row's `detail`, all of which need
   [metricsPath](../reference/options.md#metricspath).
 - Metrics are NULL without `metricsPath` (a URI checkpoint without one), when the metrics
   directory is not shared by every node ([above](#metrics-are-null)), and on the first

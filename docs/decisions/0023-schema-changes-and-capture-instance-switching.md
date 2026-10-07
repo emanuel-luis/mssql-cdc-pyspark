@@ -6,7 +6,8 @@
 **Amended:** 2026-09-30T21:25:30-03:00, drop the older instance one batch after the switch event; schema checked at an instance's first read; uncaptured declared columns fail; `detail` is the DDL statement  
 **Amended:** 2026-10-01T15:55:00-03:00, type widening on silver is a manual `ALTER COLUMN ... TYPE`: `apply_changes` merges without schema evolution  
 **Amended:** 2026-10-01T17:25:27-03:00, lab check t9 runs the switch under a continuous writer on SQL Server 2022 and 2017; the production SQL Server 2016 SP3 change tables have `__$command_id`  
-**Amended:** 2026-10-01T18:15:53-03:00, the switch tests run with the `arrow-odbc` backend too (ADR 0003 Amendment 2)
+**Amended:** 2026-10-01T18:15:53-03:00, the switch tests run with the `arrow-odbc` backend too (ADR 0003 Amendment 2)  
+**Amended:** 2026-10-07T01:41:18-03:00, the reader's other warnings (columns not read, unknown options, a fixed UTC offset) reach the batch's facts row as `detail` `{"warnings": [...]}` (Amendment 6)
 
 ## Context
 A capture instance captures a fixed column list, chosen when it is enabled. To capture a
@@ -285,3 +286,30 @@ never (a column that stays NULL until each row changes).
   on the new change table, and a transaction open during the enable (only in the old
   instance, below S). They also pinned that an update of only a column an instance does not
   capture writes no change row there; the fake now does the same.
+
+## Amendment 6: the reader's other warnings reach the facts
+The reader logs on the driver, to the stderr of the Python worker Spark runs the source in,
+which jobs rarely keep. Changes on the source were already event rows; the warnings about
+what the query reads were in that log only: captured columns that `columns` leaves out at a
+newer instance (D2), computed columns left out of the inferred schema or listed in `columns`
+([ADR 0007](0007-infer-columns-from-cdc-metadata.md)), unknown options, and the UTC offset
+it converts commit times with on a server older than SQL Server 2022
+([ADR 0008](0008-detect-source-time-zone.md)).
+
+* The reader keeps each until it plans a batch with a range to read. The batch's last range
+  carries them to its task, which writes them in its metrics file, and the sink puts them in
+  the `detail` of the batch's own row as JSON `{"warnings": [...]}`, only when there are any
+  (facts migration 12, a comment). They ride the batch's facts commit, so a replay writes
+  them once, and a retried task rewrites its file with them. Without `metricsPath` they stay
+  in the log.
+* A warning is recorded as often as it is logged: once per run, and the offset again when it
+  changes. One logged elsewhere (the computed columns by `load()`, the offset by the client)
+  is recorded by the reader, not logged again.
+* Retries on a new connection (ADR 0029) stay in the log: the batch went through.
+* Considered: an event row per warning, a new `event` value for every consumer's filters to
+  know where the batch's row has `detail` free; and an event file written while planning,
+  which the sink folds into whatever batch comes next, a dead attempt's included, where a
+  dead attempt's partition files are removed before the read.
+* Tests: `tests/test_reader_units.py` (each warning on the batch's last range, once, and in
+  its task's metrics file) and `tests/test_delta_sink.py` (a misspelt option and a column a
+  newer instance captures reach the batch's row once across a replay).

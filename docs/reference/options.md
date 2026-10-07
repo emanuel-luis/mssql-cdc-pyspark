@@ -25,7 +25,8 @@ query = stream(spark, options).to_delta(
 
 Option names are case-insensitive (`startinglsn` works). `stream()` logs one WARNING naming
 any option it does not know, in your job's log, which is how a misspelt name shows; the reader
-logs it again in the driver's stderr log, also with `spark.readStream`. Pass values as strings, as
+logs it again in the driver's stderr log, also with `spark.readStream`, and the facts row of
+its first batch keeps it ([Monitoring](../guides/monitoring.md#warnings)). Pass values as strings, as
 Spark does. A boolean option is true for `true`, `1`, `yes` or `y` and false for `false`, `0`,
 `no` or `n`, in any case; anything else raises `ValueError` naming the option, so a typo such as
 `failOnDataLoss=ture` never turns a guard off.
@@ -134,7 +135,8 @@ touch captured `datetime` columns.
   daylight-saving rules in force at each commit. Older versions lack the function; then the
   driver reads the server's current UTC offset (`SYSDATETIMEOFFSET()`) for each batch and
   applies it to the batch's commits, on the driver and the executors alike, logging a
-  warning when it takes the fallback and when the offset changes. That is exact only for
+  warning when it takes the fallback and when the offset changes, which the facts row of the
+  batch keeps too ([Monitoring](../guides/monitoring.md#warnings)). That is exact only for
   zones without daylight saving: a batch that spans a transition, or reads commits from
   before it, converts some with the wrong offset, and `finalized_until` can run ahead of
   the data.
@@ -163,7 +165,8 @@ when the backend has no column metadata (the fake without captured columns). A l
 that no capture instance of the table captures fails the first planning and the snapshot
 with a `ValueError`. A listed computed column reads NULL in every row, snapshot rows too,
 since CDC stores NULL for it in every change row; the first planning logs a warning naming
-it. A type change on the source made while the query runs is caught when the
+it, which the batch's facts row keeps ([Monitoring](../guides/monitoring.md#warnings)). A
+type change on the source made while the query runs is caught when the
 batch is planned; one made while it is stopped fails the cast at read time: update
 `columns` ([Schema changes](../guides/schema-changes.md#with-the-columns-option)).
 

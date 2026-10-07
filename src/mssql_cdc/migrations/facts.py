@@ -383,6 +383,23 @@ POSSIBLE_COMMENTS = {
 }
 
 
+# Migration 12 (2026-10-07): the warnings the reader logs on the driver also reach the batch's
+# own row, as JSON in detail (ADR 0023 amendment 6). Comment only; the creation columns take
+# it, over migration 11's.
+WARNING_COMMENTS = {
+    "detail": POSSIBLE_COMMENTS["detail"].replace(
+        "NULL on other rows.",
+        "On a micro-batch row, JSON {warnings}: the warnings the reader logged on the driver up "
+        "to planning the batch that no earlier batch's row holds, such as columns it does not "
+        "read (computed ones, or those a newer capture instance captures that the columns "
+        "option leaves out), options it does not know, or the UTC offset it converts commit "
+        "times with on a server older than SQL Server 2022; set only when there are any, and "
+        "only with the source option metricsPath and delta_sink(metrics_path=...). NULL on "
+        "other rows.",
+    ),
+}
+
+
 def _end_offset(spark, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT  # the comments new tables are created with
 
@@ -440,4 +457,7 @@ MIGRATIONS: list[Migration] = [
     ),
     Migration("skipped changes", _skipped_changes),
     Migration("possible skips", lambda spark, table: set_comments(spark, table, POSSIBLE_COMMENTS)),
+    Migration(
+        "planning warnings", lambda spark, table: set_comments(spark, table, WARNING_COMMENTS)
+    ),
 ]

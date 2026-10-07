@@ -719,3 +719,88 @@ def test_only_the_batch_s_last_range_measures_the_position(tmp_path, monkeypatch
     assert not {*position, "to_commit_ts"} & other.keys()  # the sink takes the last's
     assert last["to_commit_ts"] == last["source_max_commit_ts"] == "2026-09-28T13:50:00.000"
     assert last["retention_watermark_ts"] and last["capture_lag_seconds"] > 0
+
+
+# -- the driver's warnings reach the facts (ADR 0023 amendment 6) ----------------------------
+def test_the_drivers_warnings_ride_the_batchs_last_range_to_its_metrics_file(tmp_path, monkeypatch):
+    from mssql_cdc import source
+    from mssql_cdc.sink import _fold_metrics
+
+    monkeypatch.setattr(source, "MIN_ROWS_PER_PARTITION", 1)
+    db = FakeCdcDatabase(str(tmp_path / "src"), [CI], columns={CI: "order_id INT"})
+    c = [db.commit(CI, [(2, {"order_id": i})], at=T0 + timedelta(minutes=i)) for i in range(3)]
+    v2 = db.add_capture_instance(CI, "order_id INT, note STRING")
+    c.append(db.commit(CI, [(2, {"order_id": 3, "note": "gift"})], at=T0 + timedelta(minutes=3)))
+    metrics = tmp_path / "metrics"
+    reader = _reader(
+        str(tmp_path / "src"),
+        numPartitions=2,
+        columns="order_id INT",
+        metricsPath=str(metrics),
+        maxCommitPerBatch="5",  # a typo: logged when the reader is made, kept for the facts
+    )
+    first = reader.partitions({"lsn": c[0], "commit_ts": ""}, {"lsn": c[2]})
+    assert [r.warnings for r in first] == [
+        None,
+        ["unknown option(s) maxCommitPerBatch ignored; see docs/reference/options.md"],
+    ]
+    crossing = reader.partitions({"lsn": c[2], "commit_ts": ""}, {"lsn": c[3]})
+    not_read = f"{v2} captures note, which 'columns' does not list: not read"
+    assert crossing[-1].warnings == [not_read]  # taken once: the typo is in the first's
+    for r in crossing:
+        list(reader.read(r))
+    list(reader.read(crossing[-1]))  # a retried task writes its file again, warnings and all
+    assert _fold_metrics(str(metrics))["warnings"] == [not_read]
+
+
+def test_computed_columns_not_read_are_warnings_of_the_first_batch(tmp_path):
+    from pyspark.sql.types import IntegerType, StructField, StructType
+
+    from mssql_cdc.source import MssqlCdcStreamReader
+
+    db = FakeCdcDatabase(
+        str(tmp_path), [CI], columns={CI: "order_id INT, total INT"}, computed={CI: ["total"]}
+    )
+    c = [db.commit(CI, [(2, {"order_id": i, "total": i})]) for i in range(3)]
+    inferred = _reader(str(tmp_path))  # load() left total out of the schema, and logged it
+    [r] = inferred.partitions({"lsn": c[0], "commit_ts": ""}, {"lsn": c[1]})
+    assert r.warnings == [
+        (
+            f"{CI} captures computed column(s) total, which CDC stores as NULL in every change "
+            "row: left out of the schema"
+        )
+    ]
+    opts = {"backend": "fake", "fakePath": str(tmp_path), "captureInstance": CI}
+    schema = StructType([StructField(n, IntegerType()) for n in ("order_id", "total")])
+    listed = MssqlCdcStreamReader({**opts, "columns": "order_id INT, total INT"}, schema)
+    [r] = listed.partitions({"lsn": c[0], "commit_ts": ""}, {"lsn": c[1]})
+    assert r.warnings == [
+        (
+            f"'columns' lists computed column(s) total of {CI}, which CDC stores as NULL in "
+            "every change row: read as NULL in every row, snapshot rows too"
+        )
+    ]
+    assert listed.partitions({"lsn": c[1], "commit_ts": ""}, {"lsn": c[2]})[0].warnings is None
+
+
+def test_a_fixed_utc_offset_is_a_warning_of_the_first_batch_and_of_each_change(
+    tmp_path, monkeypatch
+):
+    clock = {"offset": -180}
+    monkeypatch.setattr(FakeCdcClient, "clock", lambda self: (None, clock["offset"]))
+    _, lsns = _db(str(tmp_path), n_tx=4)
+    reader = _reader(str(tmp_path))
+
+    def plan(a, b):
+        [r] = reader.partitions({"lsn": lsns[a], "commit_ts": ""}, {"lsn": lsns[b]})
+        return r.warnings
+
+    assert plan(0, 1) == [
+        (
+            "SQL Server before 2022 names no time zone: commit times are converted with its UTC "
+            "offset, -180 minutes; in a zone with daylight saving set sourceTimeZone to its name"
+        )
+    ]
+    assert plan(1, 2) is None  # as the client logs it: once, then on a change
+    clock["offset"] = -120
+    assert "UTC offset, -120 minutes" in plan(2, 3)[0]

@@ -35,6 +35,9 @@
   finds CDC cleanup ran while it read its range (``failOnDataLoss=false``) puts its
   'data_skipped' event, the loss possible rather than certain, in its own metrics file
   instead: a retried task rewrites it, and a dead attempt's goes with the other partitions'.
+  The reader's other warnings (columns it does not read, unknown options, a fixed UTC offset)
+  ride the same way, in the batch's last partition's file, to the batch's own row:
+  ``detail`` is ``{"warnings": [...]}`` when there are any.
 * Bronze appends use ``mergeSchema``: a column that a newer capture instance captures joins
   the table (older rows read NULL). A changed type fails the append unless the table has
   ``delta.enableTypeWidening`` and the change widens.
@@ -72,6 +75,7 @@ from .migrations.facts import (
     POSSIBLE_COMMENTS,
     RETENTION_COLUMNS,
     SKIP_COMMENTS,
+    WARNING_COMMENTS,
 )
 from .tables import is_path
 
@@ -232,7 +236,7 @@ FACTS_COLUMNS = [
     *((n, t, POSSIBLE_COMMENTS.get(n, SKIP_COMMENTS.get(n, c))) for n, t, c in EVENT_COLUMNS),
     *LAG_COLUMNS,
     *END_COLUMNS,
-    *((n, t, POSSIBLE_COMMENTS.get(n, SKIP_COMMENTS.get(n, c))) for n, t, c in DETAIL_COLUMNS),
+    *((n, t, WARNING_COMMENTS.get(n, c)) for n, t, c in DETAIL_COLUMNS),
     ("target", "STRING", "Table name or path the batch was written to."),
     (
         "written_at",
@@ -361,7 +365,8 @@ def _event_row(event: dict, **batch) -> dict:
 def _fold_metrics(path: str) -> dict:
     """Fold every metrics file in ``path``: all are the current batch's (see the module doc).
     ``data_skipped``: the events of the partitions that found CDC cleanup had run while they
-    read (ADR 0018), for the caller to take out as event rows."""
+    read (ADR 0018), for the caller to take out as event rows; ``warnings``: the driver's,
+    which the batch's last range carried, for the caller to put in the batch row's detail."""
     picked = []
     for name in _files(path):
         try:
@@ -390,6 +395,7 @@ def _fold_metrics(path: str) -> dict:
         "read_mb": round(sum(m["bytes"] for m in picked) / 1e6, 6),
         "network_wait_ms": None if None in waits else sum(waits),
         "data_skipped": [m["data_skipped"] for m in picked if m.get("data_skipped")],
+        "warnings": [w for m in picked for w in m.get("warnings") or ()],
     }
 
 
@@ -459,7 +465,7 @@ def delta_sink(
     the directory of the source option ``metricsPath``, used by no other stream. Its files are removed after each batch,
     with or without a facts table; without ``metrics_path`` nothing removes them. It also
     carries the reader's schema change, capture instance switch and data skipped events to
-    the facts.
+    the facts, and its other warnings to the batch row's ``detail``.
     A batch that read rows but found no metrics file there logs a warning, once per run.
     """
     created: set[str] = set()  # once per query run, not once per batch
@@ -506,6 +512,7 @@ def delta_sink(
             # and the partitions' (a range cleanup reached while it was read)
             names, events = _read_events(metrics_path) if metrics_path else ([], [])
             events += folded.pop("data_skipped", [])
+            warnings = folded.pop("warnings", [])  # the reader's, while it planned the batch
             if facts_table:
                 # a batch with no range writes no file; one that read rows always does
                 if metrics_path and not folded and facts["rows"] and not warned:
@@ -530,6 +537,7 @@ def delta_sink(
                     duration_ms=duration_ms,
                     **_headroom(folded.get("retention_watermark_ts"), position),
                     ingestion_lag_seconds=_lag(folded.get("source_max_commit_ts"), position),
+                    detail=json.dumps({"warnings": warnings}) if warnings else None,
                     target=target,
                     written_at=_utc_now(),
                 )

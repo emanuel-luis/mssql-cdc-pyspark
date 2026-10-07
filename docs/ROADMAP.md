@@ -61,7 +61,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
       policies).
 - [x] Typed public results: `TypedDict`s (still dicts) for `backfill()`, `apply_changes()`,
       `reconcile()`, `snapshot()`.
-- [ ] Planning warnings (columns not read) also in the facts `detail`, not only in the log.
+- [x] Planning warnings (columns not read) also in the facts `detail`, not only in the log.
 
 ## 0.4.0 (minor): typing and protocols
 

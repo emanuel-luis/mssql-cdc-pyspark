@@ -251,10 +251,10 @@ def test_facts_table_at_version_0_gains_every_column_and_the_current_comments(de
         "one row per non-empty batch",
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(spark, old, "facts") == 11
+    assert migrations.migrate(spark, old, "facts") == 12
     cols, description = _comments(spark, old)
     assert all(name in cols and cols[name][1] for name, _, _ in added)
-    # migrations 5 to 11 rewrote the comments whose meaning changed: as a new table has them
+    # migrations 5 to 12 rewrote the comments whose meaning changed: as a new table has them
     assert {n: cols[n][1] for n, _, _ in FACTS_COLUMNS} == {n: c for n, _, c in FACTS_COLUMNS}
     assert description == FACTS_COMMENT
 
@@ -374,6 +374,47 @@ def test_cleanup_during_the_read_leaves_one_possible_data_skipped_row(delta_spar
     assert (detail["to"], detail["certain"]) == (lsns[2], False)
     assert "may be missing" in detail["reason"]
     assert not os.listdir(metrics)
+
+
+def test_the_readers_warnings_reach_the_batch_row_once(delta_spark, workdir):
+    spark = delta_spark
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI], columns={CI: COLUMNS})
+    db.commit(CI, [(2, {"order_id": 0, "status": "new"})], at=T0)
+    target, facts, metrics = (os.path.join(workdir, n) for n in ("bronze", "facts", "metrics"))
+    sink = delta_sink(target, "warned-v1", facts, metrics_path=metrics)
+
+    def write(df, batch_id):
+        sink(df, batch_id)
+        sink(df, batch_id)  # a replay of the batch: read again, written once
+
+    _stream(spark, workdir, write, metricsPath=metrics)  # nothing to warn about
+    v2 = db.add_capture_instance(CI, COLUMNS + ", note STRING")
+    db.commit(
+        CI, [(2, {"order_id": 1, "status": "new", "note": "gift"})], at=T0 + timedelta(minutes=1)
+    )
+    # restarted with a misspelt option, it reads v2, whose note 'columns' leaves out
+    _stream(spark, workdir, write, metricsPath=metrics, statsu="x")
+    rows = spark.read.format("delta").load(facts).where("event IS NULL").collect()
+    assert sorted((r["batch_id"], r["detail"] and json.loads(r["detail"])) for r in rows) == [
+        (0, None),
+        (
+            1,
+            {
+                "warnings": [
+                    "unknown option(s) statsu ignored; see docs/reference/options.md",
+                    f"{v2} captures note, which 'columns' does not list: not read",
+                ]
+            },
+        ),
+    ]
+    assert not os.listdir(metrics)
+    parsed = (  # as docs/guides/monitoring.md reads them
+        spark.read.format("delta")
+        .load(facts)
+        .where("event IS NULL AND detail IS NOT NULL")
+        .selectExpr("from_json(detail, 'warnings ARRAY<STRING>').warnings AS warnings")
+    )
+    assert [len(r["warnings"]) for r in parsed.collect()] == [2]
 
 
 def test_stream_facade_declares_the_options_once(delta_spark, workdir):

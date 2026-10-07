@@ -75,7 +75,8 @@ checkpoints do not change ([Architecture](../ARCHITECTURE.md#a-second-capture-in
   `SchemaChangedError`, before reading past it; restarted, it infers the new columns and
   resumes there.
 * With the [columns](../reference/options.md#columns) option the declared list decides: the
-  query switches in place and logs a warning naming captured columns it leaves out.
+  query switches in place and logs a warning naming captured columns it leaves out, which
+  the batch's facts row keeps too ([Monitoring](monitoring.md#warnings)).
 * A column the query reads that the new instance does not capture reads NULL from S. The
   warning and the event's `detail` name it.
 * Bronze gains the new column (every append uses `mergeSchema`); older rows read NULL for it.
