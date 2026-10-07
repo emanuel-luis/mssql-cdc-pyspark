@@ -53,7 +53,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 - [x] `reconcile` reports stream lag as `MISMATCH` where it is `IN_FLIGHT`.
 - [x] `reconcile`'s join misses a change of a NULL key; join null-safe.
 
-## 0.3.0 (minor, Breaking): API shape
+## 0.3.0 (minor, Breaking, shipped 2026-10-07): API shape
 
 - [x] Keyword-only parameters after `facts_table` in `to_delta`, and `resnapshot` in
       `snapshot()`.

@@ -12,6 +12,8 @@ compatibility" line.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-07
+
 State compatibility: offsets and checkpoints unchanged. Facts migration 12 rewrites the
 comment of `detail` (metadata only), the next time a stream opens the facts table; a
 micro-batch row's `detail` gains the key `warnings`, an added payload
@@ -652,7 +654,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.1.0...v0.2.0
