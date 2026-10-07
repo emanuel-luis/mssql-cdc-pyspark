@@ -12,6 +12,9 @@ compatibility" line.
 
 ## [Unreleased]
 
+State compatibility: unchanged from 0.4.0. Code moved and tests added only: offsets,
+checkpoint layout, table schemas, facts events and payloads are as in 0.4.0; no migration.
+
 ### Changed
 
 - `mssql_cdc.client` is a package of small private modules (protocols, validators, T-SQL
