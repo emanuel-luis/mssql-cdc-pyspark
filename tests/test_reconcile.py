@@ -184,6 +184,102 @@ def test_differences_bronze_explains_are_in_flight(delta_spark, workdir, monkeyp
     assert raced[0] > after["source_lsn"] and (after["in_flight"], after["mismatch"]) == (1, 0)
 
 
+def test_changes_the_stream_has_not_read_yet_are_in_flight_and_a_real_difference_is_not(
+    delta_spark, workdir, monkeypatch
+):
+    o = Orders(delta_spark, workdir)
+    _orders(o)
+    # the source moved past what the stream read: only the change table holds these
+    o.commit((2, {"order_id": 100, "status": "new"}), (1, {"order_id": 30, "status": "new"}))
+    o.commit((3, {"order_id": 20, "status": "new"}), (4, {"order_id": 20, "status": "paid"}))
+    lagging = o.reconcile(sample=1.0)
+    statuses = {
+        r["bucket_lo"]: r["status"] for r in lagging["report"].where("key IS NULL").collect()
+    }
+    assert statuses["100"] == statuses["30"] == "IN_FLIGHT" and lagging["mismatch"] == 0
+    assert {k: v[0] for k, v in o.failures(lagging).items()} == {'{"order_id":20}': "IN_FLIGHT"}
+
+    # bronze holds some, silver none, the change table one more; and a real difference
+    o.stream()
+    o.commit((1, {"order_id": 55, "status": "new"}))
+    o.silver_table().update("order_id = 45", {"status": "'lost'"})  # an update it missed
+    mixed = o.reconcile(sample=1.0)
+    statuses = {r["bucket_lo"]: r["status"] for r in mixed["report"].where("key IS NULL").collect()}
+    assert statuses["50"] == "IN_FLIGHT" and mixed["mismatch"] == 0  # 55, the change table's
+    assert {k: v[0] for k, v in o.failures(mixed).items()} == {
+        '{"order_id":20}': "IN_FLIGHT",
+        '{"order_id":45}': "RECORD_DIFF",
+    }
+
+    o.stream()
+    o.apply()
+    o.silver_table().update("order_id = 45", {"status": "'new'"})
+    equal = o.reconcile(sample=0.0)  # applied: equal again
+    assert equal["match"] == equal["buckets"]
+    # a commit after max_lsn was read, which the count sees: read up to max_lsn after it
+    real, raced = FakeCdcClient.key_buckets, []
+
+    def racing(self, *args):
+        if not raced:
+            raced.append(o.commit((2, {"order_id": 200, "status": "new"})))  # no stream
+        return real(self, *args)
+
+    monkeypatch.setattr(FakeCdcClient, "key_buckets", racing)
+    after = o.reconcile(sample=0.0)
+    assert raced[0] > after["source_lsn"] and (after["in_flight"], after["mismatch"]) == (1, 0)
+
+
+def test_unread_keys_are_each_instances_changes_after_bronze_up_to_max_lsn(workdir):
+    import pyarrow as pa
+
+    from mssql_cdc.reconcile import _unread
+
+    db = FakeCdcDatabase(
+        workdir, [CI], keys={CI: "order_id"}, columns={CI: "order_id INT, status STRING"}
+    )
+    read = db.commit(CI, [(2, {"order_id": 1, "status": "new"})])  # bronze's newest
+    db.commit(CI, [(2, {"order_id": None, "status": "new"}), (2, {"order_id": 2, "status": "a"})])
+    v2 = db.add_capture_instance(CI, "order_id INT, status STRING")  # takes over at S
+    s = db.commit(CI, [(3, {"order_id": 2, "status": "a"}), (4, {"order_id": 2, "status": "b"})])
+    upper = db.commit(CI, [(1, {"order_id": 3, "status": "new"})])  # max_lsn, read after
+    db.commit(CI, [(2, {"order_id": 4, "status": "new"})])  # after it: the next run's
+    client, pieces = FakeCdcClient(workdir), []
+    iter_changes = client.iter_changes
+
+    def spy(ci, lo, hi, *args):
+        pieces.append((ci, lo, hi))
+        return iter_changes(ci, lo, hi, *args)
+
+    client.iter_changes = spy
+    target = pa.schema([("order_id", pa.int32())])  # cast to bronze's type
+    instances = client.capture_instances(CI)
+    assert _unread(client, instances, ["order_id"], read, upper, target) == {(None,), (2,), (3,)}
+    # the older instance below S, the newer from S, as the stream reads them
+    after = client.increment_lsn(read)
+    assert pieces == [(CI, after, client.decrement_lsn(s)), (v2, s, upper)]
+    pieces.clear()
+    assert _unread(client, instances, ["order_id"], upper, upper, target) == set()
+    assert pieces == []  # nothing after bronze: no read
+
+
+def test_a_null_key_is_compared_and_named_and_its_change_in_flight(delta_spark, workdir):
+    o = Orders(delta_spark, workdir, key="code", columns="code STRING, qty INT")
+    o.commit(*[(2, {"code": f"k{i}", "qty": i}) for i in range(5)], (2, {"code": None, "qty": 0}))
+    o.stream()
+    o.apply()
+    assert o.reconcile(sample=1.0)["failures"] == {}
+    # bronze holds an update of the NULL key that silver has not applied
+    o.commit((3, {"code": None, "qty": 0}), (4, {"code": None, "qty": 9}))
+    o.stream()
+    behind = o.reconcile(sample=1.0)
+    assert {k: v[0] for k, v in o.failures(behind).items()} == {'{"code":null}': "IN_FLIGHT"}
+    o.apply()
+    o.silver_table().update("code IS NULL", {"qty": "-1"})  # an update it missed
+    assert {k: v[0] for k, v in o.failures(o.reconcile(sample=1.0)).items()} == {
+        '{"code":null}': "RECORD_DIFF"
+    }
+
+
 def test_a_string_key_is_counted_whole_and_compared_from_the_source_rows(delta_spark, workdir):
     o = Orders(delta_spark, workdir, key="code", columns="code STRING, qty INT")
     o.commit(*[(2, {"code": f"k{i:02d}", "qty": i}) for i in range(30)])

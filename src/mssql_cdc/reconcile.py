@@ -27,11 +27,15 @@ COMMITTED, Tier 2 reads through the snapshot reader under the ``isolationLevel``
 * IN_FLIGHT: M is ``max_lsn`` read just before the source is read, E silver's
   ``applied_lsn`` in ``control_table``, read before the silver version compared, which holds
   every change up to it (not its newest ``_start_lsn``: a chunk row's stamp can be ahead of
-  the changes applied). A bucket or a key that differs while bronze holds a change to it
-  (not a snapshot row) after the older of the two is IN_FLIGHT: check it again later. While
-  a chunked snapshot is open, the keys of the chunks silver lacks are MISSING_TARGET. Equal counts are a MATCH even then. A change the stream has
-  not read yet cannot be seen: run it while the stream keeps up; a MISMATCH that causes
-  clears on the next run.
+  the changes applied). A bucket or a key that differs while a change to it (not a snapshot
+  row) after the older of the two is in bronze, or only in the change table yet, is
+  IN_FLIGHT: check it again later. Once the source is read, bronze is pinned and its change
+  table read after bronze's position (its newest change, or the S of a newer snapshot) up to
+  ``max_lsn`` read then, through the capture instances the stream reads: the changes the
+  stream has not read yet. Only a commit capture has not harvested yet (its lag, seconds)
+  cannot be seen: a MISMATCH that causes clears on the next run. While a chunked snapshot is
+  open, the keys of the chunks silver lacks are MISSING_TARGET. Equal counts are a MATCH
+  even then.
 * Chunks, with ``facts_table``: bronze's newest chunked snapshot (ADR 0028) is checked
   against its 'snapshot_chunk' facts rows, without reading SQL Server. CHUNK_TILING: the
   chunks leave a gap or overlap (each starts where the one before ended, the first open
@@ -210,6 +214,52 @@ def _after(bronze, lower: str):
     return bronze.where((F.col("_operation") != 0) & (F.col("_start_lsn") > lower))
 
 
+def _unread(client, instances, keys: list[str], after: str, upper: str, target) -> set[tuple]:
+    """The keys of the changes in (``after``, ``upper``] of the change tables, as tuples of
+    ``keys`` cast to ``target`` (their Arrow schema): each capture instance's piece of the
+    range, as the stream reads them (ADR 0023)."""
+    import pyarrow as pa
+
+    from .source import _BaseReader, _to_schema
+
+    found: set[tuple] = set()
+    if upper <= after:
+        return found
+    n = len(keys)
+    # ponytail: every change row of the range crosses to the driver, a stream's lag of them;
+    # a DISTINCT on the server if a stream far behind shows up
+    for inst, lo, hi in _BaseReader._pieces(client, instances, client.increment_lsn(after), upper):
+        for batch in client.iter_changes(inst.name, lo, hi, keys, False, 100_000):
+            last = list(range(batch.num_columns - n, batch.num_columns))  # the key columns
+            table = pa.Table.from_batches([batch]).select(last).rename_columns(keys)
+            found.update(zip(*(c.to_pylist() for c in _to_schema(table, target).columns)))
+    return found
+
+
+def _moved(spark, client, instances, bronze: str, keys: list[str], lower: str):
+    """The keys of the changes after ``lower``, which one side may not hold yet, as a
+    DataFrame of ``keys``: bronze's (its latest version), and the change table's after
+    bronze's position up to ``max_lsn`` read now, which the stream has not read yet. Called
+    after the source is read, it holds every change that read may have seen, but a commit
+    capture has not harvested yet."""
+    from pyspark.sql import functions as F
+    from pyspark.sql.pandas.types import to_arrow_schema
+
+    from .lsn import ZERO_LSN
+
+    _, changes = _latest(spark, bronze)
+    upper = client.max_lsn() or ZERO_LSN  # after bronze: at or past every change it holds
+    held = _after(changes, lower).select(*[F.col(_q(k)) for k in keys])
+    # bronze's position: its newest change, or the S of a newer snapshot the stream reads from
+    snap = "_snapshot" in changes.columns
+    s = F.coalesce("_snapshot", "_start_lsn") if snap else F.col("_start_lsn")
+    at = F.when(F.col("_operation") == 0, s).otherwise(F.col("_start_lsn"))
+    newest = _one(changes.where(F.col("_start_lsn") > lower).select(F.max(at)))
+    target = to_arrow_schema(held.schema, timezone="UTC")
+    unread = _unread(client, instances, keys, max(newest or lower, lower), upper, target)
+    return held.unionByName(spark.createDataFrame(list(unread), held.schema)) if unread else held
+
+
 def _report_row(row: dict) -> tuple:
     """``row`` as a tuple in REPORT_COLUMNS order; a key that is no column fails, rather
     than leave its column NULL."""
@@ -223,11 +273,11 @@ def _sample(rng: random.Random, items: list[int], fraction: float) -> list[int]:
     return rng.sample(items, math.ceil(fraction * len(items)))
 
 
-def _range_buckets(spark, client, source, key, kind, target, bronze, lower, bucket_rows):
+def _range_buckets(client, source, key, kind, target, changed, bucket_rows):
     """Tier 1 for an integer or date key: buckets of about ``bucket_rows`` rows, as dicts of
-    ordinals ``lo``/``hi`` [lo, hi), (rows, key_sum) of ``source``/``silver``, ``moved``
-    (bronze changed it after ``lower``) and the ``fine`` bucket ids it holds; and the Spark
-    expression of a row's fine bucket id."""
+    ordinals ``lo``/``hi`` [lo, hi), (rows, key_sum) of ``source``/``silver``, ``moved`` (a
+    key of ``changed()``, called after the count, is in it) and the ``fine`` bucket ids it
+    holds; and the Spark expression of a row's fine bucket id."""
     from pyspark.sql import functions as F
 
     sql = _ordinal_sql(kind, key)
@@ -241,14 +291,13 @@ def _range_buckets(spark, client, source, key, kind, target, bronze, lower, buck
     width = max(1, -(-(max(ends) - min(ends) + 1) // _FINE))
     fine = F.expr(f"({sql} - pmod({sql}, {width})) div {width}")  # floor, as the T-SQL's
     in_source = client.key_buckets(source.schema, source.table, key, kind, width)
-    _, changes = _latest(spark, bronze)  # after the count: holds what it may have seen
+    moved = changed().select(fine).distinct().collect()  # after the count: what it may have seen
     counted = target.where(o.isNotNull()).groupBy(fine)
     in_silver = counted.agg(F.count(F.lit(1)), F.sum(o.cast("decimal(38,0)"))).collect()
     sides = {
         "source": {b: (n, s) for b, n, s in in_source},
         "silver": {b: (n, s) for b, n, s in in_silver},
     }
-    moved = _after(changes, lower).select(fine).distinct().collect()
     return _merge_buckets(sides, moved, width, bucket_rows), fine
 
 
@@ -300,10 +349,10 @@ def reconcile(
     module docstring).
 
     ``keys``: the source's key columns; without them, the capture instance's unique index.
-    ``bronze``: the table silver is applied from; its newer changes make a difference
-    IN_FLIGHT. ``control_table``: ``apply_changes``'s, for silver's ``applied_lsn``.
-    ``facts_table``: the stream's, to check the chunks of bronze's newest chunked
-    snapshot. ``bucket_rows``: rows per bucket. ``sample``: the fraction of the MATCH buckets
+    ``bronze``: the table silver is applied from; its newer changes, and the change table's
+    the stream has not read yet, make a difference IN_FLIGHT. ``control_table``:
+    ``apply_changes``'s, for silver's ``applied_lsn``. ``facts_table``: the stream's, to
+    check the chunks of bronze's newest chunked snapshot. ``bucket_rows``: rows per bucket. ``sample``: the fraction of the MATCH buckets
     also compared row by row (0: none, 1: all). ``seed``: of that sample.
     """
     from pyspark.sql import functions as F
@@ -336,19 +385,23 @@ def reconcile(
         source = client.source_table(ci)
         # a computed column listed in 'columns': NULL in every change row, so silver cannot
         # hold its value
-        computed = {c.lower() for i in client.capture_instances(ci) for c in i.computed}
+        instances = client.capture_instances(ci)
+        computed = {c.lower() for i in instances for c in i.computed}
         columns = [f for f in columns if f.name.lower() not in computed]
         source_lsn = client.max_lsn() or ZERO_LSN  # M, before the source is read
         lower = min(source_lsn, silver_lsn or ZERO_LSN)
+
+        def changed(after: str = lower):  # called once the source is read
+            return _moved(spark, client, instances, bronze, keys, after)
+
         if kind:
             found, fine = _range_buckets(
-                spark, client, source, keys[0], kind, target, bronze, lower, bucket_rows
+                client, source, keys[0], kind, target, changed, bucket_rows
             )
             parts = [(_bound(kind, b["lo"]), _bound(kind, b["hi"])) for b in found]
         else:  # one count of the whole table; Tier 2 on ranges SQL Server cuts
             rows = client.key_buckets(source.schema, source.table, None, None, 1)[0][1]
-            _, changes = _latest(spark, bronze)
-            moved = _one(_after(changes, lower).select(F.lit(True)))
+            moved = _one(changed().select(F.lit(True)))
             found = [{"source": [rows, None], "silver": [target.count(), None], "moved": moved}]
             tiles: list | None = []  # the first key of each range after the first
             if rows > bucket_rows:
@@ -388,7 +441,7 @@ def reconcile(
                 .load()
                 .localCheckpoint()  # read once, before bronze is pinned
             )
-            _, changes = _latest(spark, bronze)
+            moved_keys = changed(min(read_lsn, silver_lsn or ZERO_LSN))
             labels = spark.createDataFrame(
                 [(i, json_or_null(parts[i][0]), json_or_null(parts[i][1])) for i in chosen],
                 "_rc_idx INT, bucket_lo STRING, bucket_hi STRING",
@@ -405,9 +458,9 @@ def reconcile(
                 held = ours.select(*[F.col(_q(k)) for k in keys])
                 theirs = _by_key(target, held, keys, "left_semi")
                 theirs, how = theirs.withColumn("_rc_idx", F.lit(None).cast("int")), "left"
-            failures = _differences(
-                ours, theirs, keys, columns, how, changes, min(read_lsn, silver_lsn or ZERO_LSN)
-            ).join(F.broadcast(labels), "_rc_idx", "left")
+            failures = _differences(ours, theirs, keys, columns, how, moved_keys).join(
+                F.broadcast(labels), "_rc_idx", "left"
+            )
 
     common = {"run_id": run_id, "run_at": run_at, "silver": silver}
     common |= {"silver_version": version, "silver_lsn": silver_lsn}
@@ -462,9 +515,10 @@ def reconcile(
     }
 
 
-def _differences(ours, theirs, keys, columns, how, changes, lower):
+def _differences(ours, theirs, keys, columns, how, moved):
     """The keys whose rows differ between the source's rows ``ours`` and silver's ``theirs``
-    (both with ``_rc_idx``), by hash: ``keys``, ``_rc_idx``, ``failure_type``, ``detail``."""
+    (both with ``_rc_idx``), by hash: ``key``, ``_rc_idx``, ``failure_type``, ``detail``;
+    IN_FLIGHT when the key is in ``moved`` (``_moved``'s)."""
     from pyspark.sql import functions as F
 
     def side(df, *extra):
@@ -503,19 +557,18 @@ def _differences(ours, theirs, keys, columns, how, changes, lower):
             ).alias("detail"),
         )
     )
-    # a key bronze changed after the older read: either side may not have that change yet.
-    # ponytail: joined by =, so a NULL key's change is not seen (one row, if a unique index has it)
-    moved = (
-        _after(changes, lower)
-        .select(*[F.col(_q(k)) for k in keys])
-        .distinct()
-        .withColumn("_rc_moved", F.lit(True))
-    )
-    return found.join(moved, keys, "left").select(
-        F.to_json(F.struct(*[F.col(_q(k)) for k in keys])).alias("key"),
-        "_rc_idx",
-        F.when(F.col("_rc_moved"), "IN_FLIGHT").otherwise(F.col("_rc_type")).alias("failure_type"),
-        "detail",
+    # a key changed after the older read: either side may not have that change yet. <=>: a
+    # key column may hold NULL (a unique index admits one), and the report names it as null
+    f, m = found.alias("f"), moved.distinct().withColumn("_rc_moved", F.lit(True)).alias("m")
+    return f.join(m, [col("f", k).eqNullSafe(col("m", k)) for k in keys], "left").select(
+        F.to_json(
+            F.struct(*[col("f", k).alias(k) for k in keys]), {"ignoreNullFields": "false"}
+        ).alias("key"),
+        col("f", "_rc_idx"),
+        F.when(col("m", "_rc_moved"), "IN_FLIGHT")
+        .otherwise(col("f", "_rc_type"))
+        .alias("failure_type"),
+        col("f", "detail"),
     )
 
 

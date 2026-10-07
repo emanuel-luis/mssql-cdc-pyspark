@@ -719,9 +719,11 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 _write_event(self.metrics_path, "data_skipped", ci, low, ts, detail, key, **gap)
         return ranges
 
-    def _pieces(self, client, instances, lo: str, hi: str) -> list[tuple]:
+    @staticmethod
+    def _pieces(client, instances, lo: str, hi: str) -> list[tuple]:
         """[lo, hi] cut at each newer instance's start S: (instance, from, to) with the
-        older instance up to S - 1 and the newer one from S. Never an empty piece."""
+        older instance up to S - 1 and the newer one from S. Never an empty piece. Also
+        reconcile's read of the changes the stream has not read yet."""
         usable = [instances[0], *(i for i in instances[1:] if i.start_lsn)]
         pieces = []
         for inst, nxt in zip(usable, [*usable[1:], None]):

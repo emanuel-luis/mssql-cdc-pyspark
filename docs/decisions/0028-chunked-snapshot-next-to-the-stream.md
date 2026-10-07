@@ -5,6 +5,7 @@
 **Amended:** 2026-10-03T14:30:38-03:00, chunks planned once from per-slice counts and fixed in a `'snapshot_plan'` row; a wave's facts rebuilt from bronze; one snapshot mode per run, locked while a snapshot is open; per-wave range deletes in silver, in re-snapshots and on datetime2 keys (see the Amendment)
 **Amended:** 2026-10-03T18:10:05-03:00, a full snapshot opens once per run and stops holding the mode once CDC cleanup passes it; a wave rebuilt from the chunks bronze holds; a keyset plan's open last chunk closed when read (see the Amendment)
 **Amended:** 2026-10-04T17:20:07-03:00, the plan counted and sought under the backfill's isolation, so `isolation="snapshot"` planning does not wait for writers' locks (see the Amendment)
+**Amended:** 2026-10-06T21:14:15-03:00, `reconcile` takes a difference the change table explains, after what the stream read, as IN_FLIGHT too, and finds a NULL key's change (see Amendment 2)
 
 ## Context
 A snapshot taken before the stream starts (ADR 0016) has to be read within the CDC
@@ -138,7 +139,7 @@ silver's rebuild point), which chunk stamps break.
    sides, classifying keys as AWS DMS validation does (MISSING_TARGET, MISSING_SOURCE,
    RECORD_DIFF), or IN_FLIGHT when bronze holds a change (no snapshot row) newer than
    silver's `applied_lsn` (`control_table`, not the newest stamp silver holds) or the source
-   read: check again later.
+   read: check again later (also when only the change table holds it yet: Amendment 2).
    Its ranges are cut on the key it compares (`snapshotKeys`), not always the unique index.
    With `facts_table`, the newest chunked snapshot's chunks are checked against bronze
    (CHUNK_TILING, CHUNK_ROWS, CHUNK_STAMP). The report is a new table kind, `reconcile`.
@@ -350,3 +351,42 @@ re-snapshot deleting stale `datetime2(7)` keys wave by wave but not one in a bou
 microsecond; integer and keyset plans under SNAPSHOT isolation not waiting for the locks a
 writer holds, which a READ COMMITTED plan waits on. Lab check t10 passes in both modes with
 the plan (LAB.md).
+
+## Amendment 2: in flight up to what the change table holds
+`reconcile` took a difference as IN_FLIGHT only when bronze held a change to it. With the
+stream behind the source, every key changed in between came out as MISMATCH,
+MISSING_TARGET, MISSING_SOURCE or RECORD_DIFF: stream lag reported as an integrity failure.
+And the join that finds a key's changes compared keys with `=`, so a change of a NULL key
+never made its difference IN_FLIGHT. CDC refuses a unique index over nullable columns, but
+`keys` may name other columns.
+
+* Once the source is read (the counts, then the rows of the buckets compared), bronze is
+  pinned and `sys.fn_cdc_get_max_lsn()` read. The change table's changes after bronze's
+  position (its newest change, or the S of a newer snapshot, which the stream reads from) up
+  to that LSN are what the stream has not read yet; their keys count with bronze's changes
+  after the older of E and M. They are read through each capture instance's piece of the
+  range, as the stream reads them (ADR 0023), with `iter_changes` on the key columns: the
+  change table the stream already reads (invariant 11), no new grant and no new T-SQL.
+* Still unseen: a commit the capture job has not harvested yet, in no change table (its lag,
+  seconds). A MISMATCH that causes clears on the next run.
+* That join is null-safe (`<=>`), as reconcile's and silver's other key joins already were,
+  and the report's `key` writes a NULL key column as `null` instead of leaving it out (`{}`).
+* Cost: every change row of the stream's lag crosses to the driver, keys only. A stream far
+  behind makes that large, and most buckets IN_FLIGHT, which they are.
+* Considered: the change table from silver's `applied_lsn` E, without bronze. One read, but
+  of every change silver has not applied (hours of them for an hourly `apply_changes`), and
+  blind to the ones cleanup purged that bronze still holds.
+* Considered: a `SELECT DISTINCT` of the keys on the server, a new client method. Less to
+  transfer, but new T-SQL on every client for a window that is a stream's lag; added if a
+  stream far behind shows up.
+* The report's column comments on `status` and `failure_type` still name bronze alone: a
+  comment migration of the `reconcile` kind waits for a minor release.
+
+### Tests
+`tests/test_reconcile.py`: an insert, a delete and an update only the change table holds
+IN_FLIGHT, then with bronze holding part of the lag, a real difference next to them still
+RECORD_DIFF, and a commit after M that the count sees; the change table read per capture
+instance from bronze's position up to the LSN read after the source (pure, on the fake); a
+NULL key's change in bronze IN_FLIGHT, a real difference of it RECORD_DIFF, both named
+`null`. `tests/integration`: the same lag on SQL Server 2022, read by the stream's
+least-privilege login.

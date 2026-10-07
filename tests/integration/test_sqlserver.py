@@ -2179,3 +2179,51 @@ def test_reconcile_buckets_a_date_key_as_sql_server_does(delta_spark, sqlserver,
     }
     assert failures == {"1900-04-08": "MISSING_TARGET", "9999-12-31": "RECORD_DIFF"}
     assert found["mismatch"] == 1 and found["in_flight"] == 0
+
+
+def test_reconcile_takes_changes_the_stream_has_not_read_as_in_flight(
+    delta_spark, sqlserver, workdir, backend
+):
+    """The change table read after bronze's position, by the stream's least-privilege login:
+    stream lag is IN_FLIGHT, and a real difference next to it is still one."""
+    from delta.tables import DeltaTable
+
+    from mssql_cdc import reconcile
+
+    sqlserver.run("CREATE TABLE dbo.rc_lag (id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL)")
+    sqlserver.run(f"INSERT INTO dbo.rc_lag SELECT n, 'old' FROM {_ROWS} WHERE n <= 300")
+    ci = sqlserver.enable_cdc("rc_lag")
+    options = {
+        "connectionString": _reader(sqlserver, "rc_lag", ci),
+        "captureInstance": ci,
+        "numPartitions": "2",
+        "backend": backend,
+    }
+    paths, cdc, run = _chunked(delta_spark, options, workdir, "rc-lag")
+    run().awaitTermination()
+    assert cdc.backfill(
+        paths["bronze"], app_id="rc-lag", facts_table=paths["facts"], chunk_rows=100
+    )["done"]
+    run().awaitTermination()
+    assert _apply(delta_spark, paths, ci, ["id"])["rebuilt"]
+    # changes the stream has not read: only the change table holds them
+    sqlserver.run("INSERT INTO dbo.rc_lag VALUES (301, 'new')")
+    sqlserver.run("DELETE FROM dbo.rc_lag WHERE id = 150")
+    sqlserver.run("UPDATE dbo.rc_lag SET v = 'new' WHERE id = 20")
+    sqlserver.wait_for(f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE id = 20")
+    DeltaTable.forPath(delta_spark, paths["silver"]).update("id = 40", {"v": "'lost'"})
+    found = reconcile(
+        delta_spark,
+        options,
+        paths["silver"],
+        bronze=paths["bronze"],
+        control_table=paths["control"],
+        bucket_rows=50,
+        sample=1.0,
+    )
+    failures = {
+        json.loads(r["key"])["id"]: r["failure_type"]
+        for r in found["report"].where("key IS NOT NULL").collect()
+    }
+    assert failures == {20: "IN_FLIGHT", 40: "RECORD_DIFF"}  # [1, 51): equal counts
+    assert (found["mismatch"], found["in_flight"]) == (0, 2)  # 150's bucket, and 301's

@@ -42,7 +42,7 @@ Entra ID logins, a managed identity needs no password at all
 |---|---|
 | `SELECT` on the source table | What SQL Server checks before the CDC metadata procedures and functions answer: `sys.sp_cdc_help_change_data_capture` (the table, its key and its capture instances), `sys.sp_cdc_get_captured_columns` (the inferred schema), `sys.sp_cdc_get_ddl_history` (schema changes), `sys.fn_cdc_get_min_lsn` (the retention guard). The snapshot for `bootstrap=True`, a re-snapshot and `snapshot_on_switch` reads the table itself; so do `backfill()`, which plans a chunked snapshot from the key alone (MIN, MAX, row counts per slice of an integer key in one `GROUP BY`, `TOP (n + 1)` seeks for other keys) and reads it in key ranges, and `reconcile()`, which counts the rows per key range in one scan and reads the ranges it compares. `SELECT` on the key and captured columns alone is enough. |
 | Membership in the gating role | Required by the same procedures and functions when the capture instance has one. |
-| `SELECT` on `cdc.[<capture instance>_CT]` | The changes. The reader queries the change table directly, because `cdc.fn_cdc_get_all_changes_<ci>` does not return `__$command_id` on SQL Server 2022 ([ADR 0009](../decisions/0009-read-change-tables-directly.md)). |
+| `SELECT` on `cdc.[<capture instance>_CT]` | The changes; `reconcile()` also reads the keys of the changes the stream has not read yet. The reader queries the change table directly, because `cdc.fn_cdc_get_all_changes_<ci>` does not return `__$command_id` on SQL Server 2022 ([ADR 0009](../decisions/0009-read-change-tables-directly.md)). |
 
 Everything else the reader touches needs no grant: `cdc.lsn_time_mapping`,
 `sys.fn_cdc_get_max_lsn`, `sys.fn_cdc_increment_lsn`, `sys.fn_cdc_map_lsn_to_time`, the

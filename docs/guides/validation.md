@@ -42,10 +42,14 @@ matched. `report` holds one row per bucket and one per key or chunk that failed;
    - MISSING_TARGET: the key is only in the source, an insert silver never applied;
    - MISSING_SOURCE: the key is only in silver, a delete it never applied, or a stale key;
    - RECORD_DIFF: other values, an update it never applied; `detail` names the columns.
-3. **In flight.** A bucket or key that differs while bronze holds a change to it newer than
-   what either side read is IN_FLIGHT: silver has not applied it yet, or the source read
-   came before it. What silver read is its `applied_lsn` in the control table. Run again
-   later; it clears once silver catches up.
+3. **In flight.** A bucket or key that differs while a change to it newer than what either
+   side read is in bronze, or still only in the change table, is IN_FLIGHT: silver has not
+   applied it yet, the stream has not read it yet, or the source read came before it. What
+   silver read is its `applied_lsn` in the control table. Once the source is read, the keys
+   the change table holds after bronze's position (its newest change, or the LSN of a newer
+   snapshot) up to `sys.fn_cdc_get_max_lsn()` read then are read too, through the capture
+   instances the stream reads. Run again later; it clears once the stream and silver catch
+   up.
 4. **Chunks.** With `facts_table`, bronze's newest [chunked snapshot](bootstrap.md#chunked-snapshots)
    is checked against its facts rows, without reading SQL Server:
    - CHUNK_TILING: the chunks leave a gap or overlap: a chunk missing or recorded twice, the
@@ -63,8 +67,8 @@ matched. `report` holds one row per bucket and one per key or chunk that failed;
   from the source are cut on them, so they can be another column, or the key of a table
   with no unique index, as long as they identify a row.
 - `control_table`: the one `apply_changes` keeps silver's position in.
-- `bronze`: the table silver is applied from, whose newer changes make a difference
-  IN_FLIGHT.
+- `bronze`: the table silver is applied from, whose newer changes, and the change table's
+  after them, make a difference IN_FLIGHT.
 - `facts_table`: the stream's, for the chunk checks.
 - `bucket_rows`: rows per bucket (default 1,000,000).
 - `sample`: the fraction of MATCH buckets also compared row by row (default 0.01; 0 none,
@@ -73,8 +77,10 @@ matched. `report` holds one row per bucket and one per key or chunk that failed;
 
 ## Pitfalls
 
-- Run it while the stream keeps up: a change the stream has not read yet cannot be seen,
-  and shows as a MISMATCH until a later run.
+- A commit the capture job has not harvested yet (its lag, seconds) is in no change table:
+  a difference it makes shows as a MISMATCH until a later run.
+- Run it while the stream keeps up: the keys of every change the stream has not read yet
+  cross to the driver, and the buckets they fall in are IN_FLIGHT, not compared.
 - Run it once a chunked snapshot is complete and applied: before that, silver lacks the
   keys of the chunks not read or applied yet, and they show as MISSING_TARGET. Snapshot rows
   are no change in flight.
