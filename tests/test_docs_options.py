@@ -21,7 +21,7 @@ def test_every_option_the_source_reads_is_documented():
 
 
 def test_every_option_the_code_reads_is_known():  # else it would be warned about as ignored
-    code = "\n".join(p.read_text(encoding="utf-8") for p in (ROOT / "src/mssql_cdc").glob("*.py"))
+    code = "\n".join(p.read_text(encoding="utf-8") for p in (ROOT / "src/mssql_cdc").rglob("*.py"))
     read = {(a or b).lower() for a, b in READ.findall(code)}
     assert len(read) > 15  # the pattern still finds the reads
     assert read <= KNOWN_OPTIONS, f"read but not in KNOWN_OPTIONS: {sorted(read - KNOWN_OPTIONS)}"

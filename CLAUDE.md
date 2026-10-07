@@ -61,9 +61,14 @@ src/mssql_cdc/
   source.py        DataSource + stream readers. Driver-side: initialOffset, latestOffset,
                    partitions, commit. Executor-side: read(). Spark 4.2 admission control
                    and Trigger.AvailableNow; legacy reader for older Spark.
-  client.py        CdcClient interface; SqlCdcClient (T-SQL) over a Backend
-                   (mssql-python default, arrow-odbc); make_client(options) factory;
-                   chunk planning for chunked snapshots: snapshot_plan() (the key's extent,
+  client/          import everything from mssql_cdc.client (__init__ re-exports it):
+    __init__.py    DataLossError, SchemaChangedError, is_*; make_client(options) factory.
+    _protocols.py  CdcClient and Backend protocols; SourceTable, CaptureInstance, DdlChange.
+    _validators.py what is inlined into T-SQL is checked here (invariant 13).
+    _sql.py        SQL Server -> Spark type map; T-SQL builders (_key_select, _isolated).
+    _backends.py   MssqlPythonBackend (default), ArrowOdbcBackend.
+    _sql_client.py SqlCdcClient: CdcClient in T-SQL over a Backend.
+    _planning.py   chunk planning for chunked snapshots: snapshot_plan() (the key's extent,
                    at the open), plan_chunks() (every chunk, at the first backfill: per-slice
                    counts by key_buckets/key_range for one integer key, key_bound otherwise).
   fake.py          File-backed CDC simulator (FakeCdcClient reader, FakeCdcDatabase writer).
@@ -174,7 +179,7 @@ notes/             Local only, gitignored: research notes in Portuguese (context
     the MAX recorded at the open. A run takes its snapshots in one mode, and a snapshot open
     in one mode blocks the other (and `seed()`) until its completion row (ADR 0028).
 13. **SQL injection.** Anything inlined into T-SQL (capture instance, columns, timezone,
-    integers) goes through the validators in `client.py`.
+    integers) goes through the validators in `client/_validators.py`.
 14. **Schema changes are checked before the read.** DDL inside a batch's range is found on
     the driver while planning; a captured type the query's no longer holds fails the batch
     before any row is read (`SchemaChangedError`; with `columns`, only a change made while

@@ -12,6 +12,13 @@ compatibility" line.
 
 ## [Unreleased]
 
+### Changed
+
+- `mssql_cdc.client` is a package of small private modules (protocols, validators, T-SQL
+  builders, backends, `SqlCdcClient`, chunk planning). Code moved only: every name imports
+  from `mssql_cdc.client` as before, and the exceptions and the `mssql_cdc.client` logger
+  keep their names. Tracebacks show the new file paths.
+
 ## [0.4.0] - 2026-10-07
 
 State compatibility: unchanged from 0.3.0. Types only: offsets, checkpoint layout, table
