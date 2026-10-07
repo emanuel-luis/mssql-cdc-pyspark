@@ -14,7 +14,7 @@ from itertools import pairwise
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from mssql_cdc import lsn
@@ -57,14 +57,14 @@ def test_every_spelling_of_an_lsn_normalizes_to_one(n, prefix, short, lower, pad
 @FIXED
 @given(st.one_of(st.integers(max_value=-1), st.integers(min_value=LSN_END)))
 def test_an_integer_outside_ten_bytes_is_no_lsn(n):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="LSN integer out of range"):
         lsn.from_int(n)
 
 
 @FIXED
 @given(st.binary(max_size=12).filter(lambda b: len(b) != 10))
 def test_only_ten_bytes_are_an_lsn(value):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="LSN must be 10 bytes"):
         lsn.normalize(value)
 
 
@@ -115,6 +115,10 @@ int_keys = st.one_of(
     estimate=st.integers(0, 400),
     chunk_rows=st.integers(1, 40),
 )
+# a slice 2 wide over chunk_rows, counted again: no chunk holds both its values
+@example(keys=[0, 0, 1, 1], later=[], estimate=0, chunk_rows=1)
+# slice [100, 150) counted again on a grid of 3: its first finer slice starts at 100, not 99
+@example(keys=[98, 99, 100, 101, 120, 147], later=[], estimate=0, chunk_rows=3)
 def test_an_integer_plan_tiles_the_keys_up_to_max(keys, later, estimate, chunk_rows):
     source = SourceTable("dbo", "t", ["id"], None)
     table = _Rows([{"id": k} for k in keys])
@@ -128,6 +132,7 @@ def test_an_integer_plan_tiles_the_keys_up_to_max(keys, later, estimate, chunk_r
     assert plan[0][0] is None and plan[-1][1] == top + 1
     assert all(a[1] == b[0] for a, b in pairwise(plan))
     assert all(lo < hi for lo, hi in plan[1:])
+    assert all(type(b) is int for chunk in plan for b in chunk if b is not None)
     held = [[k for k in keys + later if _inside(k, lo, hi)] for lo, hi in plan]
     assert sorted(k for c in held for k in c) == sorted(k for k in keys + later if k <= top)
     # none starts empty; one over chunk_rows holds a single value, which no bound can split

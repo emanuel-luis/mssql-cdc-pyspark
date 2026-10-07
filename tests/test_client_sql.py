@@ -304,6 +304,7 @@ def test_a_capture_instance_takes_any_letter_but_no_bracket_or_control_character
     assert "FROM cdc.[dbo_Situação_CT] c " in rec.calls[-1][0]
     client.min_lsn(ci)
     assert rec.calls[-1][1] == (ci,)  # a parameter where T-SQL takes one
+    client.min_lsn("a" * 100)  # a sysname holds 100
     for bad in ("dbo_x]; DROP TABLE y --", "dbo_orders\n", "dbo\x00orders", "", "a" * 101):
         with pytest.raises(ValueError, match="Invalid capture instance"):
             list(client.iter_changes(bad, "0x01", "0x02", [], True, 10))
@@ -1365,6 +1366,54 @@ def test_chunk_planning_counts_and_seeks_under_the_backfills_isolation():
     extent = {"kind": "int", "lo": 0, "hi": 9, "rows": 0}
     assert plan_chunks(client, "dbo_orders", source, extent, 10, "snapshot") == [[None, 10]]
     assert rec.calls[-1][0].startswith("SET TRANSACTION ISOLATION LEVEL SNAPSHOT; SELECT [__$b]")
+
+
+def test_every_planning_read_takes_the_source_capture_instance_key_types_and_isolation():
+    # the Recorder answers no rows, so a plan stops before most of its reads; these answer
+    from unittest.mock import create_autospec
+
+    from mssql_cdc.client import SourceTable, last_bound, plan_chunks, snapshot_plan
+
+    ci, iso = "sales_orders", "snapshot"
+    at, top = datetime(2026, 1, 1, 0, 0, 1, 123456), datetime(2026, 1, 1, 0, 0, 2, 654321)
+    client = create_autospec(CdcClient, instance=True)
+    types = {"at": "datetime", "n": "int", "v": None}  # v: a type no bound is bound as
+    client.key_types.side_effect = lambda _, keys: [types[k] for k in keys]
+    client.key_max.return_value = (top, 9)
+    client.key_bound.side_effect = [(at, 3), None, (top.replace(second=3), 0)]
+    source = SourceTable("sales", "orders", ["at", "n"], None)
+    extent = snapshot_plan(client, ci, source)
+    # bounds as datetime's text: CAST reads no more than 3 digits back
+    assert extent == {"kind": "keyset", "max": ["2026-01-01T00:00:02.654", 9]}
+    mid, end = ["2026-01-01T00:00:01.123", 3], ["2026-01-01T00:00:03.654", 0]
+    assert plan_chunks(client, ci, source, extent, 5, iso) == [[None, mid], [mid, end]]
+    assert {c.args[0] for c in client.key_types.call_args_list} == {ci}
+    assert client.key_max.call_args.args == ("sales", "orders", ["at", "n"])
+    seek = ("sales", "orders", ["at", "n"], ["datetime", "int"])
+    assert all((c.args[:4], c.args[-1]) == (seek, iso) for c in client.key_bound.call_args_list)
+    # the key after MAX reads back as MAX (a datetime2(7) in MAX's microsecond): left open
+    client.key_bound.side_effect = [(top, 9)]
+    assert last_bound(client, ci, source, extent["max"], iso) is None
+    # no unique index, or a key no bound is bound as: one chunk, the whole table
+    for keys in ([], ["at", "v"]):
+        whole = snapshot_plan(client, ci, SourceTable("sales", "orders", keys, None))
+        assert whole == {"kind": "keyset", "max": None}
+
+    # an integer key whose one slice is counted again, on a finer grid over its own keys
+    client = create_autospec(CdcClient, instance=True)
+    client.key_range.side_effect = [(0, 99), (5, 9)]
+    client.row_estimate.return_value = 0
+    client.key_buckets.side_effect = [[(0, 2, None)], [(5, 1, None), (9, 1, None)]]
+    source = SourceTable("sales", "orders", ["id"], None)
+    extent = snapshot_plan(client, ci, source)
+    assert extent == {"kind": "int", "lo": 0, "hi": 99, "rows": 0}
+    assert plan_chunks(client, ci, source, extent, 1, iso) == [[None, 9], [9, 100]]
+    client.row_estimate.assert_called_once_with("sales", "orders")
+    assert [c.args for c in client.key_range.call_args_list] == [
+        ("sales", "orders", "id"),
+        ("sales", "orders", "id", 0, 100, iso),
+    ]
+    assert all(c.args[-1] == iso for c in client.key_buckets.call_args_list)
 
 
 def test_chunk_bounds_cross_json_as_text_cast_reads_back():

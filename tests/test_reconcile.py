@@ -394,10 +394,10 @@ def _bucket(lo, hi, fine, source, silver, moved=False):
         ),
         pytest.param(
             # starts [2, 4], end 6: a fine id below the first or at the end is no bucket's,
-            # and a NULL key has none
+            # one at the first start is the first's, and a NULL key has none
             {2: (5, D(10)), 3: (5, D(15)), 4: (5, D(20)), 5: (5, D(25))},
             {2: (5, D(10)), 3: (5, D(15)), 4: (5, D(20)), 5: (5, D(25))},
-            [(None,), (1,), (3,), (6,)],
+            [(None,), (1,), (2,), (6,)],
             1,
             [
                 _bucket(2, 4, [2, 3], [10, D(25)], [10, D(25)], moved=True),
@@ -450,6 +450,7 @@ HELD = {i: (3, ABOVE) for i in range(3)}
     "complete, found, held, expected",
     [
         pytest.param(True, TILED, HELD, [], id="tiled"),
+        pytest.param(False, [], {}, [], id="open: no wave yet"),
         pytest.param(False, TILED[:2], {0: HELD[0], 1: HELD[1]}, [], id="open: more to come"),
         pytest.param(
             True,
@@ -464,6 +465,16 @@ HELD = {i: (3, ABOVE) for i in range(3)}
             {0: HELD[0], 2: HELD[2]},
             [_fail("CHUNK_TILING", 1, None, None, problem="no 'snapshot_chunk' facts row")],
             id="a gap",
+        ),
+        pytest.param(
+            True,
+            [TILED[0], _c(2, 6, None, last=True, rows=4)],
+            {0: HELD[0], 2: HELD[2]},
+            [
+                _fail("CHUNK_TILING", 1, None, None, problem="no 'snapshot_chunk' facts row"),
+                _fail("CHUNK_ROWS", 2, "6", None, facts_rows=4, bronze_rows=3),
+            ],
+            id="a gap, and the chunks after it still checked",
         ),
         pytest.param(
             True,

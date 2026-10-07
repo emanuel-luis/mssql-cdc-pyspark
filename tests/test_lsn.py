@@ -16,7 +16,7 @@ def test_roundtrip_and_ordering():
 
 
 def test_invalid():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Invalid LSN: '0xZZ'"):
         lsn.normalize("0xZZ")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="LSN must be 10 bytes, got 9"):
         lsn.normalize(b"\x00" * 9)
