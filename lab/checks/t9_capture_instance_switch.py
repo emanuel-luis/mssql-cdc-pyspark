@@ -297,7 +297,14 @@ def main(argv=None) -> bool:
     )
 
     apply_changes(
-        spark, bronze, silver, V1, ["id"], control_table=control, facts_table=facts, options=options
+        spark,
+        bronze,
+        silver,
+        capture_instance=V1,
+        keys=["id"],
+        control_table=control,
+        facts_table=facts,
+        options=options,
     )
     image = {
         tuple(r)

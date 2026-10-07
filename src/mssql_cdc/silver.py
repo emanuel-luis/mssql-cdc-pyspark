@@ -1,8 +1,9 @@
 """Apply the bronze change log to a current-state ("silver") Delta table (ADR 0019).
 
     from mssql_cdc import apply_changes
-    apply_changes(spark, "bronze.orders", "silver.orders", "dbo_orders", ["order_id"],
-                  control_table="ops.table_finalization", facts_table="ops.ingestion_facts")
+    apply_changes(spark, "bronze.orders", "silver.orders", capture_instance="dbo_orders",
+                  keys=["order_id"], control_table="ops.table_finalization",
+                  facts_table="ops.ingestion_facts")
 
 Each call applies what the capture instance's rows in ``bronze`` hold beyond the last one:
 the latest image per key by ``(_start_lsn, _command_id, _seqval, _operation)``; operation
@@ -65,6 +66,7 @@ from typing import TYPE_CHECKING
 from . import finalization, migrations
 from .sink import BRONZE_COLUMN_COMMENTS
 from .tables import delta_table, exists, retrying, table_ref
+from .types import ApplyResult, Granularity
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -263,14 +265,14 @@ def apply_changes(
     spark: SparkSession,
     bronze: str,
     target: str,
+    *,
     capture_instance: str | None = None,
     keys: Sequence[str] | None = None,
-    *,
     control_table: str,
     facts_table: str | None = None,
     options: dict | None = None,
-    granularity: finalization.Granularity = "hour",
-) -> dict:
+    granularity: Granularity = "hour",
+) -> ApplyResult:
     """Bring ``target`` up to the capture instance's changes in ``bronze``, a table fed by
     that capture instance alone (and the newer ones of its table it switched to). Until the
     stream creates ``bronze``, it does nothing but log a warning that names it.
@@ -284,7 +286,9 @@ def apply_changes(
     ``facts_table``: the stream's, needed to see the re-snapshot of an emptied table and
     any chunked snapshot (a call fails on chunk rows without it, or when its rows name
     bronze otherwise). Without it, the verdict is not advanced.
-    Returns ``{"rebuilt", "applied_lsn", "finalized_until", "bronze_found"}``;
+    The parameters after ``target`` are keyword-only.
+    Returns an ``ApplyResult``, ``{"rebuilt", "applied_lsn", "finalized_until",
+    "bronze_found"}``;
     ``bronze_found`` is False when ``bronze`` does not exist (nothing was applied).
     """
     from pyspark.sql import Window
@@ -528,6 +532,6 @@ def apply_changes(
         # without the facts, which alone tell that one is open
         "finalized_until": finalized
         if is_open or not facts_table
-        else finalization.advance(spark, control_table, target, offset, granularity),
+        else finalization.advance(spark, control_table, target, offset, granularity=granularity),
         "bronze_found": True,
     }

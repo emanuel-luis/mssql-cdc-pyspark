@@ -293,7 +293,13 @@ def main(argv=None) -> bool:
 
     def apply():
         return apply_changes(
-            spark, bronze, silver, CI, ["id"], control_table=control, facts_table=facts
+            spark,
+            bronze,
+            silver,
+            capture_instance=CI,
+            keys=["id"],
+            control_table=control,
+            facts_table=facts,
         )
 
     def facts_df():

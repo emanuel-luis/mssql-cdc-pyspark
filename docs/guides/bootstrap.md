@@ -81,7 +81,8 @@ The snapshot needs no permission beyond the stream's ([Permissions](permissions.
 ## A snapshot without the stream
 
 `snapshot(target)` takes the snapshot alone, or finds the one already in the target, and
-returns its offset. Start a new checkpoint from it:
+returns its offset (an [`Offset`](../reference/api.md#mssql_cdc.types.Offset)). Start a new
+checkpoint from it:
 
 ```python
 from mssql_cdc import stream
@@ -165,7 +166,8 @@ while True:
 ```
 
 `state` is one of `done`, `running`, `waiting_headroom`, `waiting_metrics` and
-`no_snapshot` ([backfill parameters](../reference/options.md#backfill-parameters)).
+`no_snapshot` ([backfill parameters](../reference/options.md#backfill-parameters)); the
+result is a [`BackfillStatus`](../reference/api.md#mssql_cdc.types.BackfillStatus).
 
 How it behaves ([ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md)):
 

@@ -332,6 +332,7 @@ stream(spark, options).to_delta(
     app_id,
     checkpoint,
     facts_table=None,
+    *,  # the rest by keyword only
     trigger=None,
     query_name=None,
     bootstrap=False,
@@ -343,7 +344,9 @@ stream(spark, options).to_delta(
 ```
 
 It starts the query and returns its `StreamingQuery`. `stream(spark, options)` registers the
-data source on the session first. A guide to all of it: [Streaming](../guides/streaming.md).
+data source on the session first. The parameters after `facts_table` are keyword-only;
+`on_data_loss` and `snapshot` are typed `OnDataLoss` and `SnapshotMode`
+([Types](api.md#types)). A guide to all of it: [Streaming](../guides/streaming.md).
 
 ### target
 
@@ -501,9 +504,9 @@ snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in waves 
   `"readCommitted"` reads and plans READ COMMITTED. Either in any case; anything else is a
   `ValueError` before anything is read. `None` takes the stream's `isolationLevel` option.
 
-The result: `snapshot` (its LSN S), `chunks_done`, `chunks_total` (the plan's count, `None`
-until a call has planned it), `done`, `paused` with its `reason`, and `state`, which says
-what to do next:
+The result, a [`BackfillStatus`](api.md#mssql_cdc.types.BackfillStatus): `snapshot` (its
+LSN S), `chunks_done`, `chunks_total` (the plan's count, `None` until a call has planned it),
+`done`, `paused` with its `reason`, and `state`, which says what to do next:
 
 | `state` | Meaning |
 |---|---|
@@ -523,9 +526,10 @@ offset = stream(spark, options).snapshot("bronze.orders")
 # {"lsn": "0x...", "commit_ts": "2026-09-28T14:03:12.117"}
 ```
 
-`snapshot(target, resnapshot=False, *, app_id=None, facts_table=None)` appends the source
+`snapshot(target, *, resnapshot=False, app_id=None, facts_table=None)` appends the source
 table's current rows to `target` as operation 0 and returns the offset they are stamped
-with, to start a stream from ([startingLsn](#startinglsn)). When `target` already holds a
+with (an [`Offset`](api.md#mssql_cdc.types.Offset)), to start a stream from
+([startingLsn](#startinglsn)). When `target` already holds a
 snapshot of the table, it returns that one's offset and reads nothing. `resnapshot=True`
 always takes a new one. With `facts_table` (and the stream's `app_id`, else `ValueError`), a
 chunked snapshot of that stream still open in `target` raises `ValueError`: this one is

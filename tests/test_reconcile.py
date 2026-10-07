@@ -42,7 +42,12 @@ class Orders:
 
     def apply(self):
         apply_changes(
-            self.spark, self.bronze, self.silver, CI, [self.key], control_table=self.control
+            self.spark,
+            self.bronze,
+            self.silver,
+            capture_instance=CI,
+            keys=[self.key],
+            control_table=self.control,
         )
 
     def reconcile(self, **kw):
@@ -596,8 +601,8 @@ def test_a_chunked_bootstrap_applied_by_wave_reconciles_through_snapshot_chunks(
             delta_spark,
             o.bronze,
             o.silver,
-            CI,
-            [o.key],
+            capture_instance=CI,
+            keys=[o.key],
             control_table=o.control,
             facts_table=facts,
         )
@@ -650,7 +655,13 @@ def test_chunk_checks_read_a_pipeline_built_snapshot_whose_rows_are_no_change_in
     status = cdc.backfill(o.bronze, app_id="orders-v1", facts_table=facts, chunk_rows=3)
     assert status["done"] and status["chunks_done"] == 4  # [-, 3) [3, 6) [6, 9) [9, 12)
     apply_changes(
-        delta_spark, o.bronze, o.silver, CI, [o.key], control_table=o.control, facts_table=facts
+        delta_spark,
+        o.bronze,
+        o.silver,
+        capture_instance=CI,
+        keys=[o.key],
+        control_table=o.control,
+        facts_table=facts,
     )
 
     def chunk_rows(result):

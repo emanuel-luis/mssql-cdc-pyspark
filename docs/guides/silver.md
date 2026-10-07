@@ -28,8 +28,8 @@ result = apply_changes(
     spark,
     "bronze.orders",  # the same string passed to to_delta and advance
     "silver.orders",
-    "dbo_orders",
-    ["order_id"],
+    capture_instance="dbo_orders",
+    keys=["order_id"],
     control_table="ops.table_finalization",
     facts_table="ops.ingestion_facts",
 )
@@ -37,9 +37,10 @@ result = apply_changes(
 #  "bronze_found": True}
 ```
 
-The result says whether this call rebuilt silver from a snapshot (`rebuilt`), how far
-bronze is now applied (`applied_lsn`), silver's verdict (`finalized_until`) and whether
-bronze exists (`bronze_found`). The first call that finds bronze counts as a rebuild.
+The result, an [`ApplyResult`](../reference/api.md#mssql_cdc.types.ApplyResult), says
+whether this call rebuilt silver from a snapshot (`rebuilt`), how far bronze is now applied
+(`applied_lsn`), silver's verdict (`finalized_until`) and whether bronze exists
+(`bronze_found`). The first call that finds bronze counts as a rebuild.
 
 To read the key from the capture instance's unique index instead of naming it, leave out
 `keys` and pass the stream's options. The capture instance then comes from their

@@ -6,7 +6,8 @@
 **Amended:** 2026-10-05T06:01:09-03:00, an older release keeps writing tables a newer one migrated, unless a migration sets `mssql_cdc.min_version` (amendment 2, ADR 0013)  
 **Amended:** 2026-10-05T12:35:09-03:00, every release keeps the state its wheel writes under `tests/compat/<version>`, and the current code must resume it (amendment 3)  
 **Amended:** 2026-10-05T12:49:29-03:00, the state contract covers the silver and reconcile schemas, the facts `event` values, the JSON of snapshot rows and a backfill wave's userMetadata, whose keys are only added; the public surface is what `docs/reference/api.md` lists (amendment 4)  
-**Amended:** 2026-10-05T20:51:10-03:00, the kept state includes a chunked snapshot left open, and the `fake` backend's files in it stay readable (amendment 3)
+**Amended:** 2026-10-05T20:51:10-03:00, the kept state includes a chunked snapshot left open, and the `fake` backend's files in it stay readable (amendment 3)  
+**Amended:** 2026-10-07T01:34:59-03:00, the API shape from 0.3.0: options and flags keyword-only, modes typed as `Literal`s, results as `TypedDict`s whose keys are only added (amendment 5)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -103,3 +104,34 @@ schemas, although the silver and reconcile tables have migration kinds of their 
   `'bootstrap'` or `'resnapshot'` row at or after S as complete (a newer full re-snapshot
   supersedes the chunks), while `reconcile` checks the chunks only against a completion row
   at S itself.
+
+## Amendment 5: the API shape from 0.3.0
+0.2 grew `to_delta` to eleven parameters, all positional, each new one appended so that
+positional calls kept working: `to_delta(t, a, c, None, None, None, True)` was a bootstrap,
+and `snapshot("bronze.x", True)` a re-snapshot. Its siblings took options by keyword only,
+but `apply_changes` took four strings in a row. Modes were plain `str` and results untyped
+dicts, so a misspelt mode or key surfaced only at run time.
+
+* Leading arguments stay positional: what a call is about, such as `to_delta(target,
+  app_id, checkpoint, facts_table)` ([ADR 0014](0014-network-and-read-metrics-in-facts.md)'s
+  form), `apply_changes(spark, bronze, target)`, `reconcile(spark, options, silver)`,
+  `advance(spark, control_table, table_name, end_offset)`. Everything after them, options,
+  flags and modes, is keyword-only. Breaking, in 0.3.0: `to_delta` after `facts_table`;
+  `snapshot`'s `resnapshot`; `apply_changes`'s `capture_instance` and `keys`;
+  `reconcile`'s `keys`; `granularity` of `advance`, `track` and `candidate`;
+  `delta_sink`'s `metrics_path`; `get_spark`'s `delta`.
+* Every mode parameter is a `Literal` alias defined once in `mssql_cdc.types` and exported
+  from `mssql_cdc`: `SnapshotMode`, `OnDataLoss`, `Isolation`, `Granularity`, and
+  `BackfillState` for `backfill()`'s `state`. The run-time check stays: a wrong value raises
+  `ValueError` naming the allowed ones.
+* Results are `TypedDict`s, plain dicts at run time: `Offset` (`snapshot()`, `seed()`),
+  `BackfillStatus`, `ApplyResult`, `ReconcileResult`. Their keys are public API: a minor
+  release may add one, and removing or renaming one is a break listed under "Breaking".
+  Parameters that take an offset accept any mapping, so an `Offset` and a parsed progress
+  offset both fit.
+* Considered: a release with shims that warn (`FutureWarning`) on the old positional forms,
+  as pandas 2.0 did. A positional call fails at once with Python's own `TypeError` naming
+  the call, before anything runs, so the change cannot go unnoticed or half-run; a shim
+  would be code kept for one release only.
+* `tests/typing_api.py`, checked by mypy, pins the result types and keeps the old forms and
+  wrong modes type errors.

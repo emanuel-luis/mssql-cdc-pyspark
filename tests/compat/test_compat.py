@@ -76,7 +76,15 @@ def _finish_chunked(spark, m: dict, src: str, ckpt: str) -> None:
         snapshot="chunked",
     ).awaitTermination()
     silver = c["bronze"] + "_silver"
-    apply_changes(spark, c["bronze"], silver, ci, [key], control_table=control, facts_table=facts)
+    apply_changes(
+        spark,
+        c["bronze"],
+        silver,
+        capture_instance=ci,
+        keys=[key],
+        control_table=control,
+        facts_table=facts,
+    )
     rows = sorted((r[key], r[value]) for r in spark.table(silver).collect())
     assert rows == _source_table(src, ci, key, value)
     properties = spark.sql(f"DESCRIBE DETAIL {c['bronze']}").first()["properties"]
@@ -116,7 +124,13 @@ def _resume(spark, m: dict, src: str, ckpt: str) -> None:
         end = finalization.end_offset_from_progress(q.lastProgress)
         finalization.advance(spark, control, bronze, end)
         done = apply_changes(
-            spark, bronze, silver, ci, [key], control_table=control, facts_table=facts
+            spark,
+            bronze,
+            silver,
+            capture_instance=ci,
+            keys=[key],
+            control_table=control,
+            facts_table=facts,
         )
         return end, done
 

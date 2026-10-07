@@ -55,11 +55,11 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 
 ## 0.3.0 (minor, Breaking): API shape
 
-- [ ] Keyword-only parameters after `facts_table` in `to_delta`, and `resnapshot` in
+- [x] Keyword-only parameters after `facts_table` in `to_delta`, and `resnapshot` in
       `snapshot()`.
-- [ ] `Literal` types on every mode parameter (`snapshot`, `on_data_loss`, `isolation`,
+- [x] `Literal` types on every mode parameter (`snapshot`, `on_data_loss`, `isolation`,
       policies).
-- [ ] Typed public results: `TypedDict`s (still dicts) for `backfill()`, `apply_changes()`,
+- [x] Typed public results: `TypedDict`s (still dicts) for `backfill()`, `apply_changes()`,
       `reconcile()`, `snapshot()`.
 - [ ] Planning warnings (columns not read) also in the facts `detail`, not only in the log.
 
@@ -68,7 +68,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 - [ ] `typing.Protocol` for the pluggable seams: `Backend` (mssql-python, arrow-odbc, or a
       user's own) and `CdcClient` (`SqlCdcClient`, the fake), `runtime_checkable`, exported;
       the ABCs stay as thin bases for one release.
-- [ ] `TypedDict`s for the offset, the state payloads ADR 0021 lists (`snapshot_open`,
+- [ ] `TypedDict`s for the state payloads ADR 0021 lists (`snapshot_open`,
       `snapshot_plan`, `snapshot_chunk`, completion, a wave's `userMetadata`) and the known
       source options.
 - [ ] `NewType` for LSN hex strings; frozen dataclasses in place of loose internal dicts.

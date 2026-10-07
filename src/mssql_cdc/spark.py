@@ -14,9 +14,10 @@ def available_cores(spark) -> int:
     return max(0, cores)
 
 
-def get_spark(app_name: str = "mssql-cdc", master: str = "local[*]", delta: bool = True):
+def get_spark(app_name: str = "mssql-cdc", master: str = "local[*]", *, delta: bool = True):
     """Return the active SparkSession (Databricks, EMR, Fabric...) or create a
-    local one, with Delta configured when ``delta-spark`` is installed."""
+    local one, with Delta configured when ``delta-spark`` is installed (``delta``,
+    keyword-only)."""
     from pyspark.sql import SparkSession
 
     active = SparkSession.getActiveSession()

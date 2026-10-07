@@ -445,9 +445,9 @@ def _write(
 
 
 def delta_sink(
-    target: str, app_id: str, facts_table: str | None = None, metrics_path: str | None = None
+    target: str, app_id: str, facts_table: str | None = None, *, metrics_path: str | None = None
 ) -> Callable[[DataFrame, int], None]:
-    """Return a ``foreachBatch`` function.
+    """Return a ``foreachBatch`` function; ``metrics_path`` is keyword-only.
 
     ``app_id`` must be stable for the lifetime of a checkpoint. If the checkpoint is
     deleted, use a new ``app_id``; batch ids restart at 0 and would otherwise be

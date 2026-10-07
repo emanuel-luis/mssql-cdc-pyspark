@@ -59,10 +59,13 @@ import logging
 import os
 import re
 import time
+from collections.abc import Mapping
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+from .types import BackfillState, BackfillStatus, Isolation, Offset, OnDataLoss, SnapshotMode
 
 if TYPE_CHECKING:
     from pyspark.sql import Row, SparkSession
@@ -253,13 +256,13 @@ class CdcStream:
     def snapshot(
         self,
         target: str,
-        resnapshot: bool = False,
         *,
+        resnapshot: bool = False,
         app_id: str | None = None,
         facts_table: str | None = None,
-    ) -> dict:
+    ) -> Offset:
         """Append the tracked table's current rows to ``target`` as operation 0 and return the
-        offset they are stamped with, for the stream's ``startingLsn``.
+        offset they are stamped with (an ``Offset``), for the stream's ``startingLsn``.
 
         The LSN is recorded before the table is read. Once ``target`` holds a snapshot taken
         under any capture instance of this table, its offset is returned and nothing is read,
@@ -299,10 +302,11 @@ class CdcStream:
         facts_table: str | None = None,
         allow_missing_columns: bool = False,
         reseed: bool = False,
-    ) -> dict:
+    ) -> Offset:
         """Append ``df``, a copy of the tracked table you already have, to ``target`` as its
-        snapshot, and return the offset it is stamped with (ADR 0025). For a table too big to
-        snapshot within the CDC retention; ``to_delta(bootstrap=True)`` then starts from it.
+        snapshot, and return the offset it is stamped with, an ``Offset`` (ADR 0025). For a
+        table too big to snapshot within the CDC retention; ``to_delta(bootstrap=True)`` then
+        starts from it.
 
         ``as_of``: when the copy started being read, as a UTC ``datetime`` (an aware one is
         converted), or an LSN (``"0x..."``) recorded before that. Every commit at or before it
@@ -405,7 +409,7 @@ class CdcStream:
             self._bootstrap_event(facts_table, app_id, target, offset, timing)
         return offset
 
-    def _take_snapshot(self, target: str, ci: str) -> tuple[dict, dict]:
+    def _take_snapshot(self, target: str, ci: str) -> tuple[Offset, dict]:
         """Write a new snapshot into ``target``. Returns its offset and the ``rows``,
         ``started_at`` and ``duration_ms`` of its event row in the facts table."""
         from .client import make_client
@@ -415,7 +419,7 @@ class CdcStream:
         started_at, t0 = _utc_now(), time.monotonic()
         with closing(make_client(self.options)) as client:
             lsn = snapshot_lsn(client, client.source_table(ci))
-            offset = {"lsn": lsn, "commit_ts": client.lsn_to_time(lsn) or ""}
+            offset: Offset = {"lsn": lsn, "commit_ts": client.lsn_to_time(lsn) or ""}
         _log.info("mssql_cdc: snapshot of %s into %s at %s: reading the table", ci, target, lsn)
         rows = (
             self.spark.read.format("mssql_cdc_snapshot")
@@ -464,7 +468,9 @@ class CdcStream:
             "duration_ms": duration_ms,
         }
 
-    def _last_snapshot(self, target: str, ci: str, where=None, chunks: bool = False) -> dict | None:
+    def _last_snapshot(
+        self, target: str, ci: str, where=None, chunks: bool = False
+    ) -> Offset | None:
         """The newest whole snapshot (or seed) of the table in ``target``, of those ``where``
         (a Column) keeps. A chunked snapshot's rows are never one: its chunks are stamped
         with their own LSNs, and only its facts tell it complete (``_opened``, ADR 0028).
@@ -682,9 +688,9 @@ class CdcStream:
         ci = self._capture_instance()
         offset = self._last_snapshot(target, ci)
         if offset is None and facts_table:
-            offset = self._reusable(facts_table, target, app_id, chunked)
-            if offset or chunked:
-                offset = offset or self._open(
+            opened = self._reusable(facts_table, target, app_id, chunked)
+            if opened or chunked:
+                opened = opened or self._open(
                     target,
                     ci,
                     app_id=app_id,
@@ -693,7 +699,7 @@ class CdcStream:
                     generation=0,
                     kind="bootstrap",
                 )
-                return offset["lsn"]
+                return opened["lsn"]
         timing: dict = {}
         if offset is None:
             if facts_table:
@@ -713,7 +719,7 @@ class CdcStream:
         return offset["lsn"]
 
     def _bootstrap_event(
-        self, facts_table: str, app_id: str, target: str, offset: dict, timing: dict
+        self, facts_table: str, app_id: str, target: str, offset: Offset, timing: dict
     ) -> None:
         """The 'bootstrap' event of a snapshot or a seed, written once: Delta skips a rerun's,
         so a crash between the snapshot and the event only delays it."""
@@ -794,7 +800,7 @@ class CdcStream:
                 return None
             lost_to = _ts(client.lsn_to_time(low))
             # opened by a recovery that stopped before writing its state
-            done = self._reusable(facts_table, target, next_id, chunked)
+            done: Mapping[str, Any] | None = self._reusable(facts_table, target, next_id, chunked)
             # purged too, as a full re-snapshot's would be: open past it, a generation on
             while done and _lost(client, ci, done["lsn"]):
                 n, next_id = n + 1, _generation(checkpoint, app_id, n + 2)[1]
@@ -831,6 +837,7 @@ class CdcStream:
             next_id,
         )
         _write_state(checkpoint, {**state, "recovering": start})
+        offset: Mapping[str, Any]
         if chunked:  # nothing read here, so nothing to purge meanwhile; a newer open supersedes
             offset = done or self._open(
                 target,
@@ -906,15 +913,17 @@ class CdcStream:
         app_id: str,
         checkpoint: str,
         facts_table: str | None = None,
+        *,
         trigger: dict | None = None,
         query_name: str | None = None,
         bootstrap: bool = False,
-        on_data_loss: Literal["fail", "resnapshot"] = "fail",
+        on_data_loss: OnDataLoss = "fail",
         resnapshot_interval_days: float = 7.0,
         snapshot_on_switch: bool = False,
-        snapshot: Literal["full", "chunked"] = "full",
+        snapshot: SnapshotMode = "full",
     ) -> StreamingQuery:
         """Start the stream into ``target`` through ``delta_sink``; returns the StreamingQuery.
+        The parameters after ``facts_table`` are keyword-only.
 
         ``trigger``: keyword arguments for ``DataStreamWriter.trigger``, e.g.
         ``{"availableNow": True}``. ``query_name``: the query's name; the sink app_id (with
@@ -1063,8 +1072,8 @@ class CdcStream:
         max_waves: int | None = None,
         max_seconds: float | None = None,
         min_headroom_hours: float | None = None,
-        isolation: str | None = None,
-    ) -> dict:
+        isolation: Isolation | None = None,
+    ) -> BackfillStatus:
         """Read the newest open chunked snapshot of ``target`` (``to_delta(...,
         snapshot="chunked")`` opens one) in waves of ``numPartitions`` chunks of at most about
         ``chunk_rows`` rows, next to the running stream; returns how far it got. Run it
@@ -1099,8 +1108,9 @@ class CdcStream:
         allow; ``"readCommitted"`` under READ COMMITTED. None: the stream's ``isolationLevel``
         option, READ COMMITTED without one. Either is matched ignoring case.
 
-        Returns ``{"snapshot", "chunks_done", "chunks_total", "done", "paused", "state",
-        "reason"}``: ``chunks_total`` is the plan's, None until a call has planned it.
+        Returns a ``BackfillStatus``, ``{"snapshot", "chunks_done", "chunks_total", "done",
+        "paused", "state", "reason"}``: ``chunks_total`` is the plan's, None until a call has
+        planned it.
         ``state`` says why the call returned, ``reason`` the same in words: ``"done"``,
         ``"running"`` (``max_waves`` or ``max_seconds`` stopped it: call again),
         ``"waiting_headroom"`` (below ``min_headroom_hours``), ``"waiting_metrics"`` (the
@@ -1122,7 +1132,7 @@ class CdcStream:
         level = str(asked or "readCommitted").strip().lower()
         if level not in ISOLATION_LEVELS:
             raise ValueError(f"isolation must be 'snapshot' or 'readCommitted', not {asked!r}")
-        isolation = ISOLATION_LEVELS[level]  # as client._isolated takes it
+        isolated = ISOLATION_LEVELS[level]  # as client._isolated takes it
         ci, t0 = self._capture_instance(), time.monotonic()
         ours = _family(app_id)
         kinds = ("snapshot_open", "snapshot_plan", "snapshot_chunk", "bootstrap", "resnapshot")
@@ -1176,11 +1186,18 @@ class CdcStream:
             ),
             key=lambda c: c["chunk"],
         )
-        status = {"snapshot": s, "paused": False, "state": "running", "reason": None}
+        status: BackfillStatus = {
+            "snapshot": s,
+            "chunks_done": len(chunks),
+            "chunks_total": None,
+            "done": False,
+            "paused": False,
+            "state": "running",
+            "reason": None,
+        }
         # its own row, or a newer whole snapshot's (a full re-snapshot) that supersedes it
         if any(r["event"] in ("bootstrap", "resnapshot") and r["max_lsn"] >= s for r in rows):
-            n = len(chunks)
-            return {**status, "chunks_done": n, "chunks_total": n, "done": True, "state": "done"}
+            return {**status, "chunks_total": len(chunks), "done": True, "state": "done"}
         given = str(_opt(self.options, "numPartitions") or "auto").strip().lower()
         k = int(given) if given != "auto" else available_cores(self.spark) or os.cpu_count() or 1
         base = _opt(self.options, "metricsPath")  # not the stream's own directory: it folds those
@@ -1201,7 +1218,8 @@ class CdcStream:
                     break
                 waiting = self._throttle(facts_table, sink_id, min_headroom_hours)
                 if waiting:
-                    status.update(paused=True, state=waiting[0], reason=waiting[1])
+                    status["paused"] = True
+                    status["state"], status["reason"] = waiting
                     break
                 if plan is None:
                     self._plan(
@@ -1214,7 +1232,7 @@ class CdcStream:
                         facts_table=facts_table,
                         app_id=app_id,
                         chunk_rows=chunk_rows,
-                        isolation=isolation,
+                        isolation=isolated,
                     )
                     plan = _plan_of(read_facts(), s)  # a concurrent call's, if Delta skipped ours
                     assert plan is not None  # written just now
@@ -1231,7 +1249,7 @@ class CdcStream:
                     # a keyset plan's last chunk ends at the first key after MAX, and there was
                     # none at planning: sought again, so that rows inserted above MAX since,
                     # the stream's, do not pile up in the last chunk
-                    end = last_bound(client, ci, source, info["plan"]["max"], isolation)
+                    end = last_bound(client, ci, source, info["plan"]["max"], isolated)
                     every = [*every[:-1], [every[-1][0], end]]
                 planned = [[i, *every[i]] for i in range(first, min(first + max(1, k), len(every)))]
                 wave = last["wave"] + 1 if last else 0
@@ -1260,7 +1278,7 @@ class CdcStream:
                     every=every,
                     client=client,
                     metrics=metrics,
-                    isolation=isolation,
+                    isolation=isolated,
                 )
                 chunks += read
                 waves += 1
@@ -1358,7 +1376,7 @@ class CdcStream:
 
     def _throttle(
         self, facts_table: str, sink_id: str, min_headroom_hours: float | None
-    ) -> tuple[str, str] | None:
+    ) -> tuple[BackfillState, str] | None:
         """Why ``backfill()`` pauses now, as its ``(state, reason)``, or None: the retention
         headroom of the stream ``sink_id``'s newest facts row, less that row's age, below
         ``min_headroom_hours``, or no such row."""

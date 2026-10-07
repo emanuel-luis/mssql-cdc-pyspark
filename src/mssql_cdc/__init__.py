@@ -17,6 +17,17 @@ try:
     from .reconcile import reconcile
     from .silver import apply_changes
     from .source import HAS_ADMISSION_CONTROL, OPERATIONS, MssqlCdcDataSource
+    from .types import (
+        ApplyResult,
+        BackfillState,
+        BackfillStatus,
+        Granularity,
+        Isolation,
+        Offset,
+        OnDataLoss,
+        ReconcileResult,
+        SnapshotMode,
+    )
 except ModuleNotFoundError as e:
     # "pyspark", or "pyspark.sql" when the parent is blocked; a PySpark that is present but
     # lacks a module (too old) keeps its own error.
@@ -31,9 +42,18 @@ except ModuleNotFoundError as e:
 __all__ = [
     "HAS_ADMISSION_CONTROL",
     "OPERATIONS",
+    "ApplyResult",
+    "BackfillState",
+    "BackfillStatus",
     "DataLossError",
+    "Granularity",
+    "Isolation",
     "MssqlCdcDataSource",
+    "Offset",
+    "OnDataLoss",
+    "ReconcileResult",
     "SchemaChangedError",
+    "SnapshotMode",
     "apply_changes",
     "await_all",
     "is_data_loss",

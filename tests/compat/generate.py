@@ -94,8 +94,8 @@ def main(out: Path) -> None:
             spark,
             TABLES["bronze"],
             TABLES["silver"],
-            ci,
-            [KEY],
+            capture_instance=ci,
+            keys=[KEY],
             control_table=TABLES["control"],
             facts_table=TABLES["facts"],
         )

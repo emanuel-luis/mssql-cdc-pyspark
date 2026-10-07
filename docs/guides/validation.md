@@ -22,6 +22,7 @@ result = reconcile(
 #  "hashed": 2, "failures": {}, "report": DataFrame, ...}
 ```
 
+The result is a [`ReconcileResult`](../reference/api.md#mssql_cdc.types.ReconcileResult).
 `failures` counts what differs by kind; an empty dict and `mismatch == 0` mean silver
 matched. `report` holds one row per bucket and one per key or chunk that failed; with
 `report_table` they are appended there too ([Tables](../reference/tables.md#reconcile-report)).

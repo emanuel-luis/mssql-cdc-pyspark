@@ -5,6 +5,10 @@ generated from the docstrings. Everything not listed here is internal and may ch
 any release. The options a stream takes are in [Options](options.md). `CdcStream` is listed
 for its methods: it is what `stream()` returns, and only that call creates one.
 
+Leading arguments are positional (`to_delta(target, app_id, checkpoint, facts_table)`,
+`apply_changes(spark, bronze, target)`); options, flags and modes after them are
+keyword-only (since 0.3).
+
 ## Pipeline
 
 ::: mssql_cdc.stream
@@ -45,6 +49,18 @@ returns the table's verdict, a naive UTC `datetime`, or `None` before the first 
 ## Sink
 
 ::: mssql_cdc.sink.delta_sink
+
+## Types
+
+Exported from `mssql_cdc`. The mode parameters take a `Literal`, so a type checker flags a
+misspelt mode; a wrong value still raises `ValueError` naming the allowed ones. The results
+are `TypedDict`s, plain dicts at run time; a minor release may add keys to them, never remove
+one.
+
+::: mssql_cdc.types
+    options:
+      show_root_toc_entry: false
+      members: [Offset, BackfillStatus, ApplyResult, ReconcileResult, SnapshotMode, OnDataLoss, Isolation, Granularity, BackfillState]
 
 ## Errors
 

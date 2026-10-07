@@ -1010,7 +1010,9 @@ def test_silver_reads_a_composite_key_and_converges_to_the_source_table(
         )
         q.awaitTermination()
         # no keys given: read from the capture instance's unique index, the primary key
-        apply_changes(delta_spark, bronze, silver, ci, control_table=control, options=options)
+        apply_changes(
+            delta_spark, bronze, silver, capture_instance=ci, control_table=control, options=options
+        )
         rows = delta_spark.read.format("delta").load(silver).collect()
         return sorted((r["a"], r["b"], r["v"]) for r in rows)
 
@@ -1499,8 +1501,8 @@ def _apply(delta_spark, paths: dict, ci: str, keys: list[str]) -> dict:
         delta_spark,
         paths["bronze"],
         paths["silver"],
-        ci,
-        keys,
+        capture_instance=ci,
+        keys=keys,
         control_table=paths["control"],
         facts_table=paths["facts"],
     )

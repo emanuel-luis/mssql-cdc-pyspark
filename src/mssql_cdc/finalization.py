@@ -29,14 +29,16 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, get_args
 
 from pyspark.sql.streaming import StreamingQueryListener
 
 from . import migrations
 from .migrations.control import APPLIED_COLUMNS, OPEN_COMMENTS, VERDICT_COMMENTS, WAVE_COLUMNS
 from .tables import delta_table, retrying, table_ref  # noqa: F401 - table_ref re-exported
+from .types import Granularity
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -47,7 +49,6 @@ if TYPE_CHECKING:
     )
 
 _log = logging.getLogger(__name__)
-Granularity = Literal["minute", "hour", "day"]
 _GRANULARITIES = get_args(Granularity)
 _REPEAT_SECONDS = 600  # a tracker's failure streak: one WARNING at most this often
 
@@ -68,7 +69,9 @@ def truncate(ts: datetime, granularity: str = "hour") -> datetime:
     return ts
 
 
-def candidate(end_offset: dict | None, granularity: str = "hour") -> datetime | None:
+def candidate(
+    end_offset: Mapping[str, Any] | None, *, granularity: Granularity = "hour"
+) -> datetime | None:
     """``finalized_until`` implied by a committed batch's end offset."""
     if not end_offset or not end_offset.get("commit_ts"):
         return None
@@ -134,15 +137,17 @@ def advance(
     spark: SparkSession,
     control_table: str,
     table_name: str,
-    end_offset: dict | None,
+    end_offset: Mapping[str, Any] | None,
+    *,
     granularity: Granularity = "hour",
 ) -> datetime | None:
-    """Monotonically advance ``finalized_until`` for ``table_name``.
+    """Monotonically advance ``finalized_until`` for ``table_name``; ``granularity`` is
+    keyword-only.
 
     Call only after the batch that produced ``end_offset`` is committed. A MERGE that loses
     to a concurrent commit on the control table is retried for up to a minute.
     """
-    cand = candidate(end_offset, granularity)
+    cand = candidate(end_offset, granularity=granularity)
     ensure_control_table(spark, control_table)
     if cand is not None:
         assert end_offset is not None  # candidate() is None without it
@@ -224,6 +229,7 @@ class FinalizationListener(StreamingQueryListener):
         run_id: str,
         control_table: str,
         table_name: str,
+        *,
         granularity: Granularity = "hour",
     ):
         _check_granularity(granularity)
@@ -271,9 +277,15 @@ class FinalizationListener(StreamingQueryListener):
                 break
             try:
                 end = end_offset_from_progress(progress)
-                cand = candidate(end, self._granularity)
+                cand = candidate(end, granularity=self._granularity)
                 if cand is not None and (last is None or cand > last):
-                    advance(self._session, self._control, self._table, end, self._granularity)
+                    advance(
+                        self._session,
+                        self._control,
+                        self._table,
+                        end,
+                        granularity=self._granularity,
+                    )
                     last = cand  # not on a failure: the next progress tries again
                     self.last_error, self.failures = None, 0
             except Exception as exc:  # noqa: BLE001 - the worker must survive
@@ -318,6 +330,7 @@ def track(
     query,
     control_table: str,
     table_name: str,
+    *,
     granularity: Granularity = "hour",
 ) -> FinalizationListener:
     """Advance ``finalized_until`` of ``table_name`` after every batch of ``query``, a started
@@ -327,8 +340,11 @@ def track(
     right after starting the query; ``join()`` waits for the last verdict once the query
     stops. With ``availableNow``, ``query.awaitTermination()`` then ``join()``. The control
     table is created here, so a wrong name fails now rather than in the worker's log.
+    ``granularity`` is keyword-only.
     """
-    listener = FinalizationListener(spark, query.runId, control_table, table_name, granularity)
+    listener = FinalizationListener(
+        spark, query.runId, control_table, table_name, granularity=granularity
+    )
     ensure_control_table(spark, control_table)
     spark.streams.addListener(listener)
     # progress posted before the listener was added is missed: the latest one implies it

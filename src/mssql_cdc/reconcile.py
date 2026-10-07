@@ -45,9 +45,10 @@ COMMITTED, Tier 2 reads through the snapshot reader under the ``isolationLevel``
   S. The facts are read before bronze, which commits a wave's rows before its facts rows,
   so a wave still being written is no failure.
 
-Returns ``{"run_id", "silver_version", "silver_lsn", "source_lsn", "buckets", "match",
-"in_flight", "mismatch", "hashed", "failures": {failure_type: rows}, "report"}``, ``report``
-the run's report as a DataFrame, which ``report_table`` also gets (``REPORT_COLUMNS``).
+Returns a ``ReconcileResult``, ``{"run_id", "silver_version", "silver_lsn", "source_lsn",
+"buckets", "match", "in_flight", "mismatch", "hashed", "failures": {failure_type: rows},
+"report"}``, ``report`` the run's report as a DataFrame, which ``report_table`` also gets
+(``REPORT_COLUMNS``).
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ from itertools import pairwise
 from . import migrations
 from .silver import _by_key, _one, _q, _source_keys
 from .tables import delta_table, table_ref
+from .types import ReconcileResult
 
 REPORT_COMMENT = (
     "Report of mssql-cdc-pyspark's reconcile(), which compares a silver table with its SQL "
@@ -337,8 +339,8 @@ def reconcile(
     spark,
     options: dict,
     silver: str,
-    keys: Sequence[str] | None = None,
     *,
+    keys: Sequence[str] | None = None,
     bronze: str,
     control_table: str,
     facts_table: str | None = None,
@@ -346,9 +348,10 @@ def reconcile(
     sample: float = 0.01,
     report_table: str | None = None,
     seed: int | None = None,
-) -> dict:
+) -> ReconcileResult:
     """Compare ``silver`` with the table the capture instance in ``options`` tracks (see the
-    module docstring).
+    module docstring); returns a ``ReconcileResult``. The parameters after ``silver`` are
+    keyword-only.
 
     ``keys``: the source's key columns; without them, the capture instance's unique index.
     ``bronze``: the table silver is applied from; its newer changes, and the change table's

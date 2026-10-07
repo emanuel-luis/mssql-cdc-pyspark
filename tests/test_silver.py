@@ -52,7 +52,13 @@ class Orders:
     def apply(self, **kw):
         kw.setdefault("facts_table", self.facts)  # the verdict needs it, even when it is empty
         return apply_changes(
-            self.spark, self.bronze, self.silver, CI, ["order_id"], control_table=self.control, **kw
+            self.spark,
+            self.bronze,
+            self.silver,
+            capture_instance=CI,
+            keys=["order_id"],
+            control_table=self.control,
+            **kw,
         )
 
     def rows(self):
@@ -274,12 +280,26 @@ def test_keys_and_the_capture_instance_come_from_the_options_when_not_given(delt
     with pytest.raises(ValueError, match="pass capture_instance"):
         apply_changes(delta_spark, o.bronze, o.silver, keys=["order_id"], control_table=o.control)
     with pytest.raises(ValueError, match="pass keys"):
-        apply_changes(delta_spark, o.bronze, o.silver, CI, control_table=o.control)
+        apply_changes(delta_spark, o.bronze, o.silver, capture_instance=CI, control_table=o.control)
     with pytest.raises(ValueError, match="not captured columns"):
-        apply_changes(delta_spark, o.bronze, o.silver, CI, ["id"], control_table=o.control)
+        apply_changes(
+            delta_spark,
+            o.bronze,
+            o.silver,
+            capture_instance=CI,
+            keys=["id"],
+            control_table=o.control,
+        )
     # in another case than bronze's rows and the fake's instance: both match ignoring it
     ci = CI.upper()
-    apply_changes(delta_spark, o.bronze, o.silver, ci, control_table=o.control, options=o.options)
+    apply_changes(
+        delta_spark,
+        o.bronze,
+        o.silver,
+        capture_instance=ci,
+        control_table=o.control,
+        options=o.options,
+    )
     assert o.rows() == o.source() == [(1, "new")]
     # the capture instance from the options too, into a silver of its own, applied from scratch
     o.silver, o.control = (os.path.join(workdir, n) for n in ("silver2", "control2"))
@@ -291,7 +311,7 @@ def test_keys_and_the_capture_instance_come_from_the_options_when_not_given(delt
             delta_spark,
             o.bronze,
             o.silver,
-            "dbo_x",
+            capture_instance="dbo_x",
             control_table=o.control,
             options={"backend": "fake", "fakePath": unkeyed.path},
         )
@@ -373,7 +393,13 @@ def test_a_wrong_granularity_fails_before_anything_is_written(workdir):
     control, spark = os.path.join(workdir, "control"), MagicMock(spec_set=SparkSession)
     with pytest.raises(ValueError, match="granularity"):
         apply_changes(
-            spark, "b", "s", CI, ["order_id"], control_table=control, granularity="hourly"
+            spark,
+            "b",
+            "s",
+            capture_instance=CI,
+            keys=["order_id"],
+            control_table=control,
+            granularity="hourly",
         )
     assert not os.path.exists(control) and not spark.method_calls
 
@@ -490,8 +516,8 @@ class Log:
             self.spark,
             self.bronze,
             self.silver,
-            CI,
-            list(keys),
+            capture_instance=CI,
+            keys=list(keys),
             control_table=self.control,
             facts_table=self.facts if facts else None,
         )
@@ -765,8 +791,8 @@ def test_facts_rows_that_name_bronze_otherwise_warn_then_fail_on_its_chunk_rows(
             delta_spark,
             elsewhere,
             g.silver,
-            CI,
-            ["order_id"],
+            capture_instance=CI,
+            keys=["order_id"],
             control_table=g.control,
             facts_table=g.facts,
         )
