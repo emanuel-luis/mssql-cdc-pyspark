@@ -63,7 +63,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
       `reconcile()`, `snapshot()`.
 - [x] Planning warnings (columns not read) also in the facts `detail`, not only in the log.
 
-## 0.4.0 (minor): typing and protocols
+## 0.4.0 (minor, shipped 2026-10-07): typing and protocols
 
 - [x] `typing.Protocol` for the pluggable seams: `Backend` (mssql-python, arrow-odbc, or a
       user's own) and `CdcClient` (`SqlCdcClient`, the fake), `runtime_checkable`, exported;
