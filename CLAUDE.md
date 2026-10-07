@@ -47,7 +47,8 @@ python examples/local_pipeline.py
 
 uv run ruff check                                   # lint (add --fix for the safe fixes)
 uv run ruff format                                  # format (CI runs --check)
-uv run mypy                                         # type-check src/
+uv run mypy                                         # strict: src/ and tests/typing_*.py
+uv run pyright --verifytypes mssql_cdc --ignoreexternal  # public API 100% typed (ADR 0031)
 ```
 
 `make` targets mirror these on Linux; `scripts/lab.ps1` is the PowerShell
@@ -66,7 +67,11 @@ src/mssql_cdc/
                    at the open), plan_chunks() (every chunk, at the first backfill: per-slice
                    counts by key_buckets/key_range for one integer key, key_bound otherwise).
   fake.py          File-backed CDC simulator (FakeCdcClient reader, FakeCdcDatabase writer).
-  lsn.py           LSN <-> canonical hex string.
+  lsn.py           LSN <-> canonical hex string; the Lsn NewType.
+  types.py         Public types: mode Literals, result TypedDicts (Offset, BackfillStatus...),
+                   SparkSessionLike / StreamingQueryLike (classic or Spark Connect).
+  payloads.py      TypedDicts for the facts `detail` JSON and a wave's userMetadata (state,
+                   ADR 0021 amendment 7).
   sink.py          delta_sink(): idempotent append (txnAppId/txnVersion) + per-batch facts.
   pipeline.py      stream(spark, options).to_delta(...): source + sink from one set of options;
                    .snapshot(target) / to_delta(bootstrap=True): initial load (ADR 0016);
@@ -228,9 +233,11 @@ about every 5 minutes (t1); `sql/heartbeat.sql` brings `max_lsn`'s lag to ~10 s
 ## Conventions
 
 * English in code, docs, commit messages. Python ≥ 3.10, type hints, small modules.
-* CI's `lint` job runs `ruff check`, `ruff format --check` and `mypy` (config in
-  `pyproject.toml`) and gates every other job: run them before pushing. A broad `except`
-  says why: `# noqa: BLE001 - <reason>`.
+* CI's `lint` job runs `ruff check`, `ruff format --check`, `mypy` (strict, on `src` and
+  `tests/typing_*.py`; config in `pyproject.toml`) and `pyright --verifytypes mssql_cdc
+  --ignoreexternal` (fails below 100%: annotate a public constant or attribute whose type is
+  inferred), and gates every other job: run them before pushing (ADR 0031). A broad
+  `except` says why: `# noqa: BLE001 - <reason>`.
 * PySpark is an optional extra (`[spark]`) because platforms ship their own: installing
   PyPI `pyspark` on Databricks, EMR, Dataproc or Fabric, or next to Databricks Connect,
   conflicts with the platform's Spark (DBR 18.2 is Spark 4.1). Do not add hard dependencies
