@@ -10,18 +10,24 @@ it can live inside a Spark streaming offset.
 from __future__ import annotations
 
 import re
+from typing import NewType
+
+Lsn = NewType("Lsn", str)
+"""An LSN in its canonical form, ``0x`` and 20 uppercase hex digits (ADR 0030), as
+``normalize``, ``from_int`` and the client's methods return it. A ``str`` at run time, so it
+fits anywhere a ``str`` does; parameters that take an LSN accept any ``str`` in that form."""
 
 LSN_BYTES = 10
 _HEX_RE = re.compile(r"^0x[0-9A-F]{20}$")
-ZERO_LSN = "0x" + "0" * 20
+ZERO_LSN = Lsn("0x" + "0" * 20)
 
 
-def normalize(value: str | bytes | bytearray) -> str:
+def normalize(value: str | bytes | bytearray) -> Lsn:
     """Return the canonical ``0x`` + 20 uppercase hex form of an LSN."""
     if isinstance(value, (bytes, bytearray)):
         if len(value) != LSN_BYTES:
             raise ValueError(f"LSN must be {LSN_BYTES} bytes, got {len(value)}")
-        return "0x" + bytes(value).hex().upper()
+        return Lsn("0x" + bytes(value).hex().upper())
     text = value.strip()
     if text[:2].lower() == "0x":
         text = text[2:]
@@ -29,14 +35,14 @@ def normalize(value: str | bytes | bytearray) -> str:
     out = "0x" + text
     if not _HEX_RE.match(out):
         raise ValueError(f"Invalid LSN: {value!r}")
-    return out
+    return Lsn(out)
 
 
 def to_int(lsn: str) -> int:
     return int(normalize(lsn), 16)
 
 
-def from_int(value: int) -> str:
+def from_int(value: int) -> Lsn:
     if value < 0 or value >= 1 << (8 * LSN_BYTES):
         raise ValueError(f"LSN integer out of range: {value}")
-    return "0x" + format(value, "020X")
+    return Lsn("0x" + format(value, "020X"))

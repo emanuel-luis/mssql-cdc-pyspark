@@ -2,7 +2,8 @@
 
 ``CdcClient`` is the interface the Spark data source depends on. ``SqlCdcClient``
 implements it with plain T-SQL on top of a small ``Backend`` that knows how to run a
-query and return Apache Arrow record batches. Two backends ship:
+query and return Apache Arrow record batches. Both are ``typing.Protocol``s (ADR 0030): a
+class with their methods is one, inheriting or not. Two backends ship:
 
 * ``mssql-python`` (default): Microsoft's official driver. ``pip`` only; it bundles
   the ODBC driver and fetches natively into Arrow via ``cursor.arrow_batch()``.
@@ -22,15 +23,16 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from collections.abc import Iterator, Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import NamedTuple
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import pyarrow as pa
 
 from . import lsn as _lsn
+from .lsn import Lsn
 
 _log = logging.getLogger(__name__)
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
@@ -75,14 +77,14 @@ class SourceTable(NamedTuple):
     schema: str
     table: str
     keys: list[str]  # columns of the unique index CDC identifies rows by; [] without one
-    start_lsn: str | None  # the instance's low endpoint; known before capture reaches it
+    start_lsn: Lsn | None  # the instance's low endpoint; known before capture reaches it
 
 
 class CaptureInstance(NamedTuple):
     """One capture instance of a source table (SQL Server allows two per table)."""
 
     name: str
-    start_lsn: str | None  # its low endpoint, as sys.fn_cdc_get_min_lsn once capture reaches it
+    start_lsn: Lsn | None  # its low endpoint, as sys.fn_cdc_get_min_lsn once capture reaches it
     columns: list[str]  # captured columns, in capture order; [] when unknown (the fake)
     column_types: list[str | None]  # their default Spark types; None: no default mapping
     # captured computed columns, not in ``columns``: CDC stores NULL for them in every change row
@@ -92,7 +94,7 @@ class CaptureInstance(NamedTuple):
 class DdlChange(NamedTuple):
     """A DDL statement on the tracked table (``sys.sp_cdc_get_ddl_history``)."""
 
-    lsn: str
+    lsn: Lsn
     commit_ts: str | None  # commit time (UTC, ms) of the last commit at or before ``lsn``
     command: str
 
@@ -458,39 +460,50 @@ def _int_chunks(
 # --------------------------------------------------------------------------- #
 # Interface
 # --------------------------------------------------------------------------- #
-class CdcClient(ABC):
-    """What the data source needs from SQL Server. All LSNs are hex strings."""
+@runtime_checkable
+class CdcClient(Protocol):
+    """What the data source needs from SQL Server: ``SqlCdcClient``, or the ``fake`` backend's
+    client. A ``typing.Protocol`` (ADR 0030): any class with these methods is one, and
+    ``isinstance`` checks that it has them (by name; a type checker checks their signatures).
+    A subclass inherits the methods that have a body here, and must define the abstract ones.
+
+    LSNs are hex strings (invariant 6): returned as ``Lsn``, taken as any ``str`` in that form.
+    """
 
     @abstractmethod
-    def max_lsn(self) -> str: ...
+    def max_lsn(self) -> Lsn:
+        """``sys.fn_cdc_get_max_lsn()``: the last LSN capture has processed."""
 
     @abstractmethod
-    def min_lsn(self, capture_instance: str) -> str: ...
+    def min_lsn(self, capture_instance: str) -> Lsn:
+        """``sys.fn_cdc_get_min_lsn``: the oldest LSN the instance's change table holds."""
 
     @abstractmethod
-    def increment_lsn(self, lsn: str) -> str: ...
+    def increment_lsn(self, lsn: str) -> Lsn:
+        """``sys.fn_cdc_increment_lsn``: the next LSN after ``lsn``."""
 
     @abstractmethod
-    def decrement_lsn(self, lsn: str) -> str: ...
+    def decrement_lsn(self, lsn: str) -> Lsn:
+        """``sys.fn_cdc_decrement_lsn``: the LSN before ``lsn``."""
 
     @abstractmethod
     def lsn_to_time(self, lsn: str) -> str | None:
         """Commit time of an LSN as ISO-8601 UTC string (millisecond precision)."""
 
     @abstractmethod
-    def time_to_lsn(self, ts_utc: datetime) -> str | None:
+    def time_to_lsn(self, ts_utc: datetime) -> Lsn | None:
         """The last LSN in cdc.lsn_time_mapping committed at or before ``ts_utc`` (naive,
         UTC), as ``sys.fn_cdc_map_time_to_lsn('largest less than or equal', ...)``; None
         when there is none."""
 
     @abstractmethod
-    def nth_commit_after(self, lsn: str, n: int) -> str | None:
+    def nth_commit_after(self, lsn: str, n: int) -> Lsn | None:
         """The n-th commit LSN strictly after ``lsn`` in cdc.lsn_time_mapping."""
 
     @abstractmethod
     def split_points(
         self, capture_instance: str, from_lsn: str, to_lsn: str, n: int
-    ) -> list[tuple[str, str, int]]:
+    ) -> list[tuple[Lsn, Lsn, int]]:
         """Up to ``n`` commit-aligned upper bounds that split [from, to] into ranges holding
         about the same number of change rows of ``capture_instance``, ascending, each with
         the LSN after it (``increment_lsn``), where the next range starts, and the rows of
@@ -604,6 +617,7 @@ class CdcClient(ABC):
     def forget_columns(self) -> None:
         """Make the next ``capture_instances`` read the captured columns again: a client
         may cache them, and ALTER COLUMN changes their types."""
+        return  # a body, not a docstring only: a default, not abstract (ADR 0030)
 
     @abstractmethod
     def ddl_history(self, capture_instance: str, from_lsn: str, to_lsn: str) -> list[DdlChange]:
@@ -638,31 +652,42 @@ class CdcClient(ABC):
 
     def set_clock(self, zone: str | None, offset_min: int | None) -> None:
         """Take ``clock()`` of the driver's client instead of detecting it again."""
+        return
 
     def refresh_clock(self) -> None:
         """Read a fixed UTC offset (``clock()``'s second) again: the driver, once per batch."""
+        return
 
-    def close(self) -> None:  # pragma: no cover - default no-op
-        pass
+    def close(self) -> None:
+        """Release the connection, if any."""
+        return
 
 
 # --------------------------------------------------------------------------- #
 # Backends: "run this SQL, give me Arrow"
 # --------------------------------------------------------------------------- #
-class Backend(ABC):
-    @abstractmethod
-    def batches(
-        self, sql: str, params: Sequence[str], batch_size: int
-    ) -> Iterator[pa.RecordBatch]: ...
+@runtime_checkable
+class Backend(Protocol):
+    """What ``SqlCdcClient`` needs from a database driver: run a query, return Apache Arrow.
+    A ``typing.Protocol`` (ADR 0030): a class with ``batches``, ``scalar`` and ``close`` is
+    one, inheriting or not; a subclass inherits ``scalar`` and ``close``. Every parameter is
+    text, which the T-SQL converts on the server (ADR 0003)."""
 
-    def scalar(self, sql: str, params: Sequence[str] = ()):
+    @abstractmethod
+    def batches(self, sql: str, params: Sequence[str], batch_size: int) -> Iterator[pa.RecordBatch]:
+        """The rows of ``sql``, ``params`` bound to its ``?`` marks, in Arrow record batches
+        of at most ``batch_size`` rows."""
+
+    def scalar(self, sql: str, params: Sequence[str] = ()) -> Any:
+        """The first column of the first row of ``sql``; None when it returns no row."""
         for batch in self.batches(sql, params, 1):
             if batch.num_rows:
                 return batch.column(0)[0].as_py()
         return None
 
     def close(self) -> None:
-        pass
+        """Close the connection."""
+        return  # a body, not a docstring only: a default, not abstract (ADR 0030)
 
 
 _MAX_BATCH_BYTES = 64 * 1024 * 1024  # about the most an Arrow batch from either backend holds
@@ -976,7 +1001,7 @@ class SqlCdcClient(CdcClient):
         )
         return None if value is None else int(value)
 
-    def _hex(self, value) -> str | None:
+    def _hex(self, value) -> Lsn | None:
         return None if value is None else _lsn.normalize(value)
 
     # -- metadata -------------------------------------------------------------

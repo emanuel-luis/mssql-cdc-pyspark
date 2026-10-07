@@ -95,7 +95,7 @@ extend-select = ["BLE"]  # every broad except says why: `# noqa: BLE001 - reason
 "examples/databricks_notebook.py" = ["F821"]  # spark and dbutils are injected by the runtime
 
 [tool.mypy]
-files = ["src", "tests/typing_api.py"]  # the latter: the public API's types
+files = ["src", "tests/typing_*.py"]  # the latter: the public API's types
 python_version = "3.10"
 check_untyped_defs = true  # the bodies of unannotated functions too
 warn_unused_configs = true

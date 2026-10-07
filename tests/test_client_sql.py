@@ -7,7 +7,7 @@ from decimal import Decimal
 import pyarrow as pa
 import pytest
 
-from mssql_cdc.client import Backend, SqlCdcClient, make_client
+from mssql_cdc.client import Backend, CdcClient, SqlCdcClient, make_client
 
 
 class Recorder(Backend):
@@ -371,6 +371,32 @@ def test_make_client_requires_connection_string():
         make_client({"backend": "mssql-python"})
     with pytest.raises(ValueError, match="Unknown backend"):
         make_client({"backend": "jdbc", "connectionString": "x"})
+
+
+def test_backend_and_client_are_protocols(tmp_path):
+    """A backend of one's own needs no base class, and isinstance tells it by its methods;
+    both clients are CdcClients; an LSN is a plain str at run time (ADR 0030)."""
+    from mssql_cdc.fake import FakeCdcClient
+
+    class Own:
+        def batches(self, sql, params, batch_size):
+            return iter(())
+
+        def scalar(self, sql, params=()):
+            return "0x0000002a000001000001"
+
+        def close(self):
+            pass
+
+    assert isinstance(Own(), Backend) and isinstance(Recorder(), Backend)
+    assert not isinstance(object(), Backend)
+    client = SqlCdcClient(Own(), "UTC")
+    lsn = client.max_lsn()
+    assert type(lsn) is str and lsn == "0x0000002A000001000001"
+    assert isinstance(client, CdcClient) and isinstance(FakeCdcClient(str(tmp_path)), CdcClient)
+    assert not isinstance(Own(), CdcClient)
+    with pytest.raises(TypeError):
+        Backend()
 
 
 class Rows(Recorder):

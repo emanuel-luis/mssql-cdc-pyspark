@@ -200,8 +200,8 @@ they have not had yet ([ADR 0012](decisions/0012-delta-tables-through-the-deltat
 
 ## Extension points
 
-* **New backend**: subclass `client.Backend` (`batches`, optionally `scalar`) and add
-  it to `make_client`.
+* **New backend**: a class with `batches`, `scalar` and `close`, the `Backend` protocol
+  (subclassing it inherits `scalar` and `close`, ADR 0030), added to `make_client`.
 * **Other sinks**: the source is sink-agnostic; any `writeStream` target works.
   Idempotency and facts are then the sink's job.
 * **Continuous mode**: `finalization.track` advances the verdict from a

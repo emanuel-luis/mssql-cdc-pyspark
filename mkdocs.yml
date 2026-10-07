@@ -137,5 +137,6 @@ nav:
       - decisions/0027-fan-out-one-stream-per-table.md
       - decisions/0028-chunked-snapshot-next-to-the-stream.md
       - decisions/0029-driver-retries-and-lock-timeout.md
+      - decisions/0030-protocols-for-the-pluggable-seams.md
   - Changelog: changelog.md
   - Contributing: contributing.md

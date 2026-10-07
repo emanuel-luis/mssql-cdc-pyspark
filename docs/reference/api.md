@@ -62,6 +62,23 @@ or renaming one is a break listed under "Breaking" in the changelog.
       show_root_toc_entry: false
       members: [Offset, BackfillStatus, ApplyResult, ReconcileResult, SnapshotMode, OnDataLoss, Isolation, Granularity, BackfillState]
 
+## Protocols
+
+The seams a client and a driver plug into
+([ADR 0030](../decisions/0030-protocols-for-the-pluggable-seams.md)), exported from
+`mssql_cdc`. Both are `typing.Protocol`s, `runtime_checkable`: a class with their methods is
+one without inheriting, and `isinstance` checks that it has them (by name; a type checker
+checks the signatures). A subclass inherits the methods that have a body. The data source
+builds its client from its options, so the [backend](options.md#backend) option names a
+built-in backend only. A method added to a protocol is a break for a class that implements
+it without inheriting, listed under "Breaking" in the changelog.
+
+::: mssql_cdc.Backend
+
+::: mssql_cdc.CdcClient
+
+::: mssql_cdc.Lsn
+
 ## Errors
 
 ::: mssql_cdc.DataLossError

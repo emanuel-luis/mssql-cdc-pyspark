@@ -6,6 +6,8 @@ import importlib.util
 
 try:
     from .client import (
+        Backend,
+        CdcClient,
         DataLossError,
         SchemaChangedError,
         is_data_loss,
@@ -13,6 +15,7 @@ try:
         make_client,
     )
     from .fanout import await_all, start_many, stop_all
+    from .lsn import Lsn
     from .pipeline import stream
     from .reconcile import reconcile
     from .silver import apply_changes
@@ -43,11 +46,14 @@ __all__ = [
     "HAS_ADMISSION_CONTROL",
     "OPERATIONS",
     "ApplyResult",
+    "Backend",
     "BackfillState",
     "BackfillStatus",
+    "CdcClient",
     "DataLossError",
     "Granularity",
     "Isolation",
+    "Lsn",
     "MssqlCdcDataSource",
     "Offset",
     "OnDataLoss",
