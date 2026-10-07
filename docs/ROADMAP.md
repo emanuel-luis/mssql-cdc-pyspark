@@ -25,7 +25,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 - [x] Even chunks for sparse single integer keys: a chunked snapshot's plan counts the rows
       of each key slice on the server (ADR 0028), which supersedes NTILE tiles for them.
 
-## 0.2.1 (patch): tests and supply chain
+## 0.2.1 (patch, shipped 2026-10-06): tests and supply chain
 
 - [x] Faster suites and CI: unit tests off the critical path, long jobs in parallel, a
       lighter test session, pure tests where the engine is not needed (target: CI in about
@@ -44,7 +44,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 - [x] Fixes found by the test review, and pyarrow 19 or later (18 crashes on Windows when
       imported before `mssql_python`).
 
-## 0.2.2 (patch): time and reconcile
+## 0.2.2 (patch, shipped 2026-10-07): time and reconcile
 
 - [x] DST fall-back: `commit_ts` can go backwards in a named zone; resolve the overlap by
       LSN order.
