@@ -52,6 +52,10 @@ flowchart TB
 * **Sink**: an optional, Delta-specific `foreachBatch` writer. The source works with any
   sink.
 * **Finalization**: a control table with one row per target table.
+* **Events**: the facts table's event rows (snapshots opened, planned, read in chunks and
+  completed; schema changes, capture instance switches, data skipped) are written and read
+  back through one module, `events`: their names, the rows each writer appends, and the
+  readers the pipeline, silver and reconcile share.
 * **Backfill**: `CdcStream.backfill` reads a chunked snapshot that `to_delta` opened, in
   waves next to the running stream: one bronze commit and one facts row per chunk each
   ([ADR 0028](decisions/0028-chunked-snapshot-next-to-the-stream.md)).

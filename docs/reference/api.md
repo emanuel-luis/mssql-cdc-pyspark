@@ -16,6 +16,7 @@ keyword-only (since 0.3).
 ::: mssql_cdc.pipeline.CdcStream
     options:
       members: [to_delta, backfill, snapshot, seed]
+      inherited_members: true
 
 ::: mssql_cdc.register
 

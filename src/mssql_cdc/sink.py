@@ -42,7 +42,7 @@
 * Bronze appends use ``mergeSchema``: a column that a newer capture instance captures joins
   the table (older rows read NULL). A changed type fails the append unless the table has
   ``delta.enableTypeWidening`` and the change widens.
-* Snapshots are facts too: ``write_event()`` records the bootstrap and every re-snapshot
+* Snapshots are facts too: ``events.write_event()`` records the bootstrap and every re-snapshot
   after data loss as one row with ``event`` set and no ``batch_id`` (ADR 0018), idempotent
   the same way; a chunked snapshot also its open and, through ``write_facts()``, its chunks
   (ADR 0028). Every bronze writer adds ``_batch_id``, ``_snapshot`` and ``_chunk``
@@ -68,6 +68,8 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 from . import migrations
+from .events import event_row
+from .events import write_event as write_event  # noqa: PLC0414 - re-exported, its old home
 from .migrations.facts import (
     DETAIL_COLUMNS,
     END_COLUMNS,
@@ -347,33 +349,6 @@ def _read_events(path: str) -> tuple[list[str], list[dict[str, Any]]]:
     return names, events
 
 
-def _event_row(event: Mapping[str, Any], **batch: Any) -> dict[str, Any]:
-    """A facts row for one of the reader's events: in the batch that read past it, 0 rows;
-    a 'data_skipped' one also has the gap (ADR 0018)."""
-    ts, lost_from, lost_to = (
-        datetime.fromisoformat(event[k]) if event.get(k) else None
-        for k in ("commit_ts", "lost_from_ts", "lost_to_ts")
-    )
-    lsn = event["lsn"]
-    return {
-        **batch,
-        "event": event["event"],
-        "detail": event.get("detail"),
-        "lost_from_ts": lost_from,
-        "lost_to_ts": lost_to,
-        "rows": 0,
-        "deletes": 0,
-        "inserts": 0,
-        "updates": 0,
-        "min_lsn": lsn,
-        "max_lsn": lsn,
-        "end_lsn": lsn,
-        "min_commit_ts": ts,
-        "max_commit_ts": ts,
-        "end_commit_ts": ts,
-    }
-
-
 def _fold_metrics(path: str) -> dict[str, Any]:
     """Fold every metrics file in ``path``: all are the current batch's (see the module doc).
     ``data_skipped``: the events of the partitions that found CDC cleanup had run while they
@@ -561,7 +536,7 @@ def delta_sink(
                 )
                 ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
                 keys = {k: facts[k] for k in ("app_id", "batch_id", "target", "written_at")}
-                rows = [facts, *(_event_row(e, **keys) for e in events)]
+                rows = [facts, *(event_row(e, **keys) for e in events)]
                 facts_df = spark.createDataFrame(
                     _fact_tuples(rows), FACTS_SCHEMA
                 )  # the batch's row has event NULL
@@ -573,56 +548,6 @@ def delta_sink(
             df.unpersist()
 
     return write_batch
-
-
-def write_event(
-    spark: SparkSessionLike,
-    facts_table: str,
-    event: str,
-    *,
-    app_id: str,
-    txn_app_id: str | None,
-    version: int,
-    target: str,
-    lsn: str,
-    commit_ts: str,
-    rows: int | None = None,
-    started_at: datetime | None = None,
-    duration_ms: int | None = None,
-    lost_from_ts: datetime | None = None,
-    lost_to_ts: datetime | None = None,
-    detail: str | None = None,
-) -> None:
-    """Record a snapshot (``event`` 'bootstrap', 'resnapshot', the 'snapshot_open' written
-    before either is read or a chunked snapshot's 'snapshot_plan') as one facts row.
-
-    The row has no ``batch_id``; ``lsn`` and ``commit_ts`` are the snapshot's offset.
-    Idempotent like the batch rows: a rerun with the same ``txn_app_id`` and ``version``
-    is skipped by Delta. ``txn_app_id`` None: appended every time (a full snapshot's open).
-    """
-    ts = datetime.fromisoformat(commit_ts) if commit_ts else None
-    facts = {
-        "app_id": app_id,
-        "rows": rows,
-        "min_lsn": lsn,
-        "max_lsn": lsn,
-        "min_commit_ts": ts,
-        "max_commit_ts": ts,
-        "deletes": 0,
-        "inserts": 0,
-        "updates": 0,
-        "started_at": started_at,
-        "duration_ms": duration_ms,
-        **_headroom(lost_to_ts, ts),
-        "end_lsn": lsn,  # the offset the stream starts from
-        "end_commit_ts": ts,
-        "event": event,
-        "lost_from_ts": lost_from_ts,
-        "lost_to_ts": lost_to_ts,
-        "detail": detail,
-        "target": target,
-    }
-    write_facts(spark, facts_table, [facts], txn_app_id, version)
 
 
 def write_facts(

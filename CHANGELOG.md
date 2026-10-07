@@ -18,6 +18,12 @@ compatibility" line.
   builders, backends, `SqlCdcClient`, chunk planning). Code moved only: every name imports
   from `mssql_cdc.client` as before, and the exceptions and the `mssql_cdc.client` logger
   keep their names. Tracebacks show the new file paths.
+- `mssql_cdc.pipeline` is a package too (`CdcStream` and `to_delta`, whole snapshots,
+  recovery, chunked snapshots, the snapshot mode lock), and the facts event rows are written
+  and read through one module, `mssql_cdc.events`: their names, row builders and readers.
+  Code moved only: every name imports from `mssql_cdc.pipeline` as before
+  (`mssql_cdc.sink.write_event` too), the `mssql_cdc.pipeline` logger keeps its name, and
+  every facts row and query result is the same.
 
 ## [0.4.0] - 2026-10-07
 

@@ -65,7 +65,7 @@ from decimal import Decimal
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
-from . import migrations
+from . import events, migrations
 from .silver import _by_key, _one, _q, _source_keys
 from .tables import delta_table, table_ref
 from .types import ReconcileResult
@@ -76,7 +76,6 @@ if TYPE_CHECKING:
     from pyspark.sql.types import StructField
 
     from .client import CaptureInstance, CdcClient, SourceTable
-    from .payloads import SnapshotChunkDetail
     from .source import SourceOptions
     from .types import SparkSessionLike
 
@@ -638,30 +637,21 @@ def _chunk_checks(spark: SparkSessionLike, bronze: str, facts_table: str) -> lis
 
     from .tables import exists
 
-    if not exists(spark, facts_table):
-        return []
-    kinds = ("snapshot_open", "snapshot_chunk", "bootstrap", "resnapshot")
-    facts = delta_table(spark, facts_table).toDF()
-    rows = (
-        facts.where((F.col("target") == bronze) & F.col("event").isin(*kinds))
-        .select("event", "rows", "min_lsn", "max_lsn", "detail")
-        .collect()
+    rows = events.read(
+        spark,
+        facts_table,
+        bronze,
+        (events.SNAPSHOT_OPEN, events.SNAPSHOT_CHUNK, *events.SNAPSHOTS),
+        ("event", "rows", "min_lsn", "max_lsn", "detail"),
     )
-    opens = [
-        r["max_lsn"]
-        for r in rows
-        if r["event"] == "snapshot_open" and json.loads(r["detail"]).get("mode") != "full"
-    ]  # a full snapshot's open row only locks the mode: it has no chunks
+    opens = [r["max_lsn"] for r in events.chunked_opens(rows)]
     if not opens:
         return []
     s = max(opens)  # a newer open abandons an older one
-    complete = any(r["event"] in ("bootstrap", "resnapshot") and r["max_lsn"] == s for r in rows)
-    found: list[dict[str, Any]] = []
-    for r in rows:
-        if r["event"] == "snapshot_chunk":
-            d: SnapshotChunkDetail = json.loads(r["detail"])
-            if d["snapshot"] == s:
-                found.append({**d, "rows": r["rows"], "lsn": r["min_lsn"]})
+    complete = s in events.completions(rows)
+    found: list[dict[str, Any]] = [
+        {**d, "rows": r["rows"], "lsn": r["min_lsn"]} for d, r in events.chunks_of(rows, s)
+    ]
     # bronze after the facts: it holds every wave they announce, whose rows commit first
     held: dict[int, tuple[int, str | None]] = {}
     pinned = _latest(spark, bronze)[1] if exists(spark, bronze) else None

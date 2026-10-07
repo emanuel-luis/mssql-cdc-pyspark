@@ -78,9 +78,10 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 
 ## 0.4.1 (patch): maintenance
 
-- [ ] Split `client.py` (SQL builders, backends, planning) and `pipeline.py` (snapshot,
+- [x] Split `client.py` (SQL builders, backends, planning) and `pipeline.py` (snapshot,
       backfill, recovery) into packages without changing behaviour.
-- [ ] One place for the facts event protocol, shared by its writers and readers.
+- [x] One place for the facts event protocol, shared by its writers and readers
+      (`mssql_cdc.events`).
 - [ ] Property-based tests (Hypothesis) for LSN math, plan tiling and change ordering; one
       mutation-testing pass on the core modules, results recorded.
 

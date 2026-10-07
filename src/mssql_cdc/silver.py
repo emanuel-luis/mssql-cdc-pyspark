@@ -64,7 +64,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from . import finalization, migrations
+from . import events, finalization, migrations
 from .sink import BRONZE_COLUMN_COMMENTS
 from .tables import delta_table, exists, retrying, table_ref
 from .types import ApplyResult, Granularity
@@ -173,15 +173,8 @@ class _Chunk:
 def _chunks(facts: DataFrame, snapshot: str) -> dict[int, _Chunk]:
     """The chunks of ``snapshot`` its 'snapshot_chunk' facts rows announce, by index. They
     are written after the chunks' bronze rows."""
-    from pyspark.sql import functions as F
-
     rows = (
-        facts.where(
-            (F.col("event") == "snapshot_chunk")
-            & (F.get_json_object("detail", "$.snapshot") == snapshot)
-        )
-        .select("detail", "min_lsn")
-        .collect()
+        events.where_chunks(facts, snapshot).select("detail", "min_lsn").collect()
     )  # ponytail: every chunk of the snapshot on each call; filter by wave if it shows up
     chunks: dict[int, _Chunk] = {}
     for row in rows:
@@ -368,7 +361,7 @@ def apply_changes(
     if facts_table and exists(spark, facts_table):
         every = delta_table(spark, facts_table).toDF()
         facts = every.where(F.col("target") == bronze)
-        snapshots = F.col("event").isin("bootstrap", "resnapshot")  # not the source's changes
+        snapshots = F.col("event").isin(*events.SNAPSHOTS)  # not the source's changes
         counted = facts.agg(F.max(F.when(snapshots, F.col("max_lsn"))), F.count(F.lit(1))).first()
         assert counted is not None  # a global aggregate always returns one row
         newest, found = counted
@@ -385,9 +378,8 @@ def apply_changes(
             )
         if "detail" in facts.columns:  # facts migration 6
             # a full snapshot's open row only locks the mode: its rows come whole
-            full = F.get_json_object("detail", "$.mode").eqNullSafe("full")
             opened = (
-                facts.where((F.col("event") == "snapshot_open") & ~full)
+                events.where_chunked_open(facts)
                 .orderBy(F.col("max_lsn").desc())
                 .select("max_lsn", "detail")
                 .first()
@@ -426,7 +418,7 @@ def apply_changes(
             "whose rows say which chunks arrived and when the snapshot is complete"
         )
     if chunk_rows and opened is None and every is not None:
-        named = every.where(F.col("event") == "snapshot_open").select("target").distinct()
+        named = every.where(F.col("event") == events.SNAPSHOT_OPEN).select("target").distinct()
         raise ValueError(
             f"{bronze} holds rows of a chunked snapshot, but {facts_table} has no "
             f"'snapshot_open' row for target = {bronze!r}: is it named otherwise in to_delta? "

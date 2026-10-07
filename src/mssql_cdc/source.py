@@ -56,6 +56,7 @@ from pyspark.sql.datasource import (
     InputPartition,
 )
 
+from .events import CAPTURE_INSTANCE_SWITCHED, DATA_SKIPPED, SCHEMA_CHANGE
 from .lsn import ZERO_LSN
 
 try:  # Spark 4.2+ (and runtimes that backported SPARK-55304)
@@ -381,7 +382,7 @@ def _possible_skip(client: CdcClient, partition: LsnRange, min_lsn: str) -> dict
         "was read: its changes below min_lsn may be missing",
     }
     return {
-        "event": "data_skipped",
+        "event": DATA_SKIPPED,
         "capture_instance": partition.capture_instance,
         "lsn": min_lsn,
         "commit_ts": at,
@@ -741,7 +742,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 if lost:  # NULL from S on: the warning and the facts say so
                     detail += f"; no longer captured, read as NULL: {', '.join(lost)}"
                 ts = client.lsn_to_time(s)
-                events.append(("capture_instance_switched", inst.name, s, ts, detail))
+                events.append((CAPTURE_INSTANCE_SWITCHED, inst.name, s, ts, detail))
         ranges: list[LsnRange] = []
         skipped: list[tuple[str, str, str]] = []
         gone = self._gone(instances)
@@ -785,7 +786,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 key = f"{ci}-{lo}"
                 skip: DataSkippedDetail = {"from": lo, "to": low, "certain": True}  # purged: lost
                 _write_event(
-                    self.metrics_path, "data_skipped", ci, low, ts, json.dumps(skip), key, **gap
+                    self.metrics_path, DATA_SKIPPED, ci, low, ts, json.dumps(skip), key, **gap
                 )
         return ranges
 
@@ -909,7 +910,7 @@ class _BaseReader(_Common, DataSourceStreamReader):
                 "enable delta.enableTypeWidening on bronze for a widening)."
             )
         return [
-            ("schema_change", inst.name, d.lsn, d.commit_ts, d.command[:500]) for inst, d in changes
+            (SCHEMA_CHANGE, inst.name, d.lsn, d.commit_ts, d.command[:500]) for inst, d in changes
         ]
 
     def _check_switch(self, newer: CaptureInstance) -> None:

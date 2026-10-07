@@ -1813,7 +1813,7 @@ def test_backfill_keeps_its_plan_and_rebuilds_a_waves_facts_from_bronze_without_
         cdc.backfill(target, app_id="lost-v1", facts_table=facts, chunk_rows=2, max_waves=1)
     monkeypatch.setattr(sink, "write_facts", write_facts)
     # log cleanup dropped the wave's commit: its facts rows come from its rows in bronze
-    monkeypatch.setattr(pipeline, "_earlier_wave", lambda *args: None)
+    monkeypatch.setattr(pipeline._chunked, "_earlier_wave", lambda *args: None)
     db.commit(CI, [(2, {"order_id": -1, "status": "new"})], at=T0 + timedelta(minutes=9))
     # the rerun plans a wave of three chunks; the commit it finds holds chunks 0 and 1 only
     wider = stream(spark, {**options, "numPartitions": "3"})
@@ -2055,10 +2055,10 @@ def test_a_chunked_resnapshot_opened_before_a_crash_and_purged_since_is_opened_p
             raise RuntimeError("killed")
         real(checkpoint, state)
 
-    monkeypatch.setattr(pipeline, "_write_state", killed)
+    monkeypatch.setattr(pipeline._recovery, "_write_state", killed)
     with pytest.raises(RuntimeError, match="killed"):
         run()
-    monkeypatch.setattr(pipeline, "_write_state", real)
+    monkeypatch.setattr(pipeline._recovery, "_write_state", real)
     _purge(db, 20)  # rerun after the retention: what generation 1 opened at is purged too
     run()
     opens = _events(spark, facts, "snapshot_open")

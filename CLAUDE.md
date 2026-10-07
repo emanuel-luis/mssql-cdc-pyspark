@@ -78,14 +78,24 @@ src/mssql_cdc/
   payloads.py      TypedDicts for the facts `detail` JSON and a wave's userMetadata (state,
                    ADR 0021 amendment 7).
   sink.py          delta_sink(): idempotent append (txnAppId/txnVersion) + per-batch facts.
-  pipeline.py      stream(spark, options).to_delta(...): source + sink from one set of options;
-                   .snapshot(target) / to_delta(bootstrap=True): initial load (ADR 0016);
-                   to_delta(on_data_loss="resnapshot"): re-snapshot into a new checkpoint
-                   generation after CDC data loss (ADR 0018); .seed(target, df, as_of): a target
-                   from an existing copy of the table (ADR 0025); to_delta(snapshot="chunked")
-                   opens a snapshot at S and .backfill() plans it once and reads it in chunk
-                   waves next to the stream; one snapshot mode per run, locked while a
-                   snapshot is open (_lock) (ADR 0028).
+  events.py        the facts event protocol, in one place: event names, the rows their
+                   writers append (write_event, event_row, chunk_row) and the readers pipeline,
+                   silver and reconcile share (read, mode, chunked_opens, completions, plan_of,
+                   chunks_of). A new event, or a new reader of one, goes here.
+  pipeline/        import everything from mssql_cdc.pipeline (__init__ re-exports it); its
+                   logger keeps the name mssql_cdc.pipeline. CdcStream is one class built
+                   from one mixin per part:
+    _stream.py     CdcStream, stream(spark, options).to_delta(...): source + sink from one set
+                   of options; snapshot_on_switch.
+    _snapshots.py  .snapshot(target) / to_delta(bootstrap=True): initial load (ADR 0016);
+                   .seed(target, df, as_of): a target from an existing copy (ADR 0025).
+    _recovery.py   to_delta(on_data_loss="resnapshot"): re-snapshot into a new checkpoint
+                   generation after CDC data loss; generations and their state file (ADR 0018).
+    _chunked.py    to_delta(snapshot="chunked") opens a snapshot at S and .backfill() plans it
+                   once and reads it in chunk waves next to the stream (ADR 0028).
+    _lock.py       the 'snapshot_open' rows: one snapshot mode per run, locked while a
+                   snapshot is open (_lock), and a generation's open snapshot (ADR 0028).
+    _common.py     shared helpers (_opt, _lost, _family...) and _StreamBase.
   fanout.py        start_many() / await_all() / stop_all(): one to_delta stream per capture
                    instance, from templates with {ci}, sharing the facts table (ADR 0027).
   finalization.py  finalized_until: candidate(), advance() (monotonic MERGE), is_final();
