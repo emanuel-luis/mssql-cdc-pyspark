@@ -43,6 +43,13 @@ writes `keys` and `plan` later in its JSON object; readers take keys by name.
   `stream()`, `reconcile()`, `apply_changes(options=)` and `start_many()` take a
   `SourceOptions` or any mapping (they took `dict`), so every call that type-checked before
   still does.
+- `SparkSessionLike` and `StreamingQueryLike`, exported from `mssql_cdc`: a classic or a
+  Spark Connect session or query (Databricks Connect, serverless compute), which does not
+  subclass the classic one. Every `spark` and `query` parameter takes them, so a Connect
+  caller's type checker accepts `register`, `stream`, `start_many`, `apply_changes`,
+  `reconcile` and the `finalization` functions
+  ([ADR 0031](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0031-strict-typing-gates/)
+  amendment 1).
 
 ### Changed
 

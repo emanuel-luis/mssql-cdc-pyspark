@@ -70,12 +70,13 @@ from .tables import delta_table, exists, retrying, table_ref
 from .types import ApplyResult, Granularity
 
 if TYPE_CHECKING:
-    from pyspark.sql import Column, DataFrame, Row, SparkSession
+    from pyspark.sql import Column, DataFrame, Row
     from pyspark.sql.types import DataType
 
     from .payloads import SnapshotChunkDetail
     from .source import SourceOptions
     from .tables import ColumnDef
+    from .types import SparkSessionLike
 
 _log = logging.getLogger(__name__)
 _warned: set[tuple[str, str]] = set()  # (what, table) warned about once in this process
@@ -130,7 +131,7 @@ def _source_keys(capture_instance: str, options: Mapping[str, Any] | None) -> li
 
 
 def _record(
-    spark: SparkSession,
+    spark: SparkSessionLike,
     control_table: str,
     target: str,
     lsn: str | None,
@@ -226,7 +227,7 @@ def _range_key(keys: Sequence[str], cut: object) -> bool:
 
 
 def _absent(
-    spark: SparkSession,
+    spark: SparkSessionLike,
     target: str,
     key: str,
     key_type: DataType,
@@ -287,7 +288,7 @@ def _absent(
 
 
 def apply_changes(
-    spark: SparkSession,
+    spark: SparkSessionLike,
     bronze: str,
     target: str,
     *,

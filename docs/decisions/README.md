@@ -32,7 +32,7 @@
 | [0028](0028-chunked-snapshot-next-to-the-stream.md) | Chunked snapshots read next to the running stream | accepted | 2026-10-02T20:30:12-03:00 | 2026-10-03T14:30:38-03:00, 2026-10-03T18:10:05-03:00, 2026-10-04T17:20:07-03:00, 2026-10-06T21:14:15-03:00, 2026-10-07T00:06:28-03:00 |
 | [0029](0029-driver-retries-and-lock-timeout.md) | Driver-side retries, and an optional lock timeout | accepted | 2026-10-05T12:23:04-03:00 |  |
 | [0030](0030-protocols-for-the-pluggable-seams.md) | `typing.Protocol` for the pluggable seams | accepted | 2026-10-07T09:05:52-03:00 |  |
-| [0031](0031-strict-typing-gates.md) | Strict typing: mypy strict on `src`, `pyright --verifytypes` on the public API | accepted | 2026-10-07T10:49:11-03:00 |  |
+| [0031](0031-strict-typing-gates.md) | Strict typing: mypy strict on `src`, `pyright --verifytypes` on the public API | accepted | 2026-10-07T10:49:11-03:00 | 2026-10-07T13:39:33-03:00 |
 
 New ADRs: copy the format, next number, one decision per file. Put the time the
 decision is recorded in `**Date:**` (ISO-8601 with the UTC offset, e.g.

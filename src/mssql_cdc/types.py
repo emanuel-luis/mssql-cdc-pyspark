@@ -8,10 +8,22 @@ under "Breaking" (ADR 0021).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
-    from pyspark.sql import DataFrame
+    from pyspark.sql import DataFrame, SparkSession
+    from pyspark.sql.connect.session import SparkSession as ConnectSparkSession
+    from pyspark.sql.connect.streaming.query import StreamingQuery as ConnectStreamingQuery
+    from pyspark.sql.streaming.query import StreamingQuery
+
+SparkSessionLike: TypeAlias = "SparkSession | ConnectSparkSession"
+"""What a ``spark`` parameter takes: a classic SparkSession or a Spark Connect one (Databricks
+Connect, serverless compute), which is not its subclass. For type checkers: at run time it is
+a string."""
+
+StreamingQueryLike: TypeAlias = "StreamingQuery | ConnectStreamingQuery"
+"""What a ``query`` parameter takes: a classic StreamingQuery or a Spark Connect one. For type
+checkers: at run time it is a string."""
 
 SnapshotMode = Literal["full", "chunked"]
 """How ``to_delta(snapshot=...)`` takes a snapshot: before the stream, or in chunks next to it."""

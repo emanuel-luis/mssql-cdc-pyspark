@@ -1,6 +1,7 @@
 """Type checks of the public API, run by mypy (``files`` in pyproject.toml), never by pytest.
 
-The results' types and the mode ``Literal``s; and the call forms 0.3 made keyword-only, and
+The results' types and the mode ``Literal``s; a Spark Connect session and query where a classic
+one goes; and the call forms 0.3 made keyword-only, and
 wrong modes, which must stay type errors: ``warn_unused_ignores`` fails on an ignore that no
 longer hides one.
 """
@@ -11,6 +12,8 @@ from datetime import datetime
 from typing import Any
 
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.connect.session import SparkSession as ConnectSparkSession
+from pyspark.sql.connect.streaming.query import StreamingQuery as ConnectStreamingQuery
 from pyspark.sql.streaming.query import StreamingQuery
 from typing_extensions import assert_type
 
@@ -24,6 +27,9 @@ from mssql_cdc import (
     await_all,
     finalization,
     reconcile,
+    register,
+    start_many,
+    stop_all,
     stream,
 )
 from mssql_cdc.sink import delta_sink
@@ -61,6 +67,26 @@ def results(spark: SparkSession, options: dict[str, Any], copy: DataFrame) -> No
     # an offset is what advance() takes, as end_offset_from_progress's dict is
     finalization.advance(spark, "c", "bronze.orders", offset, granularity="day")
     assert_type(finalization.end_offset_from_progress(query.lastProgress), Offset | None)
+
+
+def spark_connect(
+    spark: ConnectSparkSession, options: dict[str, Any], query: ConnectStreamingQuery
+) -> None:
+    # not a subclass of the classic SparkSession or StreamingQuery: SparkSessionLike takes both
+    register(spark)
+    cdc = stream(spark, options)
+    cdc.snapshot("bronze.orders")
+    queries = start_many(
+        spark, options, ["dbo_orders"], target="b.{ci}", app_id="{ci}", checkpoint="/c/{ci}"
+    )
+    apply_changes(spark, "bronze.orders", "silver.orders", control_table="c")
+    reconcile(spark, options, "silver.orders", bronze="bronze.orders", control_table="c")
+    finalization.advance(spark, "c", "bronze.orders", None)
+    finalization.finalized_until(spark, "c", "bronze.orders")
+    finalization.is_final(spark, "c", "bronze.orders", datetime(2026, 1, 1))
+    finalization.track(spark, query, "c", "bronze.orders").join(timeout=60)
+    await_all({"dbo_orders": query, **queries})
+    stop_all({"dbo_orders": query})
 
 
 def old_forms(spark: SparkSession, options: dict[str, Any], query: StreamingQuery) -> None:

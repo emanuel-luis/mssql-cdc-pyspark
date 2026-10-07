@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
+    from .types import SparkSessionLike
 
-def available_cores(spark: SparkSession) -> int:
+
+def available_cores(spark: SparkSessionLike) -> int:
     """Cores the session's compute runs tasks on (``defaultParallelism``); 0 when unknown,
     as on Spark Connect, which has no ``sparkContext``. ``numPartitions=auto`` then uses the
     CPU count of the node that plans, not of the process that called ``register()``."""

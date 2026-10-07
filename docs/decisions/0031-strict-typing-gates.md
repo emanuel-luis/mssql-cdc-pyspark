@@ -1,7 +1,8 @@
 # 0031: Strict typing: mypy strict on `src`, `pyright --verifytypes` on the public API
 
 **Status:** accepted  
-**Date:** 2026-10-07T10:49:11-03:00
+**Date:** 2026-10-07T10:49:11-03:00  
+**Amended:** 2026-10-07T13:39:33-03:00, `spark` and `query` parameters take a Spark Connect session or query too (amendment 1)
 
 ## Context
 Through 0.3 mypy ran with `check_untyped_defs`: it read the bodies of unannotated functions,
@@ -53,3 +54,24 @@ Considered:
   `cast` returns its argument; the asserts hold wherever the code ran before. One planning
   metric skips its query when `max_lsn` is NULL: it asked for the commit time of no LSN, which
   was None.
+
+## Amendment 1: a Spark Connect session is a session
+
+Spark Connect's `SparkSession` and `StreamingQuery` (`pyspark.sql.connect`) do not subclass
+the classic ones, and Databricks Connect and serverless compute hand out those. The library
+runs on them (`available_cores` returns 0 there; delta-spark hands a Connect session to
+`delta.connect`), so annotating `spark` as the classic `SparkSession` refused calls that run.
+It also narrowed 0.3: `register`, `reconcile`, `start_many` and `track`'s `query` had no
+annotation, and a Connect caller's type checker accepted them.
+
+* `mssql_cdc.types` has `SparkSessionLike` (either session) and `StreamingQueryLike` (either
+  query), exported from `mssql_cdc`, and every `spark` and `query` parameter takes them,
+  internal ones included: the type follows what the code does. They are string aliases of
+  names imported under `TYPE_CHECKING`, since `pyspark.sql.connect` needs `grpcio` and
+  `pandas` at run time; at run time each is a string.
+* Results keep the classic types (`to_delta` and `get_spark` return a classic
+  `StreamingQuery` and `SparkSession`, as PySpark's own `getActiveSession()` does): a union
+  would make every caller narrow it.
+* delta-spark annotates its session parameters as the classic `SparkSession`; `tables.py`
+  casts to it in one place.
+* `tests/typing_api.py` calls the public functions with a Connect session and query.

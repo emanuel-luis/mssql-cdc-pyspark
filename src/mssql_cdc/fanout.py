@@ -24,14 +24,14 @@ from typing import TYPE_CHECKING, Any
 from .pipeline import stream
 
 if TYPE_CHECKING:
-    from pyspark.sql import SparkSession
     from pyspark.sql.streaming.query import StreamingQuery
 
     from .source import SourceOptions
+    from .types import SparkSessionLike, StreamingQueryLike
 
 
 def start_many(
-    spark: SparkSession,
+    spark: SparkSessionLike,
     options: SourceOptions | Mapping[str, Any],
     capture_instances: Iterable[str] | Mapping[str, SourceOptions | Mapping[str, Any]],
     *,
@@ -98,7 +98,7 @@ def start_many(
 
 
 def await_all(
-    queries: Mapping[str, StreamingQuery], *, timeout: float | None = None
+    queries: Mapping[str, StreamingQueryLike], *, timeout: float | None = None
 ) -> dict[str, Exception]:
     """Wait until every query has stopped, or ``timeout`` seconds in all (keyword-only), and
     return the error of each query that stopped with one, by capture instance.
@@ -122,7 +122,7 @@ def await_all(
     return {ci: e for ci, q in queries.items() if (e := q.exception()) is not None}
 
 
-def stop_all(queries: Mapping[str, StreamingQuery]) -> None:
+def stop_all(queries: Mapping[str, StreamingQueryLike]) -> None:
     """Stop every query still running. Each resumes from its checkpoint when started again,
     e.g. by ``start_many`` with the same templates."""
     for query in queries.values():

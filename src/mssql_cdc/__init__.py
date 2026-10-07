@@ -5,10 +5,6 @@ from __future__ import annotations
 
 import importlib.metadata
 import importlib.util
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from pyspark.sql import SparkSession
 
 try:
     from .client import (
@@ -45,6 +41,8 @@ try:
         OnDataLoss,
         ReconcileResult,
         SnapshotMode,
+        SparkSessionLike,
+        StreamingQueryLike,
     )
 except ModuleNotFoundError as _missing:
     # "pyspark", or "pyspark.sql" when the parent is blocked; a PySpark that is present but
@@ -82,6 +80,8 @@ __all__ = [
     "SnapshotOpenDetail",
     "SnapshotPlanDetail",
     "SourceOptions",
+    "SparkSessionLike",
+    "StreamingQueryLike",
     "WaveMetadata",
     "apply_changes",
     "await_all",
@@ -100,7 +100,7 @@ except importlib.metadata.PackageNotFoundError:  # a source tree on sys.path, no
     __version__ = "0+unknown"
 
 
-def register(spark: SparkSession) -> None:
+def register(spark: SparkSessionLike) -> None:
     """Register ``format("mssql_cdc")`` (the stream) and ``format("mssql_cdc_snapshot")``
     (the tracked table's current rows) on a SparkSession.
 

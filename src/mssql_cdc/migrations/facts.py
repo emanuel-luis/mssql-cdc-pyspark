@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from .base import Migration, add_columns, set_comments
 
 if TYPE_CHECKING:
-    from pyspark.sql import SparkSession
+    from ..types import SparkSessionLike
 
 # Migration 1 (2026-09-29): network and read metrics. Frozen here as shipped; the sink's
 # creation columns reuse it so new tables are born with the same definitions. (Revised the
@@ -407,7 +407,7 @@ WARNING_COMMENTS = {
 }
 
 
-def _end_offset(spark: SparkSession, table: str) -> None:
+def _end_offset(spark: SparkSessionLike, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT  # the comments new tables are created with
 
     add_columns(spark, table, END_COLUMNS)
@@ -415,7 +415,7 @@ def _end_offset(spark: SparkSession, table: str) -> None:
     set_comments(spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in changed}, FACTS_COMMENT)
 
 
-def _source_events(spark: SparkSession, table: str) -> None:
+def _source_events(spark: SparkSessionLike, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT
 
     add_columns(spark, table, DETAIL_COLUMNS)
@@ -423,14 +423,14 @@ def _source_events(spark: SparkSession, table: str) -> None:
     set_comments(spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in changed}, FACTS_COMMENT)
 
 
-def _chunked_snapshots(spark: SparkSession, table: str) -> None:
+def _chunked_snapshots(spark: SparkSessionLike, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT
 
     changed = ("rows", "event", "detail")
     set_comments(spark, table, {n: c for n, _, c in FACTS_COLUMNS if n in changed}, FACTS_COMMENT)
 
 
-def _snapshot_modes(spark: SparkSession, table: str) -> None:
+def _snapshot_modes(spark: SparkSessionLike, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT
 
     set_comments(
@@ -438,7 +438,7 @@ def _snapshot_modes(spark: SparkSession, table: str) -> None:
     )
 
 
-def _skipped_changes(spark: SparkSession, table: str) -> None:
+def _skipped_changes(spark: SparkSessionLike, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT
 
     changed = ("batch_id", *SKIP_COMMENTS)

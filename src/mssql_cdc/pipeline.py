@@ -69,7 +69,7 @@ from uuid import uuid4
 from .types import BackfillState, BackfillStatus, Isolation, Offset, OnDataLoss, SnapshotMode
 
 if TYPE_CHECKING:
-    from pyspark.sql import Column, DataFrame, Row, SparkSession
+    from pyspark.sql import Column, DataFrame, Row
     from pyspark.sql.streaming.query import StreamingQuery
 
     from .client import CdcClient, SourceTable
@@ -83,6 +83,7 @@ if TYPE_CHECKING:
         WaveMetadata,
     )
     from .source import SourceOptions
+    from .types import SparkSessionLike
 
 _log = logging.getLogger(__name__)
 _URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")  # a scheme; a Windows drive has one letter
@@ -224,7 +225,7 @@ def _plan_of(rows: list[Row], snapshot: str) -> SnapshotPlanDetail | None:
     return None
 
 
-def _earlier_wave(spark: SparkSession, target: str, key: str, wave: int) -> WaveMetadata | None:
+def _earlier_wave(spark: SparkSessionLike, target: str, key: str, wave: int) -> WaveMetadata | None:
     """The userMetadata of the commit that appended wave ``wave`` of ``key`` to ``target``,
     from its history; None once log cleanup has dropped it."""
     from pyspark.sql import functions as F
@@ -239,7 +240,7 @@ def _earlier_wave(spark: SparkSession, target: str, key: str, wave: int) -> Wave
     return None
 
 
-def _version(spark: SparkSession, target: str) -> int:
+def _version(spark: SparkSessionLike, target: str) -> int:
     from .tables import delta_table
 
     latest = delta_table(spark, target).history(1).first()
@@ -272,11 +273,11 @@ def _last_offset(checkpoint: str) -> Offset | None:
 
 
 class CdcStream:
-    def __init__(self, spark: SparkSession, options: SourceOptions | Mapping[str, Any]):
+    def __init__(self, spark: SparkSessionLike, options: SourceOptions | Mapping[str, Any]):
         from . import register  # lazy: the package imports this module
         from .source import warn_unknown
 
-        self.spark: SparkSession = spark
+        self.spark: SparkSessionLike = spark
         self.options: dict[str, Any] = dict(options)
         warn_unknown(self.options)  # here, in the caller's log; the reader's goes to a worker's
         register(spark)
@@ -1718,6 +1719,6 @@ def _snapshot_after_switch(
     return write
 
 
-def stream(spark: SparkSession, options: SourceOptions | Mapping[str, Any]) -> CdcStream:
+def stream(spark: SparkSessionLike, options: SourceOptions | Mapping[str, Any]) -> CdcStream:
     """The CDC stream described by ``options`` (the data source options)."""
     return CdcStream(spark, options)

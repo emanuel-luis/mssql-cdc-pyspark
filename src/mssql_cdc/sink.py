@@ -83,9 +83,10 @@ from .payloads import BatchDetail
 from .tables import is_path
 
 if TYPE_CHECKING:
-    from pyspark.sql import Column, SparkSession
+    from pyspark.sql import Column
 
     from .tables import ColumnDef
+    from .types import SparkSessionLike
 
 _log = logging.getLogger(__name__)
 
@@ -267,7 +268,7 @@ def _fact_tuples(rows: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
     return [tuple(r.get(k) for k in _FACT_FIELDS) for r in rows]
 
 
-def _last_batch(spark: SparkSession, facts_table: str, app_id: str) -> int | None:
+def _last_batch(spark: SparkSessionLike, facts_table: str, app_id: str) -> int | None:
     """The largest batch id ``app_id`` wrote a batch row (event NULL) for in ``facts_table``,
     an existing table; None when it wrote none."""
     from .tables import delta_table
@@ -484,7 +485,7 @@ def delta_sink(
     carried: list[str] = []  # a replayed batch's warnings: its facts row was written already
 
     def ensure(
-        spark: SparkSession, table: str, kind: str, columns: Iterable[ColumnDef], comment: str
+        spark: SparkSessionLike, table: str, kind: str, columns: Iterable[ColumnDef], comment: str
     ) -> None:
         if table not in created:
             migrations.ensure(spark, table, kind, columns, comment)
@@ -575,7 +576,7 @@ def delta_sink(
 
 
 def write_event(
-    spark: SparkSession,
+    spark: SparkSessionLike,
     facts_table: str,
     event: str,
     *,
@@ -625,7 +626,7 @@ def write_event(
 
 
 def write_facts(
-    spark: SparkSession,
+    spark: SparkSessionLike,
     facts_table: str,
     rows: list[dict[str, Any]],
     txn_app_id: str | None,

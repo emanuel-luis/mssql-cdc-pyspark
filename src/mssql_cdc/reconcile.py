@@ -72,12 +72,13 @@ from .types import ReconcileResult
 
 if TYPE_CHECKING:
     import pyarrow as pa
-    from pyspark.sql import Column, DataFrame, SparkSession
+    from pyspark.sql import Column, DataFrame
     from pyspark.sql.types import StructField
 
     from .client import CaptureInstance, CdcClient, SourceTable
     from .payloads import SnapshotChunkDetail
     from .source import SourceOptions
+    from .types import SparkSessionLike
 
 REPORT_COMMENT = (
     "Report of mssql-cdc-pyspark's reconcile(), which compares a silver table with its SQL "
@@ -213,7 +214,7 @@ def _bound(kind: str, o: int) -> int | str | None:
     return (_EPOCH + timedelta(days=max(o, _DAYS[0]))).isoformat()
 
 
-def _latest(spark: SparkSession, table: str) -> tuple[int, DataFrame]:
+def _latest(spark: SparkSessionLike, table: str) -> tuple[int, DataFrame]:
     """``table``'s latest version and a read pinned to it."""
     latest = delta_table(spark, table).history(1).first()
     assert latest is not None  # an existing table has a version
@@ -259,7 +260,7 @@ def _unread(
 
 
 def _moved(
-    spark: SparkSession,
+    spark: SparkSessionLike,
     client: CdcClient,
     instances: Sequence[CaptureInstance],
     bronze: str,
@@ -378,7 +379,7 @@ def _merge_buckets(
 
 
 def reconcile(
-    spark: SparkSession,
+    spark: SparkSessionLike,
     options: SourceOptions | Mapping[str, Any],
     silver: str,
     *,
@@ -630,7 +631,7 @@ def _differences(
     )
 
 
-def _chunk_checks(spark: SparkSession, bronze: str, facts_table: str) -> list[dict[str, Any]]:
+def _chunk_checks(spark: SparkSessionLike, bronze: str, facts_table: str) -> list[dict[str, Any]]:
     """The chunk rows of the report for bronze's newest chunked snapshot (see the module
     docstring): ``bucket_lo``, ``bucket_hi``, ``failure_type`` and ``detail``, one per failure."""
     from pyspark.sql import functions as F

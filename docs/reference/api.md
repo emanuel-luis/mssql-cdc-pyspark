@@ -60,7 +60,7 @@ or renaming one is a break listed under "Breaking" in the changelog.
 ::: mssql_cdc.types
     options:
       show_root_toc_entry: false
-      members: [Offset, BackfillStatus, ApplyResult, ReconcileResult, SnapshotMode, OnDataLoss, Isolation, Granularity, BackfillState]
+      members: [Offset, BackfillStatus, ApplyResult, ReconcileResult, SnapshotMode, OnDataLoss, Isolation, Granularity, BackfillState, SparkSessionLike, StreamingQueryLike]
 
 ::: mssql_cdc.source.SourceOptions
     options:

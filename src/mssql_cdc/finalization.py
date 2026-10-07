@@ -41,13 +41,14 @@ from .tables import delta_table, retrying, table_ref  # noqa: F401 - table_ref r
 from .types import Granularity, Offset
 
 if TYPE_CHECKING:
-    from pyspark.sql import Column, SparkSession
+    from pyspark.sql import Column
     from pyspark.sql.streaming.listener import (
         QueryProgressEvent,
         QueryStartedEvent,
         QueryTerminatedEvent,
     )
-    from pyspark.sql.streaming.query import StreamingQuery
+
+    from .types import SparkSessionLike, StreamingQueryLike
 
 _log = logging.getLogger(__name__)
 _GRANULARITIES = get_args(Granularity)
@@ -132,12 +133,12 @@ CONTROL_COLUMNS = [
 ]
 
 
-def ensure_control_table(spark: SparkSession, control_table: str) -> None:
+def ensure_control_table(spark: SparkSessionLike, control_table: str) -> None:
     migrations.ensure(spark, control_table, "control", CONTROL_COLUMNS, CONTROL_COMMENT)
 
 
 def advance(
-    spark: SparkSession,
+    spark: SparkSessionLike,
     control_table: str,
     table_name: str,
     end_offset: Mapping[str, Any] | None,
@@ -188,14 +189,16 @@ def advance(
     return finalized_until(spark, control_table, table_name)
 
 
-def finalized_until(spark: SparkSession, control_table: str, table_name: str) -> datetime | None:
+def finalized_until(
+    spark: SparkSessionLike, control_table: str, table_name: str
+) -> datetime | None:
     df = delta_table(spark, control_table).toDF()
     rows = df.where(df.table_name == table_name).select("finalized_until").collect()
     return rows[0][0] if rows else None
 
 
 def is_final(
-    spark: SparkSession, control_table: str, table_name: str, period_end: datetime
+    spark: SparkSessionLike, control_table: str, table_name: str, period_end: datetime
 ) -> bool:
     """True when the period ending at ``period_end`` (exclusive) is complete: no source
     commit in it can still arrive. Over a loss gap a re-snapshot recorded (the facts'
@@ -228,7 +231,7 @@ class FinalizationListener(StreamingQueryListener):
 
     def __init__(
         self,
-        spark: SparkSession,
+        spark: SparkSessionLike,
         run_id: str,
         control_table: str,
         table_name: str,
@@ -330,8 +333,8 @@ class FinalizationListener(StreamingQueryListener):
 
 
 def track(
-    spark: SparkSession,
-    query: StreamingQuery,
+    spark: SparkSessionLike,
+    query: StreamingQueryLike,
     control_table: str,
     table_name: str,
     *,

@@ -6,12 +6,14 @@ from __future__ import annotations
 import random
 import time
 from collections.abc import Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, TypeAlias, TypeVar, cast
 
 if TYPE_CHECKING:
     from delta.tables import DeltaTable
     from pyspark.sql import SparkSession
     from pyspark.sql.types import DataType
+
+    from .types import SparkSessionLike
 
 T = TypeVar("T")
 _RETRY_SECONDS = 60  # how long a commit that loses to concurrent ones is retried
@@ -66,19 +68,25 @@ def table_ref(name_or_path: str) -> str:
     return "delta.`" + name_or_path.replace("`", "``") + "`"
 
 
-def delta_table(spark: SparkSession, name_or_path: str) -> DeltaTable:
+def _session(spark: SparkSessionLike) -> SparkSession:
+    # delta-spark types its session parameters as the classic SparkSession, and hands a Spark
+    # Connect one to delta.connect at run time
+    return cast("SparkSession", spark)
+
+
+def delta_table(spark: SparkSessionLike, name_or_path: str) -> DeltaTable:
     from delta.tables import DeltaTable
 
     if is_path(name_or_path):
-        return DeltaTable.forPath(spark, name_or_path)
-    return DeltaTable.forName(spark, name_or_path)
+        return DeltaTable.forPath(_session(spark), name_or_path)
+    return DeltaTable.forName(_session(spark), name_or_path)
 
 
-def exists(spark: SparkSession, name_or_path: str) -> bool:
+def exists(spark: SparkSessionLike, name_or_path: str) -> bool:
     if is_path(name_or_path):
         from delta.tables import DeltaTable
 
-        return DeltaTable.isDeltaTable(spark, name_or_path)
+        return DeltaTable.isDeltaTable(_session(spark), name_or_path)
     return spark.catalog.tableExists(name_or_path)
 
 
@@ -87,7 +95,7 @@ ColumnDef: TypeAlias = tuple[str, "str | DataType", "str | None"]
 
 
 def create_if_not_exists(
-    spark: SparkSession,
+    spark: SparkSessionLike,
     name_or_path: str,
     columns: Iterable[ColumnDef],
     comment: str | None = None,
@@ -113,7 +121,7 @@ def create_if_not_exists(
     mapped = [c[0] for c in columns if _MAPPED_ONLY.intersection(c[0])]
     if mapped:
         properties = {"delta.columnMapping.mode": "name", **(properties or {})}
-    builder = DeltaTable.createIfNotExists(spark)
+    builder = DeltaTable.createIfNotExists(_session(spark))
     builder = (
         builder.location(name_or_path) if is_path(name_or_path) else builder.tableName(name_or_path)
     )
@@ -132,7 +140,7 @@ def create_if_not_exists(
         _require_mapping(spark, name_or_path, mapped)
 
 
-def _require_mapping(spark: SparkSession, name_or_path: str, names: list[str]) -> None:
+def _require_mapping(spark: SparkSessionLike, name_or_path: str, names: list[str]) -> None:
     """Raise ``SchemaChangedError`` when ``names``, which Delta takes only with column
     mapping, holds a column the table lacks and the table maps no columns: a newer capture
     instance captures it, and the next append (``mergeSchema``) or ``apply_changes`` would
