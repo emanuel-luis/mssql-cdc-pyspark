@@ -65,13 +65,14 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 
 ## 0.4.0 (minor): typing and protocols
 
-- [ ] `typing.Protocol` for the pluggable seams: `Backend` (mssql-python, arrow-odbc, or a
+- [x] `typing.Protocol` for the pluggable seams: `Backend` (mssql-python, arrow-odbc, or a
       user's own) and `CdcClient` (`SqlCdcClient`, the fake), `runtime_checkable`, exported;
-      the ABCs stay as thin bases for one release.
+      they are the 0.3 classes themselves, so subclassing keeps working with nothing to
+      deprecate (ADR 0030).
 - [x] `TypedDict`s for the state payloads ADR 0021 lists (`snapshot_open`,
       `snapshot_plan`, `snapshot_chunk`, completion, a wave's `userMetadata`) and the known
       source options.
-- [ ] `NewType` for LSN hex strings; frozen dataclasses in place of loose internal dicts.
+- [x] `NewType` for LSN hex strings; frozen dataclasses in place of loose internal dicts.
 - [ ] mypy strict on `src` (no untyped defs, no implicit `Any` generics, `warn_return_any`);
       `pyright --verifytypes` in CI to keep the public API fully typed.
 

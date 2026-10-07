@@ -12,6 +12,45 @@ compatibility" line.
 
 ## [Unreleased]
 
+State compatibility: unchanged from 0.3.0. Types only: offsets, checkpoint layout, table
+schemas and payload keys and formats are as in 0.3.0, now described by types. A
+'data_skipped' row's `detail` (`from`, `to`, `certain`, `reason`), shipped since 0.2.0, joins
+the payloads [ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/) lists as state (amendment 7). A chunked 'snapshot_open' row
+writes `keys` and `plan` later in its JSON object; readers take keys by name.
+
+### Added
+
+- `Backend` and `CdcClient` are `typing.Protocol`s, `runtime_checkable`, exported from
+  `mssql_cdc` and listed in the API reference
+  ([ADR 0030](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0030-protocols-for-the-pluggable-seams/)).
+  Your own backend satisfies `Backend` without inheriting (`batches`, `scalar`, `close`),
+  and `isinstance` checks it. Subclassing still works and inherits the methods that have a
+  body. A method later added to a protocol is a break for a class that implements it
+  without inheriting, listed under "Breaking".
+- `Lsn`, a `NewType` of `str` for an LSN in its canonical form (`0x` and 20 uppercase hex
+  digits). `lsn.normalize`, `lsn.from_int` and the client's methods return it. Parameters
+  still take any `str`, and at run time it is the same `str`.
+- `mssql_cdc.payloads`: `TypedDict`s for the JSON a later release reads back, plain dicts at
+  run time, for Python that reads the facts table
+  (`d: SnapshotChunkDetail = json.loads(row["detail"])`): `SnapshotOpenDetail`,
+  `SnapshotPlanDetail`, `SnapshotChunkDetail`, `SnapshotCompletionDetail`,
+  `DataSkippedDetail`, `BatchDetail` and `WaveMetadata` (a wave commit's `userMetadata`),
+  exported from `mssql_cdc`, with the nested `WaveChunk`, `SnapshotExtent` (`IntExtent` or
+  `KeysetExtent`) and `SnapshotKind`. Listed in the facts table's reference next to `detail`
+  ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/) amendment 7).
+- `SourceOptions`, exported from `mssql_cdc`: a `TypedDict` of every source option with a
+  string value. Annotate an options dict with it and a type checker flags a misspelt name.
+  `stream()`, `reconcile()`, `apply_changes(options=)` and `start_many()` take a
+  `SourceOptions` or any mapping (they took `dict`), so every call that type-checked before
+  still does.
+
+### Deprecated
+
+- Nothing. `Backend` and `CdcClient` were ABCs in 0.3; they are now the protocols themselves,
+  not new classes beside them, so `class MyBackend(Backend)` keeps inheriting the method
+  bodies and an incomplete subclass still fails to instantiate. There is no separate ABC to
+  phase out ([ADR 0030](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0030-protocols-for-the-pluggable-seams/)).
+
 ## [0.3.0] - 2026-10-07
 
 State compatibility: offsets and checkpoints unchanged. Facts migration 12 rewrites the
