@@ -479,6 +479,72 @@ def test_time_to_lsn_maps_a_fall_back_hour_to_a_time_no_later_commit_reads_befor
         client.close()
 
 
+def test_commit_times_follow_lsn_order_across_a_fall_back(sqlserver, backend):
+    """2025-11-02 06:00 UTC: 02:00 EDT became 01:00 EST, so 01:00-02:00 repeated. AT TIME ZONE
+    reads a repeated time as EDT; the commits after the clock went back read it as EST.
+
+    No server clock repeats an hour on demand: the history is written into the mapping and a
+    change table of a database of its own, CDC on and no table tracked, so with no cleanup job
+    to remove it (it is below every instance's low watermark)."""
+    with closing(sqlserver.connect("master")) as master:
+        master.cursor().execute("CREATE DATABASE cdc_fall_back")
+    db = sqlserver.connect("cdc_fall_back")
+    cur = db.cursor()
+    cur.execute("EXEC sys.sp_cdc_enable_db")
+    cur.execute(  # a change table's columns the reader selects
+        "CREATE TABLE cdc.[probe_CT] (__$start_lsn binary(10) NOT NULL, "
+        "__$seqval binary(10) NOT NULL, __$operation int NOT NULL, __$command_id int, id int)"
+    )
+    history = [  # (server clock, UTC), in commit order
+        ("2025-11-01T22:00:00", "2025-11-02T02:00:00.000"),  # some hours before
+        ("2025-11-02T00:50:00", "2025-11-02T04:50:00.000"),
+        ("2025-11-02T01:20:00", "2025-11-02T05:20:00.000"),  # the first 01:00-02:00, EDT
+        ("2025-11-02T01:57:00", "2025-11-02T05:57:00.000"),
+        ("2025-11-02T01:02:00", "2025-11-02T06:02:00.000"),  # the clock went back: EST
+        ("2025-11-02T01:30:00", "2025-11-02T06:30:00.000"),
+        ("2025-11-02T01:58:30", "2025-11-02T06:58:30.000"),  # past every first-pass time
+        ("2025-11-02T02:10:00", "2025-11-02T07:10:00.000"),
+        ("2025-11-02T05:00:00", "2025-11-02T10:00:00.000"),  # one offset again
+    ]
+    lsns = [f"0x00000001{i + 1:08X}0001" for i in range(len(history))]
+    for i, (lsn, (local, _)) in enumerate(zip(lsns, history)):
+        cur.execute(
+            "INSERT INTO cdc.lsn_time_mapping (start_lsn, tran_begin_time, tran_end_time, tran_id) "
+            "VALUES (CONVERT(binary(10), ?, 1), ?, ?, 0x01)",
+            (lsn, local, local),
+        )
+        cur.execute(
+            "INSERT INTO cdc.[probe_CT] VALUES (CONVERT(binary(10), ?, 1), "
+            "CONVERT(binary(10), ?, 1), 2, 1, ?)",
+            (lsn, lsn, i),
+        )
+    utc = [u for _, u in history]
+    client = make_client(
+        {
+            "connectionString": sqlserver.base + "Database=cdc_fall_back;",
+            "sourceTimeZone": "Eastern Standard Time",
+            "backend": backend,
+        }
+    )
+
+    def read(lo: int, hi: int) -> list[str]:
+        return [
+            r["_commit_ts"].isoformat(timespec="milliseconds")
+            for b in client.iter_changes("probe", lsns[lo], lsns[hi], ["id"], True, 100)
+            for r in b.to_pylist()
+        ]
+
+    try:
+        assert [client.lsn_to_time(lsn) for lsn in lsns] == utc
+        assert read(0, 8) == utc
+        assert read(5, 6) == utc[5:7]  # its drop is before the range
+        assert read(2, 3) == utc[2:4]  # the first reading, the clock not yet back
+        assert read(8, 8) == utc[8:]  # one offset: DATEADD
+    finally:
+        client.close()
+        db.close()
+
+
 def test_round_trip_and_network_wait_on_a_real_server(sqlserver):
     client = make_client({"connectionString": sqlserver.connection_string})
     try:

@@ -290,7 +290,13 @@ def test_an_idle_stream_asks_sql_server_for_max_lsn_alone_each_poll():
     client.max_lsn.return_value = _lsn(9)  # capture moved: planned up to it, and reported
     assert reader.latestOffset(start, ReadMaxRows(10))["lsn"] == _lsn(9)
     assert reader.reportLatestOffset()["lsn"] == _lsn(9)
-    assert _called(client) == ["max_lsn", "nth_commit_after", "lsn_to_time", "lsn_to_time"]
+    assert _called(client) == [  # a new batch: the clock read again before its end offset
+        "max_lsn",
+        "nth_commit_after",
+        "refresh_clock",
+        "lsn_to_time",
+        "lsn_to_time",
+    ]
 
 
 def test_without_admission_control_the_source_reads_with_the_legacy_reader(monkeypatch):
@@ -625,6 +631,30 @@ def test_planned_ranges_carry_the_drivers_clock(tmp_path, monkeypatch):
         reader = _reader(str(tmp_path), numPartitions=n)
         ranges = reader.partitions({"lsn": lsns[0], "commit_ts": ""}, {"lsn": lsns[-1]})
         assert len(ranges) == n and {(r.zone, r.offset_min) for r in ranges} == {(zone, None)}
+
+
+@needs_admission_control
+def test_each_new_batch_reads_the_fixed_offset_again_and_its_ranges_carry_it(tmp_path, monkeypatch):
+    """Before SQL Server 2022 the clock is the server's current UTC offset: read again for
+    each new batch, before its end offset, and shipped with its ranges, so a daylight-saving
+    change in a long run reaches the offsets and the rows of the same batch alike."""
+    from pyspark.sql.streaming.datasource import ReadAllAvailable
+
+    offsets, clock = iter([-180, -120]), {"offset": -180}  # what each batch's read finds
+    monkeypatch.setattr(FakeCdcClient, "clock", lambda self: (None, clock["offset"]))
+    monkeypatch.setattr(
+        FakeCdcClient, "refresh_clock", lambda self: clock.update(offset=next(offsets))
+    )
+    db, lsns = _db(str(tmp_path), n_tx=2)
+    reader, start = _reader(str(tmp_path)), {"lsn": lsns[0], "commit_ts": ""}
+    planned = []
+    for _ in range(2):
+        end = reader.latestOffset(start, ReadAllAvailable())
+        planned += [r.offset_min for r in reader.partitions(start, end)]
+        assert reader.latestOffset(end, ReadAllAvailable()) == end  # idle: not read again
+        start = end
+        db.commit(CI, [(2, {"order_id": 9})], at=T0 + timedelta(hours=1))
+    assert planned == [-180, -120]
 
 
 def test_a_task_converts_commit_times_with_the_drivers_clock():

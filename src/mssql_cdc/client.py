@@ -639,6 +639,9 @@ class CdcClient(ABC):
     def set_clock(self, zone: str | None, offset_min: int | None) -> None:
         """Take ``clock()`` of the driver's client instead of detecting it again."""
 
+    def refresh_clock(self) -> None:
+        """Read a fixed UTC offset (``clock()``'s second) again: the driver, once per batch."""
+
     def close(self) -> None:  # pragma: no cover - default no-op
         pass
 
@@ -770,6 +773,9 @@ def _check_tz(name) -> str:
     return name
 
 
+_SHIFT_HOURS = 3  # no zone moves its clock by more, or twice within them
+
+
 class SqlCdcClient(CdcClient):
     def __init__(
         self, backend: Backend, source_timezone: str = "auto", lock_timeout_ms: int | None = None
@@ -791,8 +797,9 @@ class SqlCdcClient(CdcClient):
         SQL Server 2022+ and Azure SQL name it (``CURRENT_TIMEZONE_ID()``), and ``AT TIME
         ZONE`` applies the daylight-saving rules in force at each commit. Older versions
         have no such function; then the server's current UTC offset
-        (``SYSDATETIMEOFFSET()``) is applied to every commit, returned as ``UTC-03:00``.
-        That is exact for zones without daylight saving; elsewhere, name the zone.
+        (``SYSDATETIMEOFFSET()``) is applied to every commit, returned as ``UTC-03:00``, and
+        read again for each batch (``refresh_clock``). That is exact for zones without
+        daylight saving; elsewhere, name the zone.
         """
         if self._tz is None and self._offset_min is None:
             # The version, not a failed call: the name fails to compile before 2022 even in a
@@ -804,9 +811,7 @@ class SqlCdcClient(CdcClient):
             if named == 1:
                 self._tz = _check_tz(self._b.scalar("SELECT CURRENT_TIMEZONE_ID()"))
             else:
-                self._offset_min = int(
-                    self._b.scalar("SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())")
-                )
+                self._offset_min = self._server_offset()
                 _log.warning(
                     "mssql_cdc: SQL Server before 2022 names no time zone: commit times are "
                     "converted with its current UTC offset (%+d minutes). In a zone with "
@@ -830,35 +835,141 @@ class SqlCdcClient(CdcClient):
         if offset_min is not None:
             self._offset_min = int(offset_min)
 
-    def _utc(self, expr: str, offset_min: int | None = None) -> str:
-        """``tran_end_time`` is a timezone-less datetime in the server's clock.
+    def _server_offset(self) -> int:
+        return int(self._b.scalar("SELECT DATEPART(TZOFFSET, SYSDATETIMEOFFSET())"))
 
-        ``offset_min``: a UTC offset known to hold for every value of ``expr``; a plain
+    def refresh_clock(self):
+        # The pre-2022 fallback's offset only: it is the server's current one, so a run that
+        # kept the first would convert with it past a daylight-saving change (ADR 0008).
+        if self._tz is None and self._offset_min is not None:
+            offset = self._server_offset()
+            if offset != self._offset_min:
+                _log.warning(
+                    "mssql_cdc: the server's UTC offset changed from %+d to %+d minutes: "
+                    "batches from now on convert commit times with it",
+                    self._offset_min,
+                    offset,
+                )
+            self._offset_min = offset
+
+    def _utc(
+        self,
+        t: str,
+        lsn: str | None = None,
+        offset_min: int | None = None,
+        drops: str | None = None,
+    ) -> str:
+        """UTC time of the commit at LSN ``lsn`` that reads ``t`` (``tran_end_time``: a
+        timezone-less datetime in the server's clock).
+
+        ``offset_min``: a UTC offset known to hold for every value of ``t``; a plain
         ``DATEADD`` then replaces ``AT TIME ZONE``, which costs ~2.7x the read (lab t8).
+
+        A fall-back repeats an hour of a named zone's clock, and ``AT TIME ZONE`` reads it the
+        first time, with the offset before the change. A commit after the clock went back
+        (``_drops``; ``drops``: a query of those it can follow, None: its own) reads it the
+        second time, with the offset 3 hours on. So commit times follow LSN order across the
+        change (ADR 0008). Without ``lsn``: the first reading.
         """
         zone = self.timezone
         offset_min = self._offset_min if offset_min is None else offset_min
         if offset_min is not None:
-            return f"CAST(DATEADD(minute, {-int(offset_min)}, {expr}) AS datetime2(3))"
+            return f"CAST(DATEADD(minute, {-int(offset_min)}, {t}) AS datetime2(3))"
         if zone.upper() == "UTC":
-            return f"CAST({expr} AS datetime2(3))"
-        return f"CAST(({expr} AT TIME ZONE N'{zone}') AT TIME ZONE 'UTC' AS datetime2(3))"
+            return f"CAST({t} AS datetime2(3))"
+        first = f"CAST(({t} AT TIME ZONE N'{zone}') AT TIME ZONE 'UTC' AS datetime2(3))"
+        if lsn is None:
+            return first
+        if drops is None:  # none unless t is a time a fall-back repeats: an empty range then
+            start = f"CASE WHEN {self._repeated(t)} THEN {self._before(t)} ELSE {lsn} END"
+            drops = self._drops(start, lsn)
+        later = self._zone_offset(f"DATEADD(hour, {_SHIFT_HOURS}, {t})")
+        return (
+            f"CASE WHEN EXISTS (SELECT 1 FROM ({drops}) x WHERE x.start_lsn <= {lsn} "
+            f"AND x.t > DATEADD(hour, -{_SHIFT_HOURS}, {t})) "
+            f"THEN CAST(DATEADD(minute, -{later}, {t}) AS datetime2(3)) ELSE {first} END"
+        )
+
+    def _zone_offset(self, t: str) -> str:
+        """Minutes east of UTC of the named zone at local time ``t``; in the hour a fall-back
+        repeats, the offset before the change (tests/integration)."""
+        return f"DATEPART(TZOFFSET, {t} AT TIME ZONE N'{self.timezone}')"
+
+    def _repeated(self, t: str) -> str:
+        """``t`` is a time a fall-back repeats: the offset 3 hours on is smaller, and ``t``
+        moved on by the difference is past the repeated hour."""
+        now = self._zone_offset(t)
+        later = self._zone_offset(f"DATEADD(hour, {_SHIFT_HOURS}, {t})")
+        moved = self._zone_offset(f"DATEADD(minute, {now} - {later}, {t})")
+        return f"({later} < {now} AND {moved} = {later})"
+
+    def _drops(self, start: str, end: str) -> str:
+        """The commits with LSN in (``start``, ``end``] the server clock went back to at a
+        fall-back, columns start_lsn and t (its time): each reads more than a minute before
+        the commit before it (less is jitter), at a time the fall-back repeats. A commit that
+        follows a drop in the hours after it reads the repeated hour the second time."""
+        # start as a column: a seek on the key, where in the WHERE it filtered a full scan
+        return (
+            f"SELECT d.start_lsn, d.t FROM (SELECT {start} AS lo) b CROSS APPLY ("
+            "SELECT start_lsn, tran_end_time AS t, LAG(tran_end_time) OVER (ORDER BY start_lsn) "
+            "AS prev FROM cdc.lsn_time_mapping "
+            f"WHERE start_lsn > b.lo AND start_lsn <= {end}) d "
+            f"WHERE d.t < DATEADD(minute, -1, d.prev) AND {self._repeated('d.t')}"
+        )
+
+    def _before(self, t: str) -> str:
+        """An LSN below every commit that reads less than 3 hours before ``t``, a drop and the
+        commit before it included: the last that reads earlier (the time index's seek)."""
+        return (
+            "COALESCE((SELECT TOP (1) start_lsn FROM cdc.lsn_time_mapping "
+            f"WHERE tran_end_time <= DATEADD(hour, -{_SHIFT_HOURS}, {t}) "
+            "ORDER BY tran_end_time DESC), 0x00000000000000000000)"
+        )
+
+    def _range_utc(self, from_lsn: str, to_lsn: str) -> tuple[str, list]:
+        """_commit_ts of the change rows of [from_lsn, to_lsn] (``m``, the mapping) and its
+        parameters: one DATEADD when one offset holds for the range, else row by row, and
+        with the fall-back drops a commit of the range can follow (two queries here, run
+        only near a transition)."""
+        zone = self.timezone
+        if self._offset_min is not None or zone.upper() == "UTC":
+            return self._utc("m.tran_end_time"), []
+        offset = self._range_offset(from_lsn, to_lsn)
+        if offset is not None:
+            return self._utc("m.tran_end_time", offset_min=offset), []
+        drops: list = []
+        for batch in self._b.batches(
+            "SELECT CONVERT(varchar(22), x.start_lsn, 1) AS l, CONVERT(varchar(23), x.t, 126) AS t "
+            "FROM (SELECT MIN(tran_end_time) AS t0 FROM cdc.lsn_time_mapping WHERE start_lsn "
+            "BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1) "
+            "HAVING MIN(tran_end_time) IS NOT NULL) r "
+            f"CROSS APPLY ({self._drops(self._before('r.t0'), 'CONVERT(binary(10), ?, 1)')}) x",
+            (from_lsn, to_lsn, to_lsn),
+            1000,
+        ):
+            drops += [v for row in batch.to_pylist() for v in (row["l"], row["t"])]
+        if not drops:
+            return self._utc("m.tran_end_time"), []
+        values = ", ".join(
+            ["(CONVERT(binary(10), ?, 1), CONVERT(datetime, ?, 126))"] * (len(drops) // 2)
+        )
+        given = f"SELECT * FROM (VALUES {values}) v(start_lsn, t)"
+        return self._utc("m.tran_end_time", "m.start_lsn", drops=given), drops
 
     def _range_offset(self, from_lsn: str, to_lsn: str) -> int | None:
         """The named zone's UTC offset over a range of commits, when it is one offset.
 
-        Equal offsets at both ends of a range shorter than 7 days mean no daylight-saving
-        change in between (no zone changes twice within a week). None otherwise, or when
-        the range has no commits: the caller then converts row by row.
+        Equal offsets 3 hours before its first commit and 3 hours after its last, less than
+        7 days apart, mean no daylight-saving change in between (no zone changes twice
+        within a week), nor a fall-back's repeated hour near it, which ``AT TIME ZONE``
+        reads with the offset before the change. None otherwise, or when the range has no
+        commits: the caller then converts row by row.
         """
-        zone = self.timezone
-        if self._offset_min is not None or zone.upper() == "UTC":
-            return None
+        first = self._zone_offset(f"DATEADD(hour, -{_SHIFT_HOURS}, MIN(tran_end_time))")
+        last = self._zone_offset(f"DATEADD(hour, {_SHIFT_HOURS}, MAX(tran_end_time))")
         value = self._b.scalar(
             "SELECT CASE WHEN DATEDIFF(day, MIN(tran_end_time), MAX(tran_end_time)) < 7 "
-            f"AND DATEPART(TZOFFSET, MIN(tran_end_time) AT TIME ZONE N'{zone}') "
-            f"= DATEPART(TZOFFSET, MAX(tran_end_time) AT TIME ZONE N'{zone}') "
-            f"THEN DATEPART(TZOFFSET, MIN(tran_end_time) AT TIME ZONE N'{zone}') END "
+            f"AND {first} = {last} THEN {last} END "
             "FROM cdc.lsn_time_mapping "
             "WHERE start_lsn BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1)",
             (from_lsn, to_lsn),
@@ -905,10 +1016,18 @@ class SqlCdcClient(CdcClient):
         )
 
     def lsn_to_time(self, lsn):
+        # The mapping's own row, as sys.fn_cdc_map_lsn_to_time reads it: None for an LSN that
+        # is no commit's. Its LSN orders it in a fall-back's repeated hour (_utc).
+        return self._commit_time("=", lsn)
+
+    def _commit_time(self, op: str, lsn: str) -> str | None:
+        """UTC commit time of the last commit with an LSN ``op`` ``lsn``, one seek on the
+        mapping's key."""
         value = self._b.scalar(
-            "SELECT CONVERT(varchar(23), "
-            + self._utc("sys.fn_cdc_map_lsn_to_time(CONVERT(binary(10), ?, 1))")
-            + ", 126)",
+            "SELECT TOP (1) CONVERT(varchar(23), "
+            + self._utc("m.tran_end_time", "m.start_lsn")
+            + f", 126) FROM cdc.lsn_time_mapping m WHERE m.start_lsn {op} "
+            "CONVERT(binary(10), ?, 1) ORDER BY m.start_lsn DESC",
             (lsn,),
         )
         # Style 126 drops ".000" on whole seconds; the offset contract always carries ms.
@@ -1117,15 +1236,8 @@ class SqlCdcClient(CdcClient):
 
     def _commit_time_at_or_before(self, lsn: str) -> str | None:
         # A DDL's LSN is no commit's: sys.fn_cdc_map_lsn_to_time returns NULL for it (SQL
-        # Server 2022). The last commit before it, one seek on the mapping's key.
-        value = self._b.scalar(
-            "SELECT TOP (1) CONVERT(varchar(23), "
-            + self._utc("tran_end_time")
-            + ", 126) FROM cdc.lsn_time_mapping WHERE start_lsn <= CONVERT(binary(10), ?, 1) "
-            "ORDER BY start_lsn DESC",
-            (lsn,),
-        )
-        return datetime.fromisoformat(value).isoformat(timespec="milliseconds") if value else None
+        # Server 2022). The last commit before it.
+        return self._commit_time("<=", lsn)
 
     def present_columns(self, capture_instance, columns):
         # A dropped captured column stays in the capture instance; one added back under the
@@ -1157,20 +1269,21 @@ class SqlCdcClient(CdcClient):
         cols = ", ".join(f"c.[{_check_column(c)}]" for c in columns)
         cmd_select = "c.[__$command_id] AS _command_id, " if include_command_id else ""
         cmd_order = "c.[__$command_id], " if include_command_id else ""
+        commit_ts, params = self._range_utc(from_lsn, to_lsn)
         sql = (
             "SELECT "
             "CONVERT(varchar(22), c.[__$start_lsn], 1) AS _start_lsn, "
             "CONVERT(varchar(22), c.[__$seqval], 1) AS _seqval, "
             "c.[__$operation] AS _operation, "
             f"{cmd_select}"
-            f"{self._utc('m.tran_end_time', self._range_offset(from_lsn, to_lsn))} AS _commit_ts"
+            f"{commit_ts} AS _commit_ts"
             f"{', ' + cols if cols else ''} "
             f"FROM cdc.[{ci}_CT] c "
             "JOIN cdc.lsn_time_mapping m ON m.start_lsn = c.[__$start_lsn] "
             "WHERE c.[__$start_lsn] BETWEEN CONVERT(binary(10), ?, 1) AND CONVERT(binary(10), ?, 1) "
             f"ORDER BY c.[__$start_lsn], {cmd_order}c.[__$seqval], c.[__$operation]"
         )
-        yield from self._change_table_batches(ci, sql, (from_lsn, to_lsn), batch_size)
+        yield from self._change_table_batches(ci, sql, (*params, from_lsn, to_lsn), batch_size)
 
     # -- snapshot (ADR 0016) ----------------------------------------------------
     def _resolve(self, capture_instance: str) -> tuple[dict | None, list[dict]]:

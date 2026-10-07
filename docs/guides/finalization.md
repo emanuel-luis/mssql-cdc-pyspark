@@ -178,9 +178,12 @@ option where a listener cannot run ([Extension points](../ARCHITECTURE.md#extens
   [metricsPath](../reference/options.md#metricspath)); one a task finds after its read says
   the loss is possible, not certain (`certain` false in `detail`) ([Data loss](data-loss.md)).
 - With a named zone that has daylight saving (`sourceTimeZone`, or `auto` on SQL Server
-  2022), `granularity="minute"` is unsafe across a fall-back: commits in the second pass of
-  the repeated hour get commit times an hour early, in minutes already declared final. Use
-  `"hour"` or `"day"` there; those rows are still filed under the hour before.
+  2022), a fall-back repeats an hour of the server clock. The commits after the clock went
+  back get the offset after the change, so commit times keep commit order and any
+  granularity holds. The exception needs almost an hour without a commit around the change,
+  which the capture job's entries about every 5 minutes rule out while it runs: the second
+  pass then comes out an hour early, at most a minute behind the commit before it
+  ([ADR 0008](../decisions/0008-detect-source-time-zone.md)).
 
 ## See also
 

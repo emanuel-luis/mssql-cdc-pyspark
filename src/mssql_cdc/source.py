@@ -1009,6 +1009,8 @@ class MssqlCdcStreamReader(_BaseReader, SupportsTriggerAvailableNow):
             nth = self.client.nth_commit_after(start["lsn"], limit.max_rows)
             if nth is not None and nth < upper:
                 upper = nth
+        # a new batch: its end offset and the ranges partitions() plans take one clock
+        self.client.refresh_clock()
         return self._offset(upper)
 
     @_retrying
@@ -1026,6 +1028,7 @@ class MssqlCdcLegacyStreamReader(_BaseReader):  # pragma: no cover - Spark < 4.2
 
     @_retrying
     def latestOffset(self) -> dict:  # type: ignore[override]  # Spark < 4.2 signature; stubs are 4.2
+        self.client.refresh_clock()  # once per trigger, so for every batch too
         return self._offset(self._max_lsn())
 
 

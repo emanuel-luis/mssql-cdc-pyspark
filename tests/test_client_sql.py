@@ -29,7 +29,7 @@ class Recorder(Backend):
             return self.named
         if "CURRENT_TIMEZONE_ID" in sql:
             return self.tz
-        if "FROM cdc.lsn_time_mapping" in sql and "TZOFFSET" in sql:
+        if sql.startswith("SELECT CASE WHEN DATEDIFF(day, MIN(tran_end_time)"):
             return self.range_offset
         return self.value
 
@@ -124,6 +124,97 @@ def test_timezone_auto_falls_back_to_the_current_offset_before_2022(caplog):
     assert not any("CURRENT_TIMEZONE_ID" in s for s in sqls)
     warned = [r.getMessage() for r in caplog.records if "daylight saving" in r.getMessage()]
     assert len(warned) == 1 and "set sourceTimeZone" in warned[0]
+
+
+def test_the_fallback_offset_is_read_again_when_the_driver_refreshes_its_clock(caplog):
+    class Changing(OldServer):  # UTC-3, then UTC-2: daylight saving began meanwhile
+        def __init__(self):
+            super().__init__()
+            self.offsets = [-180, -120]
+
+        def scalar(self, sql, params=()):
+            if "SYSDATETIMEOFFSET" in sql:
+                return self.offsets.pop(0)
+            return super().scalar(sql, params)
+
+    rec = Changing()
+    client = SqlCdcClient(rec)
+    assert client.clock() == (None, -180)
+    with caplog.at_level("WARNING", logger="mssql_cdc.client"):
+        client.refresh_clock()  # the driver, for each new batch
+    assert client.clock() == (None, -120) and client.timezone == "UTC-02:00"
+    assert any("changed from -180 to -120 minutes" in r.getMessage() for r in caplog.records)
+    list(client.iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+    assert "CAST(DATEADD(minute, 120, m.tran_end_time) AS datetime2(3))" in rec.calls[-1][0]
+    named = Recorder(tz="E. South America Standard Time")
+    client = SqlCdcClient(named)
+    client.clock()
+    sent = len(named.calls)
+    client.refresh_clock()  # a named zone converts each commit by its own rules: nothing to read
+    assert len(named.calls) == sent
+
+
+ZONE = "Eastern Standard Time"
+
+
+class FallBack(Recorder):
+    """A range near a fall-back: no single offset over it (``range_offset`` None), and one
+    commit the server clock went back to, its LSN and time."""
+
+    def batches(self, sql, params, batch_size):
+        self.calls.append((sql, tuple(params)))
+        if "LAG(tran_end_time)" in sql:
+            yield pa.RecordBatch.from_pylist(
+                [{"l": "0x0000002A000001000005", "t": "2025-11-02T01:02:00"}]
+            )
+
+
+def test_a_range_near_a_fall_back_reads_commits_after_the_clock_went_back_with_the_later_offset():
+    rec = FallBack(tz=ZONE)
+    list(SqlCdcClient(rec, ZONE).iter_changes("dbo_orders", "0x01", "0x02", [], True, 10))
+    (offset_sql, _), (drops_sql, drops_params), (changes_sql, params) = rec.calls[-3:]
+    # one offset only with no change within 3 hours of the range: AT TIME ZONE reads a
+    # repeated hour with the offset before the change, as it reads the hours before it
+    assert (
+        f"DATEPART(TZOFFSET, DATEADD(hour, -3, MIN(tran_end_time)) AT TIME ZONE N'{ZONE}') "
+        f"= DATEPART(TZOFFSET, DATEADD(hour, 3, MAX(tran_end_time)) AT TIME ZONE N'{ZONE}')"
+    ) in offset_sql
+    # where the clock went back more than a minute, from 3 hours before the range up to its end
+    assert "LAG(tran_end_time) OVER (ORDER BY start_lsn)" in drops_sql
+    assert (
+        "WHERE start_lsn > b.lo AND start_lsn <= CONVERT(binary(10), ?, 1)) d "
+        "WHERE d.t < DATEADD(minute, -1, d.prev)"
+    ) in drops_sql
+    assert drops_params == ("0x01", "0x02", "0x02")
+    later = f"DATEPART(TZOFFSET, DATEADD(hour, 3, m.tran_end_time) AT TIME ZONE N'{ZONE}')"
+    assert (
+        "CASE WHEN EXISTS (SELECT 1 FROM (SELECT * FROM (VALUES (CONVERT(binary(10), ?, 1), "
+        "CONVERT(datetime, ?, 126))) v(start_lsn, t)) x WHERE x.start_lsn <= m.start_lsn "
+        "AND x.t > DATEADD(hour, -3, m.tran_end_time)) "
+        f"THEN CAST(DATEADD(minute, -{later}, m.tran_end_time) AS datetime2(3)) "
+        f"ELSE CAST((m.tran_end_time AT TIME ZONE N'{ZONE}') AT TIME ZONE 'UTC' "
+        "AS datetime2(3)) END AS _commit_ts"
+    ) in changes_sql
+    assert params == ("0x0000002A000001000005", "2025-11-02T01:02:00", "0x01", "0x02")
+
+
+def test_lsn_to_time_looks_for_the_clock_going_back_only_at_a_repeated_time():
+    rec = Recorder("2025-11-02T06:02:00", tz=ZONE)
+    assert SqlCdcClient(rec, ZONE).lsn_to_time("0x05") == "2025-11-02T06:02:00.000"
+    [(sql, params)] = rec.calls  # one query, as sys.fn_cdc_map_lsn_to_time's was
+    assert params == ("0x05",)
+    assert sql.endswith(
+        "FROM cdc.lsn_time_mapping m WHERE m.start_lsn = CONVERT(binary(10), ?, 1) "
+        "ORDER BY m.start_lsn DESC"
+    )
+    # its own 3 hours, or nothing (above its own LSN) when its time does not repeat
+    before = (
+        "COALESCE((SELECT TOP (1) start_lsn FROM cdc.lsn_time_mapping "
+        "WHERE tran_end_time <= DATEADD(hour, -3, m.tran_end_time) "
+        "ORDER BY tran_end_time DESC), 0x00000000000000000000)"
+    )
+    assert f"THEN {before} ELSE m.start_lsn END AS lo) b CROSS APPLY (" in sql
+    assert "WHERE start_lsn > b.lo AND start_lsn <= m.start_lsn) d" in sql
 
 
 def test_a_clock_set_from_the_drivers_client_is_not_detected_again():
@@ -615,9 +706,9 @@ def test_ddl_history_keeps_the_batch_range():
     assert changes[0].commit_ts == "2026-09-30T13:25:00.000"  # the commit at or before it, UTC
     # not fn_cdc_map_lsn_to_time: a DDL's LSN is no commit's, and it returns NULL for it
     commit_time = (
-        "SELECT TOP (1) CONVERT(varchar(23), CAST(tran_end_time AS datetime2(3)), 126) "
-        "FROM cdc.lsn_time_mapping WHERE start_lsn <= CONVERT(binary(10), ?, 1) "
-        "ORDER BY start_lsn DESC"
+        "SELECT TOP (1) CONVERT(varchar(23), CAST(m.tran_end_time AS datetime2(3)), 126) "
+        "FROM cdc.lsn_time_mapping m WHERE m.start_lsn <= CONVERT(binary(10), ?, 1) "
+        "ORDER BY m.start_lsn DESC"
     )
     assert (commit_time, ("0x0000002A000001000200",)) in rec.calls
     assert ("EXEC sys.sp_cdc_get_ddl_history @capture_instance = ?", ("dbo_orders",)) in rec.calls

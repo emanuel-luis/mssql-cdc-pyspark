@@ -132,13 +132,17 @@ touch captured `datetime` columns.
 
 * `auto`: `CURRENT_TIMEZONE_ID()` on SQL Server 2022+ and Azure SQL, which applies the
   daylight-saving rules in force at each commit. Older versions lack the function; then the
-  driver reads the server's current UTC offset (`SYSDATETIMEOFFSET()`) and the run applies
-  it to every commit, on the driver and the executors alike, logging a warning each time.
-  That is exact only for zones without daylight saving: across a transition, also between
-  two runs, `finalized_until` can run ahead of the data.
+  driver reads the server's current UTC offset (`SYSDATETIMEOFFSET()`) for each batch and
+  applies it to the batch's commits, on the driver and the executors alike, logging a
+  warning when it takes the fallback and when the offset changes. That is exact only for
+  zones without daylight saving: a batch that spans a transition, or reads commits from
+  before it, converts some with the wrong offset, and `finalized_until` can run ahead of
+  the data.
 * A Windows time zone name, such as `E. South America Standard Time`, or `UTC`: set it on a
   server older than 2022 in a zone with daylight saving. `AT TIME ZONE` takes the name since
-  SQL Server 2016 and applies each commit's own offset.
+  SQL Server 2016 and applies each commit's own offset. In the hour a fall-back repeats,
+  the commits after the clock went back get the offset after the change, so commit times
+  follow commit order.
 
 [ADR 0008](../decisions/0008-detect-source-time-zone.md).
 
