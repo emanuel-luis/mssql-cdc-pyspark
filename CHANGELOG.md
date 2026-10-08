@@ -12,6 +12,8 @@ compatibility" line.
 
 ## [Unreleased]
 
+## [0.5.0rc1] - 2026-10-08
+
 State compatibility: unchanged from 0.4.1. Offsets, checkpoint layout, table schemas, facts
 events and payloads, and the `userMetadata` of bronze commits keep their shape; no
 migration.
@@ -807,7 +809,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.5.0rc1...HEAD
+[0.5.0rc1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.4.1...v0.5.0rc1
 [0.4.1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.2.2...v0.3.0
