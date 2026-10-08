@@ -237,8 +237,9 @@ that many chunks at a time, however many a wave takes.
 Rows per Arrow record batch fetched from the driver, in the stream and the snapshot. Each
 batch is cast to the output schema and handed to Spark as it arrives. Batches are also
 capped near 64 MiB, on the default backend as on `arrow-odbc`, so a table with large
-`(max)`, `text` or `xml` values reads in smaller batches. A positive integer; anything else
-raises `ValueError`.
+`(max)`, `text` or `xml` values reads in smaller batches: the default backend starts each
+read with one row, then fetches as many rows as fit at the widest row of the batch before,
+at most twice as many. A positive integer; anything else raises `ValueError`.
 
 ### failOnDataLoss
 

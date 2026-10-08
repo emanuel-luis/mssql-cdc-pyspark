@@ -11,31 +11,61 @@ import pyarrow as pa
 from ._protocols import Backend
 
 _MAX_BATCH_BYTES = 64 * 1024 * 1024  # about the most an Arrow batch from either backend holds
+_VARIABLE = (
+    pa.types.is_string,
+    pa.types.is_large_string,
+    pa.types.is_binary,
+    pa.types.is_large_binary,
+)
+
+
+def _widest_row(batch: pa.RecordBatch) -> int:
+    """At least the bytes of ``batch``'s widest row: the longest value of each text or binary
+    column, plus every other column's bytes per row."""
+    import pyarrow.compute as pc
+
+    width = 0
+    for col in batch.columns:
+        if any(is_type(col.type) for is_type in _VARIABLE):
+            width += pc.max(pc.binary_length(col)).as_py() or 0
+        else:
+            width += col.nbytes // len(col)  # a batch has rows
+    return width
 
 
 class MssqlPythonBackend(Backend):
     """Microsoft ``mssql-python`` driver with native Arrow fetch (>= 1.5.0)."""
 
-    def __init__(self, connection_string: str, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        connection_string: str,
+        timeout: int = 30,
+        max_bytes_per_batch: int = _MAX_BATCH_BYTES,
+    ) -> None:
         import mssql_python  # imported lazily: this runs on driver and executors
 
         self._conn = mssql_python.connect(connection_string, autocommit=True, timeout=timeout)
+        self._max_bytes = max_bytes_per_batch
 
     def batches(self, sql: str, params: Sequence[str], batch_size: int) -> Iterator[pa.RecordBatch]:
         # batch_size is a row count; the bytes are bounded as ArrowOdbcBackend's are, so a
-        # table of (max) columns does not build gigabyte batches in a Python worker
+        # table of (max) columns does not build gigabyte batches in a Python worker. Nothing
+        # tells a row's size before it is fetched: the first batch is one row, and each next
+        # one as many as fit at the widest row of the last (not its mean: one long value among
+        # short ones is what the next batch may hold several of), at most twice its rows.
         cur = self._conn.cursor()
         try:
             cur.execute(sql, tuple(params))
-            size = min(batch_size, 64)  # rows of 1 MiB would make a first 1000 a GiB
+            size = 1
             while True:
                 batch = cur.arrow_batch(size)
                 if batch.num_rows == 0:
                     break
-                # ponytail: rows from the last batch's mean row size; rows far wider than the
-                # batch before still overshoot, by at most one batch
-                fit = _MAX_BATCH_BYTES * batch.num_rows // max(1, batch.nbytes)
-                size = max(1, min(batch_size, fit))
+                # ponytail: a run of rows far wider than the batch before still overshoots, by
+                # how much wider; a hard bound needs a cap per (max) value, as arrow-odbc's
+                # (which fails a longer value)
+                fit = self._max_bytes // max(1, _widest_row(batch))
+                size = max(1, min(batch_size, 2 * batch.num_rows, fit))
                 yield batch
         finally:
             cur.close()

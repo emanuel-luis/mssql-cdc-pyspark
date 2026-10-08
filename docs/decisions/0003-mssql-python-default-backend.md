@@ -6,7 +6,8 @@
 **Amended:** 2026-09-30T16:14:54-03:00, installed with the package instead of the `[mssql]` extra  
 **Amended:** 2026-10-01T17:55:59-03:00, `arrow-odbc` tested in CI; what it took and what still differs (see Amendment 2)  
 **Amended:** 2026-10-05T00:15:23-03:00, the default ships closed binaries too: ADBC's rejection corrected (see Amendment 3)  
-**Amended:** 2026-10-08T14:28:19-03:00, `arrow-odbc`'s concurrent fetch measured (lab t8, see Amendment 4)
+**Amended:** 2026-10-08T14:28:19-03:00, `arrow-odbc`'s concurrent fetch measured (lab t8, see Amendment 4)  
+**Amended:** 2026-10-08T14:37:54-03:00, the default backend's batches sized by their widest row (see Amendment 5)
 
 ## Context
 `read()` yields Arrow record batches from executors. The driver should fetch natively into
@@ -124,3 +125,24 @@ bytes for the same rows, so rows/s is the number to compare.
 * It costs a second set of buffers: up to `max_bytes_per_batch`, 64 MiB, more per task.
 * No option: a later release stops turning it off, once a run with client and server on
   separate machines settles the 4-partition result. The code is unchanged for now.
+
+## Amendment 5: the default backend's batches sized by their widest row
+`arrowBatchSize` counts rows, and `mssql-python` fetches as many rows as asked, whatever their
+size. Since 0.2.0 the next fetch took as many rows as fit in 64 MiB at the mean row size of
+the batch before, after a first fetch of 64 rows. Both left gigabyte batches possible on a
+table of `(max)` values: a first 64 rows of 50 MB, or one long value among short ones (a
+mean of a few KB) followed by a run of long ones.
+
+* Each read's first fetch is one row. Each next one takes as many rows as fit in 64 MiB at
+  the widest row of the batch before (the longest value of each text or binary column, plus
+  the other columns' bytes per row), and at most twice that batch's rows, up to
+  `arrowBatchSize`.
+* A narrow table reaches `arrowBatchSize` within fourteen fetches (1, 2, 4, ..., 8192, then
+  10,000). A table of `(max)` values stays under the bound while its rows are no wider than
+  the batch before's: 400 rows of 60,000 characters read with a bound of 256 KiB, every batch
+  under it, on both backends (`tests/integration`).
+* ponytail: nothing tells a row's size before it is fetched, so a run of rows much wider than
+  the batch before still overshoots, by how much wider they are. A hard bound needs a cap per
+  `(max)` value, which arrow-odbc has and which fails a longer value.
+* `MssqlPythonBackend(..., max_bytes_per_batch)` sets the bound, as `ArrowOdbcBackend`'s
+  does; no option.

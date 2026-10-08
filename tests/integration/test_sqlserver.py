@@ -2152,6 +2152,28 @@ def test_a_full_snapshot_cuts_a_composite_key_by_keyset_seeks_into_ntiles_ranges
     assert sorted(i for ids in read for i in ids) == list(range(1, 40_001))
 
 
+def test_a_varchar_max_table_reads_in_batches_bounded_in_bytes(sqlserver, backend):
+    """However many rows arrowBatchSize allows, a batch of (max) values holds about the byte
+    bound at most: 400 rows of 60,000 characters would be 24 MB in one batch otherwise."""
+    from mssql_cdc.client import ArrowOdbcBackend, MssqlPythonBackend
+
+    sqlserver.run("CREATE TABLE dbo.lob_rows (id INT NOT NULL PRIMARY KEY, doc VARCHAR(MAX))")
+    sqlserver.run(  # every tenth value short; the rest under arrow-odbc's 64 KiB a value
+        "INSERT INTO dbo.lob_rows SELECT n, REPLICATE(CAST('x' AS varchar(max)), "
+        f"IIF(n % 10 = 0, 10, 60000)) FROM {_ROWS} WHERE n <= 400"
+    )
+    cap = 256 * 1024
+    cls = {"mssql-python": MssqlPythonBackend, "arrow-odbc": ArrowOdbcBackend}[backend]
+    reader = cls(sqlserver.connection_string, 30, cap)
+    try:
+        batches = list(reader.batches("SELECT id, doc FROM dbo.lob_rows ORDER BY id", (), 10_000))
+    finally:
+        reader.close()
+    assert [i for b in batches for i in b.column("id").to_pylist()] == list(range(1, 401))
+    assert sum(len(d) for b in batches for d in b.column("doc").to_pylist()) == 360 * 60000 + 400
+    assert max(b.nbytes for b in batches) <= cap, [b.nbytes for b in batches]
+
+
 def test_reconcile_matches_a_quiet_table_and_classifies_differences_injected_in_silver(
     delta_spark, sqlserver, workdir
 ):

@@ -4,7 +4,7 @@
 |---|---|---|---|---|
 | [0001](0001-python-datasource-v2.md) | Python DataSource V2 instead of a JVM connector | accepted | 2026-09-28T16:13:29-03:00 | 2026-09-30T11:07:08-03:00 |
 | [0002](0002-lsn-offsets-with-commit-time.md) | Offsets are hex LSNs carrying the commit time | accepted | 2026-09-28T16:13:29-03:00 |  |
-| [0003](0003-mssql-python-default-backend.md) | `mssql-python` as default driver, `arrow-odbc` as fallback | accepted | 2026-09-28T16:13:29-03:00 | 2026-09-28T21:44:31-03:00, 2026-09-30T16:14:54-03:00, 2026-10-01T17:55:59-03:00, 2026-10-05T00:15:23-03:00, 2026-10-08T14:28:19-03:00 |
+| [0003](0003-mssql-python-default-backend.md) | `mssql-python` as default driver, `arrow-odbc` as fallback | accepted | 2026-09-28T16:13:29-03:00 | 2026-09-28T21:44:31-03:00, 2026-09-30T16:14:54-03:00, 2026-10-01T17:55:59-03:00, 2026-10-05T00:15:23-03:00, 2026-10-08T14:28:19-03:00, 2026-10-08T14:37:54-03:00 |
 | [0004](0004-verdict-in-control-table.md) | `finalized_until` in a control table, never in table properties | accepted | 2026-09-28T16:13:29-03:00 |  |
 | [0005](0005-ordering-over-atomicity.md) | Data first, verdict after, monotonic | accepted | 2026-09-28T16:13:29-03:00 |  |
 | [0006](0006-file-backed-fake-for-engine-tests.md) | A file-backed CDC fake to test the real Spark engine | accepted | 2026-09-28T16:13:29-03:00 |  |

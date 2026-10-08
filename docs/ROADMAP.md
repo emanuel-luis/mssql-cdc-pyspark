@@ -92,7 +92,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
       the chunks unchanged); target: the full bootstrap's wall time, to be measured by the
       Databricks benchmark below.
 - [ ] silver filters chunks by wave instead of reading every chunk on each call.
-- [ ] Batches capped by bytes for LOB tables; keyset bounds instead of NTILE for full
+- [x] Batches capped by bytes for LOB tables; keyset bounds instead of NTILE for full
       snapshots.
 - [x] Measure `arrow-odbc`'s concurrent fetch (lab t8): +19% to +48% at 1 and 2 partitions,
       nothing at 4; a later release stops turning it off (ADR 0003, Amendment 4).

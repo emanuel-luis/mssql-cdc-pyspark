@@ -338,7 +338,7 @@ def test_mssql_python_batches_are_bounded_in_bytes_not_only_rows():
 
     from mssql_cdc.client import MssqlPythonBackend
 
-    class Cursor:  # each batch holds the rows asked for, of the next width (bytes per row)
+    class Cursor:  # the query's rows: a varbinary(max) value of each width, as many as asked
         def __init__(self, widths):
             self.widths, self.asked = list(widths), []
 
@@ -347,24 +347,27 @@ def test_mssql_python_batches_are_bounded_in_bytes_not_only_rows():
 
         def arrow_batch(self, n):
             self.asked.append(n)
-            width = self.widths.pop(0) if self.widths else 0
-            return SimpleNamespace(num_rows=n if width else 0, nbytes=n * width)
+            rows, self.widths = self.widths[:n], self.widths[n:]
+            return pa.RecordBatch.from_pydict({"doc": [b"x" * w for w in rows]})
 
         def close(self):
             pass
 
-    def asked(batch_size, *widths):
+    def asked(batch_size, widths, cap=1000):
         cursor = Cursor(widths)
         backend = object.__new__(MssqlPythonBackend)
-        backend._conn = SimpleNamespace(cursor=lambda: cursor)
-        list(backend.batches("SELECT 1", (), batch_size))
+        backend._conn, backend._max_bytes = SimpleNamespace(cursor=lambda: cursor), cap
+        batches = list(backend.batches("SELECT 1", (), batch_size))
+        assert [len(v) for b in batches for v in b.column("doc").to_pylist()] == widths
         return cursor.asked
 
-    mib = 1024 * 1024
-    # a first batch of at most 64 rows; then as many as fit in 64 MiB, up to batch_size
-    assert asked(10_000, mib, 100, 100) == [64, 64, 10_000, 10_000]
-    assert asked(10, 100) == [10, 10]
-    assert asked(10_000, 100 * mib) == [64, 1]  # one row wider than the bound: one a batch
+    # one row first, then at most twice the last batch's rows, up to batch_size
+    assert asked(50, [10] * 200) == [1, 2, 4, 8, 16, 32, 50, 50, 50, 50]
+    # as many as fit in the bound at the last batch's widest row, not its mean: after one
+    # value of 400 bytes among short ones, two rows, not the 15 the mean would allow
+    assert asked(50, [10] * 7 + [400] + [10] * 20 + [400] * 4) == [1, 2, 4, 8, 2, 4, 8, 2, 2, 2]
+    assert asked(50, [300] * 8) == [1, 2, 3, 3, 3]  # never more than the bound holds
+    assert asked(50, [2000] * 3) == [1, 1, 1, 1]  # one row wider than the bound: one a batch
 
 
 def test_make_client_requires_connection_string():
