@@ -223,7 +223,8 @@ read in. The stream cuts a batch into commit-aligned LSN ranges holding about th
 of change rows, each about 50,000 or more, so a batch of fewer than about 100,000 change rows
 is read in one partition ([ADR 0015](../decisions/0015-split-batches-by-change-rows.md)). A snapshot cuts
 a single integer key into uniform ranges between its MIN and MAX, any other key into `NTILE`
-tiles of the rows, and reads a table without a unique index in one partition.
+tiles of the rows, and reads a table without a unique index in one partition. A chunked
+snapshot's `backfill()` reads that many chunks at a time, however many a wave takes.
 
 * `auto`: the cores of the session that called `register()` (`defaultParallelism`;
   `stream()` calls it), else the CPU count of the node that plans (Spark Connect, or without
@@ -482,10 +483,10 @@ status = stream(spark, options).backfill(
 ```
 
 `backfill(target, *, app_id, facts_table, chunk_rows=None, max_waves=None,
-max_seconds=None, min_headroom_hours=None, isolation=None)` reads the newest chunked
-snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in waves of
-[numPartitions](#numpartitions) chunks, and returns how far it got. Call it again until
-`done`.
+max_seconds=None, target_wave_seconds=None, min_headroom_hours=None, isolation=None)` reads
+the newest chunked snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in
+waves of chunks read [numPartitions](#numpartitions) at a time, and returns how far it got.
+Call it again until `done`.
 
 * `target`, `app_id`, `facts_table`: as passed to `to_delta`; the stream's generations
   (`<app_id>.g<n>`) are found from `app_id`. With a full snapshot of the stream still
@@ -504,6 +505,12 @@ snapshot that `to_delta(..., snapshot="chunked")` opened for `target`, in waves 
   ([How chunks are sized](../guides/bootstrap.md#how-chunks-are-sized)).
 * `max_waves`, `max_seconds`: stop after that many waves, or before a wave once that many
   seconds have passed. `None`: until the snapshot is done.
+* `target_wave_seconds`: how long a wave should take (at least 0; `None` is 300). A wave
+  takes whole rounds of `numPartitions` chunks: one round when the call starts with no wave
+  read yet, then as many rounds as the target holds at the pace of the last wave read (an
+  earlier call's, from its facts rows), and no more than what is left of `max_seconds`
+  holds. `0` reads one round per wave, as before 0.5.0. Only how many of the plan's chunks a
+  wave takes changes: the chunks, their order and `chunk_rows` do not.
 * `min_headroom_hours`: before each wave, pause while the stream's newest facts row has
   less retention headroom (less that row's age), or there is none. `None`: never pause.
 * `isolation`: `"snapshot"` sets [isolationLevel](#isolationlevel) and plans the chunks
@@ -525,7 +532,9 @@ LSN S), `chunks_done`, `chunks_total` (the plan's count, `None` until a call has
 | `no_snapshot` | no chunked snapshot of this `target` and `app_id` is open: the stream has not opened it yet, or `target` or `app_id` is wrong, or the stream bootstraps with `snapshot="full"` |
 
 Each wave is one commit to `target` and one `snapshot_chunk` facts row per chunk
-([Tables](tables.md#facts)).
+([Tables](tables.md#facts)). The next wave is read while that commit and those rows are
+written, in a background thread: one wave reading and one committing at most, its rows
+cached until its commit.
 
 ## snapshot parameters
 

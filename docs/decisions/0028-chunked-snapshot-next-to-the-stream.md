@@ -6,7 +6,8 @@
 **Amended:** 2026-10-03T18:10:05-03:00, a full snapshot opens once per run and stops holding the mode once CDC cleanup passes it; a wave rebuilt from the chunks bronze holds; a keyset plan's open last chunk closed when read (see the Amendment)
 **Amended:** 2026-10-04T17:20:07-03:00, the plan counted and sought under the backfill's isolation, so `isolation="snapshot"` planning does not wait for writers' locks (see the Amendment)
 **Amended:** 2026-10-06T21:14:15-03:00, `reconcile` takes a difference the change table explains, after what the stream read, as IN_FLIGHT too, and finds a NULL key's change (see Amendment 2)  
-**Amended:** 2026-10-07T00:06:28-03:00, bronze's position is never a whole snapshot's S, which `snapshot_on_switch` takes above the stream's (see Amendment 2)
+**Amended:** 2026-10-07T00:06:28-03:00, bronze's position is never a whole snapshot's S, which `snapshot_on_switch` takes above the stream's (see Amendment 2)  
+**Amended:** 2026-10-08T13:47:54-03:00, `backfill()` reads the next wave while the one before commits, and a wave takes as many rounds of `numPartitions` chunks as `target_wave_seconds` holds; the plan's chunks unchanged (see Amendment 3)
 
 ## Context
 A snapshot taken before the stream starts (ADR 0016) has to be read within the CDC
@@ -75,8 +76,9 @@ silver's rebuild point), which chunk stamps break.
    `backfill()` call plans the chunks (Amendment).
    `backfill(target, *, app_id, facts_table, chunk_rows=None, max_waves=None,
    max_seconds=None, min_headroom_hours=None, isolation=None)` reads the newest open
-   snapshot in waves of `numPartitions` chunks, in its own task next to the stream task, and
-   returns `{snapshot, chunks_done, chunks_total, done, paused, reason}`.
+   snapshot in waves of `numPartitions` chunks (rounds of them, read ahead: Amendment 3), in
+   its own task next to the stream task, and returns
+   `{snapshot, chunks_done, chunks_total, done, paused, reason}`.
    - Considered: a second streaming query over the chunks. Its offsets would be chunk
      indices in a second checkpoint, with a query that ends; a batch call is the same reads
      with a bound (`max_waves`, `max_seconds`) and a retry the scheduler already gives.
@@ -397,3 +399,76 @@ insert below a whole snapshot appended above the stream's position IN_FLIGHT; a
 NULL key's change in bronze IN_FLIGHT, a real difference of it RECORD_DIFF, both named
 `null`. `tests/integration`: the same lag on SQL Server 2022, read by the stream's
 least-privilege login.
+
+## Amendment 3: waves read ahead, sized toward a duration
+Against a production source (DBR 18.2, `numPartitions` 4, `chunk_rows` 1,000,000), a chunked
+snapshot of 34 million rows took 943 s where a full one took 325 s, and one of 100 million rows
+5,096 s where a full one took 3,364 s: the waves read 58,000 and 24,500 rows/s, the full
+snapshots 105,000 and 30,000. Per wave of 4 chunks, read in 46 to 78 s and in 98 to 197 s,
+15 to 25 s went from its slowest chunk's read to the end of its append (the Spark jobs, the
+cache, the commit, the history read back), 6 to 8 s more before the next wave's read (its
+facts rows, the throttle, the stamp), and its slowest chunk took 12 to 15 s longer than the
+mean of the four, which the other three connections spent idle. The chunks stay as planned
+(the Amendment's plan): what changes is how a wave is read and how many of them it takes.
+
+* **Read ahead.** Once a wave is read (cached and counted, its metrics folded into its
+  tag), its append and then its facts rows go to one background thread, and the next wave
+  is stamped and read meanwhile. That wave's commit is handed over only once the one before
+  has finished: at most one wave reads while one commits, bronze takes the waves in order
+  (`txnVersion` the wave, as before), a wave's facts rows still follow its commit, and its
+  stamp is still recorded before its read. A crash still leaves at most the last committed
+  wave without its facts rows, which a rerun rebuilds as before. The read ahead assumes the
+  wave committing holds the chunks it read; when its commit holds others (a rerun's first
+  wave, which Delta skips for an earlier attempt's of another width, or a concurrent call's),
+  the wave read ahead is dropped and read again after the commit's last chunk. A failure in
+  either thread fails the call once the other has finished: a commit under way completes.
+  The commit thread inherits the caller's job group and scheduler pool
+  (`inheritable_thread_target`), and looks up commit times on a connection of its own, one
+  more per call.
+* **Waves of rounds, sized toward `target_wave_seconds`.** A wave takes whole rounds of
+  `numPartitions` chunks; its one partition per chunk is coalesced into `numPartitions`
+  partitions, partition p reading chunks p, p + `numPartitions`... one after the other, so
+  the connections stay `numPartitions` and neighbouring chunks are still read side by side.
+  The rounds are `target_wave_seconds` (300 when None) over the pace of the last wave: its
+  read, from its stamp to its rows cached, per round; for a call's first wave the facts
+  rows of the last wave committed (`duration_ms`, its read and its append); one round
+  without either. No more rounds than the rest of `max_seconds` holds, and at least one;
+  `target_wave_seconds=0` reads one round per wave, as before.
+* The default: production waves of 4 chunks read in 1 to 3 minutes, so 300 s means about 4
+  rounds on the 34-million-row table and 2 on the 100-million-row one, 3 waves instead of 9
+  and about 14 instead of 27, each still a few minutes of work lost to a crash.
+* Cost: a wave's rows stay cached until its commit, two waves at once while one reads
+  ahead (`MEMORY_AND_DISK`): about `numPartitions` × `target_wave_seconds` × a connection's
+  rate, 2 to 4 GB of wire bytes on that source at 300 s. `max_seconds` now also bounds a
+  wave's size; a call may still pass it by up to a wave and the commit under way.
+* Considered: adapting `chunk_rows`. Ruled out: the plan's chunks never change while the
+  snapshot is open, and a rerun or `reconcile` reads them back as planned.
+* Considered: one partition per chunk, scheduled by Spark. A cluster with more cores than
+  `numPartitions` would open as many connections as a wave has chunks.
+* Considered: the FAIR scheduler pool for the commit. Pools do not preempt running tasks:
+  with fewer partitions than cores the append finds free cores anyway, and with as many
+  the read's tasks hold them in either mode. The thread keeps the caller's pool.
+* Considered: reading two waves ahead. More rows cached for no more overlap: a commit is
+  shorter than a read.
+* Considered: capping a wave's growth. The target bounds its duration already; a first wave
+  much faster than the rest (a warm buffer pool) makes the next one longer, which the one
+  after corrects.
+* Measured locally against the fake, not against SQL Server: a chunked bootstrap of 4,000
+  rows with `chunk_rows=100` (41 chunks), `numPartitions` 2, Spark local[2] with Delta in
+  one container (`apache/spark:4.1.1-python3` with PySpark 4.2.0 and delta-spark 4.4.0), the
+  wall time of `backfill()` calls until done, after a warm-up run, the code before and
+  after in turn, twice; then the same with a 1 s sleep added before each chunk's read in the
+  Python workers, as a stand-in for a read over a link. Without the sleep: 21 waves in 84 to
+  155 s before; 2 waves in 13 to 16 s with the default target; 21 waves in 77 to 98 s with
+  `target_wave_seconds=0` (the read ahead alone, the commit sharing the two cores with the
+  next read). With it: 103 to 111 s before; 32 to 36 s; 91 to 94 s. On the fake almost all
+  of a wave is its fixed cost, so these show that cost going, not the production gain. The
+  Databricks benchmark against the production source runs after the release candidate.
+
+### Tests
+`tests/test_delta_sink.py`: a wave of four chunks read two at a time, one file per partition;
+waves of one round, then of the rounds `target_wave_seconds` holds at an earlier call's pace
+from its facts rows, then of what is left of `max_seconds`; the next wave stamped while the
+wave before still writes its facts rows, and that commit completing when the next wave's
+read fails; a wave read ahead of a rerun's commit that holds fewer chunks than it read,
+dropped and read again from the commit's last chunk.

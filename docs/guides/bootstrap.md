@@ -177,11 +177,12 @@ How it behaves ([ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream
    that row and start from S again until the checkpoint has offsets.
 2. The first `backfill()` call plans every chunk ([below](#how-chunks-are-sized)) and records
    the plan in a `snapshot_plan` facts row. Each call then reads the next chunks of the plan
-   in waves of [numPartitions](../reference/options.md#numpartitions) chunks, one connection
-   each. Before a wave is read, its stamp L is recorded, `max_lsn` again, at or after S. The
-   wave is appended to the target in one Delta commit: operation 0, `_start_lsn` = L,
-   `_snapshot` = S and the chunk in `_chunk`. Then one `snapshot_chunk` facts row per chunk:
-   its rows, L and its key range.
+   in waves, [numPartitions](../reference/options.md#numpartitions) chunks at a time, one
+   connection each. Before a wave is read, its stamp L is recorded, `max_lsn` again, at or
+   after S. The wave is appended to the target in one Delta commit: operation 0,
+   `_start_lsn` = L, `_snapshot` = S and the chunk in `_chunk`. Then one `snapshot_chunk`
+   facts row per chunk: its rows, L and its key range. The next wave is read meanwhile,
+   while a background thread writes that commit and those rows.
 3. After the last chunk, which ends just above the MAX recorded at the open, it writes the
    snapshot's `bootstrap` facts row, with min = max = S and the rows of every chunk, and
    returns `done`. Downstream rebuilds from S: its rows and every change after S.
@@ -205,6 +206,12 @@ so is every row inserted above the MAX: no chunk reads those.
   or the plan waits for a transaction holding locks in its range; never `NOLOCK`.
 - `max_waves` and `max_seconds` bound one call; the result also has `chunks_done`,
   `chunks_total` (the plan's, from the first call on) and the snapshot's LSN.
+- A wave takes whole rounds of `numPartitions` chunks, each connection reading its share one
+  chunk after the other: as many rounds as `target_wave_seconds` (5 minutes by default)
+  holds at the pace of the last wave, and no more than the rest of `max_seconds`. Each wave
+  pays a Spark job, a commit and its facts rows, and waits for its slowest connection, so
+  fewer, longer waves cost less; its rows stay cached until its commit, so a longer target
+  holds more of them. `target_wave_seconds=0` reads one round per wave.
 
 [`apply_changes`](silver.md#chunked-snapshots) applies the waves as they arrive, when given
 the facts table. [`reconcile`](validation.md) checks the chunks against the facts and the

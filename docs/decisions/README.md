@@ -29,7 +29,7 @@
 | [0025](0025-seed-from-an-existing-copy.md) | Seed a target from an existing copy of the table | accepted | 2026-10-01T16:53:59-03:00 | 2026-10-01T19:44:50-03:00, 2026-10-02T20:30:12-03:00 |
 | [0026](0026-continuous-finalization-listener.md) | Continuous-mode finalization through a streaming query listener | accepted | 2026-10-01T16:36:15-03:00 | 2026-10-01T19:44:50-03:00 |
 | [0027](0027-fan-out-one-stream-per-table.md) | Many tables: one stream per capture instance, started by a fan-out helper | accepted | 2026-10-01T16:30:09-03:00 |  |
-| [0028](0028-chunked-snapshot-next-to-the-stream.md) | Chunked snapshots read next to the running stream | accepted | 2026-10-02T20:30:12-03:00 | 2026-10-03T14:30:38-03:00, 2026-10-03T18:10:05-03:00, 2026-10-04T17:20:07-03:00, 2026-10-06T21:14:15-03:00, 2026-10-07T00:06:28-03:00 |
+| [0028](0028-chunked-snapshot-next-to-the-stream.md) | Chunked snapshots read next to the running stream | accepted | 2026-10-02T20:30:12-03:00 | 2026-10-03T14:30:38-03:00, 2026-10-03T18:10:05-03:00, 2026-10-04T17:20:07-03:00, 2026-10-06T21:14:15-03:00, 2026-10-07T00:06:28-03:00, 2026-10-08T13:47:54-03:00 |
 | [0029](0029-driver-retries-and-lock-timeout.md) | Driver-side retries, and an optional lock timeout | accepted | 2026-10-05T12:23:04-03:00 |  |
 | [0030](0030-protocols-for-the-pluggable-seams.md) | `typing.Protocol` for the pluggable seams | accepted | 2026-10-07T09:05:52-03:00 |  |
 | [0031](0031-strict-typing-gates.md) | Strict typing: mypy strict on `src`, `pyright --verifytypes` on the public API | accepted | 2026-10-07T10:49:11-03:00 | 2026-10-07T13:39:33-03:00 |

@@ -1,17 +1,20 @@
 """Chunked snapshots read next to the stream (ADR 0028): ``backfill()`` plans a snapshot's
 chunks once, reads them in waves, appends each wave to the target in one commit and then
 records its chunks in the facts; after a crash between the two, the facts come from the
-commit."""
+commit. A wave is read while the one before it commits, and sized toward a duration."""
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from functools import partial
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from .. import events
@@ -20,7 +23,7 @@ from ._common import _family, _iso, _log, _opt, _ts, _version
 from ._lock import _ModeLock
 
 if TYPE_CHECKING:
-    from pyspark.sql import DataFrame, Row
+    from pyspark.sql import DataFrame, Row, SparkSession
 
     from ..client import CdcClient, SourceTable
     from ..payloads import (
@@ -44,7 +47,13 @@ _SNAPSHOT_FACTS = (
     "lost_from_ts",
     "lost_to_ts",
     "written_at",
+    "duration_ms",
 )
+
+_WAVE_SECONDS = 300.0
+"""``backfill(target_wave_seconds=None)``: on a production source, a wave of 4 chunks of
+1,000,000 rows took 1 to 3 minutes to read, plus about 25 s of fixed cost (a Spark job, the
+commit, the facts rows): a few minutes per wave amortises that (ADR 0028)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +67,28 @@ class _ChunkRead:
     rows: int | None
     lsn: str
     """The stamp it was read under."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Wave:
+    """A wave read and cached, waiting for its commit (``_commit_wave``), which unpersists it."""
+
+    wave: int
+    rows: DataFrame
+    tag: WaveMetadata
+    empty: bool
+    started_at: datetime
+    t0: float
+    """``time.monotonic()`` when its read started."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Pending:
+    """A wave committing in ``backfill()``'s background thread, and the chunks it read."""
+
+    future: Future[list[_ChunkRead]]
+    wave: int
+    chunks: list[int]
 
 
 def _earlier_wave(spark: SparkSessionLike, target: str, key: str, wave: int) -> WaveMetadata | None:
@@ -87,13 +118,14 @@ class _Chunked(_ModeLock):
         chunk_rows: int | None = None,
         max_waves: int | None = None,
         max_seconds: float | None = None,
+        target_wave_seconds: float | None = None,
         min_headroom_hours: float | None = None,
         isolation: Isolation | None = None,
     ) -> BackfillStatus:
         """Read the newest open chunked snapshot of ``target`` (``to_delta(...,
-        snapshot="chunked")`` opens one) in waves of ``numPartitions`` chunks of at most about
-        ``chunk_rows`` rows, next to the running stream; returns how far it got. Run it
-        apart from the stream (its own task) and call it again until ``done``.
+        snapshot="chunked")`` opens one) in waves of chunks of at most about ``chunk_rows``
+        rows, ``numPartitions`` at a time, next to the running stream; returns how far it
+        got. Run it apart from the stream (its own task) and call it again until ``done``.
 
         The first call plans every chunk (``client.plan_chunks``: one integer key from row
         counts per slice of its range, the slices packed into chunks of at most ``chunk_rows``
@@ -112,7 +144,14 @@ class _Chunked(_ModeLock):
         downstream to rebuild from S. After a crash between a wave's append and its facts
         rows, the rerun's append is skipped by Delta and its rows are rebuilt from the one
         committed (from its commit's userMetadata or, once log cleanup dropped that, from its
-        rows in ``target``): nothing is appended twice.
+        rows in ``target``): nothing is appended twice. A wave is read while the one before
+        it is appended and recorded, in a background thread, one wave at a time.
+
+        A wave takes whole rounds of ``numPartitions`` chunks, partition p reading chunks p,
+        p + numPartitions... one after the other: one round at first, then as many as
+        ``target_wave_seconds`` (300 when None; 0 for one round) holds at the pace of the last
+        wave read (an earlier call's from its facts row), and no more than the rest of
+        ``max_seconds``. The plan's chunks and their order never change.
 
         ``app_id``: the stream's, as given to ``to_delta``. ``max_waves`` and ``max_seconds``
         bound one call. ``min_headroom_hours``: pause before a wave while the stream's
@@ -134,6 +173,8 @@ class _Chunked(_ModeLock):
         ``"no_snapshot"`` (no chunked snapshot opened by ``app_id``'s stream in ``target``:
         not yet, or a wrong ``app_id``, ``target`` or ``facts_table``).
         """
+        from pyspark import inheritable_thread_target
+
         from .. import sink
         from ..client import last_bound, make_client
         from ..source import ISOLATION_LEVELS, snapshot_lsn
@@ -141,6 +182,9 @@ class _Chunked(_ModeLock):
 
         if chunk_rows is not None and int(chunk_rows) < 1:
             raise ValueError(f"chunk_rows must be at least 1, not {chunk_rows}")
+        target_s = _WAVE_SECONDS if target_wave_seconds is None else float(target_wave_seconds)
+        if not target_s >= 0:  # NaN too
+            raise ValueError(f"target_wave_seconds must be at least 0, not {target_wave_seconds}")
         asked = isolation if isolation is not None else _opt(self.options, "isolationLevel")
         level = str(asked or "readCommitted").strip().lower()
         if level not in ISOLATION_LEVELS:
@@ -204,9 +248,45 @@ class _Chunked(_ModeLock):
             return {**status, "chunks_total": len(chunks), "done": True, "state": "done"}
         given = str(_opt(self.options, "numPartitions") or "auto").strip().lower()
         k = int(given) if given != "auto" else available_cores(self.spark) or os.cpu_count() or 1
+        k = max(1, k)
         base = _opt(self.options, "metricsPath")  # not the stream's own directory: it folds those
         metrics = os.path.join(base, f"{sink_id}.backfill") if base else None
+        # seconds per round of k chunks of the last wave read: at first an earlier call's, from
+        # its facts rows' duration (its read and its append)
+        pace: float | None = None
+        if chunks:
+            ms = [
+                r["duration_ms"]
+                for d, r in events.chunks_of(rows, s)
+                if d["wave"] == chunks[-1].wave
+            ]
+            pace = ms[0] / 1000 / math.ceil(len(ms) / k) if ms[0] else None
+
+        def width(total: int) -> int:
+            """How many chunks the next wave takes: whole rounds of k, as many as the target
+            holds at ``pace`` and the rest of ``max_seconds`` too, at least one."""
+            per_round = pace
+            if not per_round:
+                return k
+            rounds = target_s / per_round
+            if max_seconds is not None:
+                rounds = min(rounds, (max_seconds - (time.monotonic() - t0)) / per_round)
+            return k * max(1, int(min(rounds, total)))
+
         waves = 0
+        pending: _Pending | None = None
+
+        def settle() -> bool:
+            """Wait for the wave committing in the background, if any; whether its commit holds
+            the chunks it read (an earlier attempt's may hold others: ``_committed``)."""
+            nonlocal pending
+            if pending is None:
+                return True
+            was, pending = pending, None
+            held = was.future.result()
+            chunks.extend(held)
+            return [c.chunk for c in held] == was.chunks
+
         with closing(make_client(self.options)) as client:
             source = client.source_table(ci)
             if source.keys != info["keys"]:
@@ -215,95 +295,118 @@ class _Chunked(_ModeLock):
                     f"not on {info['keys']} as when the snapshot at {s} opened: its chunks no "
                     "longer tile the table. Take a new snapshot."
                 )
-            while not (chunks and chunks[-1].last):
-                if (max_waves is not None and waves >= max_waves) or (
-                    max_seconds is not None and time.monotonic() - t0 >= max_seconds
-                ):
-                    break
-                waiting = self._throttle(facts_table, sink_id, min_headroom_hours)
-                if waiting:
-                    status["paused"] = True
-                    status["state"], status["reason"] = waiting
-                    break
-                if plan is None:
-                    self._plan(
-                        client=client,
-                        ci=ci,
-                        source=source,
-                        info=info,
-                        top=top,
-                        target=target,
-                        facts_table=facts_table,
+            # A wave is read while the one before commits in the background (its append, then
+            # its facts rows), one commit at a time: bronze takes the waves in order. The
+            # commits look up commit times on a connection of their own.
+            with closing(make_client(self.options)) as clock, ThreadPoolExecutor(1) as committer:
+                # its jobs inherit the caller's job group and scheduler pool
+                inherit = inheritable_thread_target(cast("SparkSession", self.spark))
+                while True:
+                    if plan and pending and pending.chunks[-1] == len(plan["chunks"]) - 1:
+                        settle()  # the plan's last chunk: nothing left to read ahead
+                        continue
+                    if chunks and chunks[-1].last:
+                        break
+                    if (max_waves is not None and waves >= max_waves) or (
+                        max_seconds is not None and time.monotonic() - t0 >= max_seconds
+                    ):
+                        break
+                    waiting = self._throttle(facts_table, sink_id, min_headroom_hours)
+                    if waiting:
+                        status["paused"] = True
+                        status["state"], status["reason"] = waiting
+                        break
+                    if plan is None:
+                        self._plan(
+                            client=client,
+                            ci=ci,
+                            source=source,
+                            info=info,
+                            top=top,
+                            target=target,
+                            facts_table=facts_table,
+                            app_id=app_id,
+                            chunk_rows=chunk_rows,
+                            isolation=isolated,
+                        )
+                        # a concurrent call's, if Delta skipped ours
+                        plan = events.plan_of(read_facts(), s)
+                        assert plan is not None  # written just now
+                    t1 = time.monotonic()
+                    lsn = snapshot_lsn(client, source)  # the wave's stamp, before its read
+                    if lsn < s:
+                        raise RuntimeError(
+                            f"sys.fn_cdc_get_max_lsn() is {lsn}, below the snapshot's {s}: is this "
+                            "the database the snapshot was opened on (not a readable secondary)?"
+                        )
+                    every = plan["chunks"]
+                    extent = info["plan"]
+                    if (
+                        every[-1][1] is None
+                        and extent["kind"] == "keyset"
+                        and extent["max"] is not None
+                    ):
+                        # a keyset plan's last chunk ends at the first key after MAX, and there
+                        # was none at planning: sought again, so that rows inserted above MAX
+                        # since, the stream's, do not pile up in the last chunk
+                        end = last_bound(client, ci, source, extent["max"], isolated)
+                        every = [*every[:-1], [every[-1][0], end]]
+                    # after the wave committing, as if it holds the chunks it read
+                    if pending:
+                        first, wave = pending.chunks[-1] + 1, pending.wave + 1
+                    else:
+                        first = chunks[-1].chunk + 1 if chunks else 0
+                        wave = chunks[-1].wave + 1 if chunks else 0
+                    stop = min(first + width(len(every)), len(every))
+                    planned = [[i, *every[i]] for i in range(first, stop)]
+                    _log.info(
+                        "mssql_cdc: backfill of %s (snapshot %s, %s): wave %s, chunks %s to %s "
+                        "of %s, stamped %s",
+                        target,
+                        s,
+                        sink_id,
+                        wave,
+                        planned[0][0],
+                        planned[-1][0],
+                        len(every),
+                        lsn,
+                    )
+                    read = self._read_wave(
                         app_id=app_id,
-                        chunk_rows=chunk_rows,
+                        snapshot=s,
+                        wave=wave,
+                        lsn=lsn,
+                        planned=planned,
+                        every=every,
+                        k=k,
+                        client=client,
+                        metrics=metrics,
                         isolation=isolated,
                     )
-                    # a concurrent call's, if Delta skipped ours
-                    plan = events.plan_of(read_facts(), s)
-                    assert plan is not None  # written just now
-                last = chunks[-1] if chunks else None
-                lsn = snapshot_lsn(client, source)  # the wave's stamp, before its read
-                if lsn < s:
-                    raise RuntimeError(
-                        f"sys.fn_cdc_get_max_lsn() is {lsn}, below the snapshot's {s}: is this "
-                        "the database the snapshot was opened on (not a readable secondary)?"
+                    try:
+                        held = settle()  # the wave before: committed and recorded first
+                    except BaseException:
+                        read.rows.unpersist()
+                        raise
+                    if not held:  # it read other chunks than its commit holds: read again
+                        read.rows.unpersist()
+                        continue
+                    pace = (time.monotonic() - t1) / math.ceil(len(planned) / k)
+                    commit = partial(
+                        self._commit_wave,
+                        read,
+                        target=target,
+                        app_id=app_id,
+                        facts_table=facts_table,
+                        sink_id=sink_id,
+                        snapshot=s,
+                        every=every,
+                        clock=clock,
                     )
-                first = last.chunk + 1 if last else 0
-                every = plan["chunks"]
-                extent = info["plan"]
-                if (
-                    every[-1][1] is None
-                    and extent["kind"] == "keyset"
-                    and extent["max"] is not None
-                ):
-                    # a keyset plan's last chunk ends at the first key after MAX, and there was
-                    # none at planning: sought again, so that rows inserted above MAX since,
-                    # the stream's, do not pile up in the last chunk
-                    end = last_bound(client, ci, source, extent["max"], isolated)
-                    every = [*every[:-1], [every[-1][0], end]]
-                planned = [[i, *every[i]] for i in range(first, min(first + max(1, k), len(every)))]
-                wave = last.wave + 1 if last else 0
-                _log.info(
-                    "mssql_cdc: backfill of %s (snapshot %s, %s): wave %s, chunks %s to %s of %s, "
-                    "stamped %s",
-                    target,
-                    s,
-                    sink_id,
-                    wave,
-                    planned[0][0],
-                    planned[-1][0],
-                    len(every),
-                    lsn,
-                )
-                t1 = time.monotonic()
-                read = self._backfill_wave(
-                    target=target,
-                    app_id=app_id,
-                    facts_table=facts_table,
-                    sink_id=sink_id,
-                    snapshot=s,
-                    wave=wave,
-                    lsn=lsn,
-                    planned=planned,
-                    every=every,
-                    client=client,
-                    metrics=metrics,
-                    isolation=isolated,
-                )
-                chunks += read
-                waves += 1
-                _log.info(
-                    "mssql_cdc: backfill of %s (snapshot %s, %s): wave %s in, %s rows in %.1f s; "
-                    "chunks done %s of %s",
-                    target,
-                    s,
-                    sink_id,
-                    wave,
-                    sum(c.rows or 0 for c in read),
-                    time.monotonic() - t1,
-                    len(chunks),
-                    len(every),
-                )
+                    future = committer.submit(inherit(commit))
+                    pending = _Pending(future, wave, [i for i, *_ in planned])
+                    waves += 1
+                settle()
         done = bool(chunks) and chunks[-1].last
         if done:  # also after a crash between the last wave's facts and this row
             rows_in = sum(c.rows or 0 for c in chunks)
@@ -428,36 +531,34 @@ class _Chunked(_ModeLock):
             )
         return None
 
-    def _backfill_wave(
+    def _read_wave(
         self,
         *,
-        target: str,
         app_id: str,
-        facts_table: str,
-        sink_id: str,
         snapshot: str,
         wave: int,
         lsn: str,
         planned: list[list[Any]],
         every: list[list[Any]],
+        k: int,
         client: CdcClient,
         metrics: str | None,
         isolation: str | None,
-    ) -> list[_ChunkRead]:
-        """Read the ``planned`` chunks stamped ``lsn``, append them to ``target`` and record
-        them in the facts; ``every``: the plan's chunks. Returns those of the commit that
-        holds the wave, which an earlier attempt may have made with other chunks
-        (``_committed``)."""
+    ) -> _Wave:
+        """Read the ``planned`` chunks stamped ``lsn``, ``k`` at a time, into cached rows, with
+        the tag their commit will carry; ``every``: the plan's chunks."""
         from pyspark.sql import functions as F
 
-        from ..sink import _files, _remove, _utc_now, bronze_rows, write_facts
-        from ..tables import exists
+        from ..sink import _files, _remove, _utc_now, bronze_rows
 
         drop = ("snapshotchunks", "snapshotkeys", "snapshotlsn", "metricspath", "isolationlevel")
+        # one partition per chunk, in this order; coalesced below, partition p reads chunks p,
+        # p + k...: neighbours are read side by side, as in a wave of k
+        order = [c for p in range(k) for c in planned[p::k]]
         reader = (
             self.spark.read.format("mssql_cdc_snapshot")
-            .options(**{k: v for k, v in self.options.items() if k.lower() not in drop})
-            .option("snapshotChunks", json.dumps(planned))
+            .options(**{o: v for o, v in self.options.items() if o.lower() not in drop})
+            .option("snapshotChunks", json.dumps(order))
             .option("snapshotLsn", lsn)
         )
         if metrics:
@@ -466,19 +567,24 @@ class _Chunked(_ModeLock):
         if isolation:
             reader = reader.option("isolationLevel", isolation)
         started_at, t0 = _utc_now(), time.monotonic()
-        rows = bronze_rows(reader.load(), snapshot=F.lit(snapshot)).persist()
+        df = reader.load()
+        if len(planned) > k:  # k connections at a time, whatever the wave's size
+            df = df.coalesce(k)
+        rows = bronze_rows(df, snapshot=F.lit(snapshot)).persist()
         try:
-            # reads the wave, once: the write below takes the cached rows
+            # reads the wave, once: the write takes the cached rows
             counts: dict[int, int] = dict(rows.groupBy("_chunk").count().collect())
             high = client.max_lsn()  # how far capture had got after the read: informational
             read: dict[int, dict[str, Any]] = {}  # chunk -> its metrics file
-            for name in _files(metrics) if metrics else []:
+            names = _files(metrics) if metrics else []
+            for name in names:
                 try:
                     with open(name, encoding="utf-8") as fh:
                         m = json.load(fh)
                     read[m["chunk"]] = m
                 except (OSError, ValueError, KeyError):
                     continue
+            _remove(names)  # folded into the tag; the next wave writes its own meanwhile
             tag: WaveMetadata = {
                 "backfill": f"{app_id}#snap.{snapshot}",
                 "wave": wave,
@@ -498,20 +604,46 @@ class _Chunked(_ModeLock):
                     for i, lo, hi in planned
                 ],
             }
-            if counts:  # an empty wave writes no commit
-                tag = self._append_wave(target, snapshot, rows, tag, every)
+        except BaseException:
+            rows.unpersist()
+            raise
+        return _Wave(wave, rows, tag, not counts, started_at, t0)
+
+    def _commit_wave(
+        self,
+        w: _Wave,
+        *,
+        target: str,
+        app_id: str,
+        facts_table: str,
+        sink_id: str,
+        snapshot: str,
+        every: list[list[Any]],
+        clock: CdcClient,
+    ) -> list[_ChunkRead]:
+        """Append wave ``w`` to ``target``, unpersist it and record its chunks in the facts,
+        their commit times looked up on ``clock``; ``every``: the plan's chunks. Returns those of
+        the commit that holds the wave, which an earlier attempt may have made with other chunks
+        (``_committed``). Runs in ``backfill()``'s background thread."""
+        from ..sink import write_facts
+        from ..tables import exists
+
+        tag = w.tag
+        try:
+            if not w.empty:  # an empty wave writes no commit
+                tag = self._append_wave(target, snapshot, w.rows, tag, every)
             elif exists(self.spark, target):  # though an earlier attempt that read rows may have
                 tag = self._committed(target, snapshot, tag, every) or tag
         finally:
-            rows.unpersist()
+            w.rows.unpersist()
         times: dict[str | None, datetime | None] = {}
 
         def at(x: str | None) -> datetime | None:
             if x not in times:
-                times[x] = _ts(client.lsn_to_time(x)) if x else None
+                times[x] = _ts(clock.lsn_to_time(x)) if x else None
             return times[x]
 
-        duration_ms = round((time.monotonic() - t0) * 1000)
+        duration_ms = round((time.monotonic() - w.t0) * 1000)
         write_facts(
             self.spark,
             facts_table,
@@ -521,24 +653,32 @@ class _Chunked(_ModeLock):
                     app_id=sink_id,
                     target=target,
                     snapshot=snapshot,
-                    wave=wave,
+                    wave=w.wave,
                     lsn=tag["lsn"],
                     lsn_ts=at(tag["lsn"]),
                     high_ts=at(c["high_lsn"]),
-                    started_at=started_at,
+                    started_at=w.started_at,
                     duration_ms=duration_ms,
                 )
                 for c in tag["chunks"]
             ],
             f"{app_id}#snapchunks.{snapshot}",
-            wave,
+            w.wave,
         )
-        if metrics:  # folded into the facts
-            _remove(_files(metrics))
-        return [
-            _ChunkRead(c["chunk"], wave, c.get("last", False), c["rows"], tag["lsn"])
+        held = [
+            _ChunkRead(c["chunk"], w.wave, c.get("last", False), c["rows"], tag["lsn"])
             for c in tag["chunks"]
         ]
+        _log.info(
+            "mssql_cdc: backfill of %s (snapshot %s, %s): wave %s in, %s rows in %.1f s",
+            target,
+            snapshot,
+            sink_id,
+            w.wave,
+            sum(c.rows or 0 for c in held),
+            time.monotonic() - w.t0,
+        )
+        return held
 
     def _append_wave(
         self, target: str, snapshot: str, rows: DataFrame, tag: WaveMetadata, every: list[list[Any]]
@@ -587,7 +727,7 @@ class _Chunked(_ModeLock):
         once log cleanup has dropped it, rebuilt from its rows. None when there is none.
 
         The rebuild takes the chunks from the wave's first to the last that has rows in
-        ``target``, whatever the rerun planned (its ``numPartitions`` may differ): bounds from
+        ``target``, whatever the rerun planned (its wave may take other chunks): bounds from
         ``every`` (the plan's), the stamp and the row counts from the rows, ``read_seconds``
         and ``read_mb`` NULL. The attempt's empty chunks after them are read again by the
         next wave."""

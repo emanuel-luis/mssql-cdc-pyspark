@@ -1540,13 +1540,14 @@ def test_a_chunked_bootstrap_next_to_a_running_stream_and_a_writer_ends_equal_to
     try:
         q = run(processingTime="1 second")  # opens S and streams from it, next to the waves
         while not (statuses and statuses[-1]["done"]):
-            statuses.append(
+            statuses.append(  # two waves a call: one read while the other commits
                 cdc.backfill(
                     paths["bronze"],
                     app_id="ck-live",
                     facts_table=paths["facts"],
                     chunk_rows=60,
-                    max_waves=1,
+                    max_waves=2,
+                    target_wave_seconds=0,
                 )
             )
             applied.append(_apply(delta_spark, paths, ci, ["id"]))  # wave by wave
@@ -1563,7 +1564,7 @@ def test_a_chunked_bootstrap_next_to_a_running_stream_and_a_writer_ends_equal_to
     assert image == table, (commits, len(table), sorted(image ^ table)[:10])
     assert commits > 100, commits
     assert [s["chunks_done"] for s in statuses[:-1]] == [
-        2 * (i + 1) for i in range(len(statuses) - 1)
+        4 * (i + 1) for i in range(len(statuses) - 1)
     ]
     assert any(a["rebuilt"] for a in applied[-2:])  # at completion
     facts = delta_spark.read.format("delta").load(paths["facts"])
@@ -1629,7 +1630,12 @@ def test_keyset_chunks_tile_composite_and_varchar_keys_under_changes(
     while not (statuses and statuses[-1]["done"]):
         statuses.append(
             cdc.backfill(
-                paths["bronze"], app_id=name, facts_table=paths["facts"], chunk_rows=7, max_waves=1
+                paths["bronze"],
+                app_id=name,
+                facts_table=paths["facts"],
+                chunk_rows=7,
+                max_waves=1,
+                target_wave_seconds=0,  # a round a wave: changes between them
             )
         )
         if changes:  # in keys read already, and in keys not read yet
@@ -1783,7 +1789,13 @@ def test_a_chunked_resnapshot_deletes_stale_datetime2_keys_but_not_one_in_a_boun
     monkeypatch.setattr(cdc_client, "plan_chunks", lambda *_: [[None, b1], [b1, b2], [b2, None]])
 
     def wave() -> set:
-        cdc.backfill(paths["bronze"], app_id="ck-dt2", facts_table=paths["facts"], max_waves=1)
+        cdc.backfill(
+            paths["bronze"],
+            app_id="ck-dt2",
+            facts_table=paths["facts"],
+            max_waves=1,
+            target_wave_seconds=0,  # one chunk a wave
+        )
         _apply(delta_spark, paths, ci, ["at"])
         return values()
 

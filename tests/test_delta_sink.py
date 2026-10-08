@@ -1841,6 +1841,180 @@ def test_backfill_keeps_its_plan_and_rebuilds_a_waves_facts_from_bronze_without_
     assert _rebuilt(bronze, "order_id", "status", s) == _source(db)  # order -1 by the stream
 
 
+def _waves(spark, facts) -> list:
+    """The wave of each 'snapshot_chunk' row, in chunk order."""
+    details = sorted(
+        (json.loads(r["detail"]) for r in _events(spark, facts, "snapshot_chunk")),
+        key=lambda d: d["chunk"],
+    )
+    return [(d["chunk"], d["wave"]) for d in details]
+
+
+def test_backfill_sizes_its_waves_in_rounds_of_num_partitions_toward_a_target(delta_spark, workdir):
+    from pyspark.sql import functions as F
+
+    from mssql_cdc import stream
+    from mssql_cdc.tables import delta_table
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=24)  # 12 chunks of 2
+    options["numPartitions"] = "2"
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        cdc.to_delta(
+            target,
+            "pace-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    def backfill(**kwargs):
+        return cdc.backfill(target, app_id="pace-v1", facts_table=facts, chunk_rows=2, **kwargs)
+
+    def took(wave, seconds):  # what the wave's facts rows say it took, read and append
+        delta_table(spark, facts).update(
+            f"event = 'snapshot_chunk' AND get_json_object(detail, '$.wave') = {wave}",
+            {"duration_ms": F.lit(seconds * 1000)},
+        )
+
+    run()
+    with pytest.raises(ValueError, match="target_wave_seconds must be at least 0, not -1"):
+        backfill(target_wave_seconds=-1)
+    assert backfill(target_wave_seconds=0, max_waves=2)["chunks_done"] == 4  # a round each
+    took(1, 1000)  # a round of two chunks in 1000 s: an earlier call's pace
+    assert backfill(target_wave_seconds=2500, max_waves=1)["chunks_done"] == 8  # two rounds
+    took(2, 1000)  # two rounds in 1000 s: what is left of max_seconds holds one
+    status = backfill(target_wave_seconds=2500, max_seconds=700, max_waves=1)
+    assert status["chunks_done"] == 10
+    assert backfill()["done"]  # the default target holds the rest at this pace
+    assert _waves(spark, facts) == [
+        *((i, i // 2) for i in range(4)),
+        *((i, 2) for i in range(4, 8)),
+        (8, 3),
+        (9, 3),
+        (10, 4),
+        (11, 4),
+    ]
+    # a wave of four chunks read two at a time: one file per partition
+    files = {
+        json.loads(meta)["wave"]: int(metrics["numFiles"])
+        for meta, metrics in delta_table(spark, target)
+        .history()
+        .where("userMetadata LIKE '%\"backfill\"%'")
+        .select("userMetadata", "operationMetrics")
+        .collect()
+    }
+    assert files == {0: 2, 1: 2, 2: 2, 3: 2, 4: 2}
+    run()
+    bronze = spark.read.format("delta").load(target)
+    snap = bronze.where("_operation = 0").select("order_id").collect()
+    assert len(snap) == len({r["order_id"] for r in snap}) == 24
+    s = _events(spark, facts, "snapshot_open")[0]["min_lsn"]
+    assert _rebuilt(bronze, "order_id", "status", s) == _source(db)
+
+
+def test_backfill_reads_a_wave_while_the_one_before_commits(delta_spark, workdir, monkeypatch):
+    import threading
+
+    from mssql_cdc import sink, source, stream
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=8)  # 4 chunks of 2
+    options["numPartitions"] = "2"
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        cdc.to_delta(
+            target,
+            "ahead-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    run()
+    s = _events(spark, facts, "snapshot_open")[0]["min_lsn"]
+    stamps, stamped = [], threading.Event()
+    snapshot_lsn, write_facts = source.snapshot_lsn, sink.write_facts
+
+    def stamp(client, table):  # wave 1's stamp, before its read, which then fails
+        stamps.append(snapshot_lsn(client, table))
+        if len(stamps) == 2:
+            stamped.set()
+            raise RuntimeError("wave 1's read failed")
+        return stamps[-1]
+
+    def recorded_after_wave_1_started(spark_, table, rows, txn_app_id, version):
+        if rows[0]["event"] == "snapshot_chunk":
+            assert stamped.wait(60), "wave 0's facts rows came before wave 1's stamp"
+        write_facts(spark_, table, rows, txn_app_id, version)
+
+    monkeypatch.setattr(source, "snapshot_lsn", stamp)
+    monkeypatch.setattr(sink, "write_facts", recorded_after_wave_1_started)
+    with pytest.raises(RuntimeError, match="wave 1's read failed"):
+        cdc.backfill(target, app_id="ahead-v1", facts_table=facts, chunk_rows=2, max_waves=2)
+    monkeypatch.undo()
+    # wave 0 was appended and recorded before backfill() raised: the next call goes on from it
+    assert _waves(spark, facts) == [(0, 0), (1, 0)]
+    status = cdc.backfill(target, app_id="ahead-v1", facts_table=facts, target_wave_seconds=0)
+    assert status["done"] and status["chunks_done"] == 4
+    assert _waves(spark, facts) == [(0, 0), (1, 0), (2, 1), (3, 1)]
+    run()
+    bronze = spark.read.format("delta").load(target)
+    snap = bronze.where("_operation = 0").select("order_id").collect()
+    assert len(snap) == len({r["order_id"] for r in snap}) == 8
+    assert _rebuilt(bronze, "order_id", "status", s) == _source(db)
+
+
+def test_backfill_reads_again_a_wave_read_ahead_of_a_commit_holding_other_chunks(
+    delta_spark, workdir, monkeypatch
+):
+    from mssql_cdc import sink, stream
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=10)  # 5 chunks of 2
+    options["numPartitions"] = "2"
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        cdc.to_delta(
+            target,
+            "ahead2-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    run()
+    s = _events(spark, facts, "snapshot_open")[0]["min_lsn"]
+    monkeypatch.setattr(sink, "write_facts", _dies_after_the_append(sink.write_facts))
+    with pytest.raises(RuntimeError, match="the job died"):
+        cdc.backfill(target, app_id="ahead2-v1", facts_table=facts, chunk_rows=2, max_waves=1)
+    monkeypatch.undo()  # wave 0, chunks 0 and 1, appended without its facts rows
+    # the rerun reads waves of three: wave 0 again, which Delta skips (its commit holds chunks 0
+    # and 1), and meanwhile wave 1 from chunk 3, which it reads again from chunk 2
+    wider = stream(spark, {**options, "numPartitions": "3"})
+    status = wider.backfill(target, app_id="ahead2-v1", facts_table=facts, target_wave_seconds=0)
+    assert status["done"] and status["chunks_done"] == 5
+    assert _waves(spark, facts) == [(0, 0), (1, 0), (2, 1), (3, 1), (4, 1)]
+    run()
+    bronze = spark.read.format("delta").load(target)
+    snap = bronze.where("_operation = 0").select("order_id").collect()
+    assert len(snap) == len({r["order_id"] for r in snap}) == 10
+    assert _rebuilt(bronze, "order_id", "status", s) == _source(db)
+
+
 def test_a_keyset_plans_open_last_chunk_ends_at_the_first_key_after_max_when_read(
     delta_spark, workdir, monkeypatch
 ):
