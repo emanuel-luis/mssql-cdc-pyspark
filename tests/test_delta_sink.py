@@ -1921,6 +1921,8 @@ def test_backfill_sizes_its_waves_in_rounds_of_num_partitions_toward_a_target(de
 def test_backfill_reads_a_wave_while_the_one_before_commits(delta_spark, workdir, monkeypatch):
     import threading
 
+    import pyspark
+
     from mssql_cdc import sink, source, stream
 
     spark = delta_spark
@@ -1964,7 +1966,10 @@ def test_backfill_reads_a_wave_while_the_one_before_commits(delta_spark, workdir
     monkeypatch.undo()
     # wave 0 was appended and recorded before backfill() raised: the next call goes on from it
     assert _waves(spark, facts) == [(0, 0), (1, 0)]
+    # PySpark 4.0 and 4.1 without Connect or pinned threads hand the session back
+    monkeypatch.setattr(pyspark, "inheritable_thread_target", lambda f: f)
     status = cdc.backfill(target, app_id="ahead-v1", facts_table=facts, target_wave_seconds=0)
+    monkeypatch.undo()
     assert status["done"] and status["chunks_done"] == 4
     assert _waves(spark, facts) == [(0, 0), (1, 0), (2, 1), (3, 1)]
     run()

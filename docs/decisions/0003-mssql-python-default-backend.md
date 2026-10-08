@@ -137,7 +137,7 @@ mean of a few KB) followed by a run of long ones.
   the widest row of the batch before (the longest value of each text or binary column, plus
   the other columns' bytes per row), and at most twice that batch's rows, up to
   `arrowBatchSize`.
-* A narrow table reaches `arrowBatchSize` within fourteen fetches (1, 2, 4, ..., 8192, then
+* A narrow table reaches `arrowBatchSize` from its 15th fetch on (1, 2, 4, ..., 8192, then
   10,000). A table of `(max)` values stays under the bound while its rows are no wider than
   the batch before's: 400 rows of 60,000 characters read with a bound of 256 KiB, every batch
   under it, on both backends (`tests/integration`).

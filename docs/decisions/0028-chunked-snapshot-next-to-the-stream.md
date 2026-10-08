@@ -453,17 +453,9 @@ mean of the four, which the other three connections spent idle. The chunks stay 
 * Considered: capping a wave's growth. The target bounds its duration already; a first wave
   much faster than the rest (a warm buffer pool) makes the next one longer, which the one
   after corrects.
-* Measured locally against the fake, not against SQL Server: a chunked bootstrap of 4,000
-  rows with `chunk_rows=100` (41 chunks), `numPartitions` 2, Spark local[2] with Delta in
-  one container (`apache/spark:4.1.1-python3` with PySpark 4.2.0 and delta-spark 4.4.0), the
-  wall time of `backfill()` calls until done, after a warm-up run, the code before and
-  after in turn, twice; then the same with a 1 s sleep added before each chunk's read in the
-  Python workers, as a stand-in for a read over a link. Without the sleep: 21 waves in 84 to
-  155 s before; 2 waves in 13 to 16 s with the default target; 21 waves in 77 to 98 s with
-  `target_wave_seconds=0` (the read ahead alone, the commit sharing the two cores with the
-  next read). With it: 103 to 111 s before; 32 to 36 s; 91 to 94 s. On the fake almost all
-  of a wave is its fixed cost, so these show that cost going, not the production gain. The
-  Databricks benchmark against the production source runs after the release candidate.
+* Not yet measured against SQL Server: on the fake almost all of a wave is its fixed cost, so
+  a local run shows that cost going, not the production gain. The Databricks benchmark
+  against the production source runs after the release candidate.
 
 ### Tests
 `tests/test_delta_sink.py`: a wave of four chunks read two at a time, one file per partition;

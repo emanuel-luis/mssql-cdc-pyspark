@@ -36,14 +36,12 @@ migration.
   `numPartitions` at a time.
 - By default a wave now takes more than `numPartitions` chunks once a wave's pace is known
   (from the second wave of a call, or from the first after an earlier call). Pass
-  `target_wave_seconds=0` to keep the 0.4 behaviour. Measured locally against the fake (41
-  chunks, `numPartitions` 2): 2 waves in 13–16 s instead of 21 waves in 84–155 s. The
-  Databricks benchmark against a production source follows the release candidate.
+  `target_wave_seconds=0` to keep the 0.4 behaviour. The Databricks benchmark against a
+  production source follows the release candidate.
 - While a chunked snapshot is open, `apply_changes` reads only the waves that arrived since
   its last call. Delta now skips the files of the earlier waves, the files of the whole
   snapshot silver was rebuilt from, and the changes older than the first new wave's stamp.
-  Results are unchanged. Measured locally over 6 waves of 1M rows each: the rows a call
-  reads grow by 2M per wave instead of 3M, and what still grows is the MERGE over silver
+  Results are unchanged; what still grows with the waves is the MERGE over silver
   ([ADR 0019](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0019-silver-helper-applies-the-change-log/)
   amendment 3).
 - A full snapshot of a composite or non-integer key cuts its partitions with keyset seeks
@@ -60,7 +58,7 @@ migration.
   longest text or binary value) instead of its mean. Every read starts with one row, and
   each fetch takes at most twice the previous batch's rows. A table of `(max)` values
   therefore no longer builds gigabyte batches from a large first fetch or from one long
-  value among short ones. A narrow table reaches `arrowBatchSize` within 14 fetches.
+  value among short ones. A narrow table reaches `arrowBatchSize` from its 15th fetch on.
   `MssqlPythonBackend` takes `max_bytes_per_batch`, as `ArrowOdbcBackend` does
   ([ADR 0003](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0003-mssql-python-default-backend/)
   amendment 5).

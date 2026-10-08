@@ -299,8 +299,11 @@ class _Chunked(_ModeLock):
             # its facts rows), one commit at a time: bronze takes the waves in order. The
             # commits look up commit times on a connection of their own.
             with closing(make_client(self.options)) as clock, ThreadPoolExecutor(1) as committer:
-                # its jobs inherit the caller's job group and scheduler pool
-                inherit = inheritable_thread_target(cast("SparkSession", self.spark))
+                # its jobs inherit the caller's job group and scheduler pool. Without Connect or
+                # pinned threads there is nothing to inherit, and PySpark 4.0 and 4.1 hand the
+                # session back instead of a decorator
+                wrap = inheritable_thread_target(cast("SparkSession", self.spark))
+                inherit = wrap if callable(wrap) else (lambda f: f)
                 while True:
                     if plan and pending and pending.chunks[-1] == len(plan["chunks"]) - 1:
                         settle()  # the plan's last chunk: nothing left to read ahead
@@ -383,6 +386,7 @@ class _Chunked(_ModeLock):
                         metrics=metrics,
                         isolation=isolated,
                     )
+                    took = time.monotonic() - t1  # its read, not the wait for the commit below
                     try:
                         held = settle()  # the wave before: committed and recorded first
                     except BaseException:
@@ -391,7 +395,7 @@ class _Chunked(_ModeLock):
                     if not held:  # it read other chunks than its commit holds: read again
                         read.rows.unpersist()
                         continue
-                    pace = (time.monotonic() - t1) / math.ceil(len(planned) / k)
+                    pace = took / math.ceil(len(planned) / k)
                     commit = partial(
                         self._commit_wave,
                         read,
