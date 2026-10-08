@@ -862,7 +862,7 @@ def test_snapshot_tiles_composite_and_string_keys(spark, sqlserver, name, backen
         .option("numPartitions", "3")
         .load()
     )
-    assert df.rdd.glom().map(len).collect() == [4, 3, 3]  # NTILE(3) of 10 rows, each read once
+    assert df.rdd.glom().map(len).collect() == [4, 3, 3]  # NTILE(3)'s sizes, each row once
     assert sorted(r["v"] for r in df.collect()) == sorted(
         r[0] for r in sqlserver.run(f"SELECT v FROM dbo.{name}")
     )
@@ -2103,6 +2103,53 @@ def test_key_bound_seeks_each_piece_for_its_first_keys_only(sqlserver):
     # that stops after its first n + 1 keys: never the ~33,000 keys of the range
     assert rows == 1 and sql.count(f"TOP ({n + 1})") == 3
     assert _rows_read(plan) <= 3 * (n + 1), _rows_read(plan)
+
+
+def test_a_full_snapshot_cuts_a_composite_key_by_keyset_seeks_into_ntiles_ranges(
+    sqlserver, backend
+):
+    """A full snapshot's partitions of a composite key: NTILE's tiles, each bound a seek of its
+    tile's keys from the one before, never the whole key read and spooled."""
+    from pyspark.sql.types import IntegerType, StructField, StructType
+
+    from mssql_cdc.source import MssqlCdcSnapshotReader
+
+    ci = sqlserver.cdc_table(
+        "snap_keyset", "company INT NOT NULL, id INT NOT NULL, v INT, PRIMARY KEY (company, id)"
+    )
+    sqlserver.run(f"INSERT INTO dbo.snap_keyset SELECT n % 3, n, n FROM {_ROWS}")
+    schema = StructType([StructField(c, IntegerType()) for c in ("company", "id", "v")])
+    options = {"connectionString": sqlserver.connection_string, "captureInstance": ci}
+    reader = MssqlCdcSnapshotReader({**options, "backend": backend, "numPartitions": "4"}, schema)
+    client = reader.client
+    sent = []
+    real = client._b.batches
+
+    def record(sql, params, batch_size):
+        sent.append((sql, params))
+        return real(sql, params, batch_size)
+
+    client._b.batches = record
+    try:
+        parts = reader.partitions()
+        tiles = client.key_tiles("dbo", "snap_keyset", ["company", "id"], 4)  # as before
+    finally:
+        reader._drop_client()
+    assert [p.lo for p in parts] == [None, *tiles] and len(tiles) == 3
+    seeks = [(sql, params) for sql, params in sent if " OFFSET " in sql]
+    assert len(seeks) == 3 and not any("NTILE" in sql for sql, _ in sent[:-1])
+    for sql, params in seeks:  # one piece from the start, then two: (company = c, id >= i), c > c
+        _, plan = _plan(sqlserver, sql, params)
+        # the pieces merged in key order (a Merge Join concatenation), no sort: the seeks stop
+        # once the tile's 10,000 keys and the next are read
+        assert 'PhysicalOp="Sort"' not in plan and "Spool" not in plan
+        assert _rows_read(plan) <= 10_002, _rows_read(plan)
+    _, plan = _plan(sqlserver, sent[-1][0])
+    assert "Table Spool" in plan and _rows_read(plan) >= 40_000  # NTILE's: the whole key
+    # each range reads its tile's rows, which together are the table
+    read = [[r["id"] for b in reader.read(p) for r in b.to_pylist()] for p in parts]
+    assert [len(ids) for ids in read] == [10_000] * 4
+    assert sorted(i for ids in read for i in ids) == list(range(1, 40_001))
 
 
 def test_reconcile_matches_a_quiet_table_and_classifies_differences_injected_in_silver(

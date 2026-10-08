@@ -72,8 +72,8 @@ The read is split across `numPartitions` connections:
 
 - a single integer key column: uniform ranges between its minimum and maximum (sparse or
   skewed keys give uneven ranges);
-- a composite or non-integer key: tiles of the rows computed on the server with `NTILE`,
-  which reads the whole key once;
+- a composite or non-integer key: ranges of about the same number of rows (the table's row
+  count from `sys.sp_spaceused`), each bound a seek of its range's keys from the one before;
 - no unique index, or a key the stream cannot split on: one partition.
 
 The snapshot needs no permission beyond the stream's ([Permissions](permissions.md)).

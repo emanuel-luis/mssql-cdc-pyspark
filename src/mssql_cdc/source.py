@@ -1238,21 +1238,34 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         if self.num_partitions <= 1 or not keys or not set(keys) <= set(present):
             return ranges([], None, [])
         if len(keys) == 1:
-            # One integer key: uniform ranges over MIN..MAX, two seeks. NTILE would read and
-            # spool the whole key to count and tile it; sparse or skewed keys give uneven
-            # ranges instead. ponytail: a single non-integer key pays these two seeks too.
+            # One integer key: uniform ranges over MIN..MAX, two seeks; sparse or skewed keys
+            # give uneven ranges. ponytail: a single non-integer key pays these two seeks too.
             lo, hi = client.key_range(schema, table, keys[0])
             if lo is None or lo == hi:  # empty, or one row
                 return ranges([], None, [])
             if all(isinstance(v, int) and not isinstance(v, bool) for v in (lo, hi)):
                 n = min(self.num_partitions, hi - lo + 1)
                 return ranges(keys, None, [(lo + (hi - lo + 1) * i // n,) for i in range(1, n)])
-        # Composite or non-integer key: tiles of the rows by NTILE, bounds typed per column.
+        # Composite or non-integer key: NTILE's tiles of the rows sp_spaceused counts (the first
+        # rows % n one row more), each bound a seek of its tile's keys from the one before
+        # (key_bound, as a chunked keyset plan walks them): NTILE read and spooled the whole key.
         types = client.key_types(ci, keys)
         if None in types:
             return ranges([], None, [])
-        tiles = client.key_tiles(schema, table, keys, self.num_partitions)
-        return ranges(keys, cast("list[str]", types), tiles)  # no None: returned above
+        set_types = cast("list[str]", types)  # no None: returned above
+        rows = client.row_estimate(schema, table)
+        n = min(self.num_partitions, rows)
+        bounds: list[tuple[Any, ...]] = []
+        for i in range(n - 1):
+            start = bounds[-1] if bounds else None
+            step = rows // n + (i < rows % n)
+            bound = client.key_bound(
+                schema, table, keys, set_types, start, None, step, self.isolation
+            )
+            if bound is None:  # fewer rows than the estimate: the last tile ends open
+                break
+            bounds.append(bound)
+        return ranges(keys, set_types, bounds)
 
     def read(self, partition: KeyRange) -> Iterator[pa.RecordBatch]:  # type: ignore[override]  # partitions() only plans KeyRange
         from datetime import datetime

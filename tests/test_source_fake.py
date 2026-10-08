@@ -511,10 +511,16 @@ def test_starting_lsn_is_exclusive(workdir):
     assert _order_ids(reader, ranges) == [2, 3, 4]
 
 
-def _snapshot_partitions(src, schema, n):
-    """The snapshot reader's partitions, each with the key tuples it reads."""
+def _snapshot_partitions(src, schema, n, monkeypatch):
+    """The snapshot reader's partitions, each with the key tuples it reads. Their bounds are
+    keyset seeks (key_bound), never NTILE, which reads and spools the whole key."""
+    from mssql_cdc.fake import FakeCdcClient
     from mssql_cdc.source import MssqlCdcSnapshotReader
 
+    def ntile(*args):
+        raise AssertionError("a full snapshot tiles its key with NTILE")
+
+    monkeypatch.setattr(FakeCdcClient, "key_tiles", ntile)
     reader = MssqlCdcSnapshotReader(
         {"backend": "fake", "fakePath": src, "captureInstance": CI, "numPartitions": str(n)},
         schema,
@@ -526,7 +532,7 @@ def _snapshot_partitions(src, schema, n):
     ]
 
 
-def test_snapshot_of_a_string_key_is_tiled(workdir):
+def test_snapshot_of_a_string_key_is_tiled(workdir, monkeypatch):
     from pyspark.sql.types import StringType, StructField, StructType
 
     src = os.path.join(workdir, "src")
@@ -534,8 +540,8 @@ def test_snapshot_of_a_string_key_is_tiled(workdir):
     for i in range(5):
         db.commit(CI, [(2, {"code": f"C{i}", "status": "new"})], at=T0 + timedelta(minutes=i))
     schema = StructType([StructField("code", StringType()), StructField("status", StringType())])
-    parts = _snapshot_partitions(src, schema, 4)
-    # NTILE(4) of 5 rows: 2, 1, 1, 1; each range starts at its tile's first key
+    parts = _snapshot_partitions(src, schema, 4, monkeypatch)
+    # NTILE(4)'s tiles of 5 rows: 2, 1, 1, 1; each range starts at its tile's first key
     assert [(p.lo, p.hi) for p, _ in parts] == [
         (None, ("C2",)),
         (("C2",), ("C3",)),
@@ -546,7 +552,7 @@ def test_snapshot_of_a_string_key_is_tiled(workdir):
     assert {tuple(p.types or ()) for p, _ in parts} == {("sql_variant",)}  # typed bounds
 
 
-def test_snapshot_of_a_composite_key_reads_every_row_once(spark, workdir):
+def test_snapshot_of_a_composite_key_reads_every_row_once(spark, workdir, monkeypatch):
     from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 
     src = os.path.join(workdir, "src")
@@ -563,13 +569,13 @@ def test_snapshot_of_a_composite_key_reads_every_row_once(spark, workdir):
             StructField("status", StringType()),
         ]
     )
-    parts = _snapshot_partitions(src, schema, 5)
-    # NTILE(5) of 8 rows: 2, 2, 2, 1, 1; bounds with a NULL leading or trailing column
+    parts = _snapshot_partitions(src, schema, 5, monkeypatch)
+    # NTILE(5)'s tiles of 8 rows: 2, 2, 2, 1, 1; bounds with a NULL leading or trailing column
     assert [p.lo for p, _ in parts] == [None, (None, "y"), (1, "a"), (2, None), (2, "b")]
     assert [len(rows) for _, rows in parts] == [2, 2, 2, 1, 1]
     assert sorted((r for _, rows in parts for r in rows), key=str) == sorted(keys, key=str)
     # more partitions than rows: one row each
-    many = _snapshot_partitions(src, schema, 20)
+    many = _snapshot_partitions(src, schema, 20, monkeypatch)
     assert [len(rows) for _, rows in many] == [1] * 8
     # through Spark: the tuple bounds pickle to the executors
     opts = {
@@ -582,6 +588,15 @@ def test_snapshot_of_a_composite_key_reads_every_row_once(spark, workdir):
     df = spark.read.format("mssql_cdc_snapshot").options(**opts).load()
     assert df.rdd.getNumPartitions() == 5
     assert sorted(((r["region"], r["id"]) for r in df.collect()), key=str) == sorted(keys, key=str)
+    # the row count is an estimate (sys.sp_spaceused): too low, the last range holds the rest;
+    # too high, the seeks run out of rows and the last range ends open. Every row read once
+    from mssql_cdc.fake import FakeCdcClient
+
+    for estimate, sizes in ((3, [1, 1, 6]), (100, [8])):
+        monkeypatch.setattr(FakeCdcClient, "row_estimate", lambda self, s, t, n=estimate: n)
+        got = _snapshot_partitions(src, schema, 5, monkeypatch)
+        assert [len(rows) for _, rows in got] == sizes
+        assert sorted((r for _, rows in got for r in rows), key=str) == sorted(keys, key=str)
 
 
 def test_include_command_id_false_drops_the_column(spark, workdir):

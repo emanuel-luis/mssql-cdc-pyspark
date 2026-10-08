@@ -6,7 +6,8 @@
 **Amended:** 2026-09-30T15:21:04-03:00, the capture instance matches ignoring case (see Amendment 2)  
 **Amended:** 2026-10-01T17:55:59-03:00, key bounds bound as text for either backend (ADR 0003 Amendment 2)  
 **Amended:** 2026-10-02T20:30:12-03:00, a snapshot is named by `_snapshot`; chunked snapshots (see Amendment 3, ADR 0028)  
-**Amended:** 2026-10-03T18:10:05-03:00, chunk bounds planned once, from row counts (Amendment 3's last bullet, superseded by ADR 0028's Amendment)
+**Amended:** 2026-10-03T18:10:05-03:00, chunk bounds planned once, from row counts (Amendment 3's last bullet, superseded by ADR 0028's Amendment)  
+**Amended:** 2026-10-08T10:59:48-03:00, keyset seeks instead of NTILE for composite and non-integer keys (see Amendment 4)
 
 ## Context
 The stream starts from what CDC retention still holds (`startingLsn=earliest`), which is
@@ -164,3 +165,26 @@ largest `_start_lsn` of the operation-0 rows" no longer holds.
   (`tests/integration` checks it reads at most `n + 1` rows per piece). Superseded by ADR
   0028's Amendment: the first `backfill()` call plans every chunk, an integer key from row
   counts per slice and any other key by those keyset seeks, all before the first wave.
+
+## Amendment 4: keyset seeks instead of NTILE
+The tiling query of the first Amendment reads every key of the table, and sorts or spools
+it, before the snapshot reads its first row: a pass over the whole key on the server only
+to plan. A chunked snapshot's keyset plan (ADR 0028) finds its bounds by seeks instead.
+
+* A composite or non-integer key gets NTILE's ranges by those seeks. The row count comes
+  from `sys.sp_spaceused` (metadata, as a chunked integer plan reads it); the first
+  `rows % n` ranges hold one row more; each bound is `key_bound` from the bound before: the
+  key after its range's rows, a `TOP (k + 1)` per seekable piece of `_key_select`, then the
+  (k + 1)-th key of their union.
+* With an exact count the partitions are NTILE's. A count too low leaves the rest in the
+  last range; too high, the seeks run out of rows and fewer ranges come out. Every row is
+  still read once (`tests/test_source_fake.py`).
+* The seeks read each range's keys but the last range's, once: on 40,000 rows of
+  (company, id) in four ranges, each seek reads at most 10,002 keys, with no sort and no
+  spool (SQL Server merges the pieces in key order), where NTILE reads all 40,000 keys
+  through a Table Spool; the bounds equal NTILE's and each range reads its 10,000 rows
+  (`tests/integration`).
+* They read with the snapshot's `isolationLevel`, as a chunked plan's seeks do; the NTILE
+  query read under READ COMMITTED.
+* One integer key keeps the uniform ranges over MIN..MAX. `key_tiles` stays: `reconcile()`
+  cuts its ranges with it.

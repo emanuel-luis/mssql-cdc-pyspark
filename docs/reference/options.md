@@ -222,9 +222,10 @@ At most how many partitions, each with its own connection to SQL Server, a micro
 read in. The stream cuts a batch into commit-aligned LSN ranges holding about the same number
 of change rows, each about 50,000 or more, so a batch of fewer than about 100,000 change rows
 is read in one partition ([ADR 0015](../decisions/0015-split-batches-by-change-rows.md)). A snapshot cuts
-a single integer key into uniform ranges between its MIN and MAX, any other key into `NTILE`
-tiles of the rows, and reads a table without a unique index in one partition. A chunked
-snapshot's `backfill()` reads that many chunks at a time, however many a wave takes.
+a single integer key into uniform ranges between its MIN and MAX, any other key into ranges of
+about the same number of rows, each bound a seek of its range's keys from the one before, and
+reads a table without a unique index in one partition. A chunked snapshot's `backfill()` reads
+that many chunks at a time, however many a wave takes.
 
 * `auto`: the cores of the session that called `register()` (`defaultParallelism`;
   `stream()` calls it), else the CPU count of the node that plans (Spark Connect, or without
