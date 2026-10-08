@@ -333,9 +333,10 @@ def main(argv=None) -> bool:
         purged = normalize(
             scalar(conn, "SELECT CONVERT(varchar(22), sys.fn_cdc_get_min_lsn(?), 1)", (CI,))
         )
-        # The cleanup may leave min_lsn below the low water mark asked for (CI saw it one
-        # commit lower), so the check is what the stream needs: min_lsn past what it read, and
-        # no delete row of the gap left in the change table.
+        # The cleanup may leave min_lsn below the low water mark asked for: SQL Server lowers
+        # it to the first cdc.lsn_time_mapping entry sharing its tran_end_time (datetime, 1/300
+        # s), and _quiesce's insert commits right after the gap's. So the check is what the
+        # stream needs: min_lsn past what it read, and no delete row of the gap left.
         left = scalar(
             conn, f"SELECT COUNT_BIG(*) FROM cdc.[{CI}_CT] WHERE [__$operation] = 1 AND id % 50 = 0"
         )

@@ -12,6 +12,14 @@ compatibility" line.
 
 ## [Unreleased]
 
+### Changed
+
+- Tests: the fake-vs-SQL Server parity test gives each scripted transaction a commit time
+  of its own. `sp_cdc_cleanup_change_table` lowers a low water mark to the first
+  `cdc.lsn_time_mapping` entry sharing its `tran_end_time` (documented; `datetime`, 1/300 s),
+  so two commits within one tick made the test flaky. The library is not affected: cleanup
+  deletes exactly below the `min_lsn` it reports, so the retention guard stays sound.
+
 ## [0.4.1] - 2026-10-08
 
 State compatibility: unchanged from 0.4.0. Code moved and tests added only: offsets,

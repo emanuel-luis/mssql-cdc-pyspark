@@ -7,6 +7,7 @@ by LSN or time value, which differ by construction.
 
 from __future__ import annotations
 
+import time
 from bisect import bisect_left
 from contextlib import closing
 
@@ -83,6 +84,9 @@ def test_the_fake_answers_as_sql_server_on_one_scripted_history(sqlserver, tmp_p
     ci = sqlserver.cdc_table("parity", "id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL")
     for sql, _ in SCRIPT:
         sqlserver.run(sql)
+        # a commit time of its own: cleanup lowers a low water mark to the first
+        # cdc.lsn_time_mapping entry sharing its tran_end_time (datetime, 1/300 s)
+        time.sleep(0.01)
     sqlserver.wait_for_changes(ci, ROWS)
     commits = {
         normalize(lsn)

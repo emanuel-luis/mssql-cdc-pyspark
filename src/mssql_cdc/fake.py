@@ -617,7 +617,9 @@ class FakeCdcDatabase:
 
     def cleanup(self, capture_instance: str, low_water_mark: str) -> None:
         """Like sys.sp_cdc_cleanup_change_table: move the low watermark, then delete the
-        change rows below it, and the cdc.lsn_time_mapping rows below every instance's."""
+        change rows below it, and the cdc.lsn_time_mapping rows below every instance's.
+        SQL Server may lower the mark to the first mapping entry sharing its commit time;
+        the fake does not (rows are deleted exactly below min_lsn either way)."""
         p = os.path.join(self.path, _MIN)
         mins = _read_json(p)
         mins[capture_instance] = low_water_mark
