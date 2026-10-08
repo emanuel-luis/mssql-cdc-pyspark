@@ -85,7 +85,16 @@ from ._recovery import _write_state as _write_state
 from ._stream import CdcStream, stream
 from ._stream import _snapshot_after_switch as _snapshot_after_switch
 
-__all__ = ["CdcStream", "stream"]
+__all__ = [
+    "BackfillState",
+    "BackfillStatus",
+    "CdcStream",
+    "Isolation",
+    "Offset",
+    "OnDataLoss",
+    "SnapshotMode",
+    "stream",
+]
 
 _chunk_detail = _events.chunk_detail
 _mode = _events.mode

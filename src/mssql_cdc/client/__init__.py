@@ -23,8 +23,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-# Every name the module this package replaced defined stays importable from here, the
-# private ones (tests, the data source) too.
+# Every name the module this package replaced bound stays importable from here, the private
+# ones (tests, the data source) too, but its stdlib and pyarrow imports.
+from .. import lsn as _lsn  # noqa: F401 - 0.4.0's client.py bound it
+from ..lsn import Lsn as Lsn
 from ._backends import _MAX_BATCH_BYTES as _MAX_BATCH_BYTES
 from ._backends import ArrowOdbcBackend, MssqlPythonBackend
 from ._backends import _timestamps_in_us as _timestamps_in_us
@@ -45,6 +47,9 @@ from ._sql import _text as _text
 from ._sql_client import _SHIFT_HOURS as _SHIFT_HOURS
 from ._sql_client import SqlCdcClient
 from ._sql_client import _log as _log
+from ._validators import _IDENT_RE as _IDENT_RE
+from ._validators import _TYPE_RE as _TYPE_RE
+from ._validators import _TZ_RE as _TZ_RE
 from ._validators import _check_capture_instance as _check_capture_instance
 from ._validators import _check_column as _check_column
 from ._validators import _check_ident as _check_ident
@@ -58,6 +63,7 @@ __all__ = [
     "CdcClient",
     "DataLossError",
     "DdlChange",
+    "Lsn",
     "MssqlPythonBackend",
     "SchemaChangedError",
     "SourceTable",

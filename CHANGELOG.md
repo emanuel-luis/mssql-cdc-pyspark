@@ -27,6 +27,10 @@ checkpoint layout, table schemas, facts events and payloads are as in 0.4.0; no 
   Code moved only: every name imports from `mssql_cdc.pipeline` as before
   (`mssql_cdc.sink.write_event` too), the `mssql_cdc.pipeline` logger keeps its name, and
   every facts row and query result is the same.
+- Both packages declare `__all__`: `from mssql_cdc.client import *` and
+  `from mssql_cdc.pipeline import *` bind the public names the modules bound (`Lsn`, and
+  `Offset`, `SnapshotMode` and the other `mssql_cdc.types` names in pipeline), no longer
+  their stdlib imports.
 - Tests: `tests/test_properties.py` checks properties over inputs Hypothesis generates (it
   joins the dev group, pinned by `uv.lock`): LSN round trips, canonical form and order;
   chunk plans tiling random key distributions; each key's latest image in silver whatever
