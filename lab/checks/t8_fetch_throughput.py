@@ -5,12 +5,18 @@ strings, like a wide ERP table), fills it with CDC on, then times
 ``SqlCdcClient.iter_changes`` over the whole range with and without the ``(max)``
 columns, with two Arrow batch sizes and with a named time zone (commit times converted
 per range, not per row), next to a plain ``fetchall()`` baseline.
+``--concurrency`` times each backend instead over 1, 2 and 4 ranges from ``split_points``,
+each read by a process of its own as Spark's tasks read them, and arrow-odbc with its
+fetch on a thread of its own (``fetch_concurrently``) and without (ADR 0003).
 Informational: it reports rows/s, it does not pass or fail on a number.
 
     python -m lab.checks.t8_fetch_throughput --rows 200000
+    python -m lab.checks.t8_fetch_throughput --skip-setup --concurrency   # needs msodbcsql18
 """
 
 import argparse
+import multiprocessing
+import statistics
 import sys
 import time
 
@@ -22,6 +28,7 @@ DEC = [f"d{i}" for i in range(1, 41)]
 STR = [f"s{i}" for i in range(1, 41)]
 INT = [f"i{i}" for i in range(1, 9)]
 MAX = ["m1", "m2"]
+NO_MAX = ["id"] + DEC + STR + INT
 
 
 def _setup(conn, n: int, per_tx: int) -> None:
@@ -59,6 +66,79 @@ def _setup(conn, n: int, per_tx: int) -> None:
     wait_for_rows(conn, "dbo_fetch_bench", n, timeout=600)
 
 
+def _fetch_concurrently(on) -> None:
+    """Pool initializer: whatever ArrowOdbcBackend passes, arrow-odbc fetches the next batch
+    on a thread of its own (``on``, arrow-odbc's default) or not (None: left alone)."""
+    if on is None:
+        return
+    import arrow_odbc
+
+    read = arrow_odbc.Connection.read_arrow_batches
+    arrow_odbc.Connection.read_arrow_batches = lambda self, *a, **kw: read(
+        self, *a, **{**kw, "fetch_concurrently": on}
+    )
+
+
+def _read(backend, lo, hi, columns):
+    """One range read as a task reads it: a connection of its own; rows and Arrow bytes."""
+    client = make_client(
+        {"connectionString": connection_string(), "sourceTimeZone": "UTC", "backend": backend}
+    )
+    try:
+        n = size = 0
+        for b in client.iter_changes("dbo_fetch_bench", lo, hi, columns, True, 10_000):
+            n += b.num_rows
+            size += b.nbytes
+        return n, size
+    finally:
+        client.close()
+
+
+def _concurrency(lo, hi, partitions, backends, repeat):
+    cases = [
+        (label, backend, on)
+        for label, backend, on in (
+            ("mssql-python", "mssql-python", None),
+            ("arrow-odbc", "arrow-odbc", False),
+            ("arrow-odbc, fetch_concurrently", "arrow-odbc", True),
+        )
+        if backend in backends
+    ]
+    planner = make_client({"connectionString": connection_string(), "sourceTimeZone": "UTC"})
+    # fork, as Spark's Python daemon starts its workers; the pool is up before the clock starts
+    ctx = multiprocessing.get_context("fork")
+    out = []
+    for cols_label, columns in (("91 columns", NO_MAX + MAX), ("89 columns without (max)", NO_MAX)):
+        for n in partitions:
+            ranges, start = [], lo
+            for bound, after, _ in planner.split_points("dbo_fetch_bench", lo, hi, n):
+                ranges.append((start, bound))
+                start = after
+            times, got = {c[0]: [] for c in cases}, {}
+            for _ in range(repeat):  # interleaved, so drift spreads over every case
+                for label, backend, on in cases:
+                    with ctx.Pool(len(ranges), _fetch_concurrently, (on,)) as pool:
+                        t0 = time.perf_counter()
+                        parts = pool.starmap(_read, [(backend, f, t, columns) for f, t in ranges])
+                        times[label].append(time.perf_counter() - t0)
+                    got[label] = tuple(map(sum, zip(*parts)))
+            for label, _, _ in cases:
+                total, size = got[label]
+                s = statistics.median(times[label])
+                out.append(
+                    {
+                        "label": f"{label}, {cols_label}, {len(ranges)} partitions",
+                        "rows": total,
+                        "arrow_mb": round(size / 1e6, 1),
+                        "seconds": [round(t, 2) for t in times[label]],
+                        "rows_per_s": round(total / s),
+                        "mb_per_s": round(size / 1e6 / s, 1),
+                    }
+                )
+    planner.close()
+    return out
+
+
 def _time(label, fn):
     t0 = time.perf_counter()
     n = fn()
@@ -71,12 +151,31 @@ def main(argv=None) -> bool:
     p.add_argument("--rows", type=int, default=200_000)
     p.add_argument("--per-tx", type=int, default=10_000)
     p.add_argument("--skip-setup", action="store_true")
+    p.add_argument("--concurrency", action="store_true")
+    p.add_argument("--partitions", default="1,2,4")
+    p.add_argument("--backends", default="mssql-python,arrow-odbc")
+    p.add_argument("--repeat", type=int, default=3)
     a = p.parse_args(argv)
     conn = connect()
     if not a.skip_setup:
         _setup(conn, a.rows, a.per_tx)
     lo = scalar(conn, "SELECT CONVERT(varchar(22), sys.fn_cdc_get_min_lsn('dbo_fetch_bench'), 1)")
     hi = scalar(conn, "SELECT CONVERT(varchar(22), sys.fn_cdc_get_max_lsn(), 1)")
+    server = scalar(conn, "SELECT @@VERSION").splitlines()[0]
+    if a.concurrency:
+        runs = _concurrency(
+            lo, hi, [int(n) for n in a.partitions.split(",")], a.backends.split(","), a.repeat
+        )
+        checks = [
+            (
+                r["label"],
+                None,
+                f"{r['rows']} rows, {r['rows_per_s']:,} rows/s, {r['mb_per_s']} MB/s",
+            )
+            for r in runs
+        ]
+        extra = {"repeat": a.repeat, "server": server, "runs": runs}
+        return report("t8_fetch_throughput", checks, extra)
     client = make_client({"connectionString": connection_string(), "sourceTimeZone": "UTC"})
 
     named = make_client(
@@ -106,15 +205,14 @@ def main(argv=None) -> bool:
 
         return run
 
-    no_max = ["id"] + DEC + STR + INT
     runs = [
-        _time("arrow, 91 columns incl. 2 (max), batch 10k", changes(no_max + MAX, 10_000)),
-        _time("arrow, 89 columns without (max), batch 10k", changes(no_max, 10_000)),
-        _time("arrow, 89 columns without (max), batch 50k", changes(no_max, 50_000)),
-        _time("arrow, 91 columns incl. 2 (max), batch 50k", changes(no_max + MAX, 50_000)),
-        _time("arrow, 91 columns, named time zone", changes(no_max + MAX, 10_000, named)),
-        _time("fetchall rows, 91 columns incl. (max)", fetchall(no_max + MAX)),
-        _time("fetchall rows, 89 columns without (max)", fetchall(no_max)),
+        _time("arrow, 91 columns incl. 2 (max), batch 10k", changes(NO_MAX + MAX, 10_000)),
+        _time("arrow, 89 columns without (max), batch 10k", changes(NO_MAX, 10_000)),
+        _time("arrow, 89 columns without (max), batch 50k", changes(NO_MAX, 50_000)),
+        _time("arrow, 91 columns incl. 2 (max), batch 50k", changes(NO_MAX + MAX, 50_000)),
+        _time("arrow, 91 columns, named time zone", changes(NO_MAX + MAX, 10_000, named)),
+        _time("fetchall rows, 91 columns incl. (max)", fetchall(NO_MAX + MAX)),
+        _time("fetchall rows, 89 columns without (max)", fetchall(NO_MAX)),
     ]
     client.close()
     named.close()
@@ -126,7 +224,7 @@ def main(argv=None) -> bool:
         checks,
         {
             "rows": a.rows,
-            "server": scalar(conn, "SELECT @@VERSION").splitlines()[0],
+            "server": server,
             "runs": [
                 {"label": l, "rows": n, "seconds": round(s, 2), "rows_per_s": round(r)}
                 for l, n, s, r in runs
