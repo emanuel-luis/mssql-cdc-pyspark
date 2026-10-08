@@ -12,8 +12,63 @@ compatibility" line.
 
 ## [Unreleased]
 
+State compatibility: unchanged from 0.4.1. Offsets, checkpoint layout, table schemas, facts
+events and payloads, and the `userMetadata` of bronze commits keep their shape; no
+migration.
+
+### Added
+
+- `backfill(target_wave_seconds=None)`: how long a chunked snapshot's wave should take. A
+  wave takes whole rounds of `numPartitions` chunks: as many rounds as the target (300 s by
+  default) holds at the pace of the last wave read (an earlier call's, from its facts rows),
+  and no more than what is left of `max_seconds`. `0` reads one round per wave, as before.
+  The plan's chunks, their order and `chunk_rows` do not change
+  ([ADR 0028](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0028-chunked-snapshot-next-to-the-stream/)
+  amendment 3).
+
 ### Changed
 
+- `backfill()` reads the next wave while a background thread writes the previous wave's
+  bronze commit and facts rows. At most one wave reads while one commits. Bronze appends
+  stay in wave order, facts rows still follow their commit, and crash recovery is
+  unchanged. A call opens one more connection to SQL Server (for commit times) and can hold
+  two waves' rows cached at once. A wave of more chunks than `numPartitions` still reads
+  `numPartitions` at a time.
+- By default a wave now takes more than `numPartitions` chunks once a wave's pace is known
+  (from the second wave of a call, or from the first after an earlier call). Pass
+  `target_wave_seconds=0` to keep the 0.4 behaviour. Measured locally against the fake (41
+  chunks, `numPartitions` 2): 2 waves in 13–16 s instead of 21 waves in 84–155 s. The
+  Databricks benchmark against a production source follows the release candidate.
+- While a chunked snapshot is open, `apply_changes` reads only the waves that arrived since
+  its last call. Delta now skips the files of the earlier waves, the files of the whole
+  snapshot silver was rebuilt from, and the changes older than the first new wave's stamp.
+  Results are unchanged. Measured locally over 6 waves of 1M rows each: the rows a call
+  reads grow by 2M per wave instead of 3M, and what still grows is the MERGE over silver
+  ([ADR 0019](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0019-silver-helper-applies-the-change-log/)
+  amendment 3).
+- A full snapshot of a composite or non-integer key cuts its partitions with keyset seeks
+  instead of `NTILE`. The row count comes from `sys.sp_spaceused`, the ranges take NTILE's
+  sizes, and each bound is a seek of its range's keys from the bound before (as in a chunked
+  snapshot's keyset plan), under the snapshot's `isolationLevel`. NTILE read and sorted or
+  spooled every key of the table before the first row was read. On 40,000 rows in four
+  ranges, each seek reads at most 10,002 keys, with no sort and no spool. With an exact
+  count the partitions are NTILE's; with a stale one every row is still read once. A single
+  integer key keeps its MIN..MAX ranges
+  ([ADR 0016](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0016-bootstrap-snapshot-at-a-recorded-lsn/)
+  amendment 4).
+- The default backend sizes each Arrow batch by the widest row of the batch before (the
+  longest text or binary value) instead of its mean. Every read starts with one row, and
+  each fetch takes at most twice the previous batch's rows. A table of `(max)` values
+  therefore no longer builds gigabyte batches from a large first fetch or from one long
+  value among short ones. A narrow table reaches `arrowBatchSize` within 14 fetches.
+  `MssqlPythonBackend` takes `max_bytes_per_batch`, as `ArrowOdbcBackend` does
+  ([ADR 0003](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0003-mssql-python-default-backend/)
+  amendment 5).
+- Lab: t8 `--concurrency` times each backend over 1, 2 and 4 partitions, each with a
+  connection of its own. `arrow-odbc`'s concurrent fetch gains 19% to 48% at 1 and 2
+  partitions and nothing at 4; the backend still turns it off
+  ([ADR 0003](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0003-mssql-python-default-backend/)
+  amendment 4).
 - Tests: the fake-vs-SQL Server parity test gives each scripted transaction a commit time
   of its own. `sp_cdc_cleanup_change_table` lowers a low water mark to the first
   `cdc.lsn_time_mapping` entry sharing its `tran_end_time` (documented; `datetime`, 1/300 s),

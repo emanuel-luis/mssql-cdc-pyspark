@@ -91,7 +91,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
       toward a duration (`target_wave_seconds`: how many of the plan's chunks a wave takes,
       the chunks unchanged); target: the full bootstrap's wall time, to be measured by the
       Databricks benchmark below.
-- [ ] silver filters chunks by wave instead of reading every chunk on each call.
+- [x] silver filters chunks by wave instead of reading every chunk on each call.
 - [x] Batches capped by bytes for LOB tables; keyset bounds instead of NTILE for full
       snapshots.
 - [x] Measure `arrow-odbc`'s concurrent fetch (lab t8): +19% to +48% at 1 and 2 partitions,
