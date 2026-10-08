@@ -5,7 +5,8 @@
 **Amended:** 2026-09-28T21:44:31-03:00, the `(max)` caveat measured (lab t8)  
 **Amended:** 2026-09-30T16:14:54-03:00, installed with the package instead of the `[mssql]` extra  
 **Amended:** 2026-10-01T17:55:59-03:00, `arrow-odbc` tested in CI; what it took and what still differs (see Amendment 2)  
-**Amended:** 2026-10-05T00:15:23-03:00, the default ships closed binaries too: ADBC's rejection corrected (see Amendment 3)
+**Amended:** 2026-10-05T00:15:23-03:00, the default ships closed binaries too: ADBC's rejection corrected (see Amendment 3)  
+**Amended:** 2026-10-08T14:28:19-03:00, `arrow-odbc`'s concurrent fetch measured (lab t8, see Amendment 4)
 
 ## Context
 `read()` yields Arrow record batches from executors. The driver should fetch natively into
@@ -90,3 +91,36 @@ with pip on every managed platform. The choice stands; the trade-off is now stat
   `pyarrow` and `arrow-odbc`) and uses `backend=arrow-odbc` with ODBC Driver 18 installed
   separately, where its EULA is accepted explicitly (`ACCEPT_EULA=Y`). The import of
   `mssql-python` is lazy, so nothing else needs it.
+
+## Amendment 4: `arrow-odbc`'s concurrent fetch, measured
+`ArrowOdbcBackend` passes `fetch_concurrently=False`, turning off arrow-odbc's default: a
+second set of buffers filled on a thread of its own while the caller takes the previous
+batch. Lab t8 `--concurrency` timed it on and off, next to mssql-python, over
+`dbo.fetch_bench` (400k change rows) split by `split_points` into 1, 2 and 4 ranges, each
+read by a process with a connection of its own, as Spark's tasks read them. Median of 5 runs,
+rows/s and Arrow MB/s:
+
+| Columns | Partitions | mssql-python | arrow-odbc | arrow-odbc, `fetch_concurrently` |
+|---|---|---|---|---|
+| 91, two `(max)` | 1 | 30.5k, 54 | 27.0k, 42 | 40.1k, 63 |
+| 91, two `(max)` | 2 | 56.3k, 99 | 51.3k, 80 | 65.8k, 103 |
+| 91, two `(max)` | 4 | 89.5k, 157 | 97.2k, 152 | 84.4k, 132 |
+| 89, no `(max)` | 1 | 49.3k, 71 | 44.9k, 57 | 53.5k, 68 |
+| 89, no `(max)` | 2 | 82.0k, 118 | 77.6k, 98 | 92.3k, 116 |
+| 89, no `(max)` | 4 | 127.7k, 184 | 120.4k, 152 | 121.7k, 153 |
+
+SQL Server 2022 CU27 from the compose lab; the client in a Debian 12 container on the same
+Docker VM (16 CPUs), with unixODBC 2.3.11, msodbcsql18 18.7.1, arrow-odbc 10.4.2,
+mssql-python 1.15.0 and pyarrow 25.0.1. mssql-python's batches hold 12–14% more Arrow
+bytes for the same rows, so rows/s is the number to compare.
+
+* Partitions scale both backends alike, 2.6x to 3.6x at 4: each is a connection of its
+  own, so arrow-odbc needs nothing more for them.
+* The concurrent fetch is a clear win at 1 and 2 partitions: +48% and +28% with the `(max)`
+  columns, +19% without, and ahead of mssql-python. At 4 it gains nothing, and loses 13%
+  with the `(max)` columns, here where client and server share the VM's CPUs. t8 does
+  nothing with a batch; the reader also casts it and hands it to Spark, more work for the
+  fetch thread to overlap.
+* It costs a second set of buffers: up to `max_bytes_per_batch`, 64 MiB, more per task.
+* No option: a later release stops turning it off, once a run with client and server on
+  separate machines settles the 4-partition result. The code is unchanged for now.
