@@ -4,7 +4,8 @@
 **Date:** 2026-09-30T11:07:22-03:00  
 **Amended:** 2026-10-02T20:30:12-03:00, chunked snapshots, snapshots named by `_snapshot` and completion events, operation 3 deletes its own key (see the Amendment, ADR 0028)  
 **Amended:** 2026-10-03T14:30:38-03:00, an open re-snapshot's waves applied, and per-wave range deletes on one integer, date or timestamp key (see Amendment 2, ADR 0028)  
-**Amended:** 2026-10-07T04:49:27-03:00, `capture_instance` and `keys` keyword-only from 0.3.0 ([ADR 0021](0021-compatibility-policy-for-0x.md) amendment 5)
+**Amended:** 2026-10-07T04:49:27-03:00, `capture_instance` and `keys` keyword-only from 0.3.0 ([ADR 0021](0021-compatibility-policy-for-0x.md) amendment 5)  
+**Amended:** 2026-10-08T13:06:12-03:00, a call reads only the waves since its position (see Amendment 3)
 
 ## Context
 Bronze is an append-only change log: one row per change, updates as two rows, the snapshot
@@ -146,3 +147,25 @@ large re-snapshot that leaves the keys deleted in the purged gap in silver for w
   in its microsecond are deleted by no chunk and left to the rebuild.
 * The rebuild at completion is unchanged: it still removes every key absent from the
   snapshot and the changes after it, whatever the key type.
+
+## Amendment 3: a call reads the waves since its position
+While a chunked snapshot was open, each call read every chunk row of it (looking for whole
+snapshots and counting chunk rows) and every change since S (ranking the new chunks' keys),
+so a call after each wave grew with the waves before it. The results are unchanged; what a
+call reads is not:
+
+* Whole snapshots are looked for among the operation-0 rows with `_chunk` NULL and
+  `_start_lsn` above `snapshot_lsn`, which is itself a point (bronze and the facts are
+  append-only): Delta's file statistics skip the chunks' files and those of the snapshot
+  silver was rebuilt from. Chunk rows are looked for, to fail the call, only without
+  `facts_table` or without a chunked `'snapshot_open'` row.
+* The new waves are read by `_snapshot`, `_chunk` and their stamp: a chunk's rows carry in
+  `_start_lsn` the stamp its `'snapshot_chunk'` row has in `min_lsn` (a wave is one commit
+  under one stamp, ADR 0028), so Delta skips the earlier waves' files by `_start_lsn` even
+  where it keeps no statistics on `_snapshot` and `_chunk` (a table's columns after the
+  32nd). The `'snapshot_chunk'` rows, one per chunk, are still all read, before bronze is
+  pinned: a wave's facts rows come after its bronze commit, and the waves applied are known
+  only after bronze is read.
+* The changes ranked with the new chunks' keys start at the first new stamp: an older change
+  ranks below every new chunk row.
+* The rebuild at completion still reads every chunk row of the snapshot.

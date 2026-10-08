@@ -111,7 +111,8 @@ A [chunked snapshot](bootstrap.md#chunked-snapshots) arrives in waves over days,
 - While a chunked snapshot is open, a bootstrap or a re-snapshot, each call applies the
   waves that arrived since the last one, tracked by `open_snapshot_lsn` and `snapshot_wave`
   in the control table. A chunk row is ranked with every later change of its key in bronze,
-  so it never brings back a key the stream deleted after the chunk's stamp.
+  so it never brings back a key the stream deleted after the chunk's stamp. A call reads
+  those waves' rows alone: Delta skips the earlier waves' files by their stamps.
 - Each wave also removes the keys its chunks prove gone (range deletes, below).
 - At the snapshot's `bootstrap` or `resnapshot` row, silver is rebuilt from its rows and
   the changes after S, and every key absent from both is deleted, whatever the key type.
@@ -177,8 +178,10 @@ silver, and rows that have not changed since read NULL for it.
   one, SQL Server no longer lists the old name, and a silver table built from scratch fails
   on the old rows. Keep the old (default) name configured: the stream follows the table's
   newest instance anyway.
-- The MERGE joins against the whole silver table, and each call scans bronze for snapshot
-  rows. Delta file statistics skip most of that scan, but it grows with bronze. Silver is
+- The MERGE joins against the whole silver table, and each call scans bronze for whole
+  snapshots newer than the one silver was rebuilt from. Delta file statistics skip most of
+  that scan (chunk files by `_chunk`, which has statistics while it is among the table's
+  first 32 columns), but it grows with bronze. Silver is
   created with no Delta feature beyond the defaults: deletion vectors, clustering by the
   keys and a scheduled `OPTIMIZE` make the MERGE cheaper, and are yours to enable
   ([Table properties](../reference/tables.md#table-properties)).

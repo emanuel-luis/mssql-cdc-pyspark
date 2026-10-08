@@ -39,12 +39,13 @@ Run it after the stream, in the same job or another; one job per silver table.
   bootstrap or a re-snapshot, each call applies the waves its 'snapshot_chunk' rows announce,
   tracked by ``open_snapshot_lsn`` and ``snapshot_wave`` (the chunks land below
   ``applied_lsn``), with every change after S of their keys: a chunk row never brings back a
-  key deleted since. With one key of an integer, date or timestamp type, the one the chunks
-  are cut on, a chunk also deletes the silver keys of its range [lo, hi) it does not hold
-  whose image is older than its stamp L: it saw every commit up to L. So the keys deleted in
-  a re-snapshot's purged gap go wave by wave. A datetime2(7) bound with digits below the
-  microsecond Spark keeps leaves the keys of that microsecond alone. Either way, the rebuild
-  comes at completion, and deletes the keys absent from the snapshot and the changes after it.
+  key deleted since. A call reads those waves' rows alone, not the earlier waves' files.
+  With one key of an integer, date or timestamp type, the one the chunks are cut on, a chunk
+  also deletes the silver keys of its range [lo, hi) it does not hold whose image is older
+  than its stamp L: it saw every commit up to L. So the keys deleted in a re-snapshot's
+  purged gap go wave by wave. A datetime2(7) bound with digits below the microsecond Spark
+  keeps leaves the keys of that microsecond alone. Either way, the rebuild comes at
+  completion, and deletes the keys absent from the snapshot and the changes after it.
 * Verdict: silver's ``finalized_until`` advances to the bronze verdict read before bronze
   itself. Bronze commits its rows before its verdict (ADR 0005), so the rows applied hold
   every commit up to it: silver never claims more than it has applied. While a snapshot is
@@ -173,9 +174,9 @@ class _Chunk:
 def _chunks(facts: DataFrame, snapshot: str) -> dict[int, _Chunk]:
     """The chunks of ``snapshot`` its 'snapshot_chunk' facts rows announce, by index. They
     are written after the chunks' bronze rows."""
-    rows = (
-        events.where_chunks(facts, snapshot).select("detail", "min_lsn").collect()
-    )  # ponytail: every chunk of the snapshot on each call; filter by wave if it shows up
+    # ponytail: the row of every chunk on each call, read before bronze is pinned, when the
+    # waves applied are not known yet; the bronze reads skip by wave
+    rows = events.where_chunks(facts, snapshot).select("detail", "min_lsn").collect()
     chunks: dict[int, _Chunk] = {}
     for row in rows:
         d: SnapshotChunkDetail = json.loads(row["detail"])
@@ -423,21 +424,20 @@ def apply_changes(
     op = F.col("_operation")
     snapshot_rows = ours & (op == 0)
     if rebuilt_from:
-        # A whole snapshot's rows carry its S in _start_lsn too, and rebuilt_from stays among
-        # the points (bronze and the facts are append-only): no older snapshot can change the
-        # result, and Delta's stats on _start_lsn skip their files.
-        snapshot_rows &= F.col("_start_lsn") >= rebuilt_from
-    whole, chunk_rows = (
-        pinned.where(snapshot_rows)
-        .agg(F.max(F.when(~chunked, snap)), F.count(F.when(chunked, 1)))
-        .collect()[0]  # a global aggregation: one row
-    )
-    if chunk_rows and facts is None:
-        raise ValueError(
-            f"{bronze} holds rows of a chunked snapshot: pass facts_table (the stream's), "
-            "whose rows say which chunks arrived and when the snapshot is complete"
-        )
-    if chunk_rows and opened is None and every is not None:
+        # A whole snapshot's rows carry its S in _start_lsn too, and rebuilt_from is a point
+        # (bronze and the facts are append-only): no snapshot at or below it can change the
+        # result, and Delta's stats on _start_lsn skip their files, its own included.
+        snapshot_rows &= F.col("_start_lsn") > rebuilt_from
+        points.append(rebuilt_from)
+    # the whole snapshots' rows alone: Delta's stats on _chunk skip the chunks' files
+    whole = _one(pinned.where(snapshot_rows & ~chunked).agg(F.max(snap)))
+    # chunk rows need the facts and their 'snapshot_open' row: looked for only without either
+    if (facts is None or opened is None) and pinned.where(snapshot_rows & chunked).first():
+        if every is None:
+            raise ValueError(
+                f"{bronze} holds rows of a chunked snapshot: pass facts_table (the stream's), "
+                "whose rows say which chunks arrived and when the snapshot is complete"
+            )
         named = every.where(F.col("event") == events.SNAPSHOT_OPEN).select("target").distinct()
         raise ValueError(
             f"{bronze} holds rows of a chunked snapshot, but {facts_table} has no "
@@ -464,8 +464,14 @@ def apply_changes(
     new = {i: c for i, c in chunks.items() if c.wave > after} if is_open else {}
     rows = pinned.where(base)
     if new:  # the open snapshot's waves that arrived since the last call
+        # a chunk's rows carry its stamp: Delta skips the earlier waves' files by it, where it
+        # keeps no stats on _snapshot and _chunk (a table's columns after the 32nd)
+        first = min(c.stamp for c in new.values())
         waves = pinned.where(
-            (op == 0) & (F.col("_snapshot") == s_open) & F.col("_chunk").isin(*new)
+            (op == 0)
+            & (F.col("_snapshot") == s_open)
+            & F.col("_chunk").isin(*new)
+            & (F.col("_start_lsn") >= first)
         )
         rows = rows.unionByName(waves)
     # a row of another instance would be skipped for good: a switch silver was not told about.
@@ -502,10 +508,12 @@ def apply_changes(
         if new:
             held = waves.select(*[F.col(_q(k)) for k in keys])
             # every later change of the chunks' keys, applied or not: a chunk row never
-            # outranks a delete the stream committed after its stamp
+            # outranks a delete the stream committed after its stamp. One before the first
+            # stamp ranks below every chunk row: its files are skipped.
+            later = (F.col("_start_lsn") > F.lit(s_open)) & (F.col("_start_lsn") >= first)
             rows = rows.unionByName(
                 _by_key(
-                    pinned.where(ours & change & (F.col("_start_lsn") > F.lit(s_open))),
+                    pinned.where(ours & change & later),
                     held,
                     keys,
                     "left_semi",

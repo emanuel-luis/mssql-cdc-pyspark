@@ -590,6 +590,44 @@ def test_an_open_bootstrap_applies_its_waves_without_resurrecting_deletes_and_ho
     assert not g.apply()["rebuilt"]
 
 
+def test_a_call_scans_no_bronze_file_it_applied_already(delta_spark, workdir):
+    """While a chunked re-snapshot is open, each call reads the waves and the changes since its
+    position: every bronze file is moved away after a call, and the next one would fail on any
+    it opened, the earlier waves' and the whole snapshot's silver was rebuilt from included.
+    The completion reads them all again."""
+    g, S, aside = Log(delta_spark, workdir), 100, os.path.join(workdir, "aside")
+    os.mkdir(aside)
+
+    def move(src, dst):
+        for f in os.listdir(src):
+            if f.endswith(".parquet"):
+                os.rename(os.path.join(src, f), os.path.join(dst, f))
+
+    g.whole(10, [(k, "old") for k in range(1, 10)])
+    g.apply()
+    move(g.bronze, aside)
+    g.open(S, "resnapshot")
+    g.change(105, (2, 20, "new"))  # after S: chunk 2 holds it too; 9 was deleted in the gap
+    waves = [
+        (110, (0, None, 4, [(1, "snap"), (2, "snap"), (3, "snap")]), []),
+        (120, (1, 4, 7, [(4, "snap"), (6, "snap")]), [(115, 5), (121, 4)]),  # 4 after its stamp
+        (130, (2, 7, None, [(7, "snap"), (8, "snap"), (20, "new")]), []),
+    ]
+    for wave, (stamp, chunk, deletes) in enumerate(waves):
+        g.wave(S, wave, stamp, [chunk])
+        for n, key in deletes:
+            g.change(n, (1, key, "x"))
+        g.apply()
+        move(g.bronze, aside)
+        assert g.position()[1:] == (_lsn(10), _lsn(S), wave)
+    g.apply()  # no new wave: nothing read
+    final = [(1, "snap"), (2, "snap"), (3, "snap"), (6, "snap"), (7, "snap"), (8, "snap")]
+    assert g.rows() == [*final, (20, "new")]  # 4, 5 deleted by the stream, 9 by its range
+    move(aside, g.bronze)
+    g.fact("resnapshot", S, {"snapshot": _lsn(S)})
+    assert g.apply()["rebuilt"] and g.rows() == [*final, (20, "new")]
+
+
 def _t(second, micro=0):
     return datetime(2026, 1, 1, 0, 0, second, micro)
 
