@@ -148,7 +148,8 @@ add `and not sqlserver` to it, or the run starts SQL Server containers.
   [Hypothesis](https://hypothesis.readthedocs.io/) generates: LSN math, chunk plans tiling
   the key space, each key's latest image in silver, the boolean options' spellings. The
   examples are derandomized, so a failure shows again on the next run, with the smallest
-  input Hypothesis found.
+  input Hypothesis found (the latest image's as generated: shrinking it would run a Spark
+  job a step, past CI's per-test timeout).
 * `tests/test_delta_sink.py` needs Delta.
 * `tests/integration` starts a throwaway SQL Server 2022 with CDC and SQL Server Agent
   through [testcontainers](https://testcontainers-python.readthedocs.io/), with the

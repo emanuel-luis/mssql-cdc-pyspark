@@ -14,7 +14,7 @@ from itertools import pairwise
 from typing import Any
 
 import pytest
-from hypothesis import example, given, settings
+from hypothesis import Phase, example, given, settings
 from hypothesis import strategies as st
 
 from mssql_cdc import lsn
@@ -198,8 +198,10 @@ def _position(row, command_id):  # later is larger; NULL before any value (desc,
     return (start, (cmd is not None, cmd) if command_id else 0, (seq is not None, seq), op)
 
 
-# several tables of changes an example, key (t, k), so that one Spark job checks them all
-@settings(FIXED, max_examples=6)
+# several tables of changes an example, key (t, k), so that one Spark job checks them all. No
+# shrinking: each step is a Spark job, and Hypothesis shrinks for up to 5 minutes, which CI's
+# per-test timeout ends before the failure is reported; the example as generated is small enough
+@settings(FIXED, max_examples=6, phases=[Phase.explicit, Phase.generate])
 @given(tables=st.lists(changes, min_size=1, max_size=8), data=st.data())
 def test_any_order_of_the_same_changes_gives_each_key_its_latest_image(spark, tables, data):
     from pyspark.sql import functions as F
