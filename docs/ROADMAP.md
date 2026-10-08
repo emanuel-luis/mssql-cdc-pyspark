@@ -76,7 +76,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 - [x] mypy strict on `src` (no untyped defs, no implicit `Any` generics, `warn_return_any`);
       `pyright --verifytypes` in CI to keep the public API fully typed (ADR 0031).
 
-## 0.4.1 (patch): maintenance
+## 0.4.1 (patch, shipped 2026-10-08): maintenance
 
 - [x] Split `client.py` (SQL builders, backends, planning) and `pipeline.py` (snapshot,
       backfill, recovery) into packages without changing behaviour.
