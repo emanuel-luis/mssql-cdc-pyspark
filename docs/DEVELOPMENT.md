@@ -173,8 +173,11 @@ containers.
   takes `spark`, so the integration tests run the SQL Server path through it too:
   `MSSQL_CDC_TEST_SPARK=connect uv run --group connect pytest -q -m sqlserver -k <tests>`.
   Only for the tests that drive the library through its API: one that reaches into the JVM
-  (`spark.streams._jsqm`) or collects into a list from a `foreachBatch` function, which runs
-  on the server under Connect, fails there.
+  (`spark.streams._jsqm`, `sparkContext`, `df.rdd`), reads a progress's top-level
+  `numInputRows` (a Connect progress has none; the sources' counts are there), or uses a
+  `foreachBatch` function that appends to a list or lives in a test module (it runs on the
+  server under Connect) fails there for that reason alone: 11 of the 125 tests that take
+  `spark` did on 2026-10-09, and the other 114 passed.
 
 ## Mutation testing
 

@@ -21,7 +21,7 @@ Experimental; the version is in `pyproject.toml`.
 | State compatibility (`tests/compat`) | ✅ the state the 0.1.0 wheel wrote (a checkpoint with two generations; bronze, silver, facts, control) resumes and migrates on the current code (ADR 0021 amendment 3) |
 | `arrow-odbc` backend | ✅ the `tests/integration` tests that take the `backend` fixture pass with it too (CI installs msodbcsql18; ADR 0003 Amendment 2) |
 | Databricks | ✅ t5, t6 pass on DBR 18.2 (Spark 4.1.0 with the admission-control backport), dedicated; ❌ t7 not run (needs a lab SQL Server reachable from the cluster) |
-| Spark Connect | ✅ `tests/test_connect.py` (`-m connect`, CI `connect` job) passes with a PySpark 4.2 client against a local Connect server with Delta Connect 4.4, fake backend: `to_delta` (`availableNow`, `processingTime`), `track`, `snapshot`, chunked bootstrap + `backfill`, `apply_changes`, `reconcile`, `start_many` with data loss and re-snapshot, lab `t5` through `SPARK_REMOTE`; ✅ 10 `tests/integration` tests against SQL Server 2022 pass through the same server with `MSSQL_CDC_TEST_SPARK=connect` (local, 2026-10-09; not in CI) |
+| Spark Connect | ✅ `tests/test_connect.py` (`-m connect`, CI `connect` job) passes with a PySpark 4.2 client against a local Connect server with Delta Connect 4.4, fake backend: `to_delta` (`availableNow`, `processingTime`), `track`, `snapshot`, chunked bootstrap + `backfill`, `apply_changes`, `reconcile`, `start_many` with data loss and re-snapshot, lab `t5` through `SPARK_REMOTE`; ✅ with `MSSQL_CDC_TEST_SPARK=connect` (local, 2026-10-09; not in CI) 10 `tests/integration` tests against SQL Server 2022 and 114 of the 125 unit tests that take `spark` pass through the same server; the other 11 fail on test-side JVM calls or closures only |
 
 `docs/ROADMAP.md` lists what is next.
 
@@ -227,8 +227,8 @@ notes/             Local only, gitignored: research notes in Portuguese (context
   Connect server with Delta Connect (`connect_spark` in `tests/conftest.py`), with the fake
   backend: `uv run --group connect pytest -m connect`, alone (a Connect session turns the
   whole process to Connect). Anything new a user calls from the client (a public function, a
-  listener, a client-side SQL Server call) gets a step there. No `sparkContext`, `_jvm`,
-  `_jsc` or `_jdf` in `src/`: try the call and fall back, as `available_cores` does.
+  listener, a client-side SQL Server call) gets a step there. No `sparkContext`, `rdd`,
+  `_jvm`, `_jsc` or `_jdf` in `src/`: try the call and fall back, as `available_cores` does.
   `MSSQL_CDC_TEST_SPARK=connect` runs the tests that take `spark` (integration included)
   through the same server, on demand.
 * `tests/compat/test_compat.py` resumes the state each released wheel wrote

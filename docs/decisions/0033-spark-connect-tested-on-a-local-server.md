@@ -39,7 +39,7 @@ the Databricks runs is out of its reach.
   session has; where a classic session tells it more (the cores behind
   `numPartitions=auto`), it tries the call and falls back when it fails. It never asks
   which platform it runs on (invariant 10). `tests/test_package.py` fails on a
-  `sparkContext`, `_jvm`, `_jsc`, `_jdf` or `SparkContext` in `src/` other than
+  `sparkContext`, `rdd`, `_jvm`, `_jsc`, `_jdf` or `SparkContext` in `src/` other than
   `available_cores`' guarded one, in every loop.
 * `get_spark()` returns a Connect session when `SPARK_REMOTE` is set: the server holds its
   own configuration, so neither the master nor the Delta jars are passed. The active session
@@ -62,8 +62,9 @@ the Databricks runs is out of its reach.
 * `MSSQL_CDC_TEST_SPARK=connect` hands `connect_spark` to every test that takes `spark`, so
   the SQL Server path runs through the Connect server too, on demand
   (`uv run --group connect pytest -m sqlserver -k ...`). It is not a CI job: a test that
-  reaches into the JVM or collects into a list from its `foreachBatch` function (which runs
-  on the server under Connect) fails under it for that reason alone.
+  reaches into the JVM, reads the progress's top-level `numInputRows`, or collects into a
+  list from its `foreachBatch` function (which runs on the server under Connect) fails
+  under it for that reason alone.
 * The Connect client is a dependency group, `connect` (`pyspark[connect]`, and pandas
   below 3, which PySpark 4.2 warns it does not fully support), not an extra: platforms ship
   their own client.
@@ -80,10 +81,16 @@ the Databricks runs is out of its reach.
 * The connect suite takes about five minutes (the server's start included), in a job of its
   own; its first run on a cold Ivy cache downloads the Delta Connect jars.
 * The SQL Server path through the local Connect server, run on 2026-10-09 with
-  `MSSQL_CDC_TEST_SPARK=connect` (SQL Server 2022 in Docker): 10 integration tests passed,
-  among them the stream resumed from its checkpoint, the network metrics in the facts, a
+  `MSSQL_CDC_TEST_SPARK=connect` (SQL Server 2022 in Docker): 10 integration tests passed:
+  the stream resumed from its checkpoint, the network metrics in the facts, a
   bootstrap with a least-privilege login, a purged range stopping the stream, a re-snapshot
   recovering from it, `seed`, a type change stopping the running query, a chunked bootstrap
   next to a running stream and a writer, silver on a composite key and `reconcile`.
+* The rest of the suite through the same server, the same day: 114 of the 125 tests that
+  take `spark` passed (the state of every released wheel in `tests/compat` among them). The
+  11 others failed on the tests' own means alone: a JVM attribute (`_jsqm`, `sparkContext`,
+  `df.rdd`), the top-level `numInputRows` a Connect progress leaves out, a list appended in
+  a `foreachBatch` function, which runs on the server, and a `foreachBatch` function from a
+  test module the server cannot import. None in the library.
 * Not covered: Databricks serverless and Databricks Connect themselves, whose runs are
   recorded where they happen.
