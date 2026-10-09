@@ -50,6 +50,9 @@ dev = [
     "mypy>=2.0",
     "pyright>=1.1.414",
 ]
+# The Spark Connect client, for the tests marked connect: `uv sync --group connect`. PySpark
+# 4.2 warns that it does not fully support pandas 3 yet.
+connect = ["pyspark[connect]>=4.2", "pandas<3"]
 # The documentation site (ADR 0024): `uv run --group docs zensical build --strict`.
 docs = [
     "zensical>=0.0.67",
@@ -68,8 +71,11 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# integration tests: pytest -m sqlserver (needs Docker)
-addopts = ["-ra", "--strict-markers", "--strict-config", "--durations=25", "-m", "not sqlserver"]
+# integration tests: pytest -m sqlserver (needs Docker); Spark Connect: pytest -m connect
+addopts = [
+  "-ra", "--strict-markers", "--strict-config", "--durations=25",
+  "-m", "not sqlserver and not connect",
+]
 # A hung stream aborts the whole run after dumping every thread's stack (the thread method
 # ends the process, so no later test or report runs) instead of running until the CI job's
 # own limit.
@@ -82,6 +88,8 @@ markers = [
   # -m "not spark and not sqlserver" (make test-fast)
   "spark: starts the JVM (takes the spark fixture; tests/conftest.py adds the marker)",
   "sqlserver: integration tests against SQL Server 2022 in Docker (testcontainers)",
+  # also marked spark and delta, so the loops above leave them out too
+  "connect: the library through a local Spark Connect server (tests/test_connect.py)",
 ]
 
 [tool.ruff]

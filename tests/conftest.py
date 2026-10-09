@@ -1,6 +1,11 @@
+import importlib.metadata
 import os
 import shutil
+import socket
+import subprocess
+import sys
 import tempfile
+import time
 import traceback
 
 import pytest
@@ -25,13 +30,18 @@ def pytest_sessionstart(session):
 def pytest_collection_modifyitems(items):
     """Mark every test that takes the ``spark`` or ``delta_spark`` fixture (directly or through
     another fixture): ``-m "not spark and not sqlserver"`` is the loop that starts no JVM,
-    ``-m "not delta and not sqlserver"`` the one without Delta."""
+    ``-m "not delta and not sqlserver"`` the one without Delta. A test that takes
+    ``connect_server`` (or ``connect_spark``) is marked ``connect``, and ``spark`` and
+    ``delta`` too, so neither loop starts a Connect server."""
     for item in items:
         names = getattr(item, "fixturenames", ())
         if "spark" in names:
             item.add_marker("spark")
         if "delta_spark" in names:
             item.add_marker("delta")
+        if "connect_server" in names:
+            for marker in ("connect", "spark", "delta"):
+                item.add_marker(marker)
 
 
 def pytest_collection_finish(session):
@@ -190,3 +200,80 @@ def latest():
         return sorted((k, r[value]) for k, r in images.items() if r["_operation"] != 1)
 
     return rebuild
+
+
+@pytest.fixture(scope="session")
+def connect_server(tmp_path_factory):
+    """The URL (``sc://localhost:<port>``) of a local Spark Connect server with Delta Connect,
+    which this fixture starts in its own JVM and stops after the run (tests marked
+    ``connect``). Its Python workers run this interpreter, so they import this ``mssql_cdc``.
+    The first run downloads the Delta Connect jars."""
+    import pyspark
+
+    home = os.path.dirname(pyspark.__file__)
+    with socket.socket() as s:
+        s.bind(("localhost", 0))
+        port = s.getsockname()[1]
+    base = tmp_path_factory.mktemp("connect")
+    spark_version = ".".join(pyspark.__version__.split(".")[:2])
+    delta = importlib.metadata.version("delta-spark")
+    packages = [
+        f"io.delta:delta-connect-server_{spark_version}_2.13:{delta}",
+        # Delta Connect's classes need a newer protobuf runtime than the one its POM declares
+        "com.google.protobuf:protobuf-java:3.25.1",
+    ]
+    conf = {
+        "spark.connect.grpc.binding.port": port,
+        "spark.connect.extensions.relation.classes": (
+            "org.apache.spark.sql.connect.delta.DeltaRelationPlugin"
+        ),
+        "spark.connect.extensions.command.classes": (
+            "org.apache.spark.sql.connect.delta.DeltaCommandPlugin"
+        ),
+        "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+        "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+        "spark.sql.session.timeZone": "UTC",
+        "spark.sql.shuffle.partitions": 2,
+        "spark.sql.warehouse.dir": base / "warehouse",
+        "spark.databricks.delta.snapshotPartitions": 1,
+        "spark.ui.enabled": "false",
+    }
+    submit = os.path.join(home, "bin", "spark-submit.cmd" if os.name == "nt" else "spark-submit")
+    cmd = [submit, "--master", "local[2]", "--packages", ",".join(packages)]
+    cmd += ["--class", "org.apache.spark.sql.connect.service.SparkConnectServer"]
+    for key, value in conf.items():
+        cmd += ["--conf", f"{key}={value}"]
+    log_path = base / "server.log"
+    with open(log_path, "wb") as log:
+        env = {**os.environ, "SPARK_HOME": home, "PYSPARK_PYTHON": sys.executable}
+        server = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
+    try:
+        deadline = time.monotonic() + 600  # the jars' first download included
+        while True:
+            if server.poll() is not None or time.monotonic() > deadline:
+                tail = log_path.read_text(errors="replace")[-4000:]
+                pytest.fail(f"no Spark Connect server on port {port}:\n{tail}")
+            try:
+                socket.create_connection(("localhost", port), timeout=1).close()
+                break
+            except OSError:
+                time.sleep(1)
+        yield f"sc://localhost:{port}"
+    finally:
+        server.terminate()
+        try:
+            server.wait(60)
+        except subprocess.TimeoutExpired:
+            server.kill()
+
+
+@pytest.fixture(scope="session")
+def connect_spark(connect_server):
+    """A Spark Connect client session on ``connect_server``: no JVM in this process."""
+    from pyspark.sql import SparkSession
+
+    spark = SparkSession.builder.remote(connect_server).getOrCreate()
+    yield spark
+    for q in spark.streams.active:
+        q.stop()
+    spark.stop()  # before the server stops: a client left open retries it at exit

@@ -16,6 +16,23 @@ def test_every_release_but_the_newest_has_the_state_it_wrote():
     assert not missing, f"no tests/compat/<version> for {missing}: run generate.py with each"
 
 
+def test_the_package_calls_nothing_a_spark_connect_session_lacks():
+    # serverless and Databricks Connect sessions have no JVM (ADR 0032), and the core imports
+    # no platform API (invariant 10): this runs in every loop, the connect suite in its own job
+    banned = re.compile(
+        r"\._(jvm|jsc|jdf|jsparkSession|jsqm|jconf|sc)\b|\bSparkContext\b|\.sparkContext\b"
+        r"|\bdbutils\b|^\s*(import|from) databricks\b"
+    )
+    tried = "cores = int(spark.sparkContext.defaultParallelism)"  # spark.py: falls back to 0
+    hits = [
+        f"{path.relative_to(ROOT)}:{n}: {line.strip()}"
+        for path in sorted((ROOT / "src").rglob("*.py"))
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if banned.search(line) and line.strip() != tried
+    ]
+    assert not hits, "classic-only or platform APIs: try the call and fall back instead"
+
+
 def test_import_without_pyspark_says_how_to_install_it():
     code = (
         "import sys; sys.modules['pyspark'] = None\n"
