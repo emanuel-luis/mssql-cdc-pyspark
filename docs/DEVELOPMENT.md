@@ -169,7 +169,12 @@ containers.
   (PySpark's `SparkConnectServer` through `spark-submit`, with Delta Connect) in its own JVM
   and stops it after the run; the first run downloads the Delta Connect jars. The default
   run leaves these tests out, and so do the loops above (they are marked `spark` and
-  `delta` too).
+  `delta` too). `MSSQL_CDC_TEST_SPARK=connect` hands that Connect session to every test that
+  takes `spark`, so the integration tests run the SQL Server path through it too:
+  `MSSQL_CDC_TEST_SPARK=connect uv run --group connect pytest -q -m sqlserver -k <tests>`.
+  Only for the tests that drive the library through its API: one that reaches into the JVM
+  (`spark.streams._jsqm`) or collects into a list from a `foreachBatch` function, which runs
+  on the server under Connect, fails there.
 
 ## Mutation testing
 

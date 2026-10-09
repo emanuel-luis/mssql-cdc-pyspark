@@ -80,10 +80,19 @@ def _builder(tmp_path_factory, delta: bool):
 
 
 @pytest.fixture(scope="session")
-def spark(tmp_path_factory):
+def spark(tmp_path_factory, request):
     """One session for the whole run. Uses Delta when a selected test takes ``delta_spark`` and
     the jars resolve (set MSSQL_CDC_TEST_DELTA=0 to skip trying, =require to fail without it),
-    otherwise plain Spark."""
+    otherwise plain Spark. With MSSQL_CDC_TEST_SPARK=connect, ``connect_spark`` instead: the
+    tests that drive the library through its API run as a Spark Connect client (ADR 0032)."""
+    from mssql_cdc import register
+
+    if os.environ.get("MSSQL_CDC_TEST_SPARK") == "connect":
+        session = request.getfixturevalue("connect_spark")
+        session.conf.set("mssql_cdc.test.delta", "true")
+        register(session)
+        yield session
+        return
     session, has_delta = None, False
     if NEEDS_DELTA and os.environ.get("MSSQL_CDC_TEST_DELTA", "1") != "0":
         try:
@@ -103,8 +112,6 @@ def spark(tmp_path_factory):
     if session is None:
         session = _builder(tmp_path_factory, delta=False).getOrCreate()
     session.conf.set("mssql_cdc.test.delta", str(has_delta).lower())
-    from mssql_cdc import register
-
     register(session)
     yield session
     session.stop()

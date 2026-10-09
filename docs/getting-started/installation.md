@@ -52,7 +52,11 @@ Tested with a PySpark 4.2 client against a local Spark Connect server (PySpark 4
 Delta Connect 4.4), with the fake backend in place of SQL Server: `to_delta` with
 `availableNow` and with `processingTime`, `track`, `snapshot`, a chunked bootstrap with
 `backfill`, `apply_changes`, `reconcile`, and `start_many` through a data loss and its
-re-snapshot (`tests/test_connect.py`, CI's `connect` job).
+re-snapshot (`tests/test_connect.py`, CI's `connect` job). The SQL Server path through the
+same server is tested on demand: integration tests against SQL Server 2022 in Docker
+(bootstrap, re-snapshot, chunked bootstrap, `seed`, silver, `reconcile`, a type change
+stopping the query) pass with their session swapped for a Connect one
+([Development](../DEVELOPMENT.md#tests)).
 
 What runs where:
 

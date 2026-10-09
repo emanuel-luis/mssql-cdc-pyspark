@@ -59,6 +59,11 @@ the Databricks runs is out of its reach.
   `connect` job: a Connect session turns the whole Python process to Connect
   (`SPARK_CONNECT_MODE_ENABLED`; `delta.tables` then dispatches to `delta.connect`), so
   they cannot share a run with the classic suite.
+* `MSSQL_CDC_TEST_SPARK=connect` hands `connect_spark` to every test that takes `spark`, so
+  the SQL Server path runs through the Connect server too, on demand
+  (`uv run --group connect pytest -m sqlserver -k ...`). It is not a CI job: a test that
+  reaches into the JVM or collects into a list from its `foreachBatch` function (which runs
+  on the server under Connect) fails under it for that reason alone.
 * The Connect client is a dependency group, `connect` (`pyspark[connect]`, and pandas
   below 3, which PySpark 4.2 warns it does not fully support), not an extra: platforms ship
   their own client.
@@ -74,6 +79,11 @@ the Databricks runs is out of its reach.
   so from Databricks Connect; the installation guide now says it in one place.
 * The connect suite takes about five minutes (the server's start included), in a job of its
   own; its first run on a cold Ivy cache downloads the Delta Connect jars.
-* Not covered by the suite: Databricks serverless and Databricks Connect themselves, whose
-  runs are recorded where they happen, and the SQL Server backend through a Connect server,
-  which runs the same code on the executors as on a classic cluster.
+* The SQL Server path through the local Connect server, run on 2026-10-09 with
+  `MSSQL_CDC_TEST_SPARK=connect` (SQL Server 2022 in Docker): 10 integration tests passed,
+  among them the stream resumed from its checkpoint, the network metrics in the facts, a
+  bootstrap with a least-privilege login, a purged range stopping the stream, a re-snapshot
+  recovering from it, `seed`, a type change stopping the running query, a chunked bootstrap
+  next to a running stream and a writer, silver on a composite key and `reconcile`.
+* Not covered: Databricks serverless and Databricks Connect themselves, whose runs are
+  recorded where they happen.
