@@ -24,7 +24,8 @@ The counts and ranges are always there. The read, retention and lag columns come
 files each partition leaves in a metrics directory (option `metricsPath`), which the sink
 folds into the batch's row. `to_delta` puts that directory under the checkpoint when the
 checkpoint is a path Python can write on every node (local, or a FUSE mount). With a URI
-checkpoint (`s3a://`, `abfss://`...), set `metricsPath` yourself to such a path;
+checkpoint (`s3a://`, `abfss://`...), set `metricsPath` yourself, to such a path or to a
+URI `pyarrow.fs` opens with credentials every node has (`s3://`, `abfss://`...);
 the files then go to `<metricsPath>/<app_id>`, so streams may share one
 ([Options](../reference/options.md),
 [ADR 0014](../decisions/0014-network-and-read-metrics-in-facts.md)).
@@ -106,9 +107,10 @@ A comparison with NULL is never true, so without metrics the headroom and lag co
 never fire, and only the liveness one is left. On a stream that should have them, NULL
 metrics mean the executors' files never reached the driver: the metrics directory is not
 shared by every node (a driver-local checkpoint on a multi-node cluster, where each executor
-writes to its own disk), or not writable there. The sink logs a warning on the driver, once
-per run, when a batch that read rows found no metrics file. Use a path every node shares,
-such as a Volume
+writes to its own disk), or not writable there (a URI `metricsPath` the executors have no
+credentials for: each executor logs a warning per file). The sink logs a warning on the
+driver, once per run, when a batch that read rows found no metrics file. Use a path every
+node shares, such as a Volume, or a URI every node can write
 ([metricsPath](../reference/options.md#metricspath)).
 
 ### Facts stopped arriving

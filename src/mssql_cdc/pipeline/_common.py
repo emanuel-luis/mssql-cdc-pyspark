@@ -11,13 +11,15 @@ from contextlib import closing
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from .. import _metricsfs
+
 if TYPE_CHECKING:
     from ..client import CdcClient
     from ..types import SparkSessionLike
 
 # the name of the module this package replaced: callers filter its records by it
 _log = logging.getLogger("mssql_cdc.pipeline")
-_URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")  # a scheme; a Windows drive has one letter
+_URI = _metricsfs.URI  # a scheme; a Windows drive has one letter
 
 
 def _opt(options: Mapping[str, Any], key: str) -> Any:

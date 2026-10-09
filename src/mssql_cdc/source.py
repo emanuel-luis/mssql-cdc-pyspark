@@ -56,6 +56,7 @@ from pyspark.sql.datasource import (
     InputPartition,
 )
 
+from . import _metricsfs
 from .events import CAPTURE_INSTANCE_SWITCHED, DATA_SKIPPED, SCHEMA_CHANGE
 from .lsn import ZERO_LSN
 
@@ -327,13 +328,9 @@ def union_columns(instances: Iterable[CaptureInstance]) -> str:
 def _write_metrics(path: str, name: str, metrics: Mapping[str, Any]) -> None:
     """One JSON per partition, ``<name>.json``; a task retry overwrites its file. Best
     effort: a metric must never fail a read."""
-    target = os.path.join(path, f"{name}.json")
     try:
-        os.makedirs(path, exist_ok=True)
-        with open(target + ".tmp", "w", encoding="utf-8") as fh:
-            json.dump(metrics, fh)
-        os.replace(target + ".tmp", target)
-    except OSError as exc:  # the facts' metrics go NULL: say why, in the executor's log
+        _metricsfs.write_json(path, f"{name}.json", metrics)
+    except Exception as exc:  # noqa: BLE001 - the facts' metrics go NULL: say why, in the log
         _log.warning(
             "mssql_cdc: could not write the metrics file %s.json in %s: %s", name, path, exc
         )
@@ -353,14 +350,11 @@ def _write_event(
     and ``key`` (default its LSN), which a replanned batch reproduces, so it rewrites the same
     file. ``gap``: a 'data_skipped' event's ``lost_from_ts`` and ``lost_to_ts`` (ADR 0018).
     Best effort, like the metrics."""
+    body = {"event": kind, "capture_instance": ci, "lsn": lsn, "commit_ts": commit_ts}
     try:
-        os.makedirs(path, exist_ok=True)
-        name = os.path.join(path, f"event-{kind}-{key or lsn}.json")
-        body = {"event": kind, "capture_instance": ci, "lsn": lsn, "commit_ts": commit_ts}
-        with open(name + ".tmp", "w", encoding="utf-8") as fh:
-            json.dump({**body, "detail": detail, **gap}, fh)
-        os.replace(name + ".tmp", name)
-    except OSError as exc:
+        name = f"event-{kind}-{key or lsn}.json"
+        _metricsfs.write_json(path, name, {**body, "detail": detail, **gap})
+    except Exception as exc:  # noqa: BLE001 - an event file must never fail the planning
         _log.warning("mssql_cdc: could not write the %s event file in %s: %s", kind, path, exc)
 
 
@@ -569,16 +563,12 @@ class _Common:
         )
         # at least 1: with 0, mssql-python can return an empty first batch and read nothing
         self.batch_size: int = _positive_int(options, "arrowBatchSize", "10000")
-        # optional: a directory (local or FUSE, e.g. /Volumes/...) where each partition leaves
-        # its metrics for delta_sink(metrics_path=...) to fold into the batch facts
+        # optional: a directory every node sees (local, FUSE such as /Volumes/..., or a URI
+        # pyarrow.fs opens) where each partition leaves its metrics for
+        # delta_sink(metrics_path=...) to fold into the batch facts
         self.metrics_path: str | None = _opt(options, "metricsPath")
-        if self.metrics_path and re.match(r"[A-Za-z][A-Za-z0-9+.-]+:/", self.metrics_path):
-            # written with open(): s3://m would make a local 's3:' directory on each node
-            raise ValueError(
-                f"metricsPath {self.metrics_path!r} is a URI, and the metrics files are "
-                "written with Python's file functions: use a local or FUSE path (e.g. "
-                "/Volumes/...) that every node sees"
-            )
+        if self.metrics_path:  # here, where the files are written: dbfs:/ would fail every one
+            _metricsfs.check(self.metrics_path)
         policy = str(_opt(options, "schemaChangePolicy", "classify")).strip().lower()
         if policy not in SCHEMA_CHANGE_POLICIES:
             raise ValueError(f"schemaChangePolicy must be 'classify' or 'fail', not {policy!r}")

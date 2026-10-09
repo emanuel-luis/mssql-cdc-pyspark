@@ -58,10 +58,8 @@
 
 from __future__ import annotations
 
-import glob
 import json
 import logging
-import os
 import statistics
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -72,6 +70,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 from . import migrations
+from ._metricsfs import list_json, read_json, remove
 from .events import event_row
 from .events import write_event as write_event  # noqa: PLC0414 - re-exported, its old home
 from .migrations.facts import (
@@ -359,34 +358,15 @@ def _json(facts: Mapping[str, Any]) -> str:
     )
 
 
-def _files(path: str, events: bool = False) -> list[str]:
-    """The partitions' metrics files in ``path`` or, with ``events``, the reader's event files
-    (``event-<kind>-<lsn>.json``, a data skip's ``event-data_skipped-<ci>-<from>.json``, ADR
-    0023)."""
-    return [
-        name
-        for name in glob.glob(os.path.join(path, "*.json"))
-        if os.path.basename(name).startswith("event-") == events
-    ]
-
-
-def _remove(names: list[str]) -> None:
-    for name in names:
-        try:
-            os.remove(name)
-        except OSError:
-            pass
-
-
 def _read_events(path: str) -> tuple[list[str], list[dict[str, Any]]]:
-    """The reader's events waiting in ``path``: the files read and their contents. An
+    """The reader's events waiting in ``path`` (``event-<kind>-<lsn>.json``, a data skip's
+    ``event-data_skipped-<ci>-<from>.json``, ADR 0023): the files read and their contents. An
     unreadable file is not returned, so it is never removed unfolded."""
     names: list[str] = []
     events: list[dict[str, Any]] = []
-    for name in _files(path, events=True):
+    for name in list_json(path, events=True):
         try:
-            with open(name, encoding="utf-8") as fh:
-                events.append(json.load(fh))
+            events.append(read_json(name))
         except (OSError, ValueError):
             continue
         names.append(name)
@@ -399,10 +379,9 @@ def _fold_metrics(path: str) -> dict[str, Any]:
     read (ADR 0018), for the caller to take out as event rows; ``warnings``: the driver's,
     which the batch's last range carried, for the caller to put in the batch row's detail."""
     picked: list[dict[str, Any]] = []
-    for name in _files(path):
+    for name in list_json(path):
         try:
-            with open(name, encoding="utf-8") as fh:
-                picked.append(json.load(fh))
+            picked.append(read_json(name))
         except (OSError, ValueError):
             continue
     if not picked:
@@ -560,7 +539,7 @@ def delta_sink(
         caching = kept is not None
         try:
             if metrics_path:  # the batch is not read yet: a partition's file is a dead attempt's
-                _remove(_files(metrics_path))
+                remove(list_json(metrics_path))
             ids = {"batch_id": batch_id, "app_id": app_id}
             if kept is None:
                 facts = {**append(df, batch_id), **ids}
@@ -589,9 +568,10 @@ def delta_sink(
                     _log.warning(
                         "mssql_cdc: batch %s of %s read %s rows but found no metrics file in %s: "
                         "the executors cannot write that directory, or the driver cannot see it "
-                        "(a driver-local path on a multi-node cluster). Its retention and lag "
-                        "facts are NULL: use a path every node sees (local, or FUSE such as a "
-                        "Volume).",
+                        "(a driver-local path on a multi-node cluster, or a URI the executors "
+                        "have no credentials for). Its retention and lag facts are NULL: use a "
+                        "path every node sees (local, FUSE such as a Volume, or an object store "
+                        "URI every node can write).",
                         batch_id,
                         app_id,
                         facts["rows"],
@@ -619,7 +599,7 @@ def delta_sink(
                 # one commit: the batch's row and its events are written, or skipped, together
                 _write(facts_df, facts_table, f"{app_id}#facts", batch_id)
             if metrics_path:  # folded into this batch's facts; a replay rewrites them
-                _remove(_files(metrics_path) + names)
+                remove(list_json(metrics_path) + names)
         finally:
             if kept is not None:
                 kept.unpersist()

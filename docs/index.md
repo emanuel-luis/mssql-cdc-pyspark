@@ -6,9 +6,8 @@ when a period of data is safe to read. Pure Python on Spark's DataSource V2 API:
 connector and no platform-specific APIs. Tested on local Spark 4.2 and on Databricks
 classic compute (DBR 18.2, single node); other Spark 4.2+ runtimes and multi-node clusters
 are untested. The metrics need [metricsPath](reference/options.md#metricspath) on a local
-or FUSE path every node sees.
-Databricks serverless and a `metricsPath` on an object store (`s3://`, `abfss://`...) are
-not supported yet ([Databricks](DATABRICKS.md)).
+or FUSE path every node sees, or on a URI `pyarrow.fs` opens (`s3://`, `abfss://`...).
+Databricks serverless is not supported yet ([Databricks](DATABRICKS.md)).
 
 !!! warning "Experimental"
     The streaming engine is covered by unit tests and the SQL Server behaviour by

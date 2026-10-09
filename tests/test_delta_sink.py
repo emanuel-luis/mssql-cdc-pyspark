@@ -537,6 +537,44 @@ def test_stream_facade_declares_the_options_once(delta_spark, workdir):
     assert os.listdir(shared) == ["facade-v2"]
 
 
+def test_a_uri_metrics_path_goes_through_pyarrow_fs(delta_spark, workdir):
+    """``metricsPath`` as a URI (``file://``: pyarrow.fs's local filesystem, as ``s3://`` would
+    be its S3 one): the stream's and backfill()'s metrics reach the facts, files removed."""
+    from pathlib import Path
+
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=4)
+    metrics = Path(workdir, "metrics")
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, {**options, "numPartitions": "2", "metricsPath": metrics.as_uri()})
+
+    def run():
+        cdc.to_delta(
+            target,
+            "uri-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    run()  # opens the snapshot at S and starts the stream there
+    db.commit(CI, [(2, {"order_id": 9, "status": "new"})], at=T0 + timedelta(minutes=10))
+    run()  # a batch with a row
+    assert cdc.backfill(target, app_id="uri-v1", facts_table=facts, chunk_rows=2)["done"]
+    rows = spark.read.format("delta").load(facts).collect()
+    batches = [r for r in rows if r["event"] is None and r["rows"]]
+    chunks = [r for r in rows if r["event"] == "snapshot_chunk"]
+    assert batches and chunks and all(r["read_seconds"] > 0 for r in batches + chunks)
+    assert all(r["end_lsn"] for r in batches)  # folded from the batch's last partition
+    # one directory for the stream, one for its backfill, each emptied once folded
+    assert sorted(os.listdir(metrics)) == ["uri-v1", "uri-v1.backfill"]
+    assert [f for d in metrics.iterdir() for f in os.listdir(d)] == []
+
+
 def test_migrations_bring_an_older_table_up_once(delta_spark, workdir, monkeypatch):
     from mssql_cdc import migrations, tables
     from mssql_cdc.migrations import facts as facts_migrations
@@ -1469,9 +1507,6 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir, caplog)
         cdc.to_delta(
             target, "x", ckpt, "facts", bootstrap=True, snapshot="chunked", snapshot_on_switch=True
         )
-    # executors write the metrics with Python file calls: s3: would be a local directory
-    with pytest.raises(ValueError, match="metricsPath 's3://b/m' is a URI"):
-        stream(spark, {**options, "metricsPath": "s3://b/m"}).to_delta(target, "x", ckpt, "facts")
     # the generation state is a file, and the checkpoint is read from Python
     for uri in ("abfss://c@a.dfs.core.windows.net/x", "/dbfs/ckpt/orders"):
         with pytest.raises(ValueError, match="same directory"):

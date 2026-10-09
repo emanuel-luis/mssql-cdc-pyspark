@@ -175,11 +175,11 @@ def test_inferred_columns_are_checked_and_the_snapshot_still_adds_its_chunk(tmp_
     assert MssqlCdcSnapshotDataSource(chunked).schema().endswith(", id INT, _chunk INT")
 
 
-def test_metrics_path_must_be_a_path_every_node_writes_with_open():
-    for uri in ("s3://bucket/metrics", "abfss://c@a.dfs.core.windows.net/m", "dbfs:/m"):
-        with pytest.raises(ValueError, match="is a URI.*local or FUSE path"):
-            _reader(metricsPath=uri)
-    for path in ("/Volumes/cat/sch/vol/metrics", "C:/metrics", "metrics"):
+def test_metrics_path_is_a_path_or_a_uri_pyarrow_fs_opens(tmp_path):
+    # pyarrow.fs has no dbfs: every file would fail, so the query fails at its start instead
+    with pytest.raises(ValueError, match="metricsPath 'dbfs:/m': pyarrow.fs cannot open it"):
+        _reader(metricsPath="dbfs:/m")
+    for path in ("/Volumes/cat/sch/vol/metrics", "C:/metrics", "metrics", tmp_path.as_uri()):
         assert _reader(metricsPath=path).metrics_path == path
 
 

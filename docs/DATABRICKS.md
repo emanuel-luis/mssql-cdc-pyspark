@@ -2,9 +2,9 @@
 
 Nothing in `mssql_cdc` imports Databricks APIs. What has run on Databricks is classic
 compute, DBR 18.2, dedicated access mode, single node (items 1 and 3); other runtimes and
-compute types are untested. Not supported yet: serverless compute (item 2) and a
-`metricsPath` that is a URI (`dbfs:/`, `abfss://`...), which `to_delta` refuses: keep the
-metrics in a Volume (item 5). Platform-specific concerns:
+compute types are untested. Not supported yet: serverless compute (item 2). Keep the
+metrics in a Volume (item 5): a `metricsPath` URI goes through `pyarrow.fs`, which has no
+`dbfs:/` and gets no Unity Catalog credentials. Platform-specific concerns:
 
 1. **Runtime.** The source needs the Python data source streaming API with
    admission control and `Trigger.AvailableNow` (Spark 4.2, SPARK-55304). DBR 18.2
@@ -62,8 +62,11 @@ metrics in a Volume (item 5). Platform-specific concerns:
    SQL Server and see the checkpoint path.
 5. **Names and paths.** Unity Catalog managed tables for bronze, facts and control;
    checkpoints in a Volume, where `to_delta` keeps the metrics files too. With a checkpoint
-   that is a URI, set `metricsPath` to a Volume path: executors write the files with Python,
-   which cannot write a URI. A path without a scheme (`/mnt/...`, `/tmp/...`) is DBFS for
+   that is a URI, set `metricsPath` to a Volume path. A URI `metricsPath` is written through
+   `pyarrow.fs` with the credentials each node has of its own: `dbfs:/` is a `ValueError`
+   when the query starts, and `abfss://` or `s3://` work only where every node has
+   credentials pyarrow finds on its own (environment variables, an instance profile):
+   pyarrow does not use Unity Catalog's storage credentials. A path without a scheme (`/mnt/...`, `/tmp/...`) is DBFS for
    Spark but the driver's local disk for Python: with `on_data_loss="resnapshot"`, when the
    facts table holds batches of the stream but Python finds nothing of Spark's in the
    checkpoint, `to_delta` raises `ValueError` saying the two may see different directories.

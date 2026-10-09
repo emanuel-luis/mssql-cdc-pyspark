@@ -10,8 +10,9 @@ The options go to ``readStream`` once, and the sink gets what it needs from them
 facts table, per-partition metrics default to ``<checkpoint>/_mssql_cdc_metrics`` (of the
 live generation, see below) when the
 checkpoint is a path Python can write on every node (local, or FUSE such as a Volume);
-with a URI checkpoint (``dbfs:/``, ``abfss://``...) set ``metricsPath`` yourself: the files
-then go to ``<metricsPath>/<sink app_id>``, so streams may share one ``metricsPath``.
+with a URI checkpoint (``dbfs:/``, ``abfss://``...) set ``metricsPath`` yourself (a Volume, or
+a URI ``pyarrow.fs`` opens such as ``s3://``): the files then go to
+``<metricsPath>/<sink app_id>``, so streams may share one ``metricsPath``.
 
 ``bootstrap=True`` first writes a snapshot of the tracked table into the target (once) and
 starts a new checkpoint from its LSN, so the target holds the whole table, not only what CDC

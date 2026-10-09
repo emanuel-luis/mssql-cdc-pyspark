@@ -171,9 +171,11 @@ events do not reach the facts ([Monitoring](monitoring.md)).
 - `to_delta` sets `metricsPath` to `<checkpoint>/_mssql_cdc_metrics` on its own for a local
   or FUSE checkpoint.
 - With a URI checkpoint, set the `metricsPath` option to a directory every node can write
-  and the driver can read (a Volume, or a local path on a single node), not a URI, which is
-  a `ValueError`. `to_delta` puts each
-  stream's files under `<metricsPath>/<app_id>`, so streams may share one.
+  and the driver can read: a Volume, a local path on a single node, or a URI `pyarrow.fs`
+  opens with credentials every node has (`s3://`, `gs://`, `abfss://`, `hdfs://`; not
+  `dbfs:/`, a `ValueError` when the query starts). `to_delta` puts each stream's files under
+  `<metricsPath>/<app_id>`, so streams may share one
+  ([metricsPath](../reference/options.md#metricspath)).
 
 ## The same pipeline by hand
 

@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from .. import events
+from .._metricsfs import join
 from ..types import OnDataLoss, SnapshotMode
 from ._chunked import _Chunked
 from ._common import _URI, _log, _opt
@@ -70,8 +71,10 @@ class CdcStream(_Recovery, _Chunked):
         newer instance captures, instead of NULL (ADR 0023). It reads the reader's events from
         the metrics directory, so a URI checkpoint needs ``metricsPath``. It reads the whole
         table inside the batch, so not with ``snapshot="chunked"``.
-        ``metricsPath``, when given, must be a local or FUSE path every node sees: executors
-        write it and the driver reads it with Python file calls.
+        ``metricsPath``, when given, must be a directory every node sees: executors write it
+        and the driver reads it. A local or FUSE path, or a URI ``pyarrow.fs`` opens with the
+        credentials every node has (``s3://``, ``gs://``, ``abfss://``, ``hdfs://``); the
+        reader raises ``ValueError`` at the query's start for one it cannot open (``dbfs:/``).
         """
         from ..sink import delta_sink
         from ..source import _bool
@@ -91,14 +94,7 @@ class CdcStream(_Recovery, _Chunked):
                 "snapshot_on_switch=True reads the whole table inside the stream's batch, which "
                 "snapshot='chunked' exists to avoid: use one or the other"
             )
-        given_metrics = _opt(self.options, "metricsPath")
-        if given_metrics and _URI.match(str(given_metrics)):
-            raise ValueError(
-                f"metricsPath {given_metrics!r} is a URI, but executors write it and the driver "
-                "reads it with Python file calls: use a local or FUSE path every node sees "
-                "(e.g. /Volumes/...)"
-            )
-        if snapshot_on_switch and not given_metrics and _URI.match(checkpoint):
+        if snapshot_on_switch and not _opt(self.options, "metricsPath") and _URI.match(checkpoint):
             raise ValueError(
                 "snapshot_on_switch=True learns of a switch from the reader's events in "
                 "metricsPath, which a URI checkpoint has no default for: set it"
@@ -161,7 +157,7 @@ class CdcStream(_Recovery, _Chunked):
             )
         metrics = _opt(options, "metricsPath")
         if metrics:  # one directory per stream: the sink folds and removes every file in it
-            metrics = os.path.join(metrics, sink_id)
+            metrics = join(metrics, sink_id)
         elif (facts_table or snapshot_on_switch) and metrics is None and not _URI.match(checkpoint):
             metrics = os.path.join(checkpoint, "_mssql_cdc_metrics")
         if metrics:

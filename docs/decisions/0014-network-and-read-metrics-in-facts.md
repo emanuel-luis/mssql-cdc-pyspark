@@ -6,7 +6,8 @@
 **Amended:** 2026-09-29T22:15:55-03:00, a partition that read no rows leaves no file (see Amendment 2)  
 **Amended:** 2026-09-30T15:16:41-03:00, every partition leaves a file again, with the commit time of its last LSN; the sink folds every file present (see Amendment 3)  
 **Amended:** 2026-09-30T17:47:32-03:00, one directory per stream, emptied before each batch is read (see Amendment 4)  
-**Amended:** 2026-10-05T13:53:56-03:00, only the batch's last partition measures where the stream is (see Amendment 5)
+**Amended:** 2026-10-05T13:53:56-03:00, only the batch's last partition measures where the stream is (see Amendment 5)  
+**Amended:** 2026-10-09T11:14:11-03:00, a URI `metricsPath` goes through `pyarrow.fs` (see Amendment 6)
 
 ## Context
 On a production source the reader was network-bound: round trips of 180–950 ms, and the
@@ -132,3 +133,38 @@ columns keep their meaning; their comments, written for the per-partition values
 latest seen by the batch's partitions"), still hold for the one partition that reports.
 With small tiles merged (ADR 0015, Amendment) a small batch is a single partition anyway;
 this saves queries in large batches, four per range other than the last.
+
+## Amendment 6: a URI `metricsPath` through `pyarrow.fs`
+The files were written with `os.makedirs`, `open` and `os.replace` and listed with `glob`, so
+`metricsPath` had to be a local or FUSE path; a URI was refused, because `s3://b/m` would have
+made a local `s3:` directory on each node. EMR, Dataproc and Spark Connect platforms have no
+such shared path by default, and without one the metrics, the reader's events and
+`snapshot_on_switch` are lost.
+
+Now a `metricsPath` with a URI scheme is written, listed, read and removed through
+`pyarrow.fs.FileSystem.from_uri` (pyarrow is already a dependency), one filesystem per
+directory and process. A local or FUSE path goes through Python's file functions exactly as
+before. The layout does not change: `<metricsPath>/<sink app_id>` through `stream()`, one
+file per partition or event, a retried task rewriting its file under the same name. A URI
+keeps its query (pyarrow's options, such as `?region=`) last when `stream()` appends the
+stream's directory.
+
+* Whole files: a file goes under a temporary name and is moved over its own, as before. On a
+  filesystem whose move raises `NotImplementedError` it is written under its own name in one
+  upload instead, which an object store shows only once complete. Detected by that
+  behaviour, not by the scheme.
+* The reader opens the filesystem when it is created, on the driver, where the planner
+  writes the events and the sink reads the files: a URI pyarrow cannot open (`dbfs:/`, a
+  missing driver library) is a `ValueError` when the query starts, instead of a warning per
+  file. `to_delta` does not check it: on Spark Connect it runs on the client, which need not
+  reach the store.
+* Credentials are pyarrow's: its default chains on each node (environment, instance
+  profile, managed identity) or options in the URI. On Databricks, Unity Catalog's storage
+  credentials do not reach pyarrow, so a Volume stays the way there.
+* Listing a URI that fails (a network error) logs a warning and folds nothing, so a batch
+  never fails on its metrics; the events left there reach the next batch's row.
+* `to_delta` still defaults `metricsPath` only under a local or FUSE checkpoint: a URI
+  checkpoint (`dbfs:/`, `abfss://` on Databricks) may be one pyarrow cannot write.
+
+Tested with `file://` URIs (pyarrow's local filesystem, through `to_delta` and `backfill()`)
+and with a filesystem that cannot move; not against a real object store.

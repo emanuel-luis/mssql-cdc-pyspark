@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from .. import events
+from .._metricsfs import join, list_json, read_json, remove
 from ..types import BackfillState, BackfillStatus, Isolation
 from ._common import _family, _iso, _log, _opt, _ts, _version
 from ._lock import _ModeLock
@@ -129,18 +130,15 @@ def _wave_chunks(
 
 def _chunk_metrics(metrics: str | None) -> dict[int, dict[str, Any]]:
     """The wave's chunk metrics files in ``metrics``, by chunk; removed once read."""
-    from ..sink import _files, _remove
-
     read: dict[int, dict[str, Any]] = {}
-    names = _files(metrics) if metrics else []
+    names = list_json(metrics) if metrics else []
     for name in names:
         try:
-            with open(name, encoding="utf-8") as fh:
-                m = json.load(fh)
+            m = read_json(name)
             read[m["chunk"]] = m
         except (OSError, ValueError, KeyError):
             continue
-    _remove(names)
+    remove(names)
     return read
 
 
@@ -305,7 +303,7 @@ class _Chunked(_ModeLock):
         k = int(given) if given != "auto" else available_cores(self.spark) or os.cpu_count() or 1
         k = max(1, k)
         base = _opt(self.options, "metricsPath")  # not the stream's own directory: it folds those
-        metrics = os.path.join(base, f"{sink_id}.backfill") if base else None
+        metrics = join(base, f"{sink_id}.backfill") if base else None
         # seconds per round of k chunks of the last wave read: at first an earlier call's, from
         # its facts rows' duration (its read and its append)
         pace: float | None = None
@@ -616,7 +614,7 @@ class _Chunked(_ModeLock):
         where the platform refuses to cache, a lazy wave that its append reads (ADR 0032)."""
         from pyspark.sql import functions as F
 
-        from ..sink import _cached, _files, _remove, _utc_now, bronze_rows
+        from ..sink import _cached, _utc_now, bronze_rows
 
         drop = ("snapshotchunks", "snapshotkeys", "snapshotlsn", "metricspath", "isolationlevel")
         # one partition per chunk, in this order; coalesced below, partition p reads chunks p,
@@ -649,7 +647,7 @@ class _Chunked(_ModeLock):
             return _Wave(wave, lazy, tag, False, started_at, t0, lazy=True, metrics=metrics)
         try:
             if metrics:
-                _remove(_files(metrics))  # a dead attempt's
+                remove(list_json(metrics))  # a dead attempt's
             # reads the wave, once: the write takes the cached rows
             counts: dict[int, int] = dict(rows.groupBy("_chunk").count().collect())
             high = client.max_lsn()  # how far capture had got after the read: informational
@@ -743,10 +741,8 @@ class _Chunked(_ModeLock):
         from pyspark.sql import Observation
         from pyspark.sql import functions as F
 
-        from ..sink import _files, _remove
-
         if w.metrics:
-            _remove(_files(w.metrics))  # a dead attempt's: the wave before is in
+            remove(list_json(w.metrics))  # a dead attempt's: the wave before is in
         seen = Observation()
         counts = [
             F.count(F.when(F.col("_chunk") == c["chunk"], 1)).alias(str(c["chunk"]))

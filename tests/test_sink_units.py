@@ -69,6 +69,71 @@ def test_fold_metrics_skips_unreadable_files_and_ends_at_the_largest_to_lsn(tmp_
     assert _fold_metrics(path)["network_wait_ms"] is None
 
 
+def _round_trip(uri, local):
+    """The reader's files written to ``uri``, folded and removed through it; ``local``: where
+    they land. Returns the file names the sink listed."""
+    from mssql_cdc._metricsfs import list_json, remove
+    from mssql_cdc.sink import _read_events
+    from mssql_cdc.source import _write_event, _write_metrics
+
+    _write_metrics(uri, "0x01-0x02", {"to_lsn": "0x02", "seconds": 1.0, "bytes": 1e6})
+    _write_event(uri, "schema_change", "dbo_t", "0x01", None, "{}")
+    # written whole: no temporary file left beside them
+    assert sorted(os.listdir(local)) == ["0x01-0x02.json", "event-schema_change-0x01.json"]
+    assert _fold_metrics(uri)["read_mb"] == 1.0
+    names, events = _read_events(uri)
+    assert [e["event"] for e in events] == ["schema_change"]
+    listed = list_json(uri) + names
+    remove(listed)
+    assert os.listdir(local) == []
+    return listed
+
+
+def test_a_uri_metrics_path_goes_through_pyarrow_fs(tmp_path):
+    # file://: pyarrow.fs's local filesystem, which moves a temporary file over the name
+    listed = _round_trip((tmp_path / "m").as_uri(), tmp_path / "m")
+    assert listed == [
+        (tmp_path / "m" / n).as_uri() for n in ("0x01-0x02.json", "event-schema_change-0x01.json")
+    ]
+
+
+class _NoRename:
+    """A filesystem that cannot move a file (pyarrow raises NotImplementedError), as some
+    object stores; a local filesystem otherwise."""
+
+    def __init__(self):
+        from pyarrow.fs import LocalFileSystem
+
+        self.fs, self.moves = LocalFileSystem(), 0
+
+    def __getattr__(self, name):
+        return getattr(self.fs, name)
+
+    def move(self, src, dest):
+        self.moves += 1
+        raise NotImplementedError("Move is not supported")
+
+
+def test_a_filesystem_without_rename_gets_each_file_in_one_write(tmp_path, monkeypatch):
+    from mssql_cdc import _metricsfs
+
+    store = _NoRename()
+    # s3://b/<key>?<options> is tmp_path/<key>; the query is pyarrow's, not part of the key
+    monkeypatch.setattr(
+        _metricsfs,
+        "_open",
+        lambda uri: (store, str(tmp_path / uri.partition("?")[0].removeprefix("s3://b/"))),
+    )
+    listed = _round_trip("s3://b/m?region=x", tmp_path / "m")
+    assert store.moves == 2  # tried once per file, then written under its own name
+    assert listed == [
+        "s3://b/m/0x01-0x02.json?region=x",
+        "s3://b/m/event-schema_change-0x01.json?region=x",
+    ]
+    # a stream's directory under an explicit one keeps the options last
+    assert _metricsfs.join("s3://b/m/?region=x", "app") == "s3://b/m/app?region=x"
+
+
 def test_headroom_and_lag_are_null_without_either_end():
     assert _headroom(None, T) == {"retention_watermark_ts": None, "retention_headroom_hours": None}
     assert _headroom(T, None)["retention_headroom_hours"] is None

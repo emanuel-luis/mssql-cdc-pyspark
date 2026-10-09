@@ -278,16 +278,26 @@ schema change, capture instance switch and skip past purged changes
 The sink folds them into the batch's facts row and removes them. Without it the metric
 columns of the facts table and `end_lsn` stay NULL, and events only reach the driver log.
 
-It must be a path Python can write on every node and the driver can read: local, or a FUSE
-mount such as a Databricks Volume. A URI (`s3://`, `abfss://`, `dbfs:/`) is a `ValueError`,
-since Python would write it as a local directory named after the scheme. A file that cannot
-be written is skipped: metrics never fail a read.
+It must be a directory every node can write and the driver can read, one of:
+
+* A path: local, or a FUSE mount such as a Databricks Volume (`/Volumes/...`). Python's file
+  functions write it.
+* A URI `pyarrow.fs` opens (`s3://`, `gs://`, `abfss://`, `hdfs://`, `file://`), written
+  through `pyarrow.fs.FileSystem.from_uri`. Credentials come from pyarrow's defaults on each
+  node (environment variables, an instance profile or managed identity) or from options in
+  the URI's query (`s3://bucket/metrics?region=us-east-1`), which every node must have. A
+  URI it cannot open, such as `dbfs:/`, is a `ValueError` when the query starts. Tested with
+  `file://` URIs and a filesystem that cannot rename, not against a real object store yet.
+
+Each file is written whole: under a temporary name moved over its own or, where the
+filesystem cannot move one, under its own name in one upload. A file that cannot be written
+is skipped, with a warning in the executor's log: metrics never fail a read.
 
 * Through `to_delta`, an explicit `metricsPath` holds each stream's files under
   `<metricsPath>/<app_id>`, so streams may share it. Without one, `to_delta` uses
   `<checkpoint>/_mssql_cdc_metrics` (of the live generation) when it has a `facts_table` or
   `snapshot_on_switch=True` and the checkpoint is not a URI. A URI checkpoint (`abfss://`,
-  `dbfs:/`) gets no default: set it.
+  `dbfs:/`) gets no default: set it, to a Volume or to a URI as above.
 * By hand, pass the same directory to `delta_sink(metrics_path=...)` and use it for one
   stream only: the sink folds every file in it, and nothing else removes them.
 

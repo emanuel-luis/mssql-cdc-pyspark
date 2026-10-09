@@ -34,9 +34,10 @@ Spark. On Databricks, install it as a job library and add an init script for the
 system libraries; both are in [Running on Databricks](../DATABRICKS.md).
 
 Of these platforms, only Databricks classic compute has run it, on a single node.
-Databricks serverless is not supported yet, nor is a
-[metricsPath](../reference/options.md#metricspath) on an object store: the metrics need a
-local or FUSE path every node sees, which EMR and Dataproc do not have by default.
+Databricks serverless is not supported yet. The metrics need a
+[metricsPath](../reference/options.md#metricspath) every node sees: a local or FUSE path, or,
+where there is none (EMR and Dataproc by default), an object store URI `pyarrow.fs` opens
+with the credentials the nodes have (`s3://`, `gs://`).
 
 ## Locally
 
