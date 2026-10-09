@@ -85,7 +85,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 - [x] Property-based tests (Hypothesis) for LSN math, plan tiling and change ordering; one
       mutation-testing pass on the core modules, results recorded.
 
-## 0.5.0 (minor): faster first import
+## 0.5.0 (minor, shipped 2026-10-09): faster first import
 
 - [x] Overlapping waves (read the next while committing the previous one) and waves sized
       toward a duration (`target_wave_seconds`: how many of the plan's chunks a wave takes,
@@ -96,8 +96,10 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
       snapshots.
 - [x] Measure `arrow-odbc`'s concurrent fetch (lab t8): +19% to +48% at 1 and 2 partitions,
       nothing at 4; a later release stops turning it off (ADR 0003, Amendment 4).
-- [ ] Validation: a Databricks benchmark, and the weeks-long chunked run against the
-      production source, on its largest table.
+- [x] Validation: a Databricks benchmark against the production source (34M rows: 943 s to
+      586 s; 100M rows: 5,096 s to 4,427 s; see the 0.5.0 CHANGELOG entry).
+- [ ] The weeks-long chunked run against the production source, on its largest table
+      (postponed: it holds a cluster for days or weeks; run it on request).
 
 ## 0.6.0 (minor): platforms
 

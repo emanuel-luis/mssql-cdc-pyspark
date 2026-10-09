@@ -12,6 +12,25 @@ compatibility" line.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-09
+
+The same code as 0.5.0rc1; its changes are listed under it below. Measured against a
+production SQL Server 2016 from Databricks (DBR 18.2, dedicated, `numPartitions` 4,
+`chunk_rows` 1,000,000, the default `target_wave_seconds`), next to a running stream, with
+the same checks as for 0.2.0 (every planned chunk read once, no duplicate key, silver equal to
+the source, `reconcile` matching every bucket):
+
+- a 34-million-row table: from the open to completion in 586 s instead of 943 s with 0.2.0
+  (3 waves instead of 9; 87,000 rows/s during the waves instead of 58,000);
+- a 100-million-row table: 4,427 s instead of 5,096 s (17 waves instead of 27); this read
+  is bound by the link, so the fixed cost per wave weighed less.
+
+A full bootstrap of the same tables takes 325 s and 3,364 s, so a chunked snapshot now
+costs 1.8 and 1.3 times its wall time (2.9 and 1.5 times with 0.2.0), in exchange for being
+read next to the stream over as long as it takes.
+
+State compatibility: unchanged from 0.4.1 (as 0.5.0rc1).
+
 ## [0.5.0rc1] - 2026-10-08
 
 State compatibility: unchanged from 0.4.1. Offsets, checkpoint layout, table schemas, facts
@@ -809,7 +828,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.5.0rc1...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.4.1...v0.5.0
 [0.5.0rc1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.4.1...v0.5.0rc1
 [0.4.1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.3.0...v0.4.0

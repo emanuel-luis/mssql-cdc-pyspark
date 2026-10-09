@@ -25,7 +25,7 @@ metrics in a Volume (item 5). Platform-specific concerns:
    ran). A release candidate installs only by its exact pin:
 
    ```json
-   "libraries": [{"pypi": {"package": "mssql-cdc-pyspark==0.4.1"}}]
+   "libraries": [{"pypi": {"package": "mssql-cdc-pyspark==0.5.0"}}]
    ```
 
    For an unreleased commit, a `requirements` task library pointing to a
@@ -40,7 +40,7 @@ metrics in a Volume (item 5). Platform-specific concerns:
    "libraries": [{"requirements": "/Workspace/Users/<you>/requirements.txt"}]
    ```
 
-   In a notebook, `%pip install mssql-cdc-pyspark==0.4.1` (or the git line) works too. Leave out the `[spark]`
+   In a notebook, `%pip install mssql-cdc-pyspark==0.5.0` (or the git line) works too. Leave out the `[spark]`
    extra: PyPI `pyspark` conflicts with the runtime's own Spark. `mssql-python`, installed
    with the package, loads `libltdl7` (and the Kerberos libraries) on every node that
    opens a connection; add a

@@ -21,7 +21,7 @@ not supported yet ([Databricks](DATABRICKS.md)).
     [changelog](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md)
     says what each release has. A release candidate installs only with
     `pip install --pre mssql-cdc-pyspark` or its exact pin, such as
-    `mssql-cdc-pyspark==0.4.1`. Versioned docs come later.
+    `mssql-cdc-pyspark==0.5.0`. Versioned docs come later.
 
 ## The problem
 
