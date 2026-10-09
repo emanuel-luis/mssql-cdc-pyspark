@@ -2,7 +2,9 @@
 
 They run the real Spark streaming engine (local mode, separate Python workers),
 so offsets, checkpoints, Trigger.AvailableNow and admission control are exercised
-for real; only SQL Server is simulated.
+for real; only SQL Server is simulated. On a Spark without admission control (4.0, 4.1) the
+source's legacy reader runs them, but for the tests that need it: ReadAllAvailable,
+ReadMaxRows or maxCommitsPerBatch.
 """
 
 import json
@@ -25,7 +27,7 @@ from mssql_cdc import (
 from mssql_cdc.fake import FakeCdcDatabase
 from mssql_cdc.finalization import candidate, end_offset_from_progress
 
-pytestmark = pytest.mark.skipif(not HAS_ADMISSION_CONTROL, reason="needs Spark 4.2+")
+needs_admission_control = pytest.mark.skipif(not HAS_ADMISSION_CONTROL, reason="needs Spark 4.2+")
 
 CI = "dbo_orders"
 COLUMNS = "order_id INT, status STRING, amount DECIMAL(18,2), updated_at TIMESTAMP_NTZ"
@@ -103,6 +105,7 @@ def _order_ids(reader, ranges):
     return [x for r in ranges for b in reader.read(r) for x in b.column("order_id").to_pylist()]
 
 
+@needs_admission_control
 def test_available_now_splits_on_commit_boundaries(spark, workdir):
     _db(workdir, n_tx=10, rows_per_tx=3)
     batches, out = _run(spark, workdir, maxCommitsPerBatch=4)
@@ -149,6 +152,7 @@ def test_retention_guard_fails_loudly(spark, workdir):
     assert is_data_loss(stopped.value)  # the DataLossError the source raised
 
 
+@needs_admission_control
 def test_cleanup_between_planning_and_read_fails_the_task(spark, workdir):
     from pyspark.sql.streaming.datasource import ReadAllAvailable
 
@@ -200,6 +204,7 @@ def test_metadata_columns_and_types(spark, workdir):
     assert rows[0]["_start_lsn"].startswith("0x") and len(rows[0]["_start_lsn"]) == 22
 
 
+@needs_admission_control
 def test_num_partitions_splits_without_duplicates(workdir, monkeypatch):
     from pyspark.sql.streaming.datasource import ReadAllAvailable
 
@@ -320,6 +325,7 @@ def test_a_small_batch_reads_in_one_partition_whatever_the_cores(spark, workdir)
     assert spark.sparkContext.defaultParallelism == 2 and len(pids) == 1
 
 
+@needs_admission_control
 def test_partitions_hold_the_same_rows_even_when_commits_differ_in_size(workdir, monkeypatch):
     from pyspark.sql.streaming.datasource import ReadAllAvailable
     from pyspark.sql.types import IntegerType, StructField, StructType
@@ -402,6 +408,7 @@ def test_snapshot_reads_the_current_rows_in_key_ranges(spark, workdir):
     }
 
 
+@needs_admission_control
 def test_available_now_stops_at_the_max_lsn_it_started_with(workdir):
     from pyspark.sql.streaming.datasource import ReadAllAvailable, ReadMaxRows
 
@@ -418,6 +425,7 @@ def test_available_now_stops_at_the_max_lsn_it_started_with(workdir):
     assert s["lsn"] == seen
 
 
+@needs_admission_control
 def test_driver_guard_and_empty_ranges(workdir):
     from pyspark.sql.streaming.datasource import ReadAllAvailable
 
@@ -432,6 +440,7 @@ def test_driver_guard_and_empty_ranges(workdir):
         reader.partitions(start, reader.latestOffset(start, ReadAllAvailable()))
 
 
+@needs_admission_control
 def test_fail_on_data_loss_false_skips_to_min_lsn_without_inverted_ranges(workdir):
     # another instance's low watermark keeps the cdc.lsn_time_mapping rows below CI's, so
     # the first batches end below CI's min_lsn
@@ -458,6 +467,7 @@ def test_fake_resolves_the_exact_capture_instance_first(workdir):
     assert client.source_table("dbo_Orders").table == "dbo_Orders"
 
 
+@needs_admission_control
 def test_a_range_without_rows_leaves_its_metrics_file_with_its_end_commit_time(workdir):
     from pyspark.sql.streaming.datasource import ReadAllAvailable
 
@@ -499,6 +509,7 @@ def test_snapshot_is_stamped_with_the_lsn_recorded_before_the_read(workdir):
     assert {r["_start_lsn"] for r in rows} == {part.lsn} and part.lsn < newer
 
 
+@needs_admission_control
 def test_starting_lsn_is_exclusive(workdir):
     from pyspark.sql.streaming.datasource import ReadAllAvailable
 
@@ -662,6 +673,7 @@ def _ms(minutes):
     return (T0 + timedelta(minutes=minutes)).isoformat(timespec="milliseconds")
 
 
+@needs_admission_control
 def test_a_newer_capture_instance_takes_over_at_its_start_lsn(spark, workdir):
     _, v2, s, _ = _switch(workdir)
     metrics = os.path.join(workdir, "metrics")
