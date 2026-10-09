@@ -22,7 +22,7 @@ from mssql_cdc.fake import FakeCdcDatabase
 from mssql_cdc.finalization import end_offset_from_progress
 from mssql_cdc.spark import get_spark
 
-from ..common import report
+from ..common import progress, report
 
 
 def main(argv=None) -> bool:
@@ -53,8 +53,7 @@ def main(argv=None) -> bool:
         .start()
     )
     q.awaitTermination()
-    progress = [json.loads(x.json) if hasattr(x, "json") else x for x in q.recentProgress]
-    sizes = [x["numInputRows"] for x in progress if x["numInputRows"]]
+    sizes = [x["numInputRows"] for x in progress(q) if x["numInputRows"]]
     end = end_offset_from_progress(q.lastProgress)
     total = spark.sql("SELECT count(*) FROM t5_out").first()[0]
     checks = [

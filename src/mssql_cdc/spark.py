@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -26,12 +27,15 @@ def get_spark(
 ) -> SparkSession:
     """Return the active SparkSession (Databricks, EMR, Fabric...) or create a
     local one, with Delta configured when ``delta-spark`` is installed (``delta``,
-    keyword-only)."""
+    keyword-only). With ``SPARK_REMOTE`` set, a Spark Connect session on that server, which
+    has its own configuration: ``master`` and ``delta`` are not used."""
     from pyspark.sql import SparkSession
 
     active = SparkSession.getActiveSession()
     if active is not None:
         return active
+    if "SPARK_REMOTE" in os.environ:  # PySpark refuses a master next to it
+        return SparkSession.builder.appName(app_name).getOrCreate()
     builder = (
         SparkSession.builder.appName(app_name)
         .master(master)

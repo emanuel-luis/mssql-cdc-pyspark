@@ -21,7 +21,6 @@ Databricks:  main(["--schema", "lab.cdc", "--checkpoint", "/Volumes/lab/cdc/ckpt
 """
 
 import argparse
-import json
 import os
 import sys
 import tempfile
@@ -32,7 +31,7 @@ from mssql_cdc import finalization, register
 from mssql_cdc.sink import delta_sink
 from mssql_cdc.spark import get_spark
 
-from ..common import SOURCE_TZ, connect, connection_string, ct_count, max_lsn, report
+from ..common import SOURCE_TZ, connect, connection_string, ct_count, max_lsn, progress, report
 from ..workload import Workload
 
 # dbo.orders as sql/00_setup.sql creates it; the reader must infer exactly this
@@ -115,8 +114,7 @@ def main(argv=None) -> bool:
             .start()
         )
         q.awaitTermination()
-        prog = [json.loads(x.json) if hasattr(x, "json") else x for x in q.recentProgress]
-        return q, prog
+        return q, progress(q)
 
     def bronze_count():
         return spark.sql(f"SELECT count(*) FROM {finalization.table_ref(target)}").first()[0]

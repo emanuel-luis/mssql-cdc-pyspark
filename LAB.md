@@ -73,6 +73,11 @@ python -m lab.checks.t3_read_semantics --destructive
 python -m lab.checks.t7_end_to_end --destructive
 ```
 
+The Spark checks run through a Spark Connect server too: with `SPARK_REMOTE=sc://<host>:<port>`
+set, `get_spark()` returns a session on it, and the checks' progress counts come from the
+sources, which a Connect progress keeps. CI's `connect` job runs `t5` so
+(`tests/test_connect.py`).
+
 For timezone behaviour, recreate the container with `MSSQL_TZ=America/Sao_Paulo` in
 `.env`, then rerun `t2` and `t7`. `sourceTimeZone=auto` (the default) picks the zone up
 from `CURRENT_TIMEZONE_ID()`; on SQL Server 2019 or older it applies the server's current
@@ -144,6 +149,7 @@ them, since re-running a push run skips t1 and the destructive t7).
 | t10 `--resnapshot` | SQL Server 2022 CU27 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, local | PASS: a forced cleanup purged a gap with 60 deleted keys; generation 1 opened a chunked snapshot, planned in 15 chunks and read in 8 waves under 16,493 writer transactions, closed by its `resnapshot` row; after each wave silver held 46, 32, 20, 14, 9, 4, then 1 of the 60 keys, none below the chunks applied, and 0 after the rebuild; 0 of 2,017 chunk rows stale; 15,695 change rows after S once; silver == table (4,203 rows), no delete row for the 60 keys | `t10_chunked_snapshot-20261003T182143Z.json`, local run 2026-10-03 |
 | t9, t10, t10 `--resnapshot` | SQL Server 2022 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, CI (every push, and the weekly run) | PASS | [`lab-results` artifact](https://github.com/emanuel-luis/mssql-cdc-pyspark/actions/runs/37314434485), scheduled run 2026-10-05 |
 | t5 | PySpark 4.2.0, local (WSL) | PASS | `t5_engine-20261005T173321Z.json`, local run 2026-10-05 |
+| t5 | PySpark 4.2.0 client with `SPARK_REMOTE`, local Spark Connect server (PySpark 4.2.0, Delta Connect 4.4.0), WSL | PASS: batches [3, 3, 3, 1], 10 rows, `commit_ts` in the end offset | `t5_engine-20261009T144917Z.json`, local run 2026-10-09 |
 | t7 `--transactions 200 --max-commits 50` | SQL Server 2022 CU27 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, local | PASS: bronze == change table (4,006 rows), 0 duplicates; 1,155 batches, 13 with rows, in 5,941 s, because the lab database's `cdc.lsn_time_mapping` held about 57,500 commits of earlier runs' tables and `maxCommitsPerBatch` counts them all; the rerun read 0 rows; the incremental run 52 of 52 | `t7_end_to_end-20261005T200121Z.json`, local run 2026-10-05 |
 | t9 | SQL Server 2022 CU27 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, local | PASS: the query stopped at S and resumed on restart; batches 4 to 7 after the old instance was dropped; 3,986 + 4,291 change rows (old + new instance) once each under 4,001 writer transactions; latest image == table (3,531 rows) | `t9_capture_instance_switch-20261005T200726Z.json`, local run 2026-10-05 |
 | t10 | SQL Server 2022 CU27 (`2022-latest`), PySpark 4.2.0, delta-spark 4.4.0, local | PASS: 14 chunks read in 7 waves under 18,082 writer transactions; 0 of 1,897 chunk rows stale; a chunk waited (`LCK_M_S`) on the held range; 17,139 change rows after S, each once; silver == table (4,443 rows); `reconcile` 9 buckets MATCH | `t10_chunked_snapshot-20261005T202216Z.json`, local run 2026-10-05 |

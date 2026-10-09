@@ -9,6 +9,8 @@ Connect session turns the whole process to Connect (``delta.tables`` among other
 """
 
 import os
+import subprocess
+import sys
 import time
 from datetime import datetime, timedelta
 
@@ -45,6 +47,22 @@ def _eventually(check, timeout=180):
     while not check():
         assert time.monotonic() < deadline, "timed out"
         time.sleep(0.5)
+
+
+def test_lab_t5_runs_on_the_server_spark_remote_names(connect_server):
+    # the check to run first on a new runtime (docs/DATABRICKS.md), as a Connect client: its
+    # get_spark() under SPARK_REMOTE, in a process of its own (this one has a session)
+    run = subprocess.run(
+        [sys.executable, "-m", "lab.checks.t5_engine"],
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # the repository
+        env={**os.environ, "SPARK_REMOTE": connect_server},
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,  # the assert shows its output
+    )
+    assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-3000:]
+    assert "[PASS] batches split on commit boundaries" in run.stdout
 
 
 def test_available_now_into_bronze_with_facts_then_advance(connect_spark, workdir):

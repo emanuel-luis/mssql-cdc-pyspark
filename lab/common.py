@@ -100,6 +100,17 @@ def wait_for_rows(conn, capture_instance: str, expected: int, timeout: float = 1
         time.sleep(1)
 
 
+def progress(query) -> list[dict]:
+    """``query.recentProgress`` as dicts, each ``numInputRows`` summed from its sources: on
+    Spark Connect the progress JSON has no top-level count."""
+    out = []
+    for p in query.recentProgress:
+        d = json.loads(p.json) if hasattr(p, "json") else dict(p)
+        d["numInputRows"] = sum(s.get("numInputRows") or 0 for s in d.get("sources") or ())
+        out.append(d)
+    return out
+
+
 def save_result(name: str, payload: dict) -> Path:
     """Persist ``payload`` with the server's build (@@VERSION's first line, which names the
     CU), so a result is tied to the SQL Server it ran against. None when no server is
