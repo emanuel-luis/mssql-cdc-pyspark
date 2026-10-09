@@ -8,6 +8,7 @@ alone, after ``uv sync --group connect``: ``uv run pytest -m connect``. Alone, b
 Connect session turns the whole process to Connect (``delta.tables`` among others).
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -194,3 +195,97 @@ def test_start_many_data_loss_then_a_resnapshot_recovers(connect_spark, workdir)
     bronze = spark.read.format("delta").load(templates["target"].format(ci=CI))
     keys = sorted(r["order_id"] for r in bronze.where("_operation = 0").collect())
     assert keys == [*range(12), 20]
+
+
+def test_where_caching_is_refused_the_sink_backfill_and_reconcile_still_count(
+    connect_spark, workdir, refuse_caching, caplog
+):
+    # as on Databricks serverless: the cache API raises in this client (backfill, reconcile)
+    # and in the server's foreachBatch worker, where the sink runs (ADR 0032)
+    spark = connect_spark
+    calls = refuse_caching()
+    db, options = _orders(workdir)
+    options["maxCommitsPerBatch"] = "1"
+    bronze, silver, ckpt, facts, control = _paths(
+        workdir, "bronze", "silver", "ckpt", "facts", "control"
+    )
+    cdc = stream(spark, options)
+
+    def run():  # a new sink each time, as each scheduled availableNow job is
+        cdc.to_delta(
+            bronze,
+            "refused-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    run()  # opens the snapshot at S, streams from it
+    changed = [
+        (3, {"order_id": 0, "status": "new"}),
+        (4, {"order_id": 0, "status": "paid"}),
+        (1, {"order_id": 1, "status": "new"}),
+    ]
+    db.commit(CI, changed, at=T0 + timedelta(minutes=1))
+    db.idle(at=T0 + timedelta(minutes=2))
+    db.idle(at=T0 + timedelta(minutes=3))
+    db.commit(CI, [(2, {"order_id": 20, "status": "new"})], at=T0 + timedelta(minutes=4))
+    run()  # a batch per commit: with rows, without (twice), with
+    commits = os.path.join(ckpt, "commits")
+    last = max(int(n) for n in os.listdir(commits) if n.isdigit())
+    for name in os.listdir(commits):  # the query died before its checkpoint commit
+        if name.strip(".").split(".")[0] == str(last):  # and its .crc
+            os.remove(os.path.join(commits, name))
+    run()  # replays the last batch: Delta skips both writes, its facts are counted again
+    batches = (
+        spark.read.format("delta")
+        .load(facts)
+        .where("event IS NULL")
+        .orderBy("batch_id")
+        .select("batch_id", "rows", "deletes", "inserts", "updates")
+        .collect()
+    )
+    assert [tuple(r)[1:] for r in batches[-4:]] == [(3, 1, 0, 1), (0,) * 4, (0,) * 4, (1, 0, 1, 0)]
+    # the sink ran uncached: no counts in its commits; one without rows after one with rows
+    history = spark.sql(f"DESCRIBE HISTORY delta.`{bronze}`").where("operation = 'WRITE'")
+    metas = [json.loads(r["userMetadata"]) for r in history.orderBy("version").collect()]
+    first = batches[-4]["batch_id"]
+    assert [(m["batch_id"], m["rows"]) for m in metas if "batch_id" in m][-3:] == [
+        (first, None),
+        (first + 1, None),
+        (first + 3, None),
+    ]
+    assert cdc.backfill(bronze, app_id="refused-v1", facts_table=facts, chunk_rows=3)["done"]
+    chunks = spark.read.format("delta").load(facts).where("event = 'snapshot_chunk'").collect()
+    assert len(chunks) == 4 and sum(r["rows"] for r in chunks) == 11  # order 1 deleted
+    apply_changes(
+        spark,
+        bronze,
+        silver,
+        capture_instance=CI,
+        keys=["order_id"],
+        control_table=control,
+        facts_table=facts,
+    )
+    current = spark.read.format("delta").load(silver).collect()
+    assert sorted((r["order_id"], r["status"]) for r in current) == [
+        (0, "paid"),
+        *((i, "new") for i in range(2, 12)),
+        (20, "new"),
+    ]
+    with caplog.at_level("WARNING", logger="mssql_cdc.reconcile"):
+        checked = reconcile(
+            spark,
+            options,
+            silver,
+            bronze=bronze,
+            control_table=control,
+            facts_table=facts,
+            bucket_rows=4,
+            sample=1.0,
+        )
+    assert (checked["mismatch"], checked["failures"], checked["hashed"]) == (0, {}, 0)
+    assert checked["match"] == checked["buckets"] > 0 and "compared counts only" in caplog.text
+    assert set(calls) == {"persist", "localCheckpoint"}  # backfill and reconcile, here

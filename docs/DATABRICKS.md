@@ -2,8 +2,9 @@
 
 Nothing in `mssql_cdc` imports Databricks APIs. What has run on Databricks is classic
 compute, DBR 18.2, dedicated access mode, single node (items 1 and 3); other runtimes and
-classic compute types are untested. Serverless compute runs it through Spark Connect, with
-`availableNow` only (item 2). Keep the metrics in a Volume (item 5): a `metricsPath` URI goes
+classic compute types are untested. Serverless compute is a Spark Connect platform the
+library is built for, with `availableNow` only and no cache API (item 2); it has not run
+there yet. Keep the metrics in a Volume (item 5): a `metricsPath` URI goes
 through `pyarrow.fs`, which has no `dbfs:/` and gets no Unity Catalog credentials.
 Platform-specific concerns:
 
@@ -18,9 +19,10 @@ Platform-specific concerns:
    the next run fails with "does not support recovering from checkpoint location".
 2. **Access mode.** On classic compute, use dedicated. Python streaming data sources on
    standard access mode are untested. Serverless compute and Databricks Connect are Spark
-   Connect clients: the library runs there as on any Spark Connect server
+   Connect clients: the library calls only what any Spark Connect server has
    ([Spark Connect](getting-started/installation.md#spark-connect)), tested against a local
-   one with the fake backend. Serverless allows no `processingTime` trigger, Spark's
+   one with the fake backend, also with the cache API refused as serverless refuses it.
+   Neither has run it yet. Serverless allows no `processingTime` trigger, Spark's
    default included: pass `trigger={"availableNow": True}` to `to_delta` and
    `start_many`, run the job on a schedule, and advance the verdict after
    `awaitTermination()` (`advance`, or `track` then `join`).

@@ -149,11 +149,25 @@ def workdir():
     shutil.rmtree(path, ignore_errors=True)
 
 
+@pytest.fixture(scope="session")
+def refusal_flag(tmp_path_factory):
+    """While this file exists, ``connect_server``'s ``foreachBatch`` worker refuses the cache
+    API (tests/connect_site/sitecustomize.py)."""
+    return tmp_path_factory.mktemp("refusal") / "refuse-caching"
+
+
 @pytest.fixture
-def refuse_caching(monkeypatch):
+def refuse_caching(monkeypatch, refusal_flag):
     """``refuse_caching()``: from then on every cache API raises, as on Databricks serverless
-    (ADR 0032); returns the list the refused calls' names go to."""
+    (ADR 0032): in this process, on a classic DataFrame and, once a Connect session exists, on
+    a Connect one, and in a Connect server's ``foreachBatch`` worker. Returns the list the
+    names of the calls refused in this process go to."""
     from pyspark.sql.classic.dataframe import DataFrame
+
+    classes = [DataFrame]
+    connect = sys.modules.get("pyspark.sql.connect.dataframe")  # imported by a Connect session
+    if connect is not None:
+        classes.append(connect.DataFrame)
 
     def refuse() -> list:
         calls: list = []
@@ -165,11 +179,14 @@ def refuse_caching(monkeypatch):
 
             return refused
 
-        for name in ("persist", "cache", "unpersist", "localCheckpoint", "checkpoint"):
-            monkeypatch.setattr(DataFrame, name, refusing(name))
+        for cls in classes:
+            for name in ("persist", "cache", "unpersist", "localCheckpoint", "checkpoint"):
+                monkeypatch.setattr(cls, name, refusing(name))
+        refusal_flag.touch()
         return calls
 
-    return refuse
+    yield refuse
+    refusal_flag.unlink(missing_ok=True)
 
 
 @pytest.fixture
@@ -210,11 +227,12 @@ def latest():
 
 
 @pytest.fixture(scope="session")
-def connect_server(tmp_path_factory):
+def connect_server(tmp_path_factory, refusal_flag):
     """The URL (``sc://localhost:<port>``) of a local Spark Connect server with Delta Connect,
     which this fixture starts in its own JVM and stops after the run (tests marked
-    ``connect``). Its Python workers run this interpreter, so they import this ``mssql_cdc``.
-    The first run downloads the Delta Connect jars."""
+    ``connect``). Its Python workers run this interpreter, so they import this ``mssql_cdc``,
+    and tests/connect_site's ``sitecustomize``, which ``refuse_caching`` drives through
+    ``refusal_flag``. The first run downloads the Delta Connect jars."""
     import pyspark
 
     home = os.path.dirname(pyspark.__file__)
@@ -252,7 +270,10 @@ def connect_server(tmp_path_factory):
         cmd += ["--conf", f"{key}={value}"]
     log_path = base / "server.log"
     with open(log_path, "wb") as log:
+        site = os.path.join(os.path.dirname(os.path.abspath(__file__)), "connect_site")
+        path = os.pathsep.join(p for p in (site, os.environ.get("PYTHONPATH")) if p)
         env = {**os.environ, "SPARK_HOME": home, "PYSPARK_PYTHON": sys.executable}
+        env |= {"PYTHONPATH": path, "MSSQL_CDC_TEST_REFUSE_CACHING": str(refusal_flag)}
         server = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
     try:
         deadline = time.monotonic() + 600  # the jars' first download included

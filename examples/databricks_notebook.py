@@ -5,7 +5,8 @@
 # MAGIC * Runtime: validate with `lab/checks/t5_engine.py` first (needs the Spark 4.2 Python
 # MAGIC   data source streaming API: admission control + `Trigger.AvailableNow`).
 # MAGIC * Compute: classic in **dedicated** access mode (standard mode is untested for Python
-# MAGIC   streaming sources), or serverless (Spark Connect: `availableNow` only, as below).
+# MAGIC   streaming sources), or serverless (Spark Connect: `availableNow` only, as below; not
+# MAGIC   run there yet).
 # MAGIC * Network: the SQL Server must be reachable from the compute (a local Docker is not).
 # MAGIC * The Databricks-specific bits are confined to this notebook: secrets, UC names, Volumes.
 

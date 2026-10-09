@@ -1,7 +1,8 @@
 # 0033: Spark Connect, tested against a local Connect server
 
 **Status:** accepted  
-**Date:** 2026-10-09T11:39:43-03:00
+**Date:** 2026-10-09T11:39:43-03:00  
+**Amended:** 2026-10-09T19:26:50-03:00, the server's Python workers load a `sitecustomize` through which a test refuses the cache API in its `foreachBatch` worker, as serverless does (ADR 0032)
 
 ## Context
 Databricks serverless compute (the default for new Databricks jobs), Databricks Connect and
@@ -53,7 +54,10 @@ the Databricks runs is out of its reach.
   3.24.4 its POM declares); the test process holds only the client (`connect_spark`). The
   fake backend stands in for SQL Server: the reads run on the server's executors in the
   same code as on a classic cluster, and the client-side SQL Server calls are the same
-  calls a classic driver makes.
+  calls a classic driver makes. The server's Python workers have
+  `tests/connect_site/sitecustomize.py` on their path: in the `foreachBatch` worker it makes
+  the cache API raise while the `refuse_caching` fixture's flag file exists, so the sink's
+  uncached path ([ADR 0032](0032-facts-without-caching.md)) runs where it runs on serverless.
 * The connect tests are also marked `spark` and `delta`, so the loops that leave those out
   leave them out too, and the default run deselects `connect`. They run alone, in CI's
   `connect` job: a Connect session turns the whole Python process to Connect
@@ -78,7 +82,8 @@ the Databricks runs is out of its reach.
   `track` listener run in the client process: it must reach SQL Server and see the
   checkpoint for the pre-flight, and verdicts stop moving when it exits. This was already
   so from Databricks Connect; the installation guide now says it in one place.
-* The connect suite takes about five minutes (the server's start included), in a job of its
+* The connect suite took about five minutes (the server's start included); with the test that
+  refuses the cache API, 13 minutes in one local WSL run on 2026-10-09. It has a job of its
   own; its first run on a cold Ivy cache downloads the Delta Connect jars.
 * The SQL Server path through the local Connect server, run on 2026-10-09 with
   `MSSQL_CDC_TEST_SPARK=connect` (SQL Server 2022 in Docker): 10 integration tests passed:

@@ -8,8 +8,10 @@ built on Spark's Python DataSource V2 API, plus a **completeness signal**
   a local Spark Connect server (a PySpark 4.2 client, Delta Connect) and on Databricks
   classic compute (DBR 18.2, dedicated access mode, single node); other Spark 4.2+ runtimes
   and multi-node clusters are untested. Databricks serverless and Databricks Connect are
-  Spark Connect clients; serverless takes only `trigger={"availableNow": True}`, and its
-  network path to your SQL Server is yours to set up
+  Spark Connect clients and have not run it yet. Serverless refuses the cache API, which the
+  library works without (tested on the local Connect server with caching refused), takes
+  only `trigger={"availableNow": True}`, and its network path to your SQL Server is yours
+  to set up
   ([Spark Connect](https://emanuel-luis.github.io/mssql-cdc-pyspark/getting-started/installation/#spark-connect)).
   The metrics need `metricsPath` on a directory every node sees: a local or FUSE path, such
   as a Unity Catalog Volume, or a URI `pyarrow.fs` opens (`s3://`, `gs://`, `abfss://`,

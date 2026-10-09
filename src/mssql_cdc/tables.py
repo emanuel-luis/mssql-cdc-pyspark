@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, TypeAlias, TypeVar, cast
 
 if TYPE_CHECKING:
     from delta.tables import DeltaTable
-    from pyspark.sql import SparkSession
+    from pyspark.sql import Row, SparkSession
     from pyspark.sql.types import DataType
 
     from .types import SparkSessionLike
@@ -87,6 +87,24 @@ def version(spark: SparkSessionLike, name_or_path: str) -> int:
     latest = delta_table(spark, name_or_path).history(1).first()
     assert latest is not None  # an existing table has a version
     return int(latest["version"])
+
+
+def commit_after(
+    spark: SparkSessionLike, name_or_path: str, before: int, metadata: str
+) -> Row | None:
+    """The history row of the commit after version ``before`` whose userMetadata is
+    ``metadata``, or None: a write's own commit, among those others made meanwhile (auto
+    compaction, the stream next to a backfill). Selected by version, since others may also
+    commit between reading the latest version and reading the history."""
+    from pyspark.sql import functions as F
+
+    new = version(spark, name_or_path) - before
+    if new <= 0:
+        return None
+    # ponytail: more than 16 commits between the two reads would push it out of the window
+    history = delta_table(spark, name_or_path).history(new + 16)
+    found = (F.col("version") > before) & (F.col("userMetadata") == metadata)
+    return history.where(found).first()
 
 
 def exists(spark: SparkSessionLike, name_or_path: str) -> bool:

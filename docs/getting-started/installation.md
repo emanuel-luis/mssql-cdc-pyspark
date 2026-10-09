@@ -34,7 +34,7 @@ Spark. On Databricks, install it as a job library and add an init script for the
 system libraries; both are in [Running on Databricks](../DATABRICKS.md).
 
 Of these platforms, only Databricks classic compute has run it, on a single node.
-Databricks serverless runs it through Spark Connect (below). The metrics need a
+Databricks serverless is a Spark Connect platform (below), not run yet. The metrics need a
 [metricsPath](../reference/options.md#metricspath) every node sees: a local or FUSE path, or,
 where there is none (EMR and Dataproc by default), an object store URI `pyarrow.fs` opens
 with the credentials the nodes have (`s3://`, `gs://`).
@@ -52,7 +52,9 @@ Tested with a PySpark 4.2 client against a local Spark Connect server (PySpark 4
 Delta Connect 4.4), with the fake backend in place of SQL Server: `to_delta` with
 `availableNow` and with `processingTime`, `track`, `snapshot`, a chunked bootstrap with
 `backfill`, `apply_changes`, `reconcile`, and `start_many` through a data loss and its
-re-snapshot (`tests/test_connect.py`, CI's `connect` job). The SQL Server path through the
+re-snapshot, and the sink, `backfill` and `reconcile` with the cache API refused in the
+client and in the server's `foreachBatch` worker, as Databricks serverless refuses it
+(`tests/test_connect.py`, CI's `connect` job). The SQL Server path through the
 same server is tested on demand: integration tests against SQL Server 2022 in Docker
 (bootstrap, re-snapshot, chunked bootstrap, `seed`, silver, `reconcile`, a type change
 stopping the query) pass with their session swapped for a Connect one

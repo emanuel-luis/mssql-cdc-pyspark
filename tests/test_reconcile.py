@@ -157,6 +157,24 @@ def test_where_checkpoints_are_refused_reconcile_compares_the_counts_only(
     assert not any(r["hashed"] for r in result["report"].collect())
 
 
+def test_a_source_read_that_fails_to_plan_raises_rather_than_reading_as_a_refusal(spark, workdir):
+    # even a lazy checkpoint of the read plans its scan, which asks SQL Server: a failure there
+    # is the source's, never the platform refusing checkpoints
+    from mssql_cdc.reconcile import _read_once
+
+    o = Orders(spark, workdir)
+    o.commit((2, {"order_id": 1, "status": "new"}))
+    read = (
+        spark.read.format("mssql_cdc_snapshot")
+        .options(**o.options)
+        .option("snapshotChunks", json.dumps([[0, None, 5], [1, 5, None]]))
+        .option("snapshotKeys", json.dumps(["no_such_key"]))
+        .load()
+    )
+    with pytest.raises(Exception, match="cannot be read in ranges"):
+        _read_once(read)
+
+
 def test_a_computed_column_listed_in_columns_is_not_compared(delta_spark, workdir):
     declared = "order_id INT, status STRING, total INT"
     o = Orders(delta_spark, workdir, columns=declared, computed={CI: ["total"]})

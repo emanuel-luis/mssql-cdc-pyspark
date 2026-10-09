@@ -5,7 +5,8 @@
 * The batch is cached, counted, then appended: the source is read once. Where the platform
   refuses to cache (Databricks serverless), the append reads it and its facts are observed
   on the way (ADR 0032): the same facts, but not in its commit's userMetadata, and a batch
-  without rows right after one with rows writes an empty commit.
+  without rows writes an empty commit unless the batch before it had none too (for a run's
+  first batch, as the facts table's last row says).
 * Facts about each batch go into the Delta commit (``userMetadata``) and,
   optionally, into a facts table. The table matters: ``commitInfo`` is not kept in
   checkpoints and disappears with log cleanup (``delta.logRetentionDuration``).
@@ -177,8 +178,10 @@ FACTS_COMMENT = (
     "One row per micro-batch written by mssql-cdc-pyspark's delta_sink, including batches that "
     "read no change rows (rows = 0), so a current stream on a quiet table keeps writing rows: "
     "what was written (counts, LSN and commit-time ranges), how far the stream had read "
-    "(end_lsn, end_commit_ts) and how long it took. The same facts are in each target commit's "
-    "userMetadata (batches with rows only), which Delta log cleanup eventually drops. Each "
+    "(end_lsn, end_commit_ts) and how long it took. Where the platform caches, the same facts "
+    "are in each target commit's userMetadata (batches with rows only); elsewhere the commit's "
+    "userMetadata has the keys with null counts (ADR 0032). Delta log cleanup eventually drops "
+    "it. Each "
     "snapshot stream().to_delta takes (bootstrap or re-snapshot), each schema change on the "
     "source, each switch to a newer capture instance and each skip past purged changes "
     "(failOnDataLoss=false) adds one row, with event set (see its comment); a snapshot adds one "
@@ -273,19 +276,21 @@ def _fact_tuples(rows: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
     return [tuple(r.get(k) for k in _FACT_FIELDS) for r in rows]
 
 
-def _last_batch(spark: SparkSessionLike, facts_table: str, app_id: str) -> int | None:
+def _last_batch(
+    spark: SparkSessionLike, facts_table: str, app_id: str
+) -> tuple[int, int | None] | None:
     """The largest batch id ``app_id`` wrote a batch row (event NULL) for in ``facts_table``,
-    an existing table; None when it wrote none."""
+    an existing table, and that row's ``rows``; None when it wrote none."""
     from .tables import delta_table
 
     row = (
         delta_table(spark, facts_table)
         .toDF()
         .where((F.col("app_id") == app_id) & F.col("event").isNull())
-        .agg(F.max("batch_id"))
+        .agg(F.max("batch_id"), F.max_by("rows", "batch_id"))
         .first()
     )
-    return None if row is None else row[0]
+    return None if row is None or row[0] is None else (row[0], row[1])
 
 
 def _utc_now() -> datetime:
@@ -338,17 +343,6 @@ def _cached(df: DataFrame) -> DataFrame | None:
     except Exception as exc:  # noqa: BLE001 - the refusal's type is the platform's; trying is the only test
         _log.info("mssql_cdc: this platform does not cache DataFrames (%s)", str(exc)[:200])
         return None
-
-
-def _appended(spark: SparkSessionLike, target: str, before: int, meta: str) -> bool:
-    """Whether a commit of ``target`` after version ``before`` has userMetadata ``meta``: the
-    append just made, not one Delta skipped as written already (``txnVersion``). Others may
-    commit meanwhile (a backfill wave, auto compaction)."""
-    from .tables import delta_table, version
-
-    new = version(spark, target) - before
-    history = delta_table(spark, target).history(new) if new > 0 else None
-    return history is not None and history.where(F.col("userMetadata") == meta).first() is not None
 
 
 def _json(facts: Mapping[str, Any]) -> str:
@@ -481,7 +475,8 @@ def delta_sink(
     created: set[str] = set()  # once per query run, not once per batch
     resumed = warned = False
     caching = True  # until the platform refuses to cache a batch (ADR 0032)
-    quiet = True  # the last batch read no rows, or none was read yet
+    # the last batch read no rows: for a run's first, as its facts row says (unknown: False)
+    quiet = False
     carried: list[str] = []  # a replayed batch's warnings: its facts row was written already
 
     def ensure(
@@ -494,12 +489,13 @@ def delta_sink(
     def append(df: DataFrame, batch_id: int) -> dict[str, Any]:
         """Append the batch to ``target`` uncached; returns its facts (ADR 0032). The append
         reads it and its facts are observed on the way, so its commit's userMetadata cannot
-        hold them. After a batch without rows, ``isEmpty()`` reads this one up to its first
-        row, and all of it when it has none, which then writes no commit (its only read);
-        after one with rows, a batch without them writes an empty commit."""
+        hold them. After a batch without rows (for a run's first, one the facts table says
+        had none), ``isEmpty()`` reads this one up to its first row, and all of it when it
+        has none, which then writes no commit (its only read); otherwise a batch without
+        rows writes an empty commit."""
         from pyspark.sql import Observation
 
-        from .tables import version
+        from .tables import commit_after, version
 
         nonlocal quiet
         if quiet and df.isEmpty():
@@ -511,13 +507,16 @@ def delta_sink(
         seen, before = Observation(), version(spark, target)
         observed = out.observe(seen, *_facts_columns())
         _write(observed, target, app_id, batch_id, meta, merge_schema=True)
-        # Delta skipped a replay without reading it: counted with one read
-        facts = seen.get if _appended(spark, target, before, meta) else batch_facts(df)
+        # Delta skipped a replay without reading it, or a Spark Connect server answered the
+        # write before its metrics were in (the client then has none): counted with one read
+        facts = seen.get if commit_after(spark, target, before, meta) is not None else {}
+        if "rows" not in facts:
+            facts = batch_facts(df)
         quiet = not facts["rows"]
         return facts
 
     def write_batch(df: DataFrame, batch_id: int) -> None:
-        nonlocal resumed, warned, caching, carried
+        nonlocal resumed, warned, caching, quiet, carried
         started_at, t0 = _utc_now(), time.monotonic()
         spark = df.sparkSession
         replay = False  # of a batch whose facts commit Delta will skip
@@ -526,7 +525,8 @@ def delta_sink(
         if facts_table and not resumed:
             # a restart replays at most the last batch, and a generation has its own app_id
             ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
-            last = _last_batch(spark, facts_table, app_id)
+            last, last_rows = _last_batch(spark, facts_table, app_id) or (None, None)
+            quiet = last_rows == 0  # the batch before; a replay's own, which read the same
             if last is not None and batch_id < last:
                 raise ValueError(
                     f"{facts_table} holds batch {last} of app_id {app_id!r}, but this run's "

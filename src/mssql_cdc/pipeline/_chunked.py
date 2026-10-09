@@ -752,6 +752,9 @@ class _Chunked(_ModeLock):
         if tag is not w.tag:  # an earlier attempt's commit: Delta read nothing
             return tag
         rows = {int(i): n for i, n in seen.get.items()}
+        if not rows:  # a Spark Connect server answered the write before its metrics were in
+            held = self._held(target, snapshot, tag["chunks"][0]["chunk"]) or {}
+            rows = {i: n for i, (n, _) in held.items()}
         planned = [[c["chunk"], c["lo"], c["hi"]] for c in tag["chunks"]]
         read, high = _chunk_metrics(w.metrics), clock.max_lsn()
         return {**tag, "chunks": _wave_chunks(planned, every, rows, read, high)}
@@ -763,11 +766,9 @@ class _Chunked(_ModeLock):
         userMetadata, once per (snapshot, wave). Returns the tag of the commit that holds
         them: this one's or, when Delta skipped the append, the earlier attempt's
         (``_committed``)."""
-        from pyspark.sql import functions as F
-
         from .. import migrations
         from ..sink import BRONZE_COMMENT, _write, bronze_columns
-        from ..tables import delta_table
+        from ..tables import commit_after
 
         key, wave, text = tag["backfill"], tag["wave"], json.dumps(tag)
         for attempt in (0, 1):
@@ -783,9 +784,7 @@ class _Chunked(_ModeLock):
                 flat = str(exc).replace("_", "").lower()
                 if attempt or not any(s in flat for s in ("metadatachanged", "protocolchanged")):
                     raise
-        new = _version(self.spark, target) - before
-        history = delta_table(self.spark, target).history(new) if new else None
-        if history is not None and history.where(F.col("userMetadata") == text).first():
+        if commit_after(self.spark, target, before, text) is not None:
             return tag
         earlier = self._committed(target, snapshot, tag, every)
         if earlier is None:
@@ -794,6 +793,28 @@ class _Chunked(_ModeLock):
                 f"already (txnAppId {key}), but neither {target}'s history nor its rows hold it"
             )
         return earlier
+
+    def _held(self, target: str, snapshot: str, first: int) -> dict[int, tuple[int, str]] | None:
+        """The rows and the lowest stamp of each chunk from ``first`` on of the snapshot at
+        ``snapshot`` in ``target``; None when no chunk was ever appended to it."""
+        from pyspark.sql import functions as F
+
+        from ..tables import delta_table
+
+        df = delta_table(self.spark, target).toDF()
+        if "_chunk" not in df.columns:  # bronze migration 2: no chunk ever appended
+            return None
+        found = (
+            df.where(
+                (F.col("_operation") == 0)
+                & (F.col("_snapshot") == snapshot)
+                & (F.col("_chunk") >= first)
+            )
+            .groupBy("_chunk")
+            .agg(F.count(F.lit(1)), F.min("_start_lsn"))
+            .collect()
+        )
+        return {i: (n, low) for i, n, low in found}
 
     def _committed(
         self, target: str, snapshot: str, tag: WaveMetadata, every: list[list[Any]]
@@ -807,28 +828,13 @@ class _Chunked(_ModeLock):
         ``every`` (the plan's), the stamp and the row counts from the rows, ``read_seconds``
         and ``read_mb`` NULL. The attempt's empty chunks after them are read again by the
         next wave."""
-        from pyspark.sql import functions as F
-
-        from ..tables import delta_table
-
         earlier = _earlier_wave(self.spark, target, tag["backfill"], tag["wave"])
         if earlier and None not in (c["rows"] for c in earlier["chunks"]):
             return earlier
-        df = delta_table(self.spark, target).toDF()
-        if "_chunk" not in df.columns:  # bronze migration 2: no chunk ever appended
-            return None
         first = (earlier or tag)["chunks"][0]["chunk"]  # the earlier waves' are all below it
-        found = (
-            df.where(
-                (F.col("_operation") == 0)
-                & (F.col("_snapshot") == snapshot)
-                & (F.col("_chunk") >= first)
-            )
-            .groupBy("_chunk")
-            .agg(F.count(F.lit(1)), F.min("_start_lsn"))
-            .collect()
-        )
-        held = {i: (n, low) for i, n, low in found}
+        held = self._held(target, snapshot, first)
+        if held is None:
+            return None
         if earlier:  # a tag written before its wave was read (ADR 0032): counted in its rows
             stamp = earlier["lsn"]
             counted: list[WaveChunk] = [

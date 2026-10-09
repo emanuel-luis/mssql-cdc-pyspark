@@ -221,7 +221,7 @@ class _Snapshots(_ModeLock):
 
         from .. import migrations
         from ..sink import BRONZE_COMMENT, _write, bronze_columns, bronze_rows
-        from ..tables import delta_table
+        from ..tables import commit_after
 
         rows = bronze_rows(rows, snapshot=F.col("_start_lsn"))  # whole: its stamp is its LSN
         migrations.ensure(self.spark, target, "bronze", bronze_columns(rows), BRONZE_COMMENT)
@@ -231,12 +231,7 @@ class _Snapshots(_ModeLock):
         duration_ms = round((time.monotonic() - t0) * 1000)
         # this snapshot's own commit among those after it (auto compaction may commit after
         # it, as may other writers); an empty table writes no commit at all
-        new = _version(self.spark, target) - before
-        commit = (
-            delta_table(self.spark, target).history(new).where(F.col("userMetadata") == tag).first()
-            if new
-            else None
-        )
+        commit = commit_after(self.spark, target, before, tag)
         written = commit and (commit["operationMetrics"] or {}).get("numOutputRows")
         return {
             "rows": int(written or 0),

@@ -49,7 +49,9 @@ How it is written:
   `inserts`, `updates`, `batch_id` and `app_id`. A batch that read no rows writes no commit.
   Where the platform refuses to cache the batch (Databricks serverless), the append reads it,
   so its `userMetadata` is written first: `rows` to `updates` are null, and the facts table
-  has them; and a batch with no rows right after one with rows writes an empty commit
+  has them; and a batch with no rows writes an empty commit unless the batch before it had
+  none too (for a run's first batch, as the facts table's last row says; without a facts
+  table, it writes one)
   ([ADR 0032](../decisions/0032-facts-without-caching.md)).
 * A snapshot is one append whose `userMetadata` is `{"snapshot": <capture instance>, "lsn":
   ..., "commit_ts": ...}`; a seed's, from a copy you already had, is `{"seed": <capture
@@ -79,7 +81,7 @@ What each micro-batch did, plus one row per snapshot, per source change and per 
 purged changes. Optional, but
 monitoring, the data-loss recovery and the schema-change events all need it.
 
-> One row per micro-batch written by mssql-cdc-pyspark's delta_sink, including batches that read no change rows (rows = 0), so a current stream on a quiet table keeps writing rows: what was written (counts, LSN and commit-time ranges), how far the stream had read (end_lsn, end_commit_ts) and how long it took. The same facts are in each target commit's userMetadata (batches with rows only), which Delta log cleanup eventually drops. Each snapshot stream().to_delta takes (bootstrap or re-snapshot), each schema change on the source, each switch to a newer capture instance and each skip past purged changes (failOnDataLoss=false) adds one row, with event set (see its comment); a snapshot adds one more when it opens; a chunked one also adds one with the chunks its first stream().backfill() call plans and one per chunk it reads.
+> One row per micro-batch written by mssql-cdc-pyspark's delta_sink, including batches that read no change rows (rows = 0), so a current stream on a quiet table keeps writing rows: what was written (counts, LSN and commit-time ranges), how far the stream had read (end_lsn, end_commit_ts) and how long it took. Where the platform caches, the same facts are in each target commit's userMetadata (batches with rows only); elsewhere the commit's userMetadata has the keys with null counts (ADR 0032). Delta log cleanup eventually drops it. Each snapshot stream().to_delta takes (bootstrap or re-snapshot), each schema change on the source, each switch to a newer capture instance and each skip past purged changes (failOnDataLoss=false) adds one row, with event set (see its comment); a snapshot adds one more when it opens; a chunked one also adds one with the chunks its first stream().backfill() call plans and one per chunk it reads.
 
 | Column | Type | Comment |
 |---|---|---|

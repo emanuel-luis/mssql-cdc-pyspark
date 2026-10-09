@@ -17,7 +17,8 @@ metrics files' names and layout are unchanged, and the state every released whee
 resumes through a Spark Connect session. Where the platform refuses caching:
 
 - a micro-batch's bronze commit has `rows` to `updates` null in its `userMetadata`, and a
-  batch with no rows right after one with rows writes an empty commit;
+  batch with no rows right after one with rows writes an empty commit (so does a run's first
+  without a facts table);
 - a `backfill()` wave's commit has `rows`, `high_lsn`, `read_seconds` and `read_mb` null for
   each chunk. `WaveChunk.rows` is now `int | None`
   ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)
@@ -28,20 +29,27 @@ writes NULL counts for its chunks.
 
 ### Added
 
-- Spark Connect: the library runs from a Spark Connect client, which includes Databricks
-  serverless and Databricks Connect. It is tested against a local Spark Connect server with
-  Delta Connect and the fake backend, in a new CI job, `connect`
+- Spark Connect: the library runs from a Spark Connect client. It is tested against a local
+  Spark Connect server with Delta Connect and the fake backend, in a new CI job, `connect`
   ([ADR 0033](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0033-spark-connect-tested-on-a-local-server/)).
-  On serverless, pass `trigger={"availableNow": True}`. The network path from serverless to
-  SQL Server is yours to provide. The calls that talk to SQL Server themselves (bootstrap,
-  `backfill()`, `reconcile()`...) and the `track()` listener run in the client process.
+  Databricks serverless and Databricks Connect are Spark Connect clients too, but neither
+  has run it yet. On serverless, pass `trigger={"availableNow": True}`. The network path
+  from serverless to SQL Server is yours to provide. The calls that talk to SQL Server
+  themselves (bootstrap, `backfill()`, `reconcile()`...) and the `track()` listener run in
+  the client process.
 - On a platform that refuses the DataFrame cache API (Databricks serverless), `delta_sink`
   and `backfill()` now append each batch or wave as they read it instead of failing on
   `persist()`. `observe()` counts the rows on the way, so the facts table gets the same
-  values and the source is still read once. After a batch without rows, the sink asks
-  `isEmpty()` before the append, so a batch with no rows writes no commit. Where the
-  platform caches, nothing changes. The code tells the two apart by trying `persist()`,
-  never by platform name
+  values. The source is read once, except for a batch with rows right after one without:
+  the sink asks `isEmpty()` before that append, which reads the batch's first partition with
+  rows up to its first row (an empty batch whole, which then writes no commit). For a run's
+  first batch, the batch before it is the facts table's last. A Spark Connect server can
+  answer the append before its observed metrics are in; the sink then counts the batch with
+  one more read, and `backfill()` counts the wave's chunks in bronze. Where the platform
+  caches, nothing changes. The code tells the two apart by trying `persist()`, never by
+  platform name. Tested on classic Spark with the cache API made to raise, and through a
+  local Spark Connect server that refuses it in its `foreachBatch` worker; not run on
+  serverless yet
   ([ADR 0032](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0032-facts-without-caching/)).
 - `metricsPath` can be a URI that `pyarrow.fs` opens (`s3://`, `gs://`, `abfss://`,
   `hdfs://`, `file://`), for platforms with no shared local or FUSE path (EMR, Dataproc,
@@ -65,6 +73,10 @@ writes NULL counts for its chunks.
 
 ### Fixed
 
+- A bootstrap's or re-snapshot's facts row could record 0 rows when another writer (the
+  stream, auto compaction) committed to bronze between the snapshot reading the table's
+  latest version and its history. The snapshot's own commit is now selected by version, as
+  are a micro-batch's and a `backfill()` wave's where the platform refuses to cache.
 - `mssql_cdc.spark.get_spark()` raised `CANNOT_CONFIGURE_SPARK_CONNECT_MASTER` when
   `SPARK_REMOTE` was set. It now returns a session on that Spark Connect server.
 - Lab checks t5 and t7 failed through Spark Connect because they read `numInputRows` from

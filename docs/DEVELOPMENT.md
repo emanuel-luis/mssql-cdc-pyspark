@@ -167,7 +167,9 @@ containers.
 * `tests/test_connect.py` runs the library from a Spark Connect client session, as on
   Databricks serverless: the `connect_spark` fixture starts a local Spark Connect server
   (PySpark's `SparkConnectServer` through `spark-submit`, with Delta Connect) in its own JVM
-  and stops it after the run; the first run downloads the Delta Connect jars. The default
+  and stops it after the run; the first run downloads the Delta Connect jars. Its Python
+  workers load `tests/connect_site/sitecustomize.py`, through which the `refuse_caching`
+  fixture makes the cache API raise in the server's `foreachBatch` worker too. The default
   run leaves these tests out, and so do the loops above (they are marked `spark` and
   `delta` too). `MSSQL_CDC_TEST_SPARK=connect` hands that Connect session to every test that
   takes `spark`, so the integration tests run the SQL Server path through it too:

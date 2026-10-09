@@ -229,10 +229,11 @@ def _latest(spark: SparkSessionLike, table: str) -> tuple[int, DataFrame]:
 
 def _read_once(df: DataFrame) -> DataFrame | None:
     """``df`` read now into a local checkpoint, or None where the platform refuses
-    checkpoints (Databricks serverless refuses every cache API, ADR 0032). Told by trying a
-    lazy one first, which reads nothing: a failing read raises, never reads as a refusal."""
+    checkpoints (Databricks serverless refuses every cache API, ADR 0032). Told by trying one
+    of a one-row range first: even a lazy one of ``df`` plans its scan, which asks SQL Server,
+    so a failure there would read as a refusal. ``df``'s own raises as it fails."""
     try:
-        df.localCheckpoint(eager=False)
+        df.sparkSession.range(1).localCheckpoint(eager=False)
     except Exception:  # noqa: BLE001 - the refusal's type is the platform's; trying is the only test
         return None
     return df.localCheckpoint()

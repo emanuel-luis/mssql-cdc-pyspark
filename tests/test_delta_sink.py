@@ -407,6 +407,62 @@ def test_where_caching_is_refused_the_sink_takes_the_same_facts_from_its_append(
     ]
 
 
+def test_uncached_a_runs_first_batch_asks_is_empty_only_after_a_batch_without_rows(
+    delta_spark, workdir, refuse_caching, monkeypatch
+):
+    # each run is a new sink, as each to_delta call makes: the batch before its first is the
+    # facts table's last, so a busy table's first batch is not read a second time (ADR 0032)
+    from pyspark.sql.classic.dataframe import DataFrame
+
+    spark = delta_spark
+    asked: list = []
+    is_empty = DataFrame.isEmpty
+    monkeypatch.setattr(DataFrame, "isEmpty", lambda self: asked.append(1) or is_empty(self))
+    refuse_caching()
+    db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI, "dbo_other"])
+    target, facts = os.path.join(workdir, "bronze"), os.path.join(workdir, "facts")
+    new = [(2, {"order_id": 0, "status": "new"})]
+
+    def run(table, minutes):
+        """One commit to ``table``, read by one batch in a run of its own: was it asked?"""
+        db.commit(table, new, at=T0 + timedelta(minutes=minutes))
+        asked.clear()
+        _stream(spark, workdir, delta_sink(target, "first-v1", facts))
+        return bool(asked)
+
+    assert not run(CI, 0)  # nothing before it
+    assert not run(CI, 1)  # after a batch with rows
+    assert not run("dbo_other", 2)  # no rows, after one with rows: an empty commit
+    assert run("dbo_other", 3)  # no rows, after one without: asked, no commit
+    assert run(CI, 4)  # after one without rows
+    history = spark.sql(f"DESCRIBE HISTORY delta.`{target}`").where("operation = 'WRITE'")
+    batches = [json.loads(r["userMetadata"])["batch_id"] for r in history.collect()]
+    assert sorted(batches) == [0, 1, 2, 4]
+
+
+def test_a_writes_own_commit_is_found_when_another_commits_between_the_two_reads(
+    delta_spark, workdir, monkeypatch
+):
+    from mssql_cdc import tables
+
+    spark, path = delta_spark, os.path.join(workdir, "t")
+    one = spark.range(1)
+    one.write.format("delta").save(path)
+    before = tables.version(spark, path)
+    one.write.format("delta").mode("append").option("userMetadata", "mine").save(path)
+    version = tables.version
+
+    def raced(spark, name):  # another writer commits right after the latest version is read
+        latest = version(spark, name)
+        one.write.format("delta").mode("append").save(name)
+        return latest
+
+    monkeypatch.setattr(tables, "version", raced)
+    found = tables.commit_after(spark, path, before, "mine")
+    assert found is not None and found["version"] == before + 1
+    assert tables.commit_after(spark, path, before + 1, "mine") is None  # only after before
+
+
 def test_cleanup_during_the_read_leaves_one_possible_data_skipped_row(delta_spark, workdir):
     spark = delta_spark
     db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
@@ -2202,6 +2258,45 @@ def test_where_caching_is_refused_backfill_reads_each_wave_by_appending_it(
     snap = bronze.where("_operation = 0").select("order_id").collect()
     assert len(snap) == len({r["order_id"] for r in snap}) == 16
     assert _rebuilt(bronze, "order_id", "status", s) == _source(db)
+
+
+def test_where_a_writes_metrics_do_not_come_back_its_rows_are_counted_again(
+    delta_spark, workdir, refuse_caching, monkeypatch
+):
+    # a Spark Connect server can answer a write before its observed metrics are in: the
+    # client's Observation then holds none (ADR 0032). The batch is counted with one more
+    # read, a wave's chunks in bronze.
+    from pyspark.sql import Observation
+
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=4)
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, {**options, "numPartitions": "2"})
+
+    def run():
+        cdc.to_delta(
+            target,
+            "late-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    refuse_caching()
+    monkeypatch.setattr(Observation, "get", property(lambda self: {}))
+    run()  # opens the snapshot at S
+    db.commit(CI, [(2, {"order_id": 9, "status": "new"})], at=T0 + timedelta(minutes=10))
+    run()  # a batch with a row
+    assert cdc.backfill(target, app_id="late-v1", facts_table=facts, chunk_rows=2)["done"]
+    rows = spark.read.format("delta").load(facts)
+    batches = rows.where("event IS NULL AND rows > 0").collect()
+    assert [(r["rows"], r["inserts"], r["min_lsn"] is not None) for r in batches] == [(1, 1, True)]
+    chunks = rows.where("event = 'snapshot_chunk'").collect()
+    assert sorted(r["rows"] for r in chunks) == [2, 2]
 
 
 def test_a_keyset_plans_open_last_chunk_ends_at_the_first_key_after_max_when_read(
