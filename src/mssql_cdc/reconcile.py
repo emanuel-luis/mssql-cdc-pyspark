@@ -290,9 +290,9 @@ def _moved(
     after the source is read, it holds every change that read may have seen, but a commit
     capture has not harvested yet."""
     from pyspark.sql import functions as F
-    from pyspark.sql.pandas.types import to_arrow_schema
 
     from .lsn import ZERO_LSN
+    from .spark import _arrow_schema
 
     _, changes = _latest(spark, bronze)
     upper = client.max_lsn() or ZERO_LSN  # after bronze: at or past every change it holds
@@ -303,7 +303,7 @@ def _moved(
     chunk = F.col("_chunk").isNotNull() if "_chunk" in changes.columns else F.lit(False)
     at = F.when(chunk, F.col("_snapshot")).when(F.col("_operation") != 0, F.col("_start_lsn"))
     newest = _one(changes.where(F.col("_start_lsn") > lower).select(F.max(at)))
-    target = to_arrow_schema(held.schema, timezone="UTC")
+    target = _arrow_schema(held.schema)
     unread = _unread(client, instances, keys, max(newest or lower, lower), upper, target)
     return held.unionByName(spark.createDataFrame(list(unread), held.schema)) if unread else held
 

@@ -12,6 +12,15 @@ compatibility" line.
 
 ## [Unreleased]
 
+### Fixed
+
+- On PySpark 4.0 and 4.1, Databricks serverless environment 4 included, every read failed
+  with `TypeError: to_arrow_schema() got an unexpected keyword argument 'timezone'` since
+  0.1.0 (the stream's and the snapshot's reads), and `reconcile()` too since 0.2.2: only
+  PySpark 4.2's `to_arrow_schema` takes `timezone`; 4.0 and 4.1's take `timestamp_utc`, whose
+  default reads TIMESTAMP columns as UTC instants as well. A new CI job, `spark41`, runs the
+  tests that start no JVM and the source's engine tests on PySpark 4.1.1.
+
 ## [0.6.0rc1] - 2026-10-09
 
 State compatibility: no migration; offsets, checkpoint layout, table schemas and the

@@ -59,6 +59,7 @@ from pyspark.sql.datasource import (
 from . import _metricsfs
 from .events import CAPTURE_INSTANCE_SWITCHED, DATA_SKIPPED, SCHEMA_CHANGE
 from .lsn import ZERO_LSN
+from .spark import _arrow_schema
 
 try:  # Spark 4.2+ (and runtimes that backported SPARK-55304)
     from pyspark.sql.streaming.datasource import (
@@ -977,9 +978,8 @@ class _BaseReader(_Common, DataSourceStreamReader):
     # -- data (runs on executors) ---------------------------------------------
     def read(self, partition: LsnRange) -> Iterator[pa.RecordBatch]:  # type: ignore[override]  # partitions() only plans LsnRange
         import pyarrow as pa
-        from pyspark.sql.pandas.types import to_arrow_schema
 
-        target = to_arrow_schema(self.schema, timezone="UTC")  # TIMESTAMP columns are UTC instants
+        target = _arrow_schema(self.schema)  # TIMESTAMP columns are UTC instants
         cols = self.source_columns if partition.columns is None else partition.columns
         absent = [c for c in self.source_columns if c not in cols]  # read as typed NULL
         client = self.client
@@ -1261,9 +1261,8 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         from datetime import datetime
 
         import pyarrow as pa
-        from pyspark.sql.pandas.types import to_arrow_schema
 
-        target = to_arrow_schema(self.schema, timezone="UTC")
+        target = _arrow_schema(self.schema)
         commit_ts = datetime.fromisoformat(partition.commit_ts) if partition.commit_ts else None
         meta = {  # constant per snapshot; _seqval and _command_id have no meaning here
             "_capture_instance": (partition.capture_instance, pa.string()),

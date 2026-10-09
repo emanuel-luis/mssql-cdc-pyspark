@@ -1,14 +1,37 @@
-"""SparkSession helpers: reuse the platform session or build a local one; count cores."""
+"""SparkSession helpers: reuse the platform session or build a local one; count cores; a
+Spark schema in Arrow on every supported PySpark."""
 
 from __future__ import annotations
 
+import functools
+import inspect
 import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    import pyarrow as pa
     from pyspark.sql import SparkSession
+    from pyspark.sql.types import StructType
 
     from .types import SparkSessionLike
+
+
+@functools.cache
+def _takes_timezone(to_arrow_schema: Callable[..., pa.Schema]) -> bool:
+    return "timezone" in inspect.signature(to_arrow_schema).parameters
+
+
+def _arrow_schema(schema: StructType) -> pa.Schema:
+    """``schema`` in Arrow, TIMESTAMP columns as UTC instants, on every supported PySpark:
+    4.2 takes ``timezone`` (and fails a TIMESTAMP column without it); 4.0 and 4.1 take no
+    ``timezone`` but ``timestamp_utc``, which defaults to UTC."""
+    from pyspark.sql.pandas.types import to_arrow_schema
+
+    if _takes_timezone(to_arrow_schema):
+        return to_arrow_schema(schema, timezone="UTC")
+    return to_arrow_schema(schema)
 
 
 def available_cores(spark: SparkSessionLike) -> int:

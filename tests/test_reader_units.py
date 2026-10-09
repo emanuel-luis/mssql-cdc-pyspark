@@ -684,6 +684,50 @@ def test_a_task_converts_commit_times_with_the_drivers_clock():
     assert reader._client is None  # closed: executors are stateless
 
 
+def test_a_read_casts_a_timestamp_to_its_utc_instant_with_pyspark_4_1s_to_arrow_schema(
+    tmp_path, monkeypatch
+):
+    """PySpark 4.0 and 4.1's to_arrow_schema takes ``timestamp_utc`` and no ``timezone``,
+    4.2's the reverse: read() builds its target schema with either (4.1's failed every read,
+    Databricks serverless environment 4 included, with a TypeError)."""
+    import inspect
+    from datetime import timezone
+
+    import pyarrow as pa
+    import pyspark.sql.pandas.types as arrow_types
+    from pyspark.sql.types import IntegerType, StructField, StructType, TimestampType
+
+    from mssql_cdc.source import LsnRange, MssqlCdcLegacyStreamReader
+
+    real = arrow_types.to_arrow_schema
+    if "timezone" in inspect.signature(real).parameters:  # PySpark 4.2: 4.1's signature over it
+
+        def v4_1(
+            schema,
+            error_on_duplicated_field_names_in_struct=False,
+            timestamp_utc=True,
+            prefers_large_types=False,
+        ):
+            return real(
+                schema,
+                error_on_duplicated_field_names_in_struct=error_on_duplicated_field_names_in_struct,
+                timezone="UTC" if timestamp_utc else None,
+                prefers_large_types=prefers_large_types,
+            )
+
+        monkeypatch.setattr(arrow_types, "to_arrow_schema", v4_1)
+    db = FakeCdcDatabase(str(tmp_path), [CI])
+    lsn = db.commit(CI, [(2, {"order_id": 1, "at": "2026-09-28 13:50:01.1234567 -03:00"})], at=T0)
+    schema = StructType(
+        [StructField("order_id", IntegerType()), StructField("at", TimestampType())]
+    )
+    options = {"backend": "fake", "fakePath": str(tmp_path), "captureInstance": CI}
+    [batch] = MssqlCdcLegacyStreamReader(options, schema).read(LsnRange(CI, lsn, lsn))
+    assert batch.schema.field("at").type == pa.timestamp("us", tz="UTC")
+    utc = datetime(2026, 9, 28, 16, 50, 1, 123456, tzinfo=timezone.utc)
+    assert batch.column("at").to_pylist() == [utc]
+
+
 def test_only_the_batch_s_last_range_measures_the_position(tmp_path, monkeypatch):
     import json
 
