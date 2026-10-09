@@ -22,7 +22,7 @@
 | [0018](0018-automatic-resnapshot-after-data-loss.md) | Automatic re-snapshot after CDC data loss | accepted | 2026-09-29T17:46:41-03:00 | 2026-10-02T20:30:12-03:00, 2026-10-03T18:10:05-03:00, 2026-10-05T12:46:11-03:00, 2026-10-05T20:51:10-03:00, 2026-10-06T07:45:42-03:00 |
 | [0019](0019-silver-helper-applies-the-change-log.md) | A silver helper applies the bronze change log to a current-state table | accepted | 2026-09-30T11:07:22-03:00 | 2026-10-02T20:30:12-03:00, 2026-10-03T14:30:38-03:00, 2026-10-07T04:49:27-03:00, 2026-10-08T13:06:12-03:00 |
 | [0020](0020-capture-and-ingestion-lag-in-facts.md) | Capture and ingestion lag in the ingestion facts | accepted | 2026-09-30T10:33:11-03:00 | 2026-09-30T15:16:41-03:00, 2026-10-05T13:53:56-03:00 |
-| [0021](0021-compatibility-policy-for-0x.md) | Compatibility policy for 0.x: the state contract is stable | accepted | 2026-09-30T11:07:08-03:00 | 2026-10-01T15:55:00-03:00, 2026-10-05T06:01:09-03:00, 2026-10-05T12:35:09-03:00, 2026-10-05T12:49:29-03:00, 2026-10-05T20:51:10-03:00, 2026-10-07T01:34:59-03:00, 2026-10-07T01:41:18-03:00, 2026-10-07T09:14:31-03:00 |
+| [0021](0021-compatibility-policy-for-0x.md) | Compatibility policy for 0.x: the state contract is stable | accepted | 2026-09-30T11:07:08-03:00 | 2026-10-01T15:55:00-03:00, 2026-10-05T06:01:09-03:00, 2026-10-05T12:35:09-03:00, 2026-10-05T12:49:29-03:00, 2026-10-05T20:51:10-03:00, 2026-10-07T01:34:59-03:00, 2026-10-07T01:41:18-03:00, 2026-10-07T09:14:31-03:00, 2026-10-09T11:39:56-03:00 |
 | [0022](0022-defer-spark-changes-changelog.md) | Defer a Spark `CHANGES` changelog connector | accepted | 2026-09-30T11:07:08-03:00 |  |
 | [0023](0023-schema-changes-and-capture-instance-switching.md) | Schema changes on the source, and switching to a newer capture instance | accepted | 2026-09-30T18:40:00-03:00 | 2026-09-30T20:09:44-03:00, 2026-09-30T21:25:30-03:00, 2026-10-01T15:55:00-03:00, 2026-10-01T17:25:27-03:00, 2026-10-01T18:15:53-03:00, 2026-10-07T01:41:18-03:00 |
 | [0024](0024-documentation-site.md) | A documentation site built by Zensical, hosted on GitHub Pages | accepted | 2026-10-01T14:43:57-03:00 |  |
@@ -33,6 +33,7 @@
 | [0029](0029-driver-retries-and-lock-timeout.md) | Driver-side retries, and an optional lock timeout | accepted | 2026-10-05T12:23:04-03:00 |  |
 | [0030](0030-protocols-for-the-pluggable-seams.md) | `typing.Protocol` for the pluggable seams | accepted | 2026-10-07T09:05:52-03:00 |  |
 | [0031](0031-strict-typing-gates.md) | Strict typing: mypy strict on `src`, `pyright --verifytypes` on the public API | accepted | 2026-10-07T10:49:11-03:00 | 2026-10-07T13:39:33-03:00 |
+| [0032](0032-facts-without-caching.md) | Facts without caching where the platform refuses it | accepted | 2026-10-09T11:39:56-03:00 |  |
 
 New ADRs: copy the format, next number, one decision per file. Put the time the
 decision is recorded in `**Date:**` (ISO-8601 with the UTC offset, e.g.

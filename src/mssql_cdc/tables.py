@@ -82,6 +82,13 @@ def delta_table(spark: SparkSessionLike, name_or_path: str) -> DeltaTable:
     return DeltaTable.forName(_session(spark), name_or_path)
 
 
+def version(spark: SparkSessionLike, name_or_path: str) -> int:
+    """The latest version of an existing table."""
+    latest = delta_table(spark, name_or_path).history(1).first()
+    assert latest is not None  # an existing table has a version
+    return int(latest["version"])
+
+
 def exists(spark: SparkSessionLike, name_or_path: str) -> bool:
     if is_path(name_or_path):
         from delta.tables import DeltaTable

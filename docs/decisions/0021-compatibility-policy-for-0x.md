@@ -9,7 +9,8 @@
 **Amended:** 2026-10-05T20:51:10-03:00, the kept state includes a chunked snapshot left open, and the `fake` backend's files in it stay readable (amendment 3)  
 **Amended:** 2026-10-07T01:34:59-03:00, the API shape from 0.3.0: options and flags keyword-only, modes typed as `Literal`s, results as `TypedDict`s whose keys are only added (amendment 5)  
 **Amended:** 2026-10-07T01:41:18-03:00, a micro-batch row's `detail` is a payload too, with the added key `warnings` (amendment 6, ADR 0023 Amendment 6)  
-**Amended:** 2026-10-07T09:14:31-03:00, the payloads and the source options get types, and a 'data_skipped' row's `detail` joins the listed payloads (amendment 7)
+**Amended:** 2026-10-07T09:14:31-03:00, the payloads and the source options get types, and a 'data_skipped' row's `detail` joins the listed payloads (amendment 7)  
+**Amended:** 2026-10-09T11:39:56-03:00, a wave's measured values in its userMetadata may be null where the platform refuses caching (amendment 8, ADR 0032)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -195,3 +196,14 @@ key failed only when a later call, maybe a later release, read the row.
   after `kind`. A JSON object has no order, and every reader takes its keys by name.
 * `tests/typing_payloads.py`, checked by mypy with `tests/typing_api.py`, pins the payloads'
   key types and keeps a misspelt option in a `SourceOptions` a type error.
+
+## Amendment 8: a wave's counts may be null
+Where the platform refuses to cache a wave (Databricks serverless), `backfill()` writes the
+wave's commit while it reads it, so the commit's userMetadata cannot hold what the read
+measures ([ADR 0032](0032-facts-without-caching.md)). Not additive, so recorded here: the
+keys stay, and a chunk's `rows`, `high_lsn`, `read_seconds` and `read_mb` are null in such a
+commit (`WaveChunk.rows` becomes `int | None`; the other three were nullable already). The
+wave's 'snapshot_chunk' facts rows hold the values. A reader takes null as not known:
+`backfill()` counts the chunk's rows in bronze, as it does for a commit log cleanup dropped.
+A release before 0.6.0 that finds such a commit (only after a crash between the wave's
+append and its facts rows) writes NULL counts for its chunks.

@@ -142,6 +142,21 @@ def test_equal_tables_match_into_a_typed_report_then_changes_not_applied_are_cla
     assert every["failures"] == {"MISSING_TARGET": 1, "MISSING_SOURCE": 1, "RECORD_DIFF": 1}
 
 
+def test_where_checkpoints_are_refused_reconcile_compares_the_counts_only(
+    delta_spark, workdir, refuse_caching, caplog
+):
+    o = Orders(delta_spark, workdir)
+    calls = refuse_caching()
+    _orders(o)  # streamed without caching too
+    o.silver_table().delete("order_id = 3")
+    with caplog.at_level("WARNING", logger="mssql_cdc.reconcile"):
+        result = o.reconcile(sample=1.0)
+    assert (result["mismatch"], result["match"], result["hashed"]) == (1, 9, 0)
+    assert result["failures"] == {} and "compared counts only" in caplog.text
+    assert not o.failures(result) and calls.count("localCheckpoint") == 1
+    assert not any(r["hashed"] for r in result["report"].collect())
+
+
 def test_a_computed_column_listed_in_columns_is_not_compared(delta_spark, workdir):
     declared = "order_id INT, status STRING, total INT"
     o = Orders(delta_spark, workdir, columns=declared, computed={CI: ["total"]})

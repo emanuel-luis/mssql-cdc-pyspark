@@ -144,9 +144,13 @@ class WaveChunk(TypedDict):
     lo: Any
     hi: Any
     last: bool
-    rows: int
+    rows: int | None
+    """None where the platform refuses to cache the wave (Databricks serverless): its commit
+    is written as it is read, before the rows are counted; its 'snapshot_chunk' facts row
+    has them (ADR 0032)."""
     high_lsn: str | None
-    """``max_lsn`` after the read: informational; None when it could not be read."""
+    """``max_lsn`` after the read: informational; None when it could not be read, and where
+    ``rows`` is None."""
     read_seconds: float | None
     read_mb: float | None
 

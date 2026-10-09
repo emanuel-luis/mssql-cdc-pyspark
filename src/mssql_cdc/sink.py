@@ -2,6 +2,10 @@
 
 * Writes are appends with ``txnAppId``/``txnVersion`` (Delta's idempotent-write
   options), keyed by the micro-batch id, so a replayed batch is skipped.
+* The batch is cached, counted, then appended: the source is read once. Where the platform
+  refuses to cache (Databricks serverless), the append reads it and its facts are observed
+  on the way (ADR 0032): the same facts, but not in its commit's userMetadata, and a batch
+  without rows right after one with rows writes an empty commit.
 * Facts about each batch go into the Delta commit (``userMetadata``) and,
   optionally, into a facts table. The table matters: ``commitInfo`` is not kept in
   checkpoints and disappears with log cleanup (``delta.logRetentionDuration``).
@@ -291,9 +295,9 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def batch_facts(df: DataFrame) -> dict[str, Any]:
+def _facts_columns() -> list[Column]:
     # counts, not sums: an empty batch has 0 of each, and NULL ranges
-    row = df.agg(
+    return [
         F.count(F.lit(1)).alias("rows"),
         F.min("_start_lsn").alias("min_lsn"),
         F.max("_start_lsn").alias("max_lsn"),
@@ -303,9 +307,49 @@ def batch_facts(df: DataFrame) -> dict[str, Any]:
         F.count(F.when(F.col("_operation") == 2, 1)).alias("inserts"),
         # updates count after-images (operation 4); before-images (3) pair with them
         F.count(F.when(F.col("_operation") == 4, 1)).alias("updates"),
-    ).first()
+    ]
+
+
+# what batch_facts gives a batch without rows
+_NO_ROWS: dict[str, Any] = {
+    "rows": 0,
+    "min_lsn": None,
+    "max_lsn": None,
+    "min_commit_ts": None,
+    "max_commit_ts": None,
+    "deletes": 0,
+    "inserts": 0,
+    "updates": 0,
+}
+
+
+def batch_facts(df: DataFrame) -> dict[str, Any]:
+    row = df.agg(*_facts_columns()).first()
     assert row is not None  # a global aggregate always returns one row
     return row.asDict()
+
+
+def _cached(df: DataFrame) -> DataFrame | None:
+    """``df`` persisted, or None where the platform refuses to cache (Databricks serverless
+    raises on every cache API, ADR 0032). Told by trying: no platform is named, and each
+    refuses with an exception of its own. Spark Connect sends ``persist`` at once, so a
+    refusal comes here, before anything is read."""
+    try:
+        return df.persist()
+    except Exception as exc:  # noqa: BLE001 - the refusal's type is the platform's; trying is the only test
+        _log.info("mssql_cdc: this platform does not cache DataFrames (%s)", str(exc)[:200])
+        return None
+
+
+def _appended(spark: SparkSessionLike, target: str, before: int, meta: str) -> bool:
+    """Whether a commit of ``target`` after version ``before`` has userMetadata ``meta``: the
+    append just made, not one Delta skipped as written already (``txnVersion``). Others may
+    commit meanwhile (a backfill wave, auto compaction)."""
+    from .tables import delta_table, version
+
+    new = version(spark, target) - before
+    history = delta_table(spark, target).history(new) if new > 0 else None
+    return history is not None and history.where(F.col("userMetadata") == meta).first() is not None
 
 
 def _json(facts: Mapping[str, Any]) -> str:
@@ -457,6 +501,8 @@ def delta_sink(
     """
     created: set[str] = set()  # once per query run, not once per batch
     resumed = warned = False
+    caching = True  # until the platform refuses to cache a batch (ADR 0032)
+    quiet = True  # the last batch read no rows, or none was read yet
     carried: list[str] = []  # a replayed batch's warnings: its facts row was written already
 
     def ensure(
@@ -466,8 +512,33 @@ def delta_sink(
             migrations.ensure(spark, table, kind, columns, comment)
             created.add(table)
 
+    def append(df: DataFrame, batch_id: int) -> dict[str, Any]:
+        """Append the batch to ``target`` uncached; returns its facts (ADR 0032). The append
+        reads it and its facts are observed on the way, so its commit's userMetadata cannot
+        hold them. After a batch without rows, ``isEmpty()`` reads this one up to its first
+        row, and all of it when it has none, which then writes no commit (its only read);
+        after one with rows, a batch without them writes an empty commit."""
+        from pyspark.sql import Observation
+
+        from .tables import version
+
+        nonlocal quiet
+        if quiet and df.isEmpty():
+            return dict(_NO_ROWS)
+        spark = df.sparkSession
+        out = bronze_rows(df, batch_id)
+        ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
+        meta = _json({**dict.fromkeys(_NO_ROWS), "batch_id": batch_id, "app_id": app_id})
+        seen, before = Observation(), version(spark, target)
+        observed = out.observe(seen, *_facts_columns())
+        _write(observed, target, app_id, batch_id, meta, merge_schema=True)
+        # Delta skipped a replay without reading it: counted with one read
+        facts = seen.get if _appended(spark, target, before, meta) else batch_facts(df)
+        quiet = not facts["rows"]
+        return facts
+
     def write_batch(df: DataFrame, batch_id: int) -> None:
-        nonlocal resumed, warned, carried
+        nonlocal resumed, warned, caching, carried
         started_at, t0 = _utc_now(), time.monotonic()
         spark = df.sparkSession
         replay = False  # of a batch whose facts commit Delta will skip
@@ -485,18 +556,23 @@ def delta_sink(
                     f"batch {last} as done already. Use a new app_id, or restore the checkpoint."
                 )
             replay, resumed = batch_id == last, True
-        df = df.persist()
+        kept = _cached(df) if caching else None
+        caching = kept is not None
         try:
             if metrics_path:  # the batch is not read yet: a partition's file is a dead attempt's
                 _remove(_files(metrics_path))
-            facts = batch_facts(df)  # reads the batch: its partitions write their metrics files
-            facts.update({"batch_id": batch_id, "app_id": app_id})
-            if facts["rows"]:  # a batch that read none writes no target commit, only its facts
-                out = bronze_rows(df, batch_id)
-                ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
-                # one file per range read, written in parallel; compaction merges small ones
-                # mergeSchema: a column a newer capture instance captures joins bronze (ADR 0023)
-                _write(out, target, app_id, batch_id, _json(facts), merge_schema=True)
+            ids = {"batch_id": batch_id, "app_id": app_id}
+            if kept is None:
+                facts = {**append(df, batch_id), **ids}
+            else:  # reads the batch, once: its partitions write their metrics files
+                facts = {**batch_facts(kept), **ids}
+                if facts["rows"]:  # a batch that read none writes no target commit, only facts
+                    out = bronze_rows(kept, batch_id)
+                    ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
+                    # one file per range read, written in parallel; compaction merges small ones
+                    # mergeSchema: a column a newer capture instance captures joins bronze
+                    # (ADR 0023)
+                    _write(out, target, app_id, batch_id, _json(facts), merge_schema=True)
             duration_ms = round((time.monotonic() - t0) * 1000)
             folded = _fold_metrics(metrics_path) if metrics_path else {}
             # the reader's events, written while it planned this batch (or a dead attempt),
@@ -545,7 +621,8 @@ def delta_sink(
             if metrics_path:  # folded into this batch's facts; a replay rewrites them
                 _remove(_files(metrics_path) + names)
         finally:
-            df.unpersist()
+            if kept is not None:
+                kept.unpersist()
 
     return write_batch
 

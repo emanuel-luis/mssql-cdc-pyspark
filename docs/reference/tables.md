@@ -47,6 +47,10 @@ How it is written:
   the batch id, so a replayed batch is skipped. Its `userMetadata` holds the batch's facts as
   JSON: `rows`, `min_lsn`, `max_lsn`, `min_commit_ts`, `max_commit_ts`, `deletes`,
   `inserts`, `updates`, `batch_id` and `app_id`. A batch that read no rows writes no commit.
+  Where the platform refuses to cache the batch (Databricks serverless), the append reads it,
+  so its `userMetadata` is written first: `rows` to `updates` are null, and the facts table
+  has them; and a batch with no rows right after one with rows writes an empty commit
+  ([ADR 0032](../decisions/0032-facts-without-caching.md)).
 * A snapshot is one append whose `userMetadata` is `{"snapshot": <capture instance>, "lsn":
   ..., "commit_ts": ...}`; a seed's, from a copy you already had, is `{"seed": <capture
   instance>, "lsn": ..., "commit_ts": ...}`
@@ -57,7 +61,10 @@ How it is written:
   `userMetadata` is `{"backfill": "<app_id>#snap.<S>", "wave", "lsn", "attempt", "chunks"}`:
   the wave's stamp and, per chunk, its bounds and rows. Every row has `_snapshot` = S, its
   chunk in `_chunk` and the wave's stamp in `_start_lsn`, at or after S
-  ([Bootstrap](../guides/bootstrap.md#chunked-snapshots)).
+  ([Bootstrap](../guides/bootstrap.md#chunked-snapshots)). Where the platform refuses to
+  cache the wave, a chunk's `rows`, `high_lsn`, `read_seconds` and `read_mb` are null there;
+  its `snapshot_chunk` facts row has them
+  ([ADR 0032](../decisions/0032-facts-without-caching.md)).
 * Every append uses `mergeSchema`. A changed column type fails it with `SchemaChangedError`
   unless the table has `delta.enableTypeWidening` and the change widens
   ([Schema changes](../guides/schema-changes.md#changing-a-column-type)).

@@ -1,7 +1,8 @@
 """Chunked snapshots read next to the stream (ADR 0028): ``backfill()`` plans a snapshot's
 chunks once, reads them in waves, appends each wave to the target in one commit and then
 records its chunks in the facts; after a crash between the two, the facts come from the
-commit. A wave is read while the one before it commits, and sized toward a duration."""
+commit. A wave is read while the one before it commits, and sized toward a duration; where
+the platform refuses to cache it, its append reads it (ADR 0032)."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ import json
 import math
 import os
 import time
+from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
@@ -71,7 +73,9 @@ class _ChunkRead:
 
 @dataclass(frozen=True, slots=True)
 class _Wave:
-    """A wave read and cached, waiting for its commit (``_commit_wave``), which unpersists it."""
+    """A wave read and cached, waiting for its commit (``_commit_wave``), which unpersists it;
+    or, ``lazy`` where the platform refuses to cache (ADR 0032), not read yet: its append
+    reads it, and its tag's counts and read metrics are None until then."""
 
     wave: int
     rows: DataFrame
@@ -80,6 +84,13 @@ class _Wave:
     started_at: datetime
     t0: float
     """``time.monotonic()`` when its read started."""
+    lazy: bool = False
+    metrics: str | None = None
+    """A lazy wave's chunk metrics directory."""
+
+    def release(self) -> None:
+        if not self.lazy:  # serverless refuses unpersist too
+            self.rows.unpersist()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +100,48 @@ class _Pending:
     future: Future[list[_ChunkRead]]
     wave: int
     chunks: list[int]
+
+
+def _wave_chunks(
+    planned: list[list[Any]],
+    every: list[list[Any]],
+    counts: Mapping[int, int] | None,
+    read: Mapping[int, Mapping[str, Any]],
+    high: str | None,
+) -> list[WaveChunk]:
+    """The ``planned`` chunks of the plan ``every`` in a wave's userMetadata: ``counts`` (None
+    before the wave is read), each chunk's metrics file in ``read``, and ``high``, ``max_lsn``
+    after the read, for the chunks without one."""
+    return [
+        {
+            "chunk": i,
+            "lo": lo,
+            "hi": hi,
+            "last": i == len(every) - 1,
+            "rows": None if counts is None else counts.get(i, 0),
+            "high_lsn": read.get(i, {}).get("high_lsn") or high,
+            "read_seconds": read[i]["seconds"] if i in read else None,
+            "read_mb": round(read[i]["bytes"] / 1e6, 6) if i in read else None,
+        }
+        for i, lo, hi in planned
+    ]
+
+
+def _chunk_metrics(metrics: str | None) -> dict[int, dict[str, Any]]:
+    """The wave's chunk metrics files in ``metrics``, by chunk; removed once read."""
+    from ..sink import _files, _remove
+
+    read: dict[int, dict[str, Any]] = {}
+    names = _files(metrics) if metrics else []
+    for name in names:
+        try:
+            with open(name, encoding="utf-8") as fh:
+                m = json.load(fh)
+            read[m["chunk"]] = m
+        except (OSError, ValueError, KeyError):
+            continue
+    _remove(names)
+    return read
 
 
 def _earlier_wave(spark: SparkSessionLike, target: str, key: str, wave: int) -> WaveMetadata | None:
@@ -145,7 +198,9 @@ class _Chunked(_ModeLock):
         rows, the rerun's append is skipped by Delta and its rows are rebuilt from the one
         committed (from its commit's userMetadata or, once log cleanup dropped that, from its
         rows in ``target``): nothing is appended twice. A wave is read while the one before
-        it is appended and recorded, in a background thread, one wave at a time.
+        it is appended and recorded, in a background thread, one wave at a time. Where the
+        platform refuses to cache a wave (Databricks serverless, ADR 0032), its append reads
+        it, once the one before is recorded, and its commit's userMetadata has no counts.
 
         A wave takes whole rounds of ``numPartitions`` chunks, partition p reading chunks p,
         p + numPartitions... one after the other: one round at first, then as many as
@@ -274,6 +329,7 @@ class _Chunked(_ModeLock):
             return k * max(1, int(min(rounds, total)))
 
         waves = 0
+        cache = True  # until the platform refuses to cache a wave (ADR 0032)
         pending: _Pending | None = None
 
         def settle() -> bool:
@@ -385,15 +441,17 @@ class _Chunked(_ModeLock):
                         client=client,
                         metrics=metrics,
                         isolation=isolated,
+                        cache=cache,
                     )
+                    cache = not read.lazy  # a platform that refused once is not asked again
                     took = time.monotonic() - t1  # its read, not the wait for the commit below
                     try:
                         held = settle()  # the wave before: committed and recorded first
                     except BaseException:
-                        read.rows.unpersist()
+                        read.release()
                         raise
                     if not held:  # it read other chunks than its commit holds: read again
-                        read.rows.unpersist()
+                        read.release()
                         continue
                     pace = took / math.ceil(len(planned) / k)
                     commit = partial(
@@ -410,6 +468,9 @@ class _Chunked(_ModeLock):
                     future = committer.submit(inherit(commit))
                     pending = _Pending(future, wave, [i for i, *_ in planned])
                     waves += 1
+                    if read.lazy:  # its append is its read: nothing to read ahead of it
+                        settle()
+                        pace = (time.monotonic() - t1) / math.ceil(len(planned) / k)
                 settle()
         done = bool(chunks) and chunks[-1].last
         if done:  # also after a crash between the last wave's facts and this row
@@ -548,12 +609,14 @@ class _Chunked(_ModeLock):
         client: CdcClient,
         metrics: str | None,
         isolation: str | None,
+        cache: bool,
     ) -> _Wave:
         """Read the ``planned`` chunks stamped ``lsn``, ``k`` at a time, into cached rows, with
-        the tag their commit will carry; ``every``: the plan's chunks."""
+        the tag their commit will carry; ``every``: the plan's chunks. Without ``cache``, or
+        where the platform refuses to cache, a lazy wave that its append reads (ADR 0032)."""
         from pyspark.sql import functions as F
 
-        from ..sink import _files, _remove, _utc_now, bronze_rows
+        from ..sink import _cached, _files, _remove, _utc_now, bronze_rows
 
         drop = ("snapshotchunks", "snapshotkeys", "snapshotlsn", "metricspath", "isolationlevel")
         # one partition per chunk, in this order; coalesced below, partition p reads chunks p,
@@ -566,7 +629,6 @@ class _Chunked(_ModeLock):
             .option("snapshotLsn", lsn)
         )
         if metrics:
-            _remove(_files(metrics))  # a dead attempt's
             reader = reader.option("metricsPath", metrics)
         if isolation:
             reader = reader.option("isolationLevel", isolation)
@@ -574,40 +636,25 @@ class _Chunked(_ModeLock):
         df = reader.load()
         if len(planned) > k:  # k connections at a time, whatever the wave's size
             df = df.coalesce(k)
-        rows = bronze_rows(df, snapshot=F.lit(snapshot)).persist()
+        lazy = bronze_rows(df, snapshot=F.lit(snapshot))
+        rows = _cached(lazy) if cache else None
+        tag: WaveMetadata = {
+            "backfill": f"{app_id}#snap.{snapshot}",
+            "wave": wave,
+            "lsn": lsn,
+            "attempt": uuid4().hex,
+            "chunks": _wave_chunks(planned, every, None, {}, None),
+        }
+        if rows is None:  # the wave before may be reading: its metrics files stay
+            return _Wave(wave, lazy, tag, False, started_at, t0, lazy=True, metrics=metrics)
         try:
+            if metrics:
+                _remove(_files(metrics))  # a dead attempt's
             # reads the wave, once: the write takes the cached rows
             counts: dict[int, int] = dict(rows.groupBy("_chunk").count().collect())
             high = client.max_lsn()  # how far capture had got after the read: informational
-            read: dict[int, dict[str, Any]] = {}  # chunk -> its metrics file
-            names = _files(metrics) if metrics else []
-            for name in names:
-                try:
-                    with open(name, encoding="utf-8") as fh:
-                        m = json.load(fh)
-                    read[m["chunk"]] = m
-                except (OSError, ValueError, KeyError):
-                    continue
-            _remove(names)  # folded into the tag; the next wave writes its own meanwhile
-            tag: WaveMetadata = {
-                "backfill": f"{app_id}#snap.{snapshot}",
-                "wave": wave,
-                "lsn": lsn,
-                "attempt": uuid4().hex,
-                "chunks": [
-                    {
-                        "chunk": i,
-                        "lo": lo,
-                        "hi": hi,
-                        "last": i == len(every) - 1,
-                        "rows": counts.get(i, 0),
-                        "high_lsn": read.get(i, {}).get("high_lsn") or high,
-                        "read_seconds": read[i]["seconds"] if i in read else None,
-                        "read_mb": round(read[i]["bytes"] / 1e6, 6) if i in read else None,
-                    }
-                    for i, lo, hi in planned
-                ],
-            }
+            # folded into the tag; the next wave writes its own meanwhile
+            tag["chunks"] = _wave_chunks(planned, every, counts, _chunk_metrics(metrics), high)
         except BaseException:
             rows.unpersist()
             raise
@@ -629,17 +676,20 @@ class _Chunked(_ModeLock):
         their commit times looked up on ``clock``; ``every``: the plan's chunks. Returns those of
         the commit that holds the wave, which an earlier attempt may have made with other chunks
         (``_committed``). Runs in ``backfill()``'s background thread."""
-        from ..sink import write_facts
+        from ..sink import _utc_now, write_facts
         from ..tables import exists
 
-        tag = w.tag
+        tag, started_at, t0 = w.tag, w.started_at, w.t0
         try:
-            if not w.empty:  # an empty wave writes no commit
+            if w.lazy:  # read by its append, timed from there
+                started_at, t0 = _utc_now(), time.monotonic()
+                tag = self._append_read(w, target, snapshot, every, clock)
+            elif not w.empty:  # an empty wave writes no commit
                 tag = self._append_wave(target, snapshot, w.rows, tag, every)
             elif exists(self.spark, target):  # though an earlier attempt that read rows may have
                 tag = self._committed(target, snapshot, tag, every) or tag
         finally:
-            w.rows.unpersist()
+            w.release()
         times: dict[str | None, datetime | None] = {}
 
         def at(x: str | None) -> datetime | None:
@@ -647,7 +697,7 @@ class _Chunked(_ModeLock):
                 times[x] = _ts(clock.lsn_to_time(x)) if x else None
             return times[x]
 
-        duration_ms = round((time.monotonic() - w.t0) * 1000)
+        duration_ms = round((time.monotonic() - t0) * 1000)
         write_facts(
             self.spark,
             facts_table,
@@ -661,7 +711,7 @@ class _Chunked(_ModeLock):
                     lsn=tag["lsn"],
                     lsn_ts=at(tag["lsn"]),
                     high_ts=at(c["high_lsn"]),
-                    started_at=w.started_at,
+                    started_at=started_at,
                     duration_ms=duration_ms,
                 )
                 for c in tag["chunks"]
@@ -680,9 +730,35 @@ class _Chunked(_ModeLock):
             sink_id,
             w.wave,
             sum(c.rows or 0 for c in held),
-            time.monotonic() - w.t0,
+            time.monotonic() - t0,
         )
         return held
+
+    def _append_read(
+        self, w: _Wave, target: str, snapshot: str, every: list[list[Any]], clock: CdcClient
+    ) -> WaveMetadata:
+        """Append lazy wave ``w``, which reads it (ADR 0032): each chunk's rows counted on the
+        way, its read metrics from its file and ``high_lsn`` from ``clock`` after the append.
+        Returns the tag of the commit that holds the wave, as ``_append_wave``."""
+        from pyspark.sql import Observation
+        from pyspark.sql import functions as F
+
+        from ..sink import _files, _remove
+
+        if w.metrics:
+            _remove(_files(w.metrics))  # a dead attempt's: the wave before is in
+        seen = Observation()
+        counts = [
+            F.count(F.when(F.col("_chunk") == c["chunk"], 1)).alias(str(c["chunk"]))
+            for c in w.tag["chunks"]
+        ]
+        tag = self._append_wave(target, snapshot, w.rows.observe(seen, *counts), w.tag, every)
+        if tag is not w.tag:  # an earlier attempt's commit: Delta read nothing
+            return tag
+        rows = {int(i): n for i, n in seen.get.items()}
+        planned = [[c["chunk"], c["lo"], c["hi"]] for c in tag["chunks"]]
+        read, high = _chunk_metrics(w.metrics), clock.max_lsn()
+        return {**tag, "chunks": _wave_chunks(planned, every, rows, read, high)}
 
     def _append_wave(
         self, target: str, snapshot: str, rows: DataFrame, tag: WaveMetadata, every: list[list[Any]]
@@ -740,12 +816,12 @@ class _Chunked(_ModeLock):
         from ..tables import delta_table
 
         earlier = _earlier_wave(self.spark, target, tag["backfill"], tag["wave"])
-        if earlier:
+        if earlier and None not in (c["rows"] for c in earlier["chunks"]):
             return earlier
         df = delta_table(self.spark, target).toDF()
         if "_chunk" not in df.columns:  # bronze migration 2: no chunk ever appended
             return None
-        first = tag["chunks"][0]["chunk"]  # the earlier waves' chunks are all below it
+        first = (earlier or tag)["chunks"][0]["chunk"]  # the earlier waves' are all below it
         found = (
             df.where(
                 (F.col("_operation") == 0)
@@ -757,6 +833,13 @@ class _Chunked(_ModeLock):
             .collect()
         )
         held = {i: (n, low) for i, n, low in found}
+        if earlier:  # a tag written before its wave was read (ADR 0032): counted in its rows
+            stamp = earlier["lsn"]
+            counted: list[WaveChunk] = [
+                {**c, "rows": held.get(c["chunk"], (0,))[0], "high_lsn": c["high_lsn"] or stamp}
+                for c in earlier["chunks"]
+            ]
+            return {**earlier, "chunks": counted}
         if not held:
             return None
         lsn = min(low for _, low in held.values())  # the wave's stamp, on every row

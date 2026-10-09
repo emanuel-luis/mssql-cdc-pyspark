@@ -64,11 +64,9 @@ def _family(app_id: str) -> re.Pattern[str]:
 
 
 def _version(spark: SparkSessionLike, target: str) -> int:
-    from ..tables import delta_table
+    from ..tables import version
 
-    latest = delta_table(spark, target).history(1).first()
-    assert latest is not None  # an existing table has a version
-    return int(latest["version"])
+    return version(spark, target)
 
 
 class _StreamBase:

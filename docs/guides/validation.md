@@ -43,6 +43,11 @@ matched. `report` holds one row per bucket and one per key or chunk that failed;
    - MISSING_TARGET: the key is only in the source, an insert silver never applied;
    - MISSING_SOURCE: the key is only in silver, a delete it never applied, or a stale key;
    - RECORD_DIFF: other values, an update it never applied; `detail` names the columns.
+
+   The source's rows are read once into a local checkpoint. Where the platform refuses
+   checkpoints (Databricks serverless), this step is skipped with a warning: every bucket has
+   `hashed` false, and only the counts are compared
+   ([ADR 0032](../decisions/0032-facts-without-caching.md)).
 3. **In flight.** A bucket or key that differs while a change to it newer than what either
    side read is in bronze, or still only in the change table, is IN_FLIGHT: silver has not
    applied it yet, the stream has not read it yet, or the source read came before it. What

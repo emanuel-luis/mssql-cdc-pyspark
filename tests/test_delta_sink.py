@@ -345,6 +345,68 @@ def test_a_quiet_table_is_measured_from_the_end_offset_and_its_empty_batches_wri
     assert [r["ingestion_lag_seconds"] for r in rows] == [1800.0, 900.0, 0.0]
 
 
+def test_where_caching_is_refused_the_sink_takes_the_same_facts_from_its_append(
+    delta_spark, workdir, refuse_caching
+):
+    spark = delta_spark
+    varying = {"started_at", "duration_ms", "written_at", "read_seconds", "capture_lag_seconds"}
+
+    def run(path, replay=False):
+        db = FakeCdcDatabase(os.path.join(path, "src"), [CI, "dbo_other"])
+        kept_from = db.idle(at=T0 - timedelta(hours=70))
+        new = [(2, {"order_id": i, "status": "new"}) for i in (0, 1)]
+        db.commit(CI, new, at=T0)  # batch 0 reads it and an idle entry
+        for m in (10, 17):  # batches 1 and 2 read another table's commit and an idle entry
+            db.commit("dbo_other", new[:1], at=T0 + timedelta(minutes=m))
+            db.idle(at=T0 + timedelta(minutes=m + 1))
+        changed = [
+            (3, {"order_id": 0, "status": "new"}),
+            (4, {"order_id": 0, "status": "paid"}),
+            (1, {"order_id": 1, "status": "new"}),
+        ]
+        db.commit(CI, changed, at=T0 + timedelta(minutes=20))  # batch 3
+        db.commit("dbo_other", new[1:], at=T0 + timedelta(minutes=30))
+        db.cleanup(CI, kept_from)
+        target, facts, metrics = (os.path.join(path, n) for n in ("bronze", "facts", "metrics"))
+        sink = delta_sink(target, "same-v1", facts, metrics_path=metrics)
+
+        def write(df, batch_id):
+            sink(df, batch_id)
+            if replay:  # a replay of the batch: written once
+                sink(df, batch_id)
+
+        _stream(spark, path, write, numPartitions="2", maxCommitsPerBatch="2", metricsPath=metrics)
+        bronze = spark.read.format("delta").load(target).collect()
+        rows = spark.read.format("delta").load(facts).orderBy("batch_id").collect()
+        commits = (
+            spark.sql(f"DESCRIBE HISTORY delta.`{target}`")
+            .where("operation = 'WRITE'")
+            .orderBy("version")
+            .collect()
+        )
+        kept = [
+            {k: v for k, v in r.asDict().items() if k not in varying | {"target"}} for r in rows
+        ]
+        bronze = sorted(map(tuple, bronze), key=repr)
+        return bronze, kept, [json.loads(c["userMetadata"]) for c in commits]
+
+    bronze, facts, metas = run(os.path.join(workdir, "cached"))
+    calls = refuse_caching()
+    uncached = run(os.path.join(workdir, "uncached"), replay=True)
+    assert uncached[:2] == (bronze, facts)
+    assert calls == ["persist"]  # asked once per run: refused, it is not asked again
+    assert [r["rows"] for r in facts] == [2, 0, 0, 3]
+    assert (facts[3]["updates"], facts[3]["deletes"], facts[3]["inserts"]) == (1, 1, 0)
+    ends = [r["end_commit_ts"] for r in facts[1:3]]  # measured without rows too
+    assert ends == [T0 + timedelta(minutes=11), T0 + timedelta(minutes=18)]
+    assert [m["rows"] for m in metas] == [2, 3]  # a commit per batch with rows
+    # uncached, a commit's userMetadata cannot hold the facts; a batch without rows writes an
+    # empty commit after one with rows, and none after one without (it is read before)
+    assert uncached[2] == [
+        {**dict.fromkeys(metas[0]), "batch_id": b, "app_id": "same-v1"} for b in (0, 1, 3)
+    ]
+
+
 def test_cleanup_during_the_read_leaves_one_possible_data_skipped_row(delta_spark, workdir):
     spark = delta_spark
     db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
@@ -2017,6 +2079,93 @@ def test_backfill_reads_again_a_wave_read_ahead_of_a_commit_holding_other_chunks
     bronze = spark.read.format("delta").load(target)
     snap = bronze.where("_operation = 0").select("order_id").collect()
     assert len(snap) == len({r["order_id"] for r in snap}) == 10
+    assert _rebuilt(bronze, "order_id", "status", s) == _source(db)
+
+
+def test_where_caching_is_refused_backfill_reads_each_wave_by_appending_it(
+    delta_spark, workdir, monkeypatch, refuse_caching
+):
+    import time
+    from types import SimpleNamespace
+
+    from pyspark.sql import functions as F
+
+    from mssql_cdc import sink, stream
+    from mssql_cdc.pipeline import _chunked
+    from mssql_cdc.tables import delta_table
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=16)  # 8 chunks of 2
+    options |= {"numPartitions": "2", "metricsPath": os.path.join(workdir, "metrics")}
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        cdc.to_delta(
+            target,
+            "lazy-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    run()
+    s = _events(spark, facts, "snapshot_open")[0]["min_lsn"]
+    calls = refuse_caching()
+    write_facts = sink.write_facts
+    monkeypatch.setattr(sink, "write_facts", _dies_after_the_append(write_facts))
+    with pytest.raises(RuntimeError, match="the job died"):
+        cdc.backfill(target, app_id="lazy-v1", facts_table=facts, chunk_rows=2, max_waves=1)
+    monkeypatch.setattr(sink, "write_facts", write_facts)
+    # the wave's commit was written as it was read: its userMetadata has no counts
+    [tag] = [
+        json.loads(m)
+        for (m,) in delta_table(spark, target)
+        .history()
+        .where("userMetadata LIKE '%\"backfill\"%'")
+        .select("userMetadata")
+        .collect()
+    ]
+    assert [(c["chunk"], c["rows"], c["high_lsn"]) for c in tag["chunks"]] == [
+        (0, None, None),
+        (1, None, None),
+    ]
+    # Delta skips the rerun's append: the counts come from the wave's rows in bronze
+    status = cdc.backfill(target, app_id="lazy-v1", facts_table=facts, chunk_rows=2, max_waves=1)
+    assert (status["chunks_done"], status["done"]) == (2, False)
+    rows = {
+        json.loads(r["detail"])["chunk"]: (r["rows"], r["max_lsn"])
+        for r in _events(spark, facts, "snapshot_chunk")
+    }
+    assert rows == {0: (2, tag["lsn"]), 1: (2, tag["lsn"])}
+    # a wave is sized by how long its append took, its read: as if 100 s, one round each
+    delta_table(spark, facts).update("event = 'snapshot_chunk'", {"duration_ms": F.lit(100_000)})
+    skew = [0.0]
+    monkeypatch.setattr(
+        _chunked, "time", SimpleNamespace(monotonic=lambda: time.monotonic() + skew[0])
+    )
+    commit_wave = _chunked._Chunked._commit_wave
+
+    def slow(self, *args, **kwargs):
+        skew[0] += 100
+        return commit_wave(self, *args, **kwargs)
+
+    monkeypatch.setattr(_chunked._Chunked, "_commit_wave", slow)
+    status = cdc.backfill(target, app_id="lazy-v1", facts_table=facts, target_wave_seconds=150)
+    assert status["done"] and status["chunks_done"] == 8
+    assert _waves(spark, facts) == [(i, i // 2) for i in range(8)]
+    chunks = _events(spark, facts, "snapshot_chunk")
+    later = [r for r in chunks if json.loads(r["detail"])["wave"]]  # their metrics files too
+    assert len(later) == 6 and all(r["rows"] == 2 and r["read_seconds"] for r in later)
+    assert calls == ["persist"] * 3  # once per call; never unpersist, which is refused too
+    [done] = _events(spark, facts, "bootstrap")
+    assert (done["min_lsn"], done["rows"]) == (s, 16)
+    run()
+    bronze = spark.read.format("delta").load(target)
+    snap = bronze.where("_operation = 0").select("order_id").collect()
+    assert len(snap) == len({r["order_id"] for r in snap}) == 16
     assert _rebuilt(bronze, "order_id", "status", s) == _source(db)
 
 

@@ -536,7 +536,9 @@ LSN S), `chunks_done`, `chunks_total` (the plan's count, `None` until a call has
 Each wave is one commit to `target` and one `snapshot_chunk` facts row per chunk
 ([Tables](tables.md#facts)). The next wave is read while that commit and those rows are
 written, in a background thread: one wave reading and one committing at most, its rows
-cached until its commit.
+cached until its commit. Where the platform refuses to cache (Databricks serverless), a
+wave is read by its commit, one after the other
+([ADR 0032](../decisions/0032-facts-without-caching.md)).
 
 ## snapshot parameters
 

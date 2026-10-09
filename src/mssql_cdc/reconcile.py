@@ -24,6 +24,9 @@ COMMITTED, Tier 2 reads through the snapshot reader under the ``isolationLevel``
   in silver (a delete not applied, a stale key); RECORD_DIFF: other values (an update not
   applied). For any other key silver is joined from the source's rows,
   which finds only the first and the last: no range Spark cuts of silver is SQL Server's.
+  The source's rows are read once, into a local checkpoint: where the platform refuses one
+  (Databricks serverless, ADR 0032), Tier 2 is skipped with a warning, every bucket
+  ``hashed`` false.
 * IN_FLIGHT: M is ``max_lsn`` read just before the source is read, E silver's
   ``applied_lsn`` in ``control_table``, read before the silver version compared, which holds
   every change up to it (not its newest ``_start_lsn``: a chunk row's stamp can be ahead of
@@ -54,6 +57,7 @@ Returns a ``ReconcileResult``, ``{"run_id", "silver_version", "silver_lsn", "sou
 from __future__ import annotations
 
 import json
+import logging
 import math
 import random
 import uuid
@@ -69,6 +73,8 @@ from . import events, migrations
 from .silver import _by_key, _one, _q, _source_keys
 from .tables import delta_table, table_ref
 from .types import ReconcileResult
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -219,6 +225,17 @@ def _latest(spark: SparkSessionLike, table: str) -> tuple[int, DataFrame]:
     assert latest is not None  # an existing table has a version
     version = int(latest["version"])
     return version, spark.sql(f"SELECT * FROM {table_ref(table)} VERSION AS OF {version}")
+
+
+def _read_once(df: DataFrame) -> DataFrame | None:
+    """``df`` read now into a local checkpoint, or None where the platform refuses
+    checkpoints (Databricks serverless refuses every cache API, ADR 0032). Told by trying a
+    lazy one first, which reads nothing: a failing read raises, never reads as a refusal."""
+    try:
+        df.localCheckpoint(eager=False)
+    except Exception:  # noqa: BLE001 - the refusal's type is the platform's; trying is the only test
+        return None
+    return df.localCheckpoint()
 
 
 def _after(bronze: DataFrame, lower: str) -> DataFrame:
@@ -477,21 +494,30 @@ def reconcile(
         else:
             chosen = sorted(_sample(rng, list(range(len(parts))), sample))
         failures: DataFrame | None = None
+        rows_read: DataFrame | None = None
         if chosen:
             read_lsn = client.max_lsn() or ZERO_LSN  # M again, before the rows are read
             # no chunk metrics: they are backfill()'s, and a stream's directory folds them
             read_options: dict[str, Any] = {
                 k: v for k, v in options.items() if k.lower() != "metricspath"
             }
-            rows_read = (
+            rows_read = _read_once(  # before bronze is pinned
                 spark.read.format("mssql_cdc_snapshot")
                 .options(**read_options)
                 .option("snapshotChunks", json.dumps([[i, *parts[i]] for i in chosen]))
                 .option("snapshotKeys", json.dumps(keys))  # the bounds' columns
                 .option("snapshotLsn", read_lsn)
                 .load()
-                .localCheckpoint()  # read once, before bronze is pinned
             )
+            if rows_read is None:
+                _log.warning(
+                    "mssql_cdc: reconcile of %s compared counts only: this platform refuses "
+                    "localCheckpoint, which the row comparison reads the source once with "
+                    "(Databricks serverless). Run it on compute that allows it to compare rows.",
+                    silver,
+                )
+                chosen = []
+        if rows_read is not None:
             moved_keys = changed(min(read_lsn, silver_lsn or ZERO_LSN))
             labels = spark.createDataFrame(
                 [(i, json_or_null(parts[i][0]), json_or_null(parts[i][1])) for i in chosen],

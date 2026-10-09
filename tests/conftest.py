@@ -133,6 +133,29 @@ def workdir():
 
 
 @pytest.fixture
+def refuse_caching(monkeypatch):
+    """``refuse_caching()``: from then on every cache API raises, as on Databricks serverless
+    (ADR 0032); returns the list the refused calls' names go to."""
+    from pyspark.sql.classic.dataframe import DataFrame
+
+    def refuse() -> list:
+        calls: list = []
+
+        def refusing(name):
+            def refused(self, *args, **kwargs):
+                calls.append(name)
+                raise RuntimeError(f"[NOT_SUPPORTED_WITH_SERVERLESS] {name} is not supported")
+
+            return refused
+
+        for name in ("persist", "cache", "unpersist", "localCheckpoint", "checkpoint"):
+            monkeypatch.setattr(DataFrame, name, refusing(name))
+        return calls
+
+    return refuse
+
+
+@pytest.fixture
 def latest():
     """``latest(df, key, value, facts=None)``: sorted (key, value) of the latest image per key
     in a bronze DataFrame, as a MERGE downstream applies it, rebuilt from the newest snapshot

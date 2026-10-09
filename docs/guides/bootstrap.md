@@ -211,7 +211,8 @@ so is every row inserted above the MAX: no chunk reads those.
   holds at the pace of the last wave, and no more than the rest of `max_seconds`. Each wave
   pays a Spark job, a commit and its facts rows, and waits for its slowest connection, so
   fewer, longer waves cost less; its rows stay cached until its commit, so a longer target
-  holds more of them. `target_wave_seconds=0` reads one round per wave.
+  holds more of them (where the platform caches: on Databricks serverless a wave is read by
+  its commit). `target_wave_seconds=0` reads one round per wave.
 
 [`apply_changes`](silver.md#chunked-snapshots) applies the waves as they arrive, when given
 the facts table. [`reconcile`](validation.md) checks the chunks against the facts and the

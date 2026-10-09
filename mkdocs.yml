@@ -139,5 +139,6 @@ nav:
       - decisions/0029-driver-retries-and-lock-timeout.md
       - decisions/0030-protocols-for-the-pluggable-seams.md
       - decisions/0031-strict-typing-gates.md
+      - decisions/0032-facts-without-caching.md
   - Changelog: changelog.md
   - Contributing: contributing.md
