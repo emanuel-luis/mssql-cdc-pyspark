@@ -12,6 +12,64 @@ compatibility" line.
 
 ## [Unreleased]
 
+State compatibility: no migration; offsets, checkpoint layout, table schemas and the
+metrics files' names and layout are unchanged, and the state every released wheel wrote also
+resumes through a Spark Connect session. Where the platform refuses caching:
+
+- a micro-batch's bronze commit has `rows` to `updates` null in its `userMetadata`, and a
+  batch with no rows right after one with rows writes an empty commit;
+- a `backfill()` wave's commit has `rows`, `high_lsn`, `read_seconds` and `read_mb` null for
+  each chunk. `WaveChunk.rows` is now `int | None`
+  ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)
+  amendment 8).
+
+The facts table holds those values. A 0.5 release that finds such a wave commit after a crash
+writes NULL counts for its chunks.
+
+### Added
+
+- Spark Connect: the library runs from a Spark Connect client, which includes Databricks
+  serverless and Databricks Connect. It is tested against a local Spark Connect server with
+  Delta Connect and the fake backend, in a new CI job, `connect`
+  ([ADR 0033](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0033-spark-connect-tested-on-a-local-server/)).
+  On serverless, pass `trigger={"availableNow": True}`. The network path from serverless to
+  SQL Server is yours to provide. The calls that talk to SQL Server themselves (bootstrap,
+  `backfill()`, `reconcile()`...) and the `track()` listener run in the client process.
+- On a platform that refuses the DataFrame cache API (Databricks serverless), `delta_sink`
+  and `backfill()` now append each batch or wave as they read it instead of failing on
+  `persist()`. `observe()` counts the rows on the way, so the facts table gets the same
+  values and the source is still read once. After a batch without rows, the sink asks
+  `isEmpty()` before the append, so a batch with no rows writes no commit. Where the
+  platform caches, nothing changes. The code tells the two apart by trying `persist()`,
+  never by platform name
+  ([ADR 0032](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0032-facts-without-caching/)).
+- `metricsPath` can be a URI that `pyarrow.fs` opens (`s3://`, `gs://`, `abfss://`,
+  `hdfs://`, `file://`), for platforms with no shared local or FUSE path (EMR, Dataproc,
+  Spark Connect). The metrics and event files are written, listed, read and removed through
+  `pyarrow.fs.FileSystem.from_uri`, with credentials from pyarrow's defaults on each node or
+  options in the URI query (`?region=...`). Local and FUSE paths work as before, and so do
+  the layout and file names. Each file is written whole: under a temporary name and moved,
+  or, on a filesystem that cannot move, in one upload under its own name. Tested with
+  `file://` URIs and a filesystem without rename, not against a real object store
+  ([ADR 0014](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0014-network-and-read-metrics-in-facts/),
+  Amendment 6).
+
+### Changed
+
+- `reconcile()` compares counts only (Tier 1) where the platform refuses `localCheckpoint`,
+  instead of failing: it logs a warning and every bucket has `hashed` false.
+- `to_delta` no longer raises `ValueError` for a URI `metricsPath`. The reader raises it
+  when the query starts, and only for a URI `pyarrow.fs` cannot open, such as `dbfs:/`. On
+  Databricks, keep the metrics in a Volume: pyarrow does not use Unity Catalog's storage
+  credentials.
+
+### Fixed
+
+- `mssql_cdc.spark.get_spark()` raised `CANNOT_CONFIGURE_SPARK_CONNECT_MASTER` when
+  `SPARK_REMOTE` was set. It now returns a session on that Spark Connect server.
+- Lab checks t5 and t7 failed through Spark Connect because they read `numInputRows` from
+  progress, which a Connect progress leaves out. They now sum it from the sources.
+
 ## [0.5.0] - 2026-10-09
 
 The same code as 0.5.0rc1; its changes are listed under it below. Measured against a

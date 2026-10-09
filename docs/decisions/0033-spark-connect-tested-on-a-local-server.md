@@ -1,4 +1,4 @@
-# 0032: Spark Connect, tested against a local Connect server
+# 0033: Spark Connect, tested against a local Connect server
 
 **Status:** accepted  
 **Date:** 2026-10-09T11:39:43-03:00
@@ -28,8 +28,8 @@ and with `SPARK_REMOTE` set PySpark refuses a master
 Connect server. Past it, t5 and t7 read `numInputRows` from each progress, which a Connect
 progress JSON leaves out (the sources' counts are there).
 
-Databricks serverless adds limits of its own: no DataFrame cache API (the sink's `persist()`
-is a separate change), only `Trigger.AvailableNow`, and it reaches a SQL Server in a private
+Databricks serverless adds limits of its own: no DataFrame cache API (the sink and `backfill()`
+append uncached there, [ADR 0032](0032-facts-without-caching.md)), only `Trigger.AvailableNow`, and it reaches a SQL Server in a private
 network only through what the workspace configures. Measured on 2026-10-09: on serverless,
 `mssql-python` imports and loads without an init script, and the private SQL Server used for
 the Databricks runs is out of its reach.

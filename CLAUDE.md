@@ -78,7 +78,9 @@ src/mssql_cdc/
                    SparkSessionLike / StreamingQueryLike (classic or Spark Connect).
   payloads.py      TypedDicts for the facts `detail` JSON and a wave's userMetadata (state,
                    ADR 0021 amendment 7).
-  sink.py          delta_sink(): idempotent append (txnAppId/txnVersion) + per-batch facts.
+  sink.py          delta_sink(): idempotent append (txnAppId/txnVersion) + per-batch facts;
+                   uncached, counted by observe(), where the platform refuses persist() (ADR 0032).
+  _metricsfs.py    metricsPath files: local/FUSE paths, or a URI through pyarrow.fs (ADR 0014).
   events.py        the facts event protocol, in one place: event names, the rows their
                    writers append (write_event, event_row, chunk_row) and the readers pipeline,
                    silver and reconcile share (read, mode, chunked_opens, completions, plan_of,

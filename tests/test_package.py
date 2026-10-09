@@ -17,7 +17,7 @@ def test_every_release_but_the_newest_has_the_state_it_wrote():
 
 
 def test_the_package_calls_nothing_a_spark_connect_session_lacks():
-    # serverless and Databricks Connect sessions have no JVM (ADR 0032), and the core imports
+    # serverless and Databricks Connect sessions have no JVM (ADR 0033), and the core imports
     # no platform API (invariant 10): this runs in every loop, the connect suite in its own job
     banned = re.compile(
         r"\._(jvm|jsc|jdf|jsparkSession|jsqm|jconf|sc)\b|\bSparkContext\b|\.(sparkContext|rdd)\b"

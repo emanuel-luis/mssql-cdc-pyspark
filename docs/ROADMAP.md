@@ -103,10 +103,12 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 
 ## 0.6.0 (minor): platforms
 
-- [ ] Databricks serverless: facts from the written commit instead of `persist()`.
-- [ ] Object-store `metricsPath` (`s3://`, `abfss://`) through `pyarrow.fs`.
+- [x] Databricks serverless: facts without `persist()` where the platform refuses it,
+      counted by `observe()` on the append (ADR 0032).
+- [x] Object-store `metricsPath` (`s3://`, `abfss://`) through `pyarrow.fs` (ADR 0014,
+      Amendment 6; tested with `file://` URIs, not a real object store).
 - [x] Spark Connect checks: the library and `t5` from a Spark Connect client against a local
-      Connect server with Delta Connect, in CI's `connect` job (ADR 0032).
+      Connect server with Delta Connect, in CI's `connect` job (ADR 0033).
 - [ ] t5 and t7 on serverless and on one non-Databricks platform.
 
 ## 0.7.0 (minor): credentials and privacy

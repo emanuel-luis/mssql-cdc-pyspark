@@ -84,7 +84,7 @@ def spark(tmp_path_factory, request):
     """One session for the whole run. Uses Delta when a selected test takes ``delta_spark`` and
     the jars resolve (set MSSQL_CDC_TEST_DELTA=0 to skip trying, =require to fail without it),
     otherwise plain Spark. With MSSQL_CDC_TEST_SPARK=connect, ``connect_spark`` instead: the
-    tests that drive the library through its API run as a Spark Connect client (ADR 0032)."""
+    tests that drive the library through its API run as a Spark Connect client (ADR 0033)."""
     from mssql_cdc import register
 
     if os.environ.get("MSSQL_CDC_TEST_SPARK") == "connect":
