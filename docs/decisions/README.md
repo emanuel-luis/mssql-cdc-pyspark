@@ -34,6 +34,7 @@
 | [0030](0030-protocols-for-the-pluggable-seams.md) | `typing.Protocol` for the pluggable seams | accepted | 2026-10-07T09:05:52-03:00 |  |
 | [0031](0031-strict-typing-gates.md) | Strict typing: mypy strict on `src`, `pyright --verifytypes` on the public API | accepted | 2026-10-07T10:49:11-03:00 | 2026-10-07T13:39:33-03:00 |
 | [0032](0032-facts-without-caching.md) | Facts without caching where the platform refuses it | accepted | 2026-10-09T11:39:56-03:00 |  |
+| [0033](0033-spark-connect-tested-on-a-local-server.md) | Spark Connect, tested against a local Connect server | accepted | 2026-10-09T11:39:43-03:00 |  |
 
 New ADRs: copy the format, next number, one decision per file. Put the time the
 decision is recorded in `**Date:**` (ISO-8601 with the UTC offset, e.g.

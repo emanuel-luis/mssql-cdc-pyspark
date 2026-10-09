@@ -105,7 +105,9 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 
 - [ ] Databricks serverless: facts from the written commit instead of `persist()`.
 - [ ] Object-store `metricsPath` (`s3://`, `abfss://`) through `pyarrow.fs`.
-- [ ] Spark Connect checks; t5 and t7 on serverless and on one non-Databricks platform.
+- [x] Spark Connect checks: the library and `t5` from a Spark Connect client against a local
+      Connect server with Delta Connect, in CI's `connect` job (ADR 0032).
+- [ ] t5 and t7 on serverless and on one non-Databricks platform.
 
 ## 0.7.0 (minor): credentials and privacy
 

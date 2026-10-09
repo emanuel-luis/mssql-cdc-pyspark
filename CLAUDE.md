@@ -21,6 +21,7 @@ Experimental; the version is in `pyproject.toml`.
 | State compatibility (`tests/compat`) | ✅ the state the 0.1.0 wheel wrote (a checkpoint with two generations; bronze, silver, facts, control) resumes and migrates on the current code (ADR 0021 amendment 3) |
 | `arrow-odbc` backend | ✅ the `tests/integration` tests that take the `backend` fixture pass with it too (CI installs msodbcsql18; ADR 0003 Amendment 2) |
 | Databricks | ✅ t5, t6 pass on DBR 18.2 (Spark 4.1.0 with the admission-control backport), dedicated; ❌ t7 not run (needs a lab SQL Server reachable from the cluster) |
+| Spark Connect | ✅ `tests/test_connect.py` (`-m connect`, CI `connect` job) passes with a PySpark 4.2 client against a local Connect server with Delta Connect 4.4, fake backend: `to_delta` (`availableNow`, `processingTime`), `track`, `snapshot`, chunked bootstrap + `backfill`, `apply_changes`, `reconcile`, `start_many` with data loss and re-snapshot |
 
 `docs/ROADMAP.md` lists what is next.
 
@@ -109,7 +110,8 @@ src/mssql_cdc/
   tables.py        DeltaTable API: open by name/path, create typed with column comments (ADR 0012).
   migrations/      schema migrations per table kind: control.py, facts.py, bronze.py,
                    silver.py, reconcile.py (ADR 0013).
-  spark.py         get_spark(): reuse the platform session or build a local one with Delta;
+  spark.py         get_spark(): reuse the platform session, a Spark Connect one with
+                   SPARK_REMOTE, or build a local one with Delta;
                    available_cores(): what register() uses for numPartitions=auto (ADR 0011).
 lab/
   workload.py      Faker OLTP workload (setup/seed/stream/bulk/long-tx).
@@ -120,6 +122,7 @@ sql/heartbeat.sql  Optional Agent job that keeps max_lsn moving on a quiet datab
 sql/switch_capture_instance.sql  The DBA's steps to move a table to a new capture instance (ADR 0023).
 tests/             pytest suite (fake backend runs the real Spark engine).
   integration/     the source against SQL Server 2022 in Docker (testcontainers), -m sqlserver.
+  test_connect.py  the library from a Spark Connect client, local Connect server, -m connect.
   compat/          <version>/: the state that release's wheel wrote (generate.py);
                    test_compat.py resumes each with the current code (ADR 0021).
 examples/          local_pipeline.py, databricks_notebook.py.
@@ -220,6 +223,12 @@ notes/             Local only, gitignored: research notes in Portuguese (context
   server clock in `America/Sao_Paulo`). `uv run pytest -m sqlserver`; needs Docker. The
   default run deselects it. Add a test there for anything that depends on how SQL Server
   or the driver actually behaves.
+* `tests/test_connect.py` runs the library from a Spark Connect client against a local
+  Connect server with Delta Connect (`connect_spark` in `tests/conftest.py`), with the fake
+  backend: `uv run --group connect pytest -m connect`, alone (a Connect session turns the
+  whole process to Connect). Anything new a user calls from the client (a public function, a
+  listener, a client-side SQL Server call) gets a step there. No `sparkContext`, `_jvm`,
+  `_jsc` or `_jdf` in `src/`: try the call and fall back, as `available_cores` does.
 * `tests/compat/test_compat.py` resumes the state each released wheel wrote
   (`tests/compat/<version>`) with the current code: a change that fails it breaks the
   state contract (ADR 0021).

@@ -34,10 +34,44 @@ Spark. On Databricks, install it as a job library and add an init script for the
 system libraries; both are in [Running on Databricks](../DATABRICKS.md).
 
 Of these platforms, only Databricks classic compute has run it, on a single node.
-Databricks serverless is not supported yet. The metrics need a
+Databricks serverless runs it through Spark Connect (below). The metrics need a
 [metricsPath](../reference/options.md#metricspath) every node sees: a local or FUSE path, or,
 where there is none (EMR and Dataproc by default), an object store URI `pyarrow.fs` opens
 with the credentials the nodes have (`s3://`, `gs://`).
+
+## Spark Connect
+
+Databricks serverless compute, Databricks Connect and any Spark Connect server give your code
+a client session with no JVM; the queries run on the server. The library calls only APIs a
+Connect session has (DataFrames, SQL, `DeltaTable`, Python data sources, streaming query
+listeners). Where a classic session can tell it more, such as the cores behind
+`numPartitions=auto`, it tries the call and falls back when it fails, without asking which
+platform it runs on.
+
+Tested with a PySpark 4.2 client against a local Spark Connect server (PySpark 4.2 with
+Delta Connect 4.4), with the fake backend in place of SQL Server: `to_delta` with
+`availableNow` and with `processingTime`, `track`, `snapshot`, a chunked bootstrap with
+`backfill`, `apply_changes`, `reconcile`, and `start_many` through a data loss and its
+re-snapshot (`tests/test_connect.py`, CI's `connect` job).
+
+What runs where:
+
+- On the server: the stream (the reader plans in a Python worker of the server's driver and
+  reads on its executors) and the sink, a `foreachBatch` function that runs in a Python
+  process the server starts. Install the library where the server's Python finds it.
+- In your process: the calls that talk to SQL Server themselves (`to_delta`'s bootstrap and
+  `on_data_loss="resnapshot"` pre-flight, `snapshot()`, `seed()`, `backfill()`,
+  `reconcile()`, `apply_changes(options=...)`) and the listener `track()` adds. Your process
+  must reach SQL Server, and see the checkpoint path for the pre-flight
+  ([checkpoint](../reference/options.md#checkpoint)); `track()` advances the verdict only
+  while it runs.
+- `numPartitions=auto` is the CPU count of the node that plans: a Connect session has no
+  `sparkContext` to count the cluster's cores.
+
+A Spark Connect server of your own needs Delta Connect for the `DeltaTable` calls:
+`io.delta:delta-connect-server_<spark version>_2.13` with its relation and command plugins,
+as the `connect_spark` fixture in `tests/conftest.py` starts one. Databricks has its own.
+For Databricks serverless, see [Databricks](../DATABRICKS.md).
 
 ## Locally
 
@@ -48,7 +82,8 @@ pip install "mssql-cdc-pyspark[spark]"
 ```
 
 `mssql_cdc.spark.get_spark()` then returns the active session, or builds a local one with
-Delta configured and the session time zone set to UTC. Native Windows also needs
+Delta configured and the session time zone set to UTC; with `SPARK_REMOTE` set, it returns a
+session on that Spark Connect server instead. Native Windows also needs
 `HADOOP_HOME` (winutils) and `PYSPARK_PYTHON`; see
 [Development](../DEVELOPMENT.md#windows-native-powershell).
 

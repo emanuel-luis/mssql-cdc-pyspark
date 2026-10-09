@@ -4,16 +4,18 @@ A platform-agnostic **PySpark streaming source for SQL Server Change Data Captur
 built on Spark's Python DataSource V2 API, plus a **completeness signal**
 (`finalized_until`) that tells downstream jobs when a period of data is safe to read.
 
-* 100% PySpark: no JVM connector, no platform-specific APIs. Tested on local Spark 4.2 and
-  on Databricks classic compute (DBR 18.2, dedicated access mode, single node); other Spark
-  4.2+ runtimes and multi-node clusters are untested. The metrics need `metricsPath` on a
-  directory every node sees: a local or FUSE path, such as a Unity Catalog Volume, or a URI
-  `pyarrow.fs` opens (`s3://`, `gs://`, `abfss://`, `hdfs://`; tested with `file://` URIs,
-  not against a real object store yet). Not supported yet:
-  Databricks serverless, which refuses the DataFrame cache API the sink calls on every batch and `processingTime` triggers (it would
-  need at least `trigger={"availableNow": True}`). Without a `metricsPath` every node can
-  write the stream runs, but the facts' metric columns stay NULL and schema change events
-  do not reach them.
+* 100% PySpark: no JVM connector, no platform-specific APIs. Tested on local Spark 4.2, on
+  a local Spark Connect server (a PySpark 4.2 client, Delta Connect) and on Databricks
+  classic compute (DBR 18.2, dedicated access mode, single node); other Spark 4.2+ runtimes
+  and multi-node clusters are untested. Databricks serverless and Databricks Connect are
+  Spark Connect clients; serverless takes only `trigger={"availableNow": True}`, and its
+  network path to your SQL Server is yours to set up
+  ([Spark Connect](https://emanuel-luis.github.io/mssql-cdc-pyspark/getting-started/installation/#spark-connect)).
+  The metrics need `metricsPath` on a directory every node sees: a local or FUSE path, such
+  as a Unity Catalog Volume, or a URI `pyarrow.fs` opens (`s3://`, `gs://`, `abfss://`,
+  `hdfs://`; tested with `file://` URIs, not against a real object store yet). Without a
+  `metricsPath` every node can write the stream runs, but the facts' metric columns stay
+  NULL and schema change events do not reach them.
 * Offsets are SQL Server commit LSNs, checkpointed by Spark. Supports
   `Trigger.AvailableNow` and per-batch limits (`maxCommitsPerBatch`).
 * Arrow end to end: the default driver (`mssql-python`) fetches straight into Arrow

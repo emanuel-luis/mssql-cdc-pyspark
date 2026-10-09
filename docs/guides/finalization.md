@@ -149,10 +149,12 @@ Where the listener runs:
   (`pyspark/sql/connect/streaming/query.py`, `StreamingQueryListenerBus`), so the worker runs
   on the client and runs `advance` through the client's session. There the listener stays
   registered after its run: removing the client's last listener while another query posts
-  an event hangs PySpark 4.2.0's listener bus. It ignores every other run's events. Not
-  tested.
-- Databricks classic compute and Databricks Connect: not tested. Serverless is not supported
-  yet ([Databricks](../DATABRICKS.md)).
+  an event hangs PySpark 4.2.0's listener bus. It ignores every other run's events. Tested
+  with a PySpark 4.2.0 client against a local Spark Connect server: the client process must
+  keep running for the verdict to move.
+- Databricks classic compute, Databricks Connect and serverless: not tested. Serverless
+  allows only `availableNow`, so there `track` serves a run of the job: `join()` after
+  `awaitTermination()` ([Databricks](../DATABRICKS.md)).
 
 A separate job that reads the checkpoint's committed offsets and calls `advance` remains an
 option where a listener cannot run ([Extension points](../ARCHITECTURE.md#extension-points)).

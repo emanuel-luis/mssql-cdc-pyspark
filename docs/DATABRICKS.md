@@ -1,10 +1,11 @@
-# Running on Databricks (classic compute)
+# Running on Databricks
 
 Nothing in `mssql_cdc` imports Databricks APIs. What has run on Databricks is classic
 compute, DBR 18.2, dedicated access mode, single node (items 1 and 3); other runtimes and
-compute types are untested. Not supported yet: serverless compute (item 2). Keep the
-metrics in a Volume (item 5): a `metricsPath` URI goes through `pyarrow.fs`, which has no
-`dbfs:/` and gets no Unity Catalog credentials. Platform-specific concerns:
+classic compute types are untested. Serverless compute runs it through Spark Connect, with
+`availableNow` only (item 2). Keep the metrics in a Volume (item 5): a `metricsPath` URI goes
+through `pyarrow.fs`, which has no `dbfs:/` and gets no Unity Catalog credentials.
+Platform-specific concerns:
 
 1. **Runtime.** The source needs the Python data source streaming API with
    admission control and `Trigger.AvailableNow` (Spark 4.2, SPARK-55304). DBR 18.2
@@ -15,11 +16,14 @@ metrics in a Volume (item 5): a `metricsPath` URI goes through `pyarrow.fs`, whi
    at its default (a fresh temp dir): a path without a scheme is local to Python but
    resolves to DBFS for the Spark checkpoint, so a fixed one survives the cluster and
    the next run fails with "does not support recovering from checkpoint location".
-2. **Access mode.** Use dedicated. Python streaming data sources on standard access
-   mode are untested. Serverless compute is unsupported until it is tested: it refuses
-   the DataFrame cache API that the sink calls on every batch, and `processingTime`
-   triggers, Spark's default included, so it would need at least
-   `trigger={"availableNow": True}`.
+2. **Access mode.** On classic compute, use dedicated. Python streaming data sources on
+   standard access mode are untested. Serverless compute and Databricks Connect are Spark
+   Connect clients: the library runs there as on any Spark Connect server
+   ([Spark Connect](getting-started/installation.md#spark-connect)), tested against a local
+   one with the fake backend. Serverless allows no `processingTime` trigger, Spark's
+   default included: pass `trigger={"availableNow": True}` to `to_delta` and
+   `start_many`, run the job on a schedule, and advance the verdict after
+   `awaitTermination()` (`advance`, or `track` then `join`).
 3. **Install.** In a job, a `pypi` task library pinned to a release (checked with 0.1.0 on
    DBR 18.2, dedicated, single node: installed with `mssql-python`, bootstrap and stream
    ran). A release candidate installs only by its exact pin:
@@ -54,12 +58,19 @@ metrics in a Volume (item 5): a `metricsPath` URI goes through `pyarrow.fs`, whi
      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libltdl7 libkrb5-3 libgssapi-krb5-2
    fi
    ```
+
+   Serverless compute takes no init scripts and needs none: `mssql-python` imports and loads
+   there as it is (checked on 2026-10-09). List the package in the serverless job's
+   environment dependencies, or `%pip install` it in the notebook.
 4. **Network.** The SQL Server must be reachable from every worker (executors open
    their own connections in `read()`). `to_delta`'s bootstrap and
    `on_data_loss="resnapshot"` pre-flight, `seed()` and `backfill()` run in the Python
    process that calls them, which connects to SQL Server and, for the pre-flight, reads
    the checkpoint itself: from Databricks Connect, that is your machine, which must reach
-   SQL Server and see the checkpoint path.
+   SQL Server and see the checkpoint path. Serverless compute reaches only the networks the
+   workspace lets it reach: a SQL Server in a private network needs that path set up first
+   (serverless network connectivity, or a public endpoint behind a firewall rule). That is
+   yours to provide: the library cannot test it for you.
 5. **Names and paths.** Unity Catalog managed tables for bronze, facts and control;
    checkpoints in a Volume, where `to_delta` keeps the metrics files too. With a checkpoint
    that is a URI, set `metricsPath` to a Volume path. A URI `metricsPath` is written through

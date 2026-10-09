@@ -125,10 +125,14 @@ MSSQL_CDC_TEST_DELTA=0 uv run pytest -q     # don't even try Delta
 uv run pytest -q -k idle                    # one topic
 uv run pytest -q -m sqlserver               # integration: SQL Server 2022 in Docker
 MSSQL_CDC_TEST_BACKEND=arrow-odbc uv run --extra arrow-odbc pytest -q -m sqlserver
+uv run --group connect pytest -q -m connect  # through a local Spark Connect server
 ```
 
-The last line runs the integration tests that take the `backend` fixture with `arrow-odbc`;
-it needs unixODBC and ODBC Driver 18 ([Installation](getting-started/installation.md#arrow-odbc)).
+The `arrow-odbc` line runs the integration tests that take the `backend` fixture with
+`arrow-odbc`; it needs unixODBC and ODBC Driver 18
+([Installation](getting-started/installation.md#arrow-odbc)). The last line needs the
+Spark Connect client (`pyspark[connect]`, the `connect` group) and runs alone: a Connect
+session turns the whole process to Spark Connect.
 
 Quick loops while editing:
 
@@ -138,8 +142,9 @@ uv run pytest -q -m "not delta and not sqlserver"     # the engine without Delta
 ```
 
 The second leaves out every test that takes the `delta_spark` fixture. A
-`-m` on the command line replaces the `-m "not sqlserver"` in `pyproject.toml`, so always
-add `and not sqlserver` to it, or the run starts SQL Server containers.
+`-m` on the command line replaces the `-m "not sqlserver and not connect"` in
+`pyproject.toml`, so always add `and not sqlserver` to it, or the run starts SQL Server
+containers.
 
 * `tests/test_source_fake.py` is the main safety net: real Spark streaming,
   simulated SQL Server.
@@ -159,6 +164,12 @@ add `and not sqlserver` to it, or the run starts SQL Server containers.
   pulls the SQL Server image. The default `pytest` run leaves these tests out.
   `test_fake_parity.py` applies one history to SQL Server and to the fake and compares
   what the source reads from each, so the fake the unit tests run on stays true to CDC.
+* `tests/test_connect.py` runs the library from a Spark Connect client session, as on
+  Databricks serverless: the `connect_spark` fixture starts a local Spark Connect server
+  (PySpark's `SparkConnectServer` through `spark-submit`, with Delta Connect) in its own JVM
+  and stops it after the run; the first run downloads the Delta Connect jars. The default
+  run leaves these tests out, and so do the loops above (they are marked `spark` and
+  `delta` too).
 
 ## Mutation testing
 
