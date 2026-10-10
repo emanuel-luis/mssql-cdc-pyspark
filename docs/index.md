@@ -8,8 +8,9 @@ on local Spark 4.1, without admission control), on a local
 [Spark Connect](getting-started/installation.md#spark-connect) server and on Databricks
 classic compute (DBR 18.2, single node); other Spark 4.1+ runtimes and multi-node clusters
 are untested. Databricks serverless is a Spark Connect platform the library is built for (no
-cache API, `availableNow` only), tested on the local Connect server with caching refused but
-not run on serverless yet ([Databricks](DATABRICKS.md)). The metrics need
+cache API, `availableNow` only), tested on the local Connect server with caching refused, and
+run on serverless with the fake backend; its SQL Server path needs a network path from
+serverless to your server, which has not been tried ([Databricks](DATABRICKS.md)). The metrics need
 [metricsPath](reference/options.md#metricspath) on a local or FUSE path every node sees, or
 on a URI `pyarrow.fs` opens (`s3://`, `abfss://`...).
 
@@ -24,7 +25,7 @@ on a URI `pyarrow.fs` opens (`s3://`, `abfss://`...).
     [changelog](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md)
     says what each release has. A release candidate installs only with
     `pip install --pre mssql-cdc-pyspark` or its exact pin, such as
-    `mssql-cdc-pyspark==0.5.0`. Versioned docs come later.
+    `mssql-cdc-pyspark==0.6.0`. Versioned docs come later.
 
 ## The problem
 

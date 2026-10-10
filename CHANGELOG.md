@@ -12,6 +12,19 @@ compatibility" line.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-10
+
+The changes are listed under 0.6.0rc3, rc2 and rc1 below; this release adds only the
+documentation of where it has run. The library ran on Databricks serverless (environment 4,
+a Spark Connect client) with the fake backend: a stream with `availableNow`, a chunked
+bootstrap with `backfill()`, `apply_changes`, `reconcile` and finalization, with the cache
+API refused by the platform; 24 checks passed (bronze equal to the source, no duplicates,
+facts counted without `persist()`, metrics files in a Volume, silver equal to the table).
+Serverless refuses `processingTime` triggers. Its SQL Server path was not run there: the
+validation workspace's serverless compute has no network path to the server.
+
+State compatibility: as 0.6.0rc1 to rc3.
+
 ## [0.6.0rc3] - 2026-10-10
 
 ### Fixed
@@ -917,7 +930,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc3...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.5.0...v0.6.0
 [0.6.0rc3]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc2...v0.6.0rc3
 [0.6.0rc2]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc1...v0.6.0rc2
 [0.6.0rc1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.5.0...v0.6.0rc1

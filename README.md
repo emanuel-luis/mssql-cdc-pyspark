@@ -8,8 +8,8 @@ built on Spark's Python DataSource V2 API, plus a **completeness signal**
   source alone also on local Spark 4.1, without admission control), on a local Spark Connect
   server (a PySpark 4.2 client, Delta Connect) and on Databricks classic compute (DBR 18.2,
   dedicated access mode, single node); other Spark 4.1+ runtimes and multi-node clusters are
-  untested. Databricks serverless and Databricks Connect are Spark Connect clients and have
-  not run it yet. Serverless refuses the cache API, which the library works without (tested
+  untested. Databricks serverless and Databricks Connect are Spark Connect clients; 0.6.0rc3
+  ran the whole library on Databricks serverless (environment 4) with the fake backend: stream, chunked bootstrap and backfill, silver, `reconcile` and finalization; its SQL Server path has not run there, since serverless needs a network path to your SQL Server. Serverless refuses the cache API, which the library works without (tested
   on the local Connect server with caching refused), takes only
   `trigger={"availableNow": True}`, and its network path to your SQL Server is yours to set
   up

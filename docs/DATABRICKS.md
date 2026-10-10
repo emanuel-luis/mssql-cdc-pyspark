@@ -3,8 +3,8 @@
 Nothing in `mssql_cdc` imports Databricks APIs. What has run on Databricks is classic
 compute, DBR 18.2, dedicated access mode, single node (items 1 and 3); other runtimes and
 classic compute types are untested. Serverless compute is a Spark Connect platform the
-library is built for, with `availableNow` only and no cache API (item 2); it has not run
-there yet. Keep the metrics in a Volume (item 5): a `metricsPath` URI goes
+library is built for, with `availableNow` only and no cache API (item 2); 0.6.0rc3
+ran the whole library on Databricks serverless (environment 4) with the fake backend: stream, chunked bootstrap and backfill, silver, `reconcile` and finalization; its SQL Server path has not run there, since serverless needs a network path to your SQL Server. Keep the metrics in a Volume (item 5): a `metricsPath` URI goes
 through `pyarrow.fs`, which has no `dbfs:/` and gets no Unity Catalog credentials.
 Platform-specific concerns:
 
@@ -32,7 +32,7 @@ Platform-specific concerns:
    ran). A release candidate installs only by its exact pin:
 
    ```json
-   "libraries": [{"pypi": {"package": "mssql-cdc-pyspark==0.5.0"}}]
+   "libraries": [{"pypi": {"package": "mssql-cdc-pyspark==0.6.0"}}]
    ```
 
    For an unreleased commit, a `requirements` task library pointing to a
@@ -47,7 +47,7 @@ Platform-specific concerns:
    "libraries": [{"requirements": "/Workspace/Users/<you>/requirements.txt"}]
    ```
 
-   In a notebook, `%pip install mssql-cdc-pyspark==0.5.0` (or the git line) works too. Leave out the `[spark]`
+   In a notebook, `%pip install mssql-cdc-pyspark==0.6.0` (or the git line) works too. Leave out the `[spark]`
    extra: PyPI `pyspark` conflicts with the runtime's own Spark. `mssql-python`, installed
    with the package, loads `libltdl7` (and the Kerberos libraries) on every node that
    opens a connection; add a
