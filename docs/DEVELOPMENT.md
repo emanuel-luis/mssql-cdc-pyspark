@@ -281,11 +281,15 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
 
 * `lint`: `ruff check`, `ruff format --check`, `mypy` and `pyright --verifytypes` (a type
   completeness below 100% fails); the other jobs wait for it, and only for it: `unit`,
-  `integration` and `lab` run side by side.
+  `spark41`, `integration` and `lab` run side by side.
 * `unit`: pytest with Delta on Ubuntu, Java 17, in three shards: `tests/test_silver.py`,
   `tests/test_delta_sink.py`, and every other file (`--ignore` of those two, so a new test
   file or compat version lands there). Each test gets 300 s (`--timeout=300`). Python 3.11
   on every push, 3.10 to 3.13 on the weekly schedule.
+* `spark41`: PySpark 4.1.1 installed over the locked 4.2.0, then the tests that start no JVM
+  and `tests/test_source_fake.py`: the source's legacy reader, with no admission
+  control (the tests that need it skip), and the PySpark APIs whose signatures 4.2 changed.
+  No Delta.
 * `integration`: one leg per backend, both `pytest -m sqlserver` with testcontainers on the
   runner's Docker. `mssql-python` runs every test; `arrow-odbc` installs ODBC Driver 18 and
   runs the tests that take the `backend` fixture, with `MSSQL_CDC_TEST_BACKEND=arrow-odbc`.

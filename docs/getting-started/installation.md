@@ -12,7 +12,7 @@
 | What | Version | Notes |
 |---|---|---|
 | Python | 3.10–3.13 | CI runs 3.11 on every push and all four weekly |
-| Spark | 4.2+ | or a runtime with the Python data source admission control backported, such as Databricks Runtime 18.2+ ([Databricks](../DATABRICKS.md)) |
+| Spark | 4.1+ | CI runs 4.2.0, and the source alone on 4.1.1; 4.0 is untested. `maxCommitsPerBatch` needs 4.2+ or a runtime with the Python data source admission control backported, such as Databricks Runtime 18.2+ ([Databricks](../DATABRICKS.md)) |
 | Delta Lake | delta-spark 4.4+ locally | for `to_delta`, the facts and control tables and `apply_changes`; Spark platforms ship it |
 | Java | 17 | only for a local Spark; CI runs 17, 21 is untested |
 | SQL Server | CI runs 2022 | CDC enabled on the database and the table, SQL Server Agent running (capture and cleanup are Agent jobs) |
@@ -160,8 +160,8 @@ print(mssql_cdc.__version__)
 
 On Spark 4.2+ and on runtimes with the admission control backport, the
 `maxCommitsPerBatch` option and `Trigger.AvailableNow` work. On an older Spark every batch
-reads up to the newest change captured, `maxCommitsPerBatch` has no effect, and that path
-is not tested.
+reads up to the newest change captured and `maxCommitsPerBatch` has no effect: CI runs that
+path on PySpark 4.1.1, with the fake backend and without Delta.
 
 Without PySpark the import fails with an `ImportError` that says how to get it.
 

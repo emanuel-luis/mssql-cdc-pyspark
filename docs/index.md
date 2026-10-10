@@ -3,9 +3,10 @@
 A PySpark streaming source for SQL Server Change Data Capture (CDC), a Delta sink with
 per-batch facts, and a completeness signal, `finalized_until`, that tells downstream jobs
 when a period of data is safe to read. Pure Python on Spark's DataSource V2 API: no JVM
-connector and no platform-specific APIs. Tested on local Spark 4.2, on a local
+connector and no platform-specific APIs. Tested on local Spark 4.2 (the source alone also
+on local Spark 4.1, without admission control), on a local
 [Spark Connect](getting-started/installation.md#spark-connect) server and on Databricks
-classic compute (DBR 18.2, single node); other Spark 4.2+ runtimes and multi-node clusters
+classic compute (DBR 18.2, single node); other Spark 4.1+ runtimes and multi-node clusters
 are untested. Databricks serverless is a Spark Connect platform the library is built for (no
 cache API, `availableNow` only), tested on the local Connect server with caching refused but
 not run on serverless yet ([Databricks](DATABRICKS.md)). The metrics need

@@ -4,14 +4,15 @@ A platform-agnostic **PySpark streaming source for SQL Server Change Data Captur
 built on Spark's Python DataSource V2 API, plus a **completeness signal**
 (`finalized_until`) that tells downstream jobs when a period of data is safe to read.
 
-* 100% PySpark: no JVM connector, no platform-specific APIs. Tested on local Spark 4.2, on
-  a local Spark Connect server (a PySpark 4.2 client, Delta Connect) and on Databricks
-  classic compute (DBR 18.2, dedicated access mode, single node); other Spark 4.2+ runtimes
-  and multi-node clusters are untested. Databricks serverless and Databricks Connect are
-  Spark Connect clients and have not run it yet. Serverless refuses the cache API, which the
-  library works without (tested on the local Connect server with caching refused), takes
-  only `trigger={"availableNow": True}`, and its network path to your SQL Server is yours
-  to set up
+* 100% PySpark: no JVM connector, no platform-specific APIs. Tested on local Spark 4.2 (the
+  source alone also on local Spark 4.1, without admission control), on a local Spark Connect
+  server (a PySpark 4.2 client, Delta Connect) and on Databricks classic compute (DBR 18.2,
+  dedicated access mode, single node); other Spark 4.1+ runtimes and multi-node clusters are
+  untested. Databricks serverless and Databricks Connect are Spark Connect clients and have
+  not run it yet. Serverless refuses the cache API, which the library works without (tested
+  on the local Connect server with caching refused), takes only
+  `trigger={"availableNow": True}`, and its network path to your SQL Server is yours to set
+  up
   ([Spark Connect](https://emanuel-luis.github.io/mssql-cdc-pyspark/getting-started/installation/#spark-connect)).
   The metrics need `metricsPath` on a directory every node sees: a local or FUSE path, such
   as a Unity Catalog Volume, or a URI `pyarrow.fs` opens (`s3://`, `gs://`, `abfss://`,

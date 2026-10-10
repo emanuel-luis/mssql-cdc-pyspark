@@ -8,8 +8,9 @@ there yet. Keep the metrics in a Volume (item 5): a `metricsPath` URI goes
 through `pyarrow.fs`, which has no `dbfs:/` and gets no Unity Catalog credentials.
 Platform-specific concerns:
 
-1. **Runtime.** The source needs the Python data source streaming API with
-   admission control and `Trigger.AvailableNow` (Spark 4.2, SPARK-55304). DBR 18.2
+1. **Runtime.** `maxCommitsPerBatch` needs the Python data source streaming API with
+   admission control and `Trigger.AvailableNow` (Spark 4.2, SPARK-55304); without it every
+   batch reads up to `max_lsn` (CI runs the source on PySpark 4.1.1). DBR 18.2
    ships Spark 4.1.0 with that API backported: `t5_engine` passes there (dedicated,
    single node). Run `lab/checks/t5_engine.py` in a notebook to confirm on another
    runtime before anything else. `t5` needs a single-node cluster, because its
