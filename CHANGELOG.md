@@ -12,6 +12,8 @@ compatibility" line.
 
 ## [Unreleased]
 
+## [0.6.0rc2] - 2026-10-10
+
 ### Fixed
 
 - On PySpark 4.0 and 4.1, Databricks serverless environment 4 included, every read failed
@@ -909,7 +911,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc1...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc2...HEAD
+[0.6.0rc2]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc1...v0.6.0rc2
 [0.6.0rc1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.5.0...v0.6.0rc1
 [0.5.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.4.1...v0.5.0
 [0.5.0rc1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.4.1...v0.5.0rc1
