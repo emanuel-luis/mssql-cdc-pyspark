@@ -10,13 +10,17 @@ from uuid import uuid4
 
 import pytest
 
-from mssql_cdc import finalization
+from mssql_cdc import HAS_ADMISSION_CONTROL, finalization
 from mssql_cdc.fake import FakeCdcDatabase
 from mssql_cdc.sink import delta_sink
 
 CI = "dbo_orders"
 COLUMNS = "order_id INT, status STRING"
 T0 = datetime(2026, 9, 28, 13, 50)
+
+# maxCommitsPerBatch and SupportsTriggerAvailableNow: Spark 4.2+ (Spark 4.0/4.1 ignore the one,
+# and their AvailableNow wrapper ends a run after the batch it replays; the next run reads on)
+needs_admission_control = pytest.mark.skipif(not HAS_ADMISSION_CONTROL, reason="needs Spark 4.2+")
 
 
 def _stream(spark, path, write, **options):
@@ -49,6 +53,7 @@ def _batch(spark):
     )
 
 
+@needs_admission_control
 def test_sink_facts_and_monotonic_finalization(delta_spark, workdir):
     spark = delta_spark
     db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
@@ -282,6 +287,7 @@ def test_network_and_read_metrics_reach_the_facts(delta_spark, workdir):
     assert not [f for f in os.listdir(metrics) if f.endswith(".json")]  # folded and removed
 
 
+@needs_admission_control
 def test_capture_and_ingestion_lag_reach_the_facts(delta_spark, workdir):
     spark = delta_spark
     db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI])
@@ -304,6 +310,7 @@ def test_capture_and_ingestion_lag_reach_the_facts(delta_spark, workdir):
         assert row["started_at"] - timedelta(milliseconds=1) <= seen <= row["written_at"]
 
 
+@needs_admission_control
 def test_a_quiet_table_is_measured_from_the_end_offset_and_its_empty_batches_write_facts(
     delta_spark, workdir
 ):
@@ -345,6 +352,7 @@ def test_a_quiet_table_is_measured_from_the_end_offset_and_its_empty_batches_wri
     assert [r["ingestion_lag_seconds"] for r in rows] == [1800.0, 900.0, 0.0]
 
 
+@needs_admission_control
 def test_where_caching_is_refused_the_sink_takes_the_same_facts_from_its_append(
     delta_spark, workdir, refuse_caching
 ):
@@ -535,6 +543,7 @@ def test_the_readers_warnings_reach_the_batch_row_once(delta_spark, workdir):
     assert [len(r["warnings"]) for r in parsed.collect()] == [2]
 
 
+@needs_admission_control
 def test_a_replayed_batchs_warnings_go_to_the_next_batch_row(delta_spark, workdir):
     spark = delta_spark
     db = FakeCdcDatabase(os.path.join(workdir, "src"), [CI], columns={CI: COLUMNS})
