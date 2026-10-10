@@ -69,6 +69,26 @@ def test_commit_times_are_utc_on_a_non_utc_server(spark, sqlserver, backend):
     assert abs(offset_ts - utc_now) < timedelta(minutes=1)
 
 
+def test_user_and_password_options_log_in_with_no_quoting(spark, sqlserver, backend):
+    """ADR 0034: the login in options of its own, with a password a connection string would
+    need braces and a doubled } for; a refused login names neither value."""
+    ci = sqlserver.cdc_table("cred_probe", "id INT NOT NULL PRIMARY KEY")
+    sqlserver.run("INSERT INTO dbo.cred_probe VALUES (1), (2)")
+    sqlserver.wait_for_changes(ci, 2)
+    password = "Rd;r}x{=9 Q!"
+    grants = ("GRANT SELECT ON dbo.cred_probe TO cred_reader",)
+    grants += (f"GRANT SELECT ON cdc.[{ci}_CT] TO cred_reader",)
+    sqlserver.login("cred_reader", *grants, password=password)
+    conn = re.sub(r"(UID|PWD)=[^;]*;", "", sqlserver.connection_string)  # no login in it
+    login = {"connectionString": conn, "user": "cred_reader", "password": password}
+    df, _ = _read(spark, sqlserver, ci, **login, backend=backend)  # driver and executors
+    assert sorted(r["id"] for r in df.collect()) == [1, 2]
+    with pytest.raises(ConnectionError) as info:
+        make_client({**login, "password": password + "x", "backend": backend})
+    assert "Login failed for user '***'" in str(info.value)  # SQL Server's 18456, masked
+    assert password not in str(info.value) and "cred_reader" not in str(info.value)
+
+
 TYPES_DDL = """
   id int NOT NULL PRIMARY KEY,
   c_bit bit, c_tiny tinyint, c_small smallint, c_big bigint,

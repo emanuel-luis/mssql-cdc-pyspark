@@ -111,9 +111,10 @@ sudo apt-get install -y libltdl7 libkrb5-3 libgssapi-krb5-2
 ```
 
 The connection string uses ODBC keywords, for example
-`Server=host,1433;Database=db;UID=user;PWD=secret;Encrypt=yes`; add
-`TrustServerCertificate=yes` only for a server with a self-signed certificate, such as a
-local container. How to quote a password and authenticate without one:
+`Server=host,1433;Database=db;Encrypt=yes`; add `TrustServerCertificate=yes` only for a
+server with a self-signed certificate, such as a local container. The login goes in the
+[user](../reference/options.md#user) and [password](../reference/options.md#password)
+options, and how to authenticate without a password is under
 [connectionString](../reference/options.md#connectionstring).
 
 `mssql-python` depends on `mssql-python-odbc`, which holds Microsoft's ODBC Driver 18

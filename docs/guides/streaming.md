@@ -11,7 +11,9 @@ control.
 from mssql_cdc import stream
 
 options = {
-    "connectionString": "Server=sqlhost,1433;Database=sales;UID=cdc_reader;PWD=...;Encrypt=yes",
+    "connectionString": "Server=sqlhost,1433;Database=sales;Encrypt=yes",
+    "user": "cdc_reader",
+    "password": "...",
     "captureInstance": "dbo_orders",
 }
 query = stream(spark, options).to_delta(

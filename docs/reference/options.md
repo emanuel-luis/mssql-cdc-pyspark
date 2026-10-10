@@ -11,7 +11,9 @@ and the parameters of [`to_delta()`](api.md#mssql_cdc.pipeline.CdcStream.to_delt
 from mssql_cdc import stream
 
 options = {
-    "connectionString": "Server=host,1433;Database=db;UID=u;PWD=p;Encrypt=yes",
+    "connectionString": "Server=host,1433;Database=db;Encrypt=yes",
+    "user": "cdc_reader",
+    "password": password,  # from your secret store
     "captureInstance": "dbo_orders",
     "maxCommitsPerBatch": "500",
 }
@@ -42,6 +44,10 @@ dict at run time, and every function that takes options takes any mapping too.
 |---|---|---|
 | [captureInstance](#captureinstance) | required | stream, snapshot |
 | [connectionString](#connectionstring) | required | stream, snapshot |
+| [user](#user) | none | stream, snapshot |
+| [password](#password) | none | stream, snapshot |
+| [accessToken](#accesstoken) | none | stream, snapshot |
+| [tokenProvider](#tokenprovider) | none | stream, snapshot |
 | [backend](#backend) | `mssql-python` | stream, snapshot |
 | [connectTimeout](#connecttimeout) | `30` | stream, snapshot |
 | [lockTimeoutMs](#locktimeoutms) | none: wait | snapshot |
@@ -79,24 +85,109 @@ configured name that was disabled still resolves when it is the table's default 
 ### connectionString
 
 Connection string for `mssql-python` or ODBC Driver 18, for example
-`Server=host,1433;Database=db;UID=u;PWD=p;Encrypt=yes`; `backend=arrow-odbc` adds
+`Server=host,1433;Database=db;Encrypt=yes`; `backend=arrow-odbc` adds
 `Driver={ODBC Driver 18 for SQL Server}` when it names no driver. Not needed with `backend=fake`.
 The driver plans with it and every executor task opens its own connection with it, so the
 server must be reachable from every worker. The login needs the grants in
 [Permissions](../guides/permissions.md).
 
-- A value that contains `;` or `}`, a password for instance, goes in braces with every `}`
-  doubled: `PWD={p;a}}ss}` for `p;a}ss`. Quote values read from a secret store this way, as
-  in `"PWD={" + secret.replace("}", "}}") + "}"`.
-- Without a SQL login's password: Entra ID authentication, which `mssql-python` and ODBC
-  Driver 18 support where the server takes Entra ID logins (Azure SQL, SQL Server with
-  Entra ID). `Authentication=ActiveDirectoryMsi` uses a managed identity and needs no secret
-  at all; `Authentication=ActiveDirectoryServicePrincipal` takes the application id as `UID`
-  and its secret as `PWD`.
+- Give the login in options of its own rather than as `UID` and `PWD` here: [user](#user)
+  and [password](#password), or an Entra ID access token ([accessToken](#accesstoken),
+  [tokenProvider](#tokenprovider)). The driver escapes them, and Spark redacts `password`
+  and `accessToken` where it shows options, which it does not do for this one.
+- A value written here that contains `;` or `}` goes in braces with every `}` doubled:
+  `PWD={p;a}}ss}` for `p;a}ss`.
+- Entra ID authentication by the driver itself, where the server takes Entra ID logins
+  (Azure SQL, SQL Server with Entra ID): `Authentication=ActiveDirectoryMsi` uses a managed
+  identity and needs no secret at all; `Authentication=ActiveDirectoryServicePrincipal` takes
+  the application id as [user](#user) and its secret as [password](#password).
 - Spark does not redact this option by default: its default patterns (`secret`, `password`,
-  `token`, `url`...) match neither the key `connectionString` nor `PWD=`. Where options can
-  surface (a table defined with `OPTIONS (...)`, a plan in the UI or a log), set
+  `token`, `url`...) match neither the key `connectionString` nor `PWD=`, and a streaming
+  query's plan shows it whole. Where options can surface (a table defined with
+  `OPTIONS (...)`, a plan in the UI or a log), keep the secret out of it, or set
   `spark.sql.redaction.options.regex` to `(?i)url|connectionstring`.
+
+### user
+
+The login's name, passed to the driver apart from the connection string: `mssql-python`
+takes it as its `UID` keyword argument, `arrow-odbc` as `arrow_odbc.connect(user=...)`, and
+each escapes it, so it needs no braces. With
+`Authentication=ActiveDirectoryServicePrincipal` in the connection string it is the
+application (client) id; with `Authentication=ActiveDirectoryMsi`, a user-assigned identity's
+client id. A `UID` in [connectionString](#connectionstring) as well is a `ValueError`: give
+it once.
+
+### password
+
+The login's password, or a service principal's secret, passed to the driver apart from the
+connection string as [user](#user) is: no braces, no doubled `}`. Read it from your
+platform's secret store:
+
+```python
+options = {
+    "connectionString": "Server=host,1433;Database=sales;Encrypt=yes",
+    "user": "cdc_reader",
+    "password": secret("mssql-password"),  # your secret store's call
+    "captureInstance": "dbo_orders",
+}
+```
+
+A `PWD` in [connectionString](#connectionstring) as well is a `ValueError`. Spark redacts an
+option named `password` where it shows options (`spark.redaction.regex`, by default
+`(?i)secret|password|token|access[.]?key`). No error message of the library holds it: a
+driver error that does (and SQL Server's "Login failed for user '...'", which names the
+user) is raised again as a `ConnectionError` with each value of these options replaced by
+`***`.
+
+### accessToken
+
+A Microsoft Entra ID access token for SQL Server (scope
+`https://database.windows.net/.default`), for a server that takes Entra ID logins.
+`mssql-python` passes it as the `SQL_COPT_SS_ACCESS_TOKEN` pre-connect attribute. Every
+connection, the executors' included, uses this same token, and a token expires: it suits a
+job that ends before it does. A stream needs [tokenProvider](#tokenprovider).
+
+It replaces the login, so each of these next to it is a `ValueError`: `tokenProvider`,
+`user`, `password`, and `UID`, `PWD`, `Authentication` or `Trusted_Connection` in
+[connectionString](#connectionstring). `backend=arrow-odbc` cannot pass a token (arrow-odbc
+sets no attribute before it connects), so it is a `ValueError` there too: use an
+`Authentication=` keyword of ODBC Driver 18 instead. Spark redacts it where it shows options,
+as it does `password`.
+
+### tokenProvider
+
+A function, named `package.module:function`, that returns an Entra ID access token as a
+string. The library imports it and calls it with no arguments each time it opens a
+connection, on the driver and in every executor task, and logs in with what it returns, as
+[accessToken](#accesstoken). Only the name crosses to the executors, so the module must be
+importable on every node, installed with the job's libraries; a stream gets a fresh token
+each time it connects. How the function gets the token is yours: with `azure-identity`,
+which you install (the library does not depend on it), for instance:
+
+```python
+# sql_token.py, installed on every node
+from azure.identity import DefaultAzureCredential
+
+_credential = DefaultAzureCredential()  # one per Python process, which caches its token
+
+
+def token() -> str:
+    return _credential.get_token("https://database.windows.net/.default").token
+```
+
+```python
+options = {
+    "connectionString": "Server=myserver.database.windows.net;Database=sales;Encrypt=yes",
+    "tokenProvider": "sql_token:token",
+    "captureInstance": "dbo_orders",
+}
+```
+
+The same options exclude it as `accessToken`, and `backend=arrow-odbc` too. A name that does
+not import is a `ValueError`; a function that raises fails the connection with a
+`RuntimeError` that names it; one that returns anything but a non-empty string (an
+`AccessToken` instead of its `.token`, say) is a `TypeError`. The messages name the
+provider, never a token.
 
 ### backend
 

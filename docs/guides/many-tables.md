@@ -14,7 +14,9 @@ A scheduled job that catches every table up, then advances each table's verdict:
 from mssql_cdc import await_all, finalization, start_many
 
 options = {
-    "connectionString": "Server=sqlhost,1433;Database=sales;UID=cdc_reader;PWD=...;Encrypt=yes",
+    "connectionString": "Server=sqlhost,1433;Database=sales;Encrypt=yes",
+    "user": "cdc_reader",
+    "password": "...",
 }
 queries = start_many(
     spark,

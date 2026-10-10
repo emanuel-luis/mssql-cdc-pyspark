@@ -80,7 +80,9 @@ In code, one stream and one verdict:
 from mssql_cdc import finalization, stream
 
 options = {
-    "connectionString": "Server=host,1433;Database=db;UID=u;PWD=p;Encrypt=yes",
+    "connectionString": "Server=host,1433;Database=db;Encrypt=yes",
+    "user": "u",
+    "password": "p",  # from a secret store
     "captureInstance": "dbo_orders",
 }
 query = stream(spark, options).to_delta(

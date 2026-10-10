@@ -76,9 +76,10 @@ class SqlServer:
                 time.sleep(2)
         return self.run(sql, params)
 
-    def login(self, name: str, *grants: str) -> str:
-        """A login whose database user has only ``grants``; returns its connection string."""
-        self.run(f"CREATE LOGIN [{name}] WITH PASSWORD = '{PASSWORD}', CHECK_POLICY = OFF")
+    def login(self, name: str, *grants: str, password: str = PASSWORD) -> str:
+        """A login whose database user has only ``grants``; returns its connection string
+        (with ``PWD`` the default password's)."""
+        self.run(f"CREATE LOGIN [{name}] WITH PASSWORD = '{password}', CHECK_POLICY = OFF")
         self.run(f"CREATE USER [{name}] FOR LOGIN [{name}]")
         for grant in grants:
             self.run(grant)

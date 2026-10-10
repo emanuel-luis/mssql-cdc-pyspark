@@ -8,6 +8,7 @@ from typing import Any
 
 import pyarrow as pa
 
+from ._credentials import SQL_COPT_SS_ACCESS_TOKEN, token_struct
 from ._protocols import Backend
 
 _MAX_BATCH_BYTES = 64 * 1024 * 1024  # about the most an Arrow batch from either backend holds
@@ -34,17 +35,31 @@ def _widest_row(batch: pa.RecordBatch) -> int:
 
 
 class MssqlPythonBackend(Backend):
-    """Microsoft ``mssql-python`` driver with native Arrow fetch (>= 1.5.0)."""
+    """Microsoft ``mssql-python`` driver with native Arrow fetch (>= 1.5.0).
+
+    ``user`` and ``password`` go as ``UID`` and ``PWD`` keyword arguments, which the driver
+    escapes into the connection string it builds; ``access_token``, an Entra ID access token,
+    as the ``SQL_COPT_SS_ACCESS_TOKEN`` pre-connect attribute (ADR 0034).
+    """
 
     def __init__(
         self,
         connection_string: str,
         timeout: int = 30,
         max_bytes_per_batch: int = _MAX_BATCH_BYTES,
+        *,
+        user: str | None = None,
+        password: str | None = None,
+        access_token: str | None = None,
     ) -> None:
         import mssql_python  # imported lazily: this runs on driver and executors
 
-        self._conn = mssql_python.connect(connection_string, autocommit=True, timeout=timeout)
+        login: dict[str, Any] = {k: v for k, v in (("UID", user), ("PWD", password)) if v}
+        if access_token:
+            login["attrs_before"] = {SQL_COPT_SS_ACCESS_TOKEN: token_struct(access_token)}
+        self._conn = mssql_python.connect(
+            connection_string, autocommit=True, timeout=timeout, **login
+        )
         self._max_bytes = max_bytes_per_batch
 
     def batches(self, sql: str, params: Sequence[str], batch_size: int) -> Iterator[pa.RecordBatch]:
@@ -94,7 +109,9 @@ def _timestamps_in_us(schema: pa.Schema) -> pa.Schema:
 class ArrowOdbcBackend(Backend):
     """``arrow-odbc``. Requires unixODBC + Microsoft ODBC Driver 18 on the worker.
 
-    It binds every parameter as text, which the T-SQL here already does (ADR 0003).
+    It binds every parameter as text, which the T-SQL here already does (ADR 0003). ``user``
+    and ``password`` go to ``arrow_odbc.connect``'s own parameters, which it escapes; it sets
+    no pre-connect attribute, so no access token (ADR 0034).
     """
 
     # ponytail: one bound for every (max) column, in characters or bytes; a longer value fails
@@ -106,13 +123,18 @@ class ArrowOdbcBackend(Backend):
         connection_string: str,
         timeout: int = 30,
         max_bytes_per_batch: int = _MAX_BATCH_BYTES,
+        *,
+        user: str | None = None,
+        password: str | None = None,
     ) -> None:
         import arrow_odbc
 
         # The same connection string as mssql-python's, which names no driver.
         if not re.search(r"(^|;)\s*driver\s*=", connection_string, re.IGNORECASE):
             connection_string = "Driver={ODBC Driver 18 for SQL Server};" + connection_string
-        self._conn = arrow_odbc.connect(connection_string, login_timeout_sec=timeout)
+        self._conn = arrow_odbc.connect(
+            connection_string, user=user, password=password, login_timeout_sec=timeout
+        )
         self._max_bytes = max_bytes_per_batch
 
     def batches(self, sql: str, params: Sequence[str], batch_size: int) -> Iterator[pa.RecordBatch]:

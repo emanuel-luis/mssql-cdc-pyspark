@@ -15,7 +15,8 @@ Usage::
     from mssql_cdc import register
     register(spark)
     df = (spark.readStream.format("mssql_cdc")
-            .option("connectionString", "Server=...;Database=...;UID=...;PWD=...;Encrypt=yes")
+            .option("connectionString", "Server=...;Database=...;Encrypt=yes")
+            .option("user", "...").option("password", "...")  # or accessToken, tokenProvider
             .option("captureInstance", "dbo_orders")
             .load())  # columns inferred from CDC metadata; "columns" (DDL) overrides
 
@@ -170,6 +171,10 @@ class SourceOptions(TypedDict, total=False):
 
     captureInstance: str
     connectionString: str
+    user: str
+    password: str
+    accessToken: str
+    tokenProvider: str
     backend: str
     sourceTimeZone: str
     connectTimeout: str

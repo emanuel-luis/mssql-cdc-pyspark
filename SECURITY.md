@@ -19,8 +19,8 @@ In scope:
 - SQL injection into the T-SQL the library sends, through its options (capture instance,
   columns, time zone, snapshot keys and chunks) or through metadata read from SQL Server
   (schema, table, column and capture instance names).
-- Credential leaks: a connection string or password written by the library to logs, error
-  messages, the facts or control tables, or Delta commit metadata.
+- Credential leaks: a connection string, password or access token written by the library to
+  logs, error messages, the facts or control tables, metrics files, or Delta commit metadata.
 
 Out of scope: vulnerabilities in SQL Server, Spark, Delta Lake or the drivers themselves
 (report those to their maintainers), and exposure that follows from how the operator

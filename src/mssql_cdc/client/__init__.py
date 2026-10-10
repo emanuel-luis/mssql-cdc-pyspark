@@ -30,6 +30,7 @@ from ..lsn import Lsn as Lsn
 from ._backends import _MAX_BATCH_BYTES as _MAX_BATCH_BYTES
 from ._backends import ArrowOdbcBackend, MssqlPythonBackend
 from ._backends import _timestamps_in_us as _timestamps_in_us
+from ._credentials import credentials, masked
 from ._planning import _MAX_SLICES as _MAX_SLICES
 from ._planning import _SLICES as _SLICES
 from ._planning import _int_chunks as _int_chunks
@@ -124,11 +125,22 @@ def make_client(options: Mapping[str, Any]) -> CdcClient:
     timeout = _non_negative(opts, "connectTimeout", "seconds")
     timeout = 30 if timeout is None else timeout
     lock_timeout = _non_negative(opts, "lockTimeoutMs", "milliseconds")  # None: wait forever
-    if backend == "mssql-python":
-        return SqlCdcClient(MssqlPythonBackend(conn, timeout), tz, lock_timeout)
-    if backend == "arrow-odbc":
-        return SqlCdcClient(ArrowOdbcBackend(conn, timeout), tz, lock_timeout)
-    raise ValueError(f"Unknown backend {backend!r} (use mssql-python, arrow-odbc or fake)")
+    if backend not in ("mssql-python", "arrow-odbc"):
+        raise ValueError(f"Unknown backend {backend!r} (use mssql-python, arrow-odbc or fake)")
+    login = credentials(opts, conn, backend)  # calls tokenProvider: once per connection
+    try:
+        if backend == "mssql-python":
+            b: Backend = MssqlPythonBackend(conn, timeout, **login)
+        else:  # credentials() gives arrow-odbc no token
+            b = ArrowOdbcBackend(
+                conn, timeout, user=login.get("user"), password=login.get("password")
+            )
+    except Exception as exc:
+        hidden = masked(exc, login)
+        if hidden is None:
+            raise
+        raise hidden from None  # exc holds a credential: it goes no further
+    return SqlCdcClient(b, tz, lock_timeout)
 
 
 def _non_negative(opts: Mapping[str, Any], name: str, unit: str) -> int | None:

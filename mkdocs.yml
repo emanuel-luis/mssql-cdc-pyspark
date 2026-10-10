@@ -141,5 +141,6 @@ nav:
       - decisions/0031-strict-typing-gates.md
       - decisions/0032-facts-without-caching.md
       - decisions/0033-spark-connect-tested-on-a-local-server.md
+      - decisions/0034-credentials-outside-the-connection-string.md
   - Changelog: changelog.md
   - Contributing: contributing.md
