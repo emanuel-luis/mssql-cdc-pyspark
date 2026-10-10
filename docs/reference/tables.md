@@ -7,6 +7,7 @@ is a catalog table, and anything with a `/` or a `:` is a path.
 |---|---|---|---|
 | [Bronze](#bronze) | one row per change | `to_delta` (`delta_sink`, snapshots) | `target` |
 | [Facts](#facts) | one row per micro-batch, snapshot and source change | `to_delta` (`delta_sink`) | `facts_table` |
+| [Snapshot plans](#snapshot-plans) | one row per chunked snapshot opened and planned, and per chunk read | `to_delta`, `backfill` | none: `<target>_snapshot_plans` |
 | [Control](#control) | one row per table | `finalization.advance`, `apply_changes` | `control_table` |
 | [Silver](#silver) | one row per source key | `apply_changes` | its `target` |
 | [Reconcile report](#reconcile-report) | one row per bucket, differing key and chunk failure of each run | `reconcile` | `report_table` |
@@ -15,8 +16,8 @@ Each is created on first use with the `DeltaTable` builder: explicit types, a co
 table and on every column the library defines, which `DESCRIBE TABLE` shows
 ([ADR 0012](../decisions/0012-delta-tables-through-the-deltatable-api.md)). The comments
 below are the ones the tables carry, copied from the code (`mssql_cdc.sink`,
-`mssql_cdc.finalization`, `mssql_cdc.silver`, `mssql_cdc.reconcile` and
-`mssql_cdc.migrations`), and
+`mssql_cdc.events`, `mssql_cdc.finalization`, `mssql_cdc.silver`, `mssql_cdc.reconcile`
+and `mssql_cdc.migrations`), and
 `tests/test_docs_tables.py` fails when they drift. How the pieces fit: [Architecture](../ARCHITECTURE.md#tables-written-by-the-sink-finalization-silver-and-reconcile).
 
 ## Bronze
@@ -111,22 +112,25 @@ monitoring, the data-loss recovery and the schema-change events all need it.
 | `ingestion_lag_seconds` | DOUBLE | Seconds between end_commit_ts and source_max_commit_ts: how far the stream's position (the batch's end offset) is behind what CDC capture had processed. Near 0 for a current stream, on a quiet table too, since a batch that read no rows also writes its row. Growing means the stream is falling behind, and as it grows retention_headroom_hours shrinks. Only moves while the stream runs: also alert when facts stop arriving (the stream or CDC capture has stopped). Rows written before end_commit_ts existed measured from max_commit_ts, which also counted the time from the table's last change to the database's newest commit. NULL under the same condition as source_max_commit_ts. |
 | `end_lsn` | STRING | The batch's end offset: the commit LSN (0x + 20 hex) the stream had processed up to after this batch, the largest to_lsn of its partitions. At or after max_lsn: offsets follow CDC capture (sys.fn_cdc_get_max_lsn), which moves with idle entries and with other tables' commits, so on a quiet table it keeps moving while its batches read no rows. On event rows, the snapshot's or the change's LSN. NULL unless the source option metricsPath and delta_sink(metrics_path=...) are set, and on a batch that planned no range to read (a new checkpoint's first batch when nothing is new). |
 | `end_commit_ts` | TIMESTAMP_NTZ | Commit time (UTC) of end_lsn: how far through the source's commit history the stream had read after this batch, whether the batch had rows or not. retention_headroom_hours and ingestion_lag_seconds are measured from it. Later than max_commit_ts, the batch's last change, when the table changed less recently than the database. On event rows, the snapshot's or the change's commit time. NULL under the same condition as end_lsn. |
-| `detail` | STRING | On 'schema_change' rows, the DDL statement; on 'capture_instance_switched' rows, 'old -> new' capture instance, plus the columns the query reads that the new one does not capture (NULL from then on). JSON on the rows of snapshots: 'snapshot_open' {mode ('full' or 'chunked'), kind ('bootstrap' or 'resnapshot'), generation, lost_from_ts, lost_to_ts, and on a chunked one keys and plan, the key's extent read just after S ({kind: 'int', lo, hi, rows} for one integer key, else {kind: 'keyset', max})}; 'snapshot_plan' {snapshot, kind, keys, chunk_rows, chunks}, chunks the [lo, hi] of every chunk in order, fixed while the snapshot is open; 'snapshot_chunk' {snapshot, chunk, wave, lo, hi, last}, the chunk's key range from lo (inclusive) to hi (exclusive), null for an open end and a list for a composite key, last true on the plan's final chunk, whose read completes the snapshot; a chunked snapshot's 'bootstrap' or 'resnapshot' row {snapshot, chunks, rows, last_lsn}. On 'data_skipped' rows, JSON {from, to, certain}: the first LSN not read and the min_lsn reading resumed at, certain true; or, from a task that found cleanup had run while it read a range, the range's first LSN and the min_lsn it found, certain false, and a reason. On a micro-batch row, JSON {warnings}: the warnings the reader logged on the driver up to planning the batch that no earlier batch's row holds, such as columns it does not read (computed ones, or those a newer capture instance captures that the columns option leaves out), options it does not know, or the UTC offset it converts commit times with on a server older than SQL Server 2022; set only when there are any, and only with the source option metricsPath and delta_sink(metrics_path=...). NULL on other rows. |
+| `detail` | STRING | On 'schema_change' rows, the DDL statement; on 'capture_instance_switched' rows, 'old -> new' capture instance, plus the columns the query reads that the new one does not capture (NULL from then on). JSON on the rows of snapshots: 'snapshot_open' {mode ('full' or 'chunked'), kind ('bootstrap' or 'resnapshot'), generation, lost_from_ts, lost_to_ts}; 'snapshot_plan' {snapshot, kind, keys, chunk_rows, chunk_count}, its chunks fixed while the snapshot is open; 'snapshot_chunk' {snapshot, chunk, wave, last}, last true on the plan's final chunk, whose read completes the snapshot; a chunked snapshot's 'bootstrap' or 'resnapshot' row {snapshot, chunks, rows, last_lsn}. A chunked snapshot's key values are in the plans table next to bronze (<bronze>_snapshot_plans), with the detail of each of its rows whole: on 'snapshot_open' keys (the key columns) and plan (the key's extent), on 'snapshot_plan' chunks (every chunk's [lo, hi]), on 'snapshot_chunk' lo and hi (its key range). A snapshot opened before 0.7.0 has them here instead: plan {kind: 'int', lo, hi, rows} for one integer key, else {kind: 'keyset', max}, read just after S; chunks in order, fixed while the snapshot is open; a chunk's range from lo (inclusive) to hi (exclusive), null for an open end and a list for a composite key. On 'data_skipped' rows, JSON {from, to, certain}: the first LSN not read and the min_lsn reading resumed at, certain true; or, from a task that found cleanup had run while it read a range, the range's first LSN and the min_lsn it found, certain false, and a reason. On a micro-batch row, JSON {warnings}: the warnings the reader logged on the driver up to planning the batch that no earlier batch's row holds, such as columns it does not read (computed ones, or those a newer capture instance captures that the columns option leaves out), options it does not know, or the UTC offset it converts commit times with on a server older than SQL Server 2022; set only when there are any, and only with the source option metricsPath and delta_sink(metrics_path=...). NULL on other rows. |
 | `target` | STRING | Table name or path the batch was written to. |
 | `written_at` | TIMESTAMP_NTZ | When this facts row was written, after the target commit, UTC. |
 
-`detail` copies source key values. A chunked snapshot's 'snapshot_open', 'snapshot_plan'
-and 'snapshot_chunk' rows hold the key values at its chunk boundaries (with a composite or
-non-integer key, real keys of the table every `chunk_rows` rows), and so does the
-`userMetadata` of each wave's commit in bronze's history. Column masks and row filters on
-bronze do not reach these copies: give the facts table and bronze's history the same access
-policy as bronze. When keys are natural or personal identifiers (a document number, an
-e-mail address), keep one facts table per access domain rather than one for every table.
+The facts hold no source key values. A chunked snapshot's key values, its key's extent and
+the bounds of its chunks (with a composite or non-integer key, real keys of the table every
+`chunk_rows` rows), are in the [snapshot plans](#snapshot-plans) table next to bronze, and
+in the `userMetadata` of each wave's commit in bronze's history; give both bronze's access
+policy. A snapshot opened before 0.7.0 keeps them in its facts rows to its end, as that
+release wrote them, so jobs of both releases that share the facts read them; give such a
+facts table bronze's access policy until its snapshots complete
+([ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md#amendment-4-key-values-in-a-table-next-to-bronze)).
 
 The `event` values, the keys of these JSON payloads and those of a wave's `userMetadata`
 are state a later release reads back: a release only adds keys, never renames or removes
 one, so a query that parses `detail` keeps working across upgrades
-([ADR 0021](../decisions/0021-compatibility-policy-for-0x.md)).
+([ADR 0021](../decisions/0021-compatibility-policy-for-0x.md)). The one exception is the
+key values above, which 0.7.0 moved to the snapshot plans table, whose `detail` holds each
+payload whole.
 
 Their types, `TypedDict`s exported from `mssql_cdc`, for Python that reads them
 (`d: SnapshotChunkDetail = json.loads(row["detail"])`):
@@ -155,6 +159,10 @@ The kinds of row, and the Delta `txnAppId` and `txnVersion` that make each write
 | Switch to a newer capture instance | `capture_instance_switched` | the batch's | 0 | the sink's | in the batch's own commit |
 | Purged changes skipped (`failOnDataLoss=false`), or possibly missed by a task that cleanup overtook | `data_skipped` | the batch's | 0 | the sink's | in the batch's own commit |
 
+A chunked snapshot's rows in its [plans table](#snapshot-plans) are each written just before
+their facts rows, with the same key in that table, but for 'snapshot_open': its row there
+has `<app_id>#snapopen.<S>`, 0, so a rerun that opens it at another S writes its own.
+
 The sink's `app_id` is the one passed to `to_delta`, or `<app_id>.g<n>` in generation `n`.
 Statistics over micro-batches filter `event IS NULL`; the snapshots downstream rebuilds from
 are `event IN ('bootstrap', 'resnapshot')`. A chunked snapshot's `bootstrap` or `resnapshot`
@@ -171,6 +179,24 @@ LIMIT 20;
 
 What to alert on: [Monitoring](../guides/monitoring.md). The metric columns and `end_lsn`
 are NULL without [metricsPath](options.md#metricspath).
+
+## Snapshot plans
+
+The key values of a chunked snapshot, next to bronze: what its 'snapshot_open',
+'snapshot_plan' and 'snapshot_chunk' facts rows leave out
+([ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md#amendment-4-key-values-in-a-table-next-to-bronze)).
+You do not name it: `to_delta` creates it when it opens a chunked snapshot of `target`, as
+`<target>_snapshot_plans` (`bronze.orders_snapshot_plans`, or the sibling directory
+`.../orders_snapshot_plans` of a path), and `backfill()`, `apply_changes` and `reconcile`
+find it by bronze's name.
+
+> Key values of the chunked snapshots stream().backfill() reads into a bronze table, kept by mssql-cdc-pyspark next to it, under its name with _snapshot_plans appended: one row per 'snapshot_open', 'snapshot_plan' and 'snapshot_chunk' row of the ingestion facts table, with that row's detail whole. The facts rows leave these values out; they are values of the source table's key, so give this table bronze's access policy.
+
+| Column | Type | Comment |
+|---|---|---|
+| `snapshot` | STRING | The snapshot's LSN S (0x + 20 hex): min_lsn of its 'snapshot_open' facts row, and _snapshot of its rows in bronze. |
+| `event` | STRING | The facts row of the snapshot this one completes: 'snapshot_open', 'snapshot_plan' or 'snapshot_chunk' (with the chunk and wave of its detail). |
+| `detail` | STRING | JSON, the facts row's detail with the keys it leaves out: 'snapshot_open' {mode, kind, generation, lost_from_ts, lost_to_ts, keys, plan}, keys the columns the chunks are cut on and plan the key's extent read just after S ({kind: 'int', lo, hi, rows} for one integer key, else {kind: 'keyset', max}); 'snapshot_plan' {snapshot, kind, keys, chunk_rows, chunk_count, chunks}, chunks the [lo, hi] of every chunk in order, fixed while the snapshot is open; 'snapshot_chunk' {snapshot, chunk, wave, lo, hi, last}, the key range the chunk was read in, from lo (inclusive) to hi (exclusive). A bound is null for an open end and a list for a composite key. |
 
 ## Control
 
@@ -270,10 +296,11 @@ The versions, from `mssql_cdc.migrations.<kind>.MIGRATIONS`:
 | Kind | Version | Migrations |
 |---|---|---|
 | bronze | 2 | 1 capture instance comments, 2 snapshot and chunk columns |
-| facts | 12 | 1 network and read metrics, 2 retention headroom, 3 snapshot events, 4 lag metrics, 5 end offset, 6 source change events, 7 chunked snapshot events, 8 snapshot plans and modes, 9 full snapshot opens per run, 10 skipped changes, 11 possible skips, 12 planning warnings |
+| facts | 13 | 1 network and read metrics, 2 retention headroom, 3 snapshot events, 4 lag metrics, 5 end offset, 6 source change events, 7 chunked snapshot events, 8 snapshot plans and modes, 9 full snapshot opens per run, 10 skipped changes, 11 possible skips, 12 planning warnings, 13 key values in the plans table |
 | control | 4 | 1 add `applied_lsn` and `snapshot_lsn`, 2 add `open_snapshot_lsn` and `snapshot_wave`, 3 open re-snapshots too, 4 the verdict over a loss gap |
 | silver | 0 | none |
 | reconcile | 0 | none |
+| plans | 0 | none |
 
 A migration that adds columns appends them, so in a table created by an older release they
 come after `written_at` (facts), `updated_at` (control) or `_batch_id` and the captured

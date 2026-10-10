@@ -127,7 +127,10 @@ chunks' ranges: a chunk stamped L saw every commit up to L, so a silver key insi
 `[lo, hi)` that the chunk does not hold, and whose image is older than L, was gone by L. The
 call deletes it as a change at L, ranked with the rest, so a later change of the key in
 bronze still wins. The gap's deleted keys leave silver wave by wave instead of at the
-completion, which on a large table can be weeks later.
+completion, which on a large table can be weeks later. The ranges, and the key they are cut
+on, come from bronze's [snapshot plans](../reference/tables.md#snapshot-plans) table, found
+by bronze's name (a snapshot opened before 0.7.0 has them in its facts rows); a chunk whose
+range is in neither fails the call rather than delete by a range it cannot bound.
 
 - Which keys: silver's key must be the snapshot's own (the key its chunks are cut on, the
   table's unique index) and a single column of an integer type, `date`, or a timestamp

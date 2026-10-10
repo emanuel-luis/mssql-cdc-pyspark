@@ -87,11 +87,11 @@ alone; `start_many` adds no state of its own.
   Writers that commit to a new Delta table at the same time conflict; afterwards every
   stream only appends its own rows. The [health query](monitoring.md#health-of-every-stream)
   groups by `target`, so it covers every table as is.
-- A shared facts table shows every table's facts to whoever reads it, and a chunked
-  snapshot's facts rows hold source key values (the chunk bounds,
-  [Bootstrap](bootstrap.md#pitfalls)). Where keys are natural or personal identifiers, use
-  one `facts_table` per access domain, a `start_many` call each, and give each the access
-  policy of its bronze tables.
+- A shared facts table shows every table's facts to whoever reads it, but no source key
+  values: a chunked snapshot keeps its chunk bounds in a plans table next to its bronze
+  table ([Bootstrap](bootstrap.md#pitfalls)). One opened before 0.7.0 keeps them in its
+  facts rows until it completes: until then, where keys are natural or personal
+  identifiers, give the facts table the access policy of its bronze tables.
 - Finalization stays per table: advance each target's verdict after its own query, as in
   the job above. A consumer that joins two tables waits until both are final for its
   period. Each stream is a prefix of the commit history of its own table, read at its own

@@ -1718,6 +1718,19 @@ def _events(spark, facts, event):
     return sorted(rows, key=lambda r: (r["min_lsn"], r["detail"] or ""))
 
 
+def _plans(spark, target, event):
+    """The details of the rows of ``event`` in bronze ``target``'s plans table, whole: by
+    snapshot, chunk and wave."""
+    rows = spark.read.format("delta").load(f"{target}_snapshot_plans").where(f"event = '{event}'")
+    return sorted(
+        ((r["snapshot"], json.loads(r["detail"])) for r in rows.collect()),
+        key=lambda x: (x[0], x[1].get("chunk", -1), x[1].get("wave", -1)),
+    )
+
+
+KEY_VALUES = {"plan", "chunks", "lo", "hi"}  # what the facts leave to the plans table
+
+
 def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_spark, workdir):
     from mssql_cdc import stream
     from mssql_cdc.pipeline import _version
@@ -1745,16 +1758,17 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
     [opened] = _events(spark, facts, "snapshot_open")
     s = opened["min_lsn"]
     assert (opened["max_lsn"], opened["app_id"], opened["batch_id"]) == (s, "chunk-v1", None)
-    plan = json.loads(opened["detail"])
-    assert plan == {
+    plan = {
         "mode": "chunked",
         "kind": "bootstrap",
-        "keys": ["order_id"],
-        "plan": {"kind": "int", "lo": 0, "hi": 7, "rows": 8},
         "generation": 0,
         "lost_from_ts": None,
         "lost_to_ts": None,
     }
+    assert json.loads(opened["detail"]) == plan  # the key's extent in the plans table, first
+    assert _plans(spark, target, "snapshot_open") == [
+        (s, {**plan, "keys": ["order_id"], "plan": {"kind": "int", "lo": 0, "hi": 7, "rows": 8}})
+    ]
     # the mode holds while the snapshot is open: a full run, snapshot() and seed() raise
     lock = rf"chunked snapshot open at {s} \(generation 0\) that has not completed"
     with pytest.raises(ValueError, match=lock):
@@ -1817,12 +1831,14 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
     assert sorted({r["_chunk"] for r in snap}) == [0, 1, 2, 3]
     chunks = _events(spark, facts, "snapshot_chunk")
     details = sorted((json.loads(r["detail"]) for r in chunks), key=lambda d: d["chunk"])
-    assert [(d["chunk"], d["wave"], d["lo"], d["hi"]) for d in details] == [
+    bounds = [d for _, d in _plans(spark, target, "snapshot_chunk")]
+    assert [(d["chunk"], d["wave"], d["lo"], d["hi"]) for d in bounds] == [
         (0, 0, None, 2),
         (1, 0, 2, 4),
         (2, 1, 4, 6),
         (3, 1, 6, 8),  # MAX + 1: 9, inserted after S, is the stream's
     ]
+    assert details == [{k: v for k, v in d.items() if k not in KEY_VALUES} for d in bounds]
     assert {d["snapshot"] for d in details} == {s} and all(r["min_lsn"] >= s for r in chunks)
     assert sum(r["rows"] for r in chunks) == len(snap)
     [done] = _events(spark, facts, "bootstrap")  # written once the last chunk is in
@@ -1840,13 +1856,14 @@ def test_a_chunked_bootstrap_streams_from_s_while_backfill_reads_in_waves(delta_
     assert [d["last"] for d in details] == [False, False, False, True]
     [planned] = _events(spark, facts, "snapshot_plan")  # by the first call, before its wave
     assert (planned["min_lsn"], planned["max_lsn"], planned["app_id"]) == (s, s, "chunk-v1")
-    assert json.loads(planned["detail"]) == {
-        "snapshot": s,
-        "kind": "int",
-        "keys": ["order_id"],
-        "chunk_rows": 2,
-        "chunks": [[None, 2], [2, 4], [4, 6], [6, 8]],
-    }
+    shape = {"snapshot": s, "kind": "int", "keys": ["order_id"], "chunk_rows": 2, "chunk_count": 4}
+    assert json.loads(planned["detail"]) == shape
+    assert _plans(spark, target, "snapshot_plan") == [
+        (s, {**shape, "chunks": [[None, 2], [2, 4], [4, 6], [6, 8]]})
+    ]
+    # no facts row holds a key value: the plans table, next to bronze, has them all
+    every = spark.read.format("delta").load(facts).where("event LIKE 'snapshot%'").collect()
+    assert len(every) == 6 and not [r for r in every if KEY_VALUES & set(json.loads(r["detail"]))]
     version = _version(spark, target)
     again = cdc.backfill(target, app_id="chunk-v1", facts_table=facts)
     assert again["done"] and again["chunks_done"] == 4
@@ -1880,8 +1897,9 @@ def test_backfill_defaults_a_key_an_older_snapshot_open_row_lacks(delta_spark, w
         snapshot="chunked",
     ).awaitTermination()
     [opened] = _events(spark, facts, "snapshot_open")
-    # the shape before 'kind' (ADR 0028's amendment): the kind in 'mode', which reads as chunked
-    detail = json.loads(opened["detail"])
+    # the shape before 'kind' (ADR 0028's amendment): the kind in 'mode', which reads as
+    # chunked; whole, with the key values, as every release before 0.7.0 wrote it
+    [(_, detail)] = _plans(spark, target, "snapshot_open")
     detail["mode"] = detail.pop("kind")
     delta_table(spark, facts).update(
         "event = 'snapshot_open'", {"detail": F.lit(json.dumps(detail))}
@@ -1889,6 +1907,15 @@ def test_backfill_defaults_a_key_an_older_snapshot_open_row_lacks(delta_spark, w
     assert cdc.backfill(target, app_id="old-v1", facts_table=facts, chunk_rows=2)["done"]
     [done] = _events(spark, facts, "bootstrap")  # generation 0's kind
     assert (done["min_lsn"], done["app_id"], done["rows"]) == (opened["min_lsn"], "old-v1", 4)
+    # opened before 0.7.0, planned by this release: its key values stay in its facts rows, so
+    # that a job of an earlier release sharing them reads them as before (ADR 0028 Amendment 4)
+    [planned] = _events(spark, facts, "snapshot_plan")
+    assert json.loads(planned["detail"])["chunks"] == [[None, 2], [2, 4]]
+    chunks = [json.loads(r["detail"]) for r in _events(spark, facts, "snapshot_chunk")]
+    assert sorted((d["chunk"], d["lo"], d["hi"]) for d in chunks) == [(0, None, 2), (1, 2, 4)]
+    assert not _plans(spark, target, "snapshot_plan") and not _plans(
+        spark, target, "snapshot_chunk"
+    )
 
 
 @pytest.mark.parametrize("change", ["insert", "delete"])
@@ -1993,8 +2020,14 @@ def test_backfill_keeps_its_plan_and_rebuilds_a_waves_facts_from_bronze_without_
     }
     assert stamp >= s
     assert cdc.backfill(target, app_id="lost-v1", facts_table=facts)["done"]
-    [planned] = _events(spark, facts, "snapshot_plan")
-    assert json.loads(planned["detail"])["chunks"] == [[None, 2], [2, 4], [4, 6]]
+    [(_, planned)] = _plans(spark, target, "snapshot_plan")
+    assert planned["chunks"] == [[None, 2], [2, 4], [4, 6]]
+    # the rebuilt wave's bounds are the plan's, as the commit's would have been
+    bounds = [
+        (d["chunk"], d["wave"], d["lo"], d["hi"])
+        for _, d in _plans(spark, target, "snapshot_chunk")
+    ]
+    assert bounds == [(0, 0, None, 2), (1, 0, 2, 4), (2, 1, 4, 6)]
     run()
     bronze = spark.read.format("delta").load(target)
     snap = bronze.where("_operation = 0").select("order_id").collect()
@@ -2359,8 +2392,9 @@ def test_a_keyset_plans_open_last_chunk_ends_at_the_first_key_after_max_when_rea
         snap.backfill(target, app_id="keys-v1", facts_table=facts, isolation="dirty")
     snap.backfill(target, app_id="keys-v1", facts_table=facts, chunk_rows=2, max_waves=1)
     assert seen and set(seen) == {"snapshot"}
-    [planned] = _events(spark, facts, "snapshot_plan")  # no key after MAX yet: open
-    assert json.loads(planned["detail"])["chunks"] == [[None, "c"], ["c", "e"], ["e", None]]
+    [planned] = _events(spark, facts, "snapshot_plan")
+    [(_, plan)] = _plans(spark, target, "snapshot_plan")  # no key after MAX yet: open
+    assert plan["chunks"] == [[None, "c"], ["c", "e"], ["e", None]]
     # inserted after S, above MAX: the stream's, and no reason for the last chunk to grow
     later = [(2, {"code": c, "status": "new"}) for c in "hg"]
     db.commit(CI, later, at=T0 + timedelta(minutes=9))
@@ -2370,7 +2404,8 @@ def test_a_keyset_plans_open_last_chunk_ends_at_the_first_key_after_max_when_rea
     ]
     assert seen and set(seen) == {None}
     chunks = {json.loads(r["detail"])["chunk"]: r for r in _events(spark, facts, "snapshot_chunk")}
-    assert (json.loads(chunks[2]["detail"])["hi"], chunks[2]["rows"]) == ("g", 2)
+    bounds = {d["chunk"]: d for _, d in _plans(spark, target, "snapshot_chunk")}
+    assert (bounds[2]["hi"], chunks[2]["rows"]) == ("g", 2)  # as read, in the plans table
     run()
     bronze = spark.read.format("delta").load(target)
     assert sorted(r["code"] for r in bronze.where("_operation = 0").collect()) == list("abcdef")

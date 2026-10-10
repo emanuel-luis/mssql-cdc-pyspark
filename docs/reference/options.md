@@ -557,8 +557,9 @@ for the read: not for tables too big to snapshot. With `snapshot="chunked"` it i
 How `bootstrap=True` and `on_data_loss="resnapshot"` take a snapshot.
 
 * `"full"`: read the whole table before the query starts, as above.
-* `"chunked"`: only open one: record its LSN S and the key's extent in a `snapshot_open`
-  facts row, then start the stream (the new generation, after a loss) at S at once.
+* `"chunked"`: only open one: record its LSN S in a `snapshot_open` facts row, and the
+  key's extent in the [snapshot plans](tables.md#snapshot-plans) table next to `target`,
+  then start the stream (the new generation, after a loss) at S at once.
   [backfill()](#backfill-parameters), run in a task of its own, plans the chunks, reads the
   table in chunks next to the stream and writes the `bootstrap` or `resnapshot` row at the
   end. Requires `facts_table` (`ValueError`). A rerun finds the snapshot it opened and opens
@@ -598,7 +599,8 @@ Call it again until `done`.
   chunked snapshot it returns at once, `paused` with state `no_snapshot` and a `reason`.
 * `chunk_rows`: the most rows a chunk holds when planned (at least 1; `None` is
   1,000,000). It counts on the first call only, which plans every chunk and records the plan
-  in a `snapshot_plan` facts row; later calls keep the plan's value and log a warning when
+  in the snapshot plans table and a `snapshot_plan` facts row (its chunk count, no bounds);
+  later calls keep the plan's value and log a warning when
   given another. One integer key is counted per slice on the server and the slices packed
   into chunks of at most `chunk_rows` rows, each but the last short of it by less than one
   slice (about a sixteenth of `chunk_rows` on an even key); other keys are cut every
@@ -634,8 +636,9 @@ LSN S), `chunks_done`, `chunks_total` (the plan's count, `None` until a call has
 | `waiting_metrics` | paused: the stream has written no facts row with a headroom yet |
 | `no_snapshot` | no chunked snapshot of this `target` and `app_id` is open: the stream has not opened it yet, or `target` or `app_id` is wrong, or the stream bootstraps with `snapshot="full"` |
 
-Each wave is one commit to `target` and one `snapshot_chunk` facts row per chunk
-([Tables](tables.md#facts)). The next wave is read while that commit and those rows are
+Each wave is one commit to `target` and one `snapshot_chunk` facts row per chunk, its
+bounds in the snapshot plans table ([Tables](tables.md#facts)); a snapshot opened before
+0.7.0 keeps them in its facts rows. The next wave is read while that commit and those rows are
 written, in a background thread: one wave reading and one committing at most, its rows
 cached until its commit. Where the platform refuses to cache (Databricks serverless), a
 wave is read by its commit, one after the other

@@ -7,7 +7,8 @@
 **Amended:** 2026-10-04T17:20:07-03:00, the plan counted and sought under the backfill's isolation, so `isolation="snapshot"` planning does not wait for writers' locks (see the Amendment)
 **Amended:** 2026-10-06T21:14:15-03:00, `reconcile` takes a difference the change table explains, after what the stream read, as IN_FLIGHT too, and finds a NULL key's change (see Amendment 2)  
 **Amended:** 2026-10-07T00:06:28-03:00, bronze's position is never a whole snapshot's S, which `snapshot_on_switch` takes above the stream's (see Amendment 2)  
-**Amended:** 2026-10-08T13:47:54-03:00, `backfill()` reads the next wave while the one before commits, and a wave takes as many rounds of `numPartitions` chunks as `target_wave_seconds` holds; the plan's chunks unchanged (see Amendment 3)
+**Amended:** 2026-10-08T13:47:54-03:00, `backfill()` reads the next wave while the one before commits, and a wave takes as many rounds of `numPartitions` chunks as `target_wave_seconds` holds; the plan's chunks unchanged (see Amendment 3)  
+**Amended:** 2026-10-10T18:02:10-03:00, a chunked snapshot's key values move from the facts to a plans table next to bronze; one opened before 0.7.0 finishes with them in the facts (see Amendment 4)
 
 ## Context
 A snapshot taken before the stream starts (ADR 0016) has to be read within the CDC
@@ -464,3 +465,81 @@ from its facts rows, then of what is left of `max_seconds`; the next wave stampe
 wave before still writes its facts rows, and that commit completing when the next wave's
 read fails; a wave read ahead of a rerun's commit that holds fewer chunks than it read,
 dropped and read again from the commit's last chunk.
+
+## Amendment 4: key values in a table next to bronze
+A chunked snapshot wrote source key values into the facts table: its open the key's MIN and
+MAX, its plan the bounds of every chunk and each chunk row its own; with a composite,
+string or date key those bounds are real keys of the table every `chunk_rows` rows (a
+document number, an e-mail address). The facts table is the one an operator, a dashboard or
+a monitoring job reads, often shared by every table of a fan-out
+([ADR 0027](0027-fan-out-one-stream-per-table.md)), while bronze, which holds those values
+anyway, sits behind the table's own access policy. Column masks and row filters on bronze do
+not reach a copy in another table, so the documentation asked for the facts table to get
+bronze's policy, one facts table per access domain. 0.7.0 moves the values instead.
+
+* **A plans table next to bronze.** `<target>_snapshot_plans`, in bronze's schema for a
+  name and a sibling directory for a path, so that it gets bronze's access by where it
+  lives; named after the target, as the facts rows match it already, so no option names
+  it and `apply_changes` and `reconcile` find it from `bronze`. Created typed and commented
+  through the `DeltaTable` API ([ADR 0012](0012-delta-tables-through-the-deltatable-api.md)),
+  a table kind of its own with its migrations module
+  ([ADR 0013](0013-schema-migrations-per-table-kind.md)). Its columns: `snapshot` (S),
+  `event` and `detail`. One row per 'snapshot_open', 'snapshot_plan' and 'snapshot_chunk'
+  facts row of a chunked snapshot, whose `detail` is that row's payload whole: the shape
+  the facts row had before 0.7.0, plus `chunk_count` on the plan. A chunk's row is found
+  by its event, chunk and wave.
+* **The facts rows leave out the key values.** 'snapshot_open' drops `keys` and `plan`, so
+  a chunked open has a full one's keys; 'snapshot_plan' drops `chunks` and gets
+  `chunk_count`; 'snapshot_chunk' drops `lo` and `hi`. `keys` names columns, not values,
+  but leaves the open too: `apply_changes` before 0.7.0 cuts ranges only when the open has
+  `keys`, and with no bounds on the chunk rows it would take each chunk as the whole table
+  and delete every key the chunk does not hold until the rebuild. Without `keys` it applies
+  the waves by key alone. A `backfill()` or `reconcile` before 0.7.0 fails on such a
+  snapshot with a `KeyError` (`keys`, `chunks` or `lo`) instead of reading wrong bounds.
+* **Plans first.** Each plans row is written before its facts row, idempotent like it: the
+  plan's and a wave's chunks with the facts rows' own `txnAppId` and version (another
+  table, so the keys do not collide), a wave's from the tag of the commit that holds it, as
+  its facts rows. The open's with `<app_id>#snapopen.<S>`, 0, not the facts row's key per
+  generation: a run that stops between the two opens again at another S, whose facts row
+  then needs a plans row of its own. After planning, the plan read back from the table is
+  the one recorded, so a concurrent call, or one that stopped before its facts row, leaves
+  one plan.
+* **Readers take the payload whole.** `backfill()` (the open's extent and keys, the plan,
+  and so the fallback that rebuilds a wave's facts from bronze), `apply_changes` (the open's
+  key columns, each chunk's range for its deletes) and `reconcile` (each chunk's range for
+  its tiling checks) read the snapshot's rows of the plans table and complete each facts
+  row from it (`events.Plans.whole`). A facts row that has its key values, written before
+  0.7.0, is taken as it is. A row with neither fails with a `ValueError` naming the plans
+  table: a range without bounds is never read as the whole table.
+* **A snapshot opened before 0.7.0 finishes as it started.** Its open, and maybe its plan
+  and some chunks, hold its key values in the facts already; 0.7.0's `backfill()` writes
+  its plan and chunk rows whole too, and nothing to a plans table. Every job sharing those
+  facts, of either release, then reads its chunks: `apply_changes` of 0.6 included, whose
+  range deletes need bounds on every chunk row. A snapshot 0.7.0 opens keeps them out of the
+  facts from its open.
+* The wave commits' `userMetadata` keeps each chunk's `lo` and `hi`: bronze's history, under
+  bronze's access, from which a rerun rebuilds a wave's facts.
+* State: the payload keys go from rows 0.7.0 writes only; a reader takes them from the
+  plans table, or from the row when it has them
+  ([ADR 0021](0021-compatibility-policy-for-0x.md), amendment 9). Facts migration 13
+  updates the `detail` comment. No `mssql_cdc.min_version`: an older release keeps writing
+  the facts table, and fails only on a snapshot 0.7.0 opened, as above.
+* Considered: hashing or encrypting the values in the facts. A hash cannot bound a range,
+  and a key to decrypt with is one more secret to keep, where bronze's access is one already.
+* Considered: an option naming the plans table. A name derived from the target needs none,
+  and cannot be given wrong to one of the three readers.
+* Considered: one row per snapshot, its chunks in an array. A chunk's row is written with
+  its wave, so a crash leaves no row half updated; and a chunk read again by a later wave
+  (after a crash, a rebuilt wave's empty chunks at its end) has a row per wave.
+
+### Tests
+`tests/test_delta_sink.py`: a chunked bootstrap's open, plan and chunk rows whole in the
+plans table and without key values in the facts; a wave rebuilt from bronze after a crash
+gets its plan's bounds there; a keyset plan's last chunk ends there at the key sought before
+its wave; a snapshot opened in the shape before 0.7.0 is planned and read with its key
+values in the facts and none in the plans table. `tests/test_silver.py`: each wave's range
+deletes from the plans table, and from the facts rows of a snapshot opened before 0.7.0.
+`tests/test_reconcile.py`: a chunk's bounds changed in the plans table fail its tiling.
+`tests/test_payloads.py`: a facts row completed from the plans table, and a `ValueError`
+without its row. `tests/compat/test_compat.py`: the snapshot each release left open after
+one wave finishes with its key values in the facts and no plans table.

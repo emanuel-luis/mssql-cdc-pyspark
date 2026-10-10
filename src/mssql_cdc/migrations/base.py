@@ -29,10 +29,10 @@ class Migration:
 
 
 def _migrations(kind: str) -> list[Migration]:
-    from . import bronze, control, facts, reconcile, silver
+    from . import bronze, control, facts, plans, reconcile, silver
 
     kinds = {"bronze": bronze, "control": control, "facts": facts, "reconcile": reconcile}
-    migrations: list[Migration] = {**kinds, "silver": silver}[kind].MIGRATIONS
+    migrations: list[Migration] = {**kinds, "silver": silver, "plans": plans}[kind].MIGRATIONS
     return migrations
 
 

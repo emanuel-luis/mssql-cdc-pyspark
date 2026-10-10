@@ -407,6 +407,40 @@ WARNING_COMMENTS = {
 }
 
 
+# Migration 13 (2026-10-10): a chunked snapshot's key values (its extent, every chunk's bounds)
+# leave the facts for the plans table next to bronze; a snapshot opened before keeps them here
+# (ADR 0028 Amendment 4). Comment only; the creation columns take it, over migration 12's.
+_SNAPSHOT_PAYLOADS = (
+    "'snapshot_open' {mode ('full' or 'chunked'), kind ('bootstrap' or 'resnapshot'), "
+    "generation, lost_from_ts, lost_to_ts, and on a chunked one keys and plan, the key's "
+    "extent read just after S ({kind: 'int', lo, hi, rows} for one integer key, else {kind: "
+    "'keyset', max})}; 'snapshot_plan' {snapshot, kind, keys, chunk_rows, chunks}, chunks the "
+    "[lo, hi] of every chunk in order, fixed while the snapshot is open; 'snapshot_chunk' "
+    "{snapshot, chunk, wave, lo, hi, last}, the chunk's key range from lo (inclusive) to hi "
+    "(exclusive), null for an open end and a list for a composite key, last true on the plan's "
+    "final chunk, whose read completes the snapshot; a chunked snapshot's 'bootstrap' or "
+    "'resnapshot' row {snapshot, chunks, rows, last_lsn}."
+)
+KEY_VALUE_COMMENTS = {
+    "detail": WARNING_COMMENTS["detail"].replace(
+        _SNAPSHOT_PAYLOADS,
+        "'snapshot_open' {mode ('full' or 'chunked'), kind ('bootstrap' or 'resnapshot'), "
+        "generation, lost_from_ts, lost_to_ts}; 'snapshot_plan' {snapshot, kind, keys, "
+        "chunk_rows, chunk_count}, its chunks fixed while the snapshot is open; "
+        "'snapshot_chunk' {snapshot, chunk, wave, last}, last true on the plan's final chunk, "
+        "whose read completes the snapshot; a chunked snapshot's 'bootstrap' or 'resnapshot' "
+        "row {snapshot, chunks, rows, last_lsn}. A chunked snapshot's key values are in the "
+        "plans table next to bronze (<bronze>_snapshot_plans), with the detail of each of its "
+        "rows whole: on 'snapshot_open' keys (the key columns) and plan (the key's extent), on "
+        "'snapshot_plan' chunks (every chunk's [lo, hi]), on 'snapshot_chunk' lo and hi (its "
+        "key range). A snapshot opened before 0.7.0 has them here instead: plan {kind: 'int', "
+        "lo, hi, rows} for one integer key, else {kind: 'keyset', max}, read just after S; "
+        "chunks in order, fixed while the snapshot is open; a chunk's range from lo "
+        "(inclusive) to hi (exclusive), null for an open end and a list for a composite key.",
+    ),
+}
+
+
 def _end_offset(spark: SparkSessionLike, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT  # the comments new tables are created with
 
@@ -466,5 +500,9 @@ MIGRATIONS: list[Migration] = [
     Migration("possible skips", lambda spark, table: set_comments(spark, table, POSSIBLE_COMMENTS)),
     Migration(
         "planning warnings", lambda spark, table: set_comments(spark, table, WARNING_COMMENTS)
+    ),
+    Migration(
+        "key values in the plans table",
+        lambda spark, table: set_comments(spark, table, KEY_VALUE_COMMENTS),
     ),
 ]

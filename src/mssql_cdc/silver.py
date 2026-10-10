@@ -43,7 +43,8 @@ Run it after the stream, in the same job or another; one job per silver table.
   With one key of an integer, date or timestamp type, the one the chunks are cut on, a chunk
   also deletes the silver keys of its range [lo, hi) it does not hold whose image is older
   than its stamp L: it saw every commit up to L. So the keys deleted in a re-snapshot's
-  purged gap go wave by wave. A datetime2(7) bound with digits below the microsecond Spark
+  purged gap go wave by wave. The key columns and the ranges are in bronze's plans table
+  (``<bronze>_snapshot_plans``), or in the facts rows of a snapshot opened before 0.7.0. A datetime2(7) bound with digits below the microsecond Spark
   keeps leaves the keys of that microsecond alone. Either way, the rebuild comes at
   completion, and deletes the keys absent from the snapshot and the changes after it.
 * Verdict: silver's ``finalized_until`` advances to the bronze verdict read before bronze
@@ -171,16 +172,17 @@ class _Chunk:
     """The LSN it was read under."""
 
 
-def _chunks(facts: DataFrame, snapshot: str) -> dict[int, _Chunk]:
-    """The chunks of ``snapshot`` its 'snapshot_chunk' facts rows announce, by index. They
-    are written after the chunks' bronze rows."""
+def _chunks(facts: DataFrame, snapshot: str, kept: events.Plans) -> dict[int, _Chunk]:
+    """The chunks of ``snapshot`` its 'snapshot_chunk' facts rows announce, by index, their
+    bounds from ``kept`` (its plans) unless the rows have them. They are written after the
+    chunks' bronze rows and plans."""
     # ponytail: the row of every chunk on each call, read before bronze is pinned, when the
     # waves applied are not known yet; the bronze reads skip by wave
     rows = events.where_chunks(facts, snapshot).select("detail", "min_lsn").collect()
     chunks: dict[int, _Chunk] = {}
     for row in rows:
-        d: SnapshotChunkDetail = json.loads(row["detail"])
-        chunks[int(d["chunk"])] = _Chunk(int(d["wave"]), d.get("lo"), d.get("hi"), row["min_lsn"])
+        d: SnapshotChunkDetail = kept.whole(events.SNAPSHOT_CHUNK, json.loads(row["detail"]))
+        chunks[int(d["chunk"])] = _Chunk(int(d["wave"]), d["lo"], d["hi"], row["min_lsn"])
     return chunks
 
 
@@ -379,6 +381,7 @@ def apply_changes(
     facts: DataFrame | None = None
     opened: Row | None = None
     chunks: dict[int, _Chunk] = {}
+    cut: list[str] | None = None  # the open snapshot's key columns, its bounds' (ADR 0028)
     if facts_table and exists(spark, facts_table):
         every = delta_table(spark, facts_table).toDF()
         facts = every.where(F.col("target") == bronze)
@@ -406,7 +409,10 @@ def apply_changes(
                 .first()
             )
         if opened and (points[0] is None or opened["max_lsn"] > points[0]):
-            chunks = _chunks(facts, opened["max_lsn"])
+            kept = events.plans(spark, bronze, opened["max_lsn"])
+            info = kept.whole(events.SNAPSHOT_OPEN, json.loads(opened["detail"] or "{}"))
+            cut = info.get("keys")
+            chunks = _chunks(facts, opened["max_lsn"], kept)
     latest_commit = delta_table(spark, bronze).history(1).first()
     assert latest_commit is not None  # an existing table has a version
     version = int(latest_commit["version"])
@@ -520,7 +526,6 @@ def apply_changes(
                 )
             )
             # bounds are cut on the snapshot's key columns: by range only on those (ADR 0028)
-            cut = json.loads(opened["detail"] or "{}").get("keys") if opened else None
             if _range_key(keys, cut):
                 key_type = pinned.schema[keys[0]].dataType
                 gone = _absent(spark, target, keys[0], key_type, new, held)

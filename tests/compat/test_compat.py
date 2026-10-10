@@ -66,6 +66,12 @@ def _finish_chunked(spark, m: dict, src: str, ckpt: str) -> None:
     cdc = stream(spark, {**m["options"], "backend": "fake", "fakePath": src, "numPartitions": "2"})
     status = cdc.backfill(c["bronze"], app_id=c["app_id"], facts_table=facts)
     assert status["done"] and status["chunks_done"] == status["chunks_total"] > 2, status
+    # opened by the release: its facts rows keep its key values to its end, this code's too,
+    # and no plans table is written (ADR 0028 Amendment 4)
+    chunks = spark.table(facts).where(f"event = 'snapshot_chunk' AND target = '{c['bronze']}'")
+    assert all("lo" in json.loads(r["detail"]) for r in chunks.collect())
+    assert chunks.count() == status["chunks_done"]
+    assert not spark.catalog.tableExists(c["bronze"] + "_snapshot_plans")
     cdc.to_delta(
         c["bronze"],
         c["app_id"],

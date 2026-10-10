@@ -86,7 +86,7 @@ class CdcStream(_Recovery, _Chunked):
         chunked = snapshot == "chunked"
         if chunked and not facts_table:
             raise ValueError(
-                "snapshot='chunked' needs a facts_table: its event rows hold the snapshot's plan "
+                "snapshot='chunked' needs a facts_table: its event rows record the snapshot "
                 "and which chunks are in"
             )
         if snapshot_on_switch and chunked:

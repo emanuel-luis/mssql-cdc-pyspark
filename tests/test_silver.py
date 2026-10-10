@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from pyspark.sql import SparkSession
 
-from mssql_cdc import apply_changes, finalization, stream
+from mssql_cdc import apply_changes, events, finalization, stream
 from mssql_cdc.fake import FakeCdcClient, FakeCdcDatabase
 from mssql_cdc.sink import write_facts
 
@@ -425,10 +425,12 @@ CHANGE = (
 
 
 class Log:
-    """Bronze, facts and the bronze verdict for apply_changes, written row by row."""
+    """Bronze, facts and the bronze verdict for apply_changes, written row by row. A chunked
+    snapshot's key values go to bronze's plans table, as from 0.7.0; ``in_facts``: in its facts
+    rows, as a snapshot opened before 0.7.0 writes them (ADR 0028 Amendment 4)."""
 
-    def __init__(self, spark, workdir, key_type="INT"):
-        self.spark, self.key_type = spark, key_type
+    def __init__(self, spark, workdir, key_type="INT", in_facts=False):
+        self.spark, self.key_type, self.in_facts = spark, key_type, in_facts
         self.bronze, self.silver, self.facts, self.control = (
             os.path.join(workdir, n) for n in ("bronze", "silver", "facts", "control")
         )
@@ -474,17 +476,24 @@ class Log:
         ]
         if rows:
             self._append(rows, f"{CHANGE}, _snapshot STRING, _chunk INT")
+        details = [
+            {"snapshot": _lsn(s), "chunk": chunk, "wave": wave, "lo": lo, "hi": hi}
+            for chunk, lo, hi, _ in chunks
+        ]
         facts = [
-            self._fact(
-                "snapshot_chunk",
-                stamp,
-                {"snapshot": _lsn(s), "chunk": chunk, "wave": wave, "lo": lo, "hi": hi},
-                rows=len(image),
-                high=stamp + 1,
-            )
-            for chunk, lo, hi, image in chunks
+            self._fact("snapshot_chunk", stamp, self._kept(s, d), rows=len(image), high=stamp + 1)
+            for d, (_, _, _, image) in zip(details, chunks)
         ]
         write_facts(self.spark, self.facts, facts, None, 0)
+
+    def _kept(self, s, detail):
+        """``detail`` of a facts row of the snapshot at ``s``: whole, or without its key
+        values, which go to the plans table first."""
+        event = "snapshot_open" if "mode" in detail else "snapshot_chunk"
+        if self.in_facts:
+            return detail
+        events.write_plans(self.spark, self.bronze, _lsn(s), event, [detail], None, 0)
+        return events.public(event, detail)
 
     def _fact(self, event, n, detail=None, rows=0, high=None):
         return {
@@ -505,7 +514,7 @@ class Log:
         """The 'snapshot_open' row, as CdcStream._open writes it."""
         generation = int(kind == "resnapshot")
         detail = {"mode": "chunked", "kind": kind, "keys": list(keys), "generation": generation}
-        self.fact("snapshot_open", s, detail)
+        self.fact("snapshot_open", s, self._kept(s, detail))
 
     def verdict(self, n):
         offset = {"lsn": _lsn(n), "commit_ts": _ts(n).isoformat(timespec="milliseconds")}
@@ -647,13 +656,16 @@ RANGES = {
 }
 
 
+@pytest.mark.parametrize("in_facts", [False, True], ids=["plans table", "opened before 0.7.0"])
 @pytest.mark.parametrize("key_type", list(RANGES))
 def test_each_wave_deletes_the_stale_keys_of_its_ranges_and_completion_any_absent_key(
-    delta_spark, workdir, key_type
+    delta_spark, workdir, key_type, in_facts
 ):
     from mssql_cdc.silver import _record
 
-    g, S = Log(delta_spark, workdir, key_type), 100
+    # the ranges and the key columns from bronze's plans table, or from the facts rows of a
+    # snapshot opened before 0.7.0
+    g, S = Log(delta_spark, workdir, key_type, in_facts), 100
     (k1, k2, k3, k4, k5, k6), b1, b2, odd = RANGES[key_type]
     # silver from changes whose history lost the deletes of 2, 6, the NULL key and the odd one
     stale = [k2, k6, None] + ([odd] if odd else [])

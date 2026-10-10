@@ -19,6 +19,13 @@ is an event:
 Snapshot events have no ``batch_id`` and go through ``write_event``, skipped by Delta when
 their ``txn_app_id`` already wrote that version. The names and the ``detail`` payloads
 (``payloads``) are state (ADR 0021): a release adds one, never renames or drops one.
+
+A chunked snapshot's key values (its extent, every chunk's bounds) are in a plans table next
+to bronze (``plans_table``), not in the facts: its 'snapshot_open', 'snapshot_plan' and
+'snapshot_chunk' rows leave out the keys ``_IN_PLANS`` names, and a row of the plans table
+holds each one's ``detail`` whole, written first. A snapshot opened before 0.7.0 keeps them
+in its facts rows to its end; readers take the whole payload either way (``Plans.whole``)
+(ADR 0028 Amendment 4).
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
 
@@ -33,6 +41,7 @@ if TYPE_CHECKING:
     from pyspark.sql import DataFrame, Row
 
     from .payloads import SnapshotChunkDetail, SnapshotPlanDetail, WaveChunk
+    from .tables import ColumnDef
     from .types import SnapshotMode, SparkSessionLike
 
 SCHEMA_CHANGE: Final = "schema_change"
@@ -45,6 +54,140 @@ BOOTSTRAP: Final = "bootstrap"
 RESNAPSHOT: Final = "resnapshot"
 SNAPSHOTS: Final = (BOOTSTRAP, RESNAPSHOT)
 """The events that are snapshots, each a snapshot's completion."""
+
+_IN_PLANS: Final = {
+    SNAPSHOT_OPEN: ("keys", "plan"),
+    SNAPSHOT_PLAN: ("chunks",),
+    SNAPSHOT_CHUNK: ("lo", "hi"),
+}
+"""The keys of a chunked snapshot's payloads its facts rows leave to the plans table: the
+source's key values, and on 'snapshot_open' the key columns too, so that a release before
+0.7.0 reading such a row cuts no key range it has no bounds for."""
+
+PLANS_COMMENT = (
+    "Key values of the chunked snapshots stream().backfill() reads into a bronze table, kept "
+    "by mssql-cdc-pyspark next to it, under its name with _snapshot_plans appended: one row "
+    "per 'snapshot_open', 'snapshot_plan' and 'snapshot_chunk' row of the ingestion facts "
+    "table, with that row's detail whole. The facts rows leave these values out; they are "
+    "values of the source table's key, so give this table bronze's access policy."
+)
+PLANS_COLUMNS: list[ColumnDef] = [
+    (
+        "snapshot",
+        "STRING",
+        (
+            "The snapshot's LSN S (0x + 20 hex): min_lsn of its 'snapshot_open' facts row, and "
+            "_snapshot of its rows in bronze."
+        ),
+    ),
+    (
+        "event",
+        "STRING",
+        (
+            "The facts row of the snapshot this one completes: 'snapshot_open', "
+            "'snapshot_plan' or 'snapshot_chunk' (with the chunk and wave of its detail)."
+        ),
+    ),
+    (
+        "detail",
+        "STRING",
+        (
+            "JSON, the facts row's detail with the keys it leaves out: 'snapshot_open' {mode, "
+            "kind, generation, lost_from_ts, lost_to_ts, keys, plan}, keys the columns the "
+            "chunks are cut on and plan the key's extent read just after S ({kind: 'int', lo, "
+            "hi, rows} for one integer key, else {kind: 'keyset', max}); 'snapshot_plan' "
+            "{snapshot, kind, keys, chunk_rows, chunk_count, chunks}, chunks the [lo, hi] of "
+            "every chunk in order, fixed while the snapshot is open; 'snapshot_chunk' "
+            "{snapshot, chunk, wave, lo, hi, last}, the key range the chunk was read in, from lo "
+            "(inclusive) to hi (exclusive). A bound is null for an open end and a list for a "
+            "composite key."
+        ),
+    ),
+]
+_PLANS_SCHEMA = ", ".join(f"{name} {data_type}" for name, data_type, _ in PLANS_COLUMNS)
+
+
+def plans_table(target: str) -> str:
+    """The plans table of bronze ``target``: ``<target>_snapshot_plans``, in the same schema
+    for a name, a sibling directory for a path."""
+    if target.endswith("`"):  # a quoted name: the suffix inside the quotes
+        return target[:-1] + "_snapshot_plans`"
+    return target.rstrip("/") + "_snapshot_plans"
+
+
+def in_facts(event: str, detail: Mapping[str, Any]) -> bool:
+    """Whether ``detail`` of a chunked snapshot's facts row of ``event`` holds its key values,
+    as a snapshot opened before 0.7.0 writes them."""
+    return any(k in detail for k in _IN_PLANS[event])
+
+
+def public(event: str, detail: Mapping[str, Any]) -> dict[str, Any]:
+    """``detail`` of a chunked snapshot's facts row of ``event``, without the keys its plans
+    table holds."""
+    return {k: v for k, v in detail.items() if k not in _IN_PLANS[event]}
+
+
+def write_plans(
+    spark: SparkSessionLike,
+    target: str,
+    snapshot: str,
+    event: str,
+    details: Sequence[Mapping[str, Any]],
+    txn_app_id: str | None,
+    version: int,
+) -> None:
+    """Append the whole ``details`` of the snapshot at ``snapshot``'s facts rows of ``event``
+    to ``target``'s plans table, created first, in one commit: before those rows, which
+    leave out what these hold. Skipped by Delta when ``txn_app_id`` already wrote
+    ``version`` (never when None)."""
+    from . import migrations
+    from .sink import _write
+
+    table = plans_table(target)
+    migrations.ensure(spark, table, "plans", PLANS_COLUMNS, PLANS_COMMENT)
+    rows = [(snapshot, event, json.dumps(d)) for d in details]
+    _write(spark.createDataFrame(rows, _PLANS_SCHEMA), table, txn_app_id, version)
+
+
+@dataclass(frozen=True, slots=True)
+class Plans:
+    """The rows of a chunked snapshot in its plans table, which complete its facts rows."""
+
+    table: str
+    snapshot: str
+    details: Mapping[tuple[str, int | None, int | None], Any]
+    """Each row's ``detail``, by its event and, on a chunk, its chunk and wave."""
+
+    def whole(self, event: str, detail: Mapping[str, Any]) -> Any:
+        """``detail`` of the snapshot's facts row of ``event``, whole: as the row has it when
+        a release before 0.7.0 wrote it, else from this table. Raises when it is not here."""
+        if in_facts(event, detail):
+            return detail
+        found = self.details.get((event, detail.get("chunk"), detail.get("wave")))
+        if found is None:
+            which = "" if event != SNAPSHOT_CHUNK else f" for chunk {detail.get('chunk')}"
+            raise ValueError(
+                f"{self.table} has no {event!r} row of the snapshot at {self.snapshot}{which}, "
+                "whose facts row leaves its key values to it: was it dropped or renamed? It is "
+                "found by bronze's name, as given to to_delta"
+            )
+        return found
+
+
+def plans(spark: SparkSessionLike, target: str, snapshot: str) -> Plans:
+    """The rows of the snapshot at ``snapshot`` in bronze ``target``'s plans table; none
+    before the table exists."""
+    from pyspark.sql import functions as F
+
+    from .tables import delta_table, exists
+
+    table, found = plans_table(target), {}
+    if exists(spark, table):
+        rows = delta_table(spark, table).toDF().where(F.col("snapshot") == snapshot).collect()
+        for r in rows:
+            d = json.loads(r["detail"])
+            found[(r["event"], d.get("chunk"), d.get("wave"))] = d
+    return Plans(table, snapshot, found)
 
 
 # -- writers ------------------------------------------------------------------------
@@ -139,10 +282,13 @@ def chunk_row(
     high_ts: datetime | None,
     started_at: datetime,
     duration_ms: int,
+    whole: bool,
 ) -> dict[str, Any]:
     """The 'snapshot_chunk' facts row of chunk ``c`` of wave ``wave``, stamped ``lsn``:
     ``min_lsn`` the stamp, ``max_lsn`` how far capture had got after the read, with their
-    commit times ``lsn_ts`` and ``high_ts``; the wave's timing."""
+    commit times ``lsn_ts`` and ``high_ts``; the wave's timing. Its bounds only when
+    ``whole`` (a snapshot opened before 0.7.0), else they are in the plans table."""
+    detail = chunk_detail(snapshot, wave, c)
     return {
         "app_id": app_id,
         "rows": c["rows"],
@@ -158,7 +304,7 @@ def chunk_row(
         "read_seconds": c["read_seconds"],
         "read_mb": c["read_mb"],
         "event": SNAPSHOT_CHUNK,
-        "detail": json.dumps(chunk_detail(snapshot, wave, c)),
+        "detail": json.dumps(detail if whole else public(SNAPSHOT_CHUNK, detail)),
         "target": target,
     }
 
@@ -220,13 +366,13 @@ def completions(rows: Iterable[Row]) -> list[str]:
     return [r["max_lsn"] for r in rows if r["event"] in SNAPSHOTS]
 
 
-def plan_of(rows: Iterable[Row], snapshot: str) -> SnapshotPlanDetail | None:
-    """The detail of the 'snapshot_plan' facts row of ``snapshot`` among ``rows``, or None:
-    ``{snapshot, kind, keys, chunk_rows, chunks}``, chunk i from ``chunks[i][0]`` to
-    ``chunks[i][1]`` (``client.plan_chunks``)."""
+def plan_of(rows: Iterable[Row], snapshot: str, kept: Plans) -> SnapshotPlanDetail | None:
+    """The detail of the 'snapshot_plan' facts row of ``snapshot`` among ``rows``, whole
+    (``kept``, the snapshot's plans), or None: ``{snapshot, kind, keys, chunk_rows, chunks}``,
+    chunk i from ``chunks[i][0]`` to ``chunks[i][1]`` (``client.plan_chunks``)."""
     for r in rows:
         if r["event"] == SNAPSHOT_PLAN and (d := json.loads(r["detail"]))["snapshot"] == snapshot:
-            plan: SnapshotPlanDetail = d
+            plan: SnapshotPlanDetail = kept.whole(SNAPSHOT_PLAN, d)
             return plan
     return None
 

@@ -78,6 +78,7 @@ from .migrations.facts import (
     DETAIL_COLUMNS,
     END_COLUMNS,
     EVENT_COLUMNS,
+    KEY_VALUE_COMMENTS,
     LAG_COLUMNS,
     NETWORK_COLUMNS,
     POSSIBLE_COMMENTS,
@@ -255,7 +256,7 @@ FACTS_COLUMNS = [
     *((n, t, POSSIBLE_COMMENTS.get(n, SKIP_COMMENTS.get(n, c))) for n, t, c in EVENT_COLUMNS),
     *LAG_COLUMNS,
     *END_COLUMNS,
-    *((n, t, WARNING_COMMENTS.get(n, c)) for n, t, c in DETAIL_COLUMNS),
+    *((n, t, KEY_VALUE_COMMENTS.get(n, WARNING_COMMENTS.get(n, c))) for n, t, c in DETAIL_COLUMNS),
     ("target", "STRING", "Table name or path the batch was written to."),
     (
         "written_at",

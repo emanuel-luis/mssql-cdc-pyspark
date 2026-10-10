@@ -1534,11 +1534,27 @@ def _image(delta_spark, path: str, *columns: str) -> set:
     }
 
 
-def _chunk_facts(delta_spark, facts: str) -> list[dict]:
-    """The 'snapshot_chunk' facts rows: their detail with ``rows`` and ``lsn`` (the stamp L)."""
-    rows = delta_spark.read.format("delta").load(facts).where("event = 'snapshot_chunk'").collect()
-    found = [json.loads(r["detail"]) | {"rows": r["rows"], "lsn": r["min_lsn"]} for r in rows]
+def _chunk_facts(delta_spark, paths: dict) -> list[dict]:
+    """The 'snapshot_chunk' facts rows: their detail, whole with the bounds bronze's plans
+    table holds, with ``rows`` and ``lsn`` (the stamp L)."""
+    from mssql_cdc import events
+
+    facts = delta_spark.read.format("delta").load(paths["facts"])
+    found = []
+    for r in facts.where("event = 'snapshot_chunk'").collect():
+        d = json.loads(r["detail"])
+        kept = events.plans(delta_spark, paths["bronze"], d["snapshot"])
+        found.append(
+            kept.whole(events.SNAPSHOT_CHUNK, d) | {"rows": r["rows"], "lsn": r["min_lsn"]}
+        )
     return sorted(found, key=lambda d: d["chunk"])
+
+
+def _plan_row(delta_spark, paths: dict, event: str) -> dict:
+    """The detail of bronze's only plans table row of ``event``."""
+    plans = delta_spark.read.format("delta").load(f"{paths['bronze']}_snapshot_plans")
+    [row] = plans.where(f"event = '{event}'").collect()
+    return json.loads(row["detail"])
 
 
 def test_a_chunked_bootstrap_next_to_a_running_stream_and_a_writer_ends_equal_to_the_table(
@@ -1589,7 +1605,7 @@ def test_a_chunked_bootstrap_next_to_a_running_stream_and_a_writer_ends_equal_to
     assert any(a["rebuilt"] for a in applied[-2:])  # at completion
     facts = delta_spark.read.format("delta").load(paths["facts"])
     [s] = [r["min_lsn"] for r in facts.where("event = 'snapshot_open'").collect()]
-    chunks = _chunk_facts(delta_spark, paths["facts"])
+    chunks = _chunk_facts(delta_spark, paths)
     assert len(chunks) == statuses[-1]["chunks_done"] and min(c["lsn"] for c in chunks) >= s
     snap = delta_spark.read.format("delta").load(paths["bronze"]).where("_operation = 0")
     assert snap.count() == snap.select("id").distinct().count()  # no key read twice
@@ -1643,9 +1659,7 @@ def test_keyset_chunks_tile_composite_and_varchar_keys_under_changes(
     }
     paths, cdc, run = _chunked(delta_spark, options, workdir, name)
     run().awaitTermination()
-    facts = delta_spark.read.format("delta").load(paths["facts"])
-    [opened] = facts.where("event = 'snapshot_open'").collect()
-    assert json.loads(opened["detail"])["plan"]["kind"] == "keyset"
+    assert _plan_row(delta_spark, paths, "snapshot_open")["plan"]["kind"] == "keyset"
     statuses, changes = [], list(changes)
     while not (statuses and statuses[-1]["done"]):
         statuses.append(
@@ -1671,7 +1685,7 @@ def test_keyset_chunks_tile_composite_and_varchar_keys_under_changes(
     table = {tuple(r) for r in sqlserver.run(f"SELECT {', '.join(keys)}, v FROM dbo.{name}")}
     assert _image(delta_spark, paths["silver"], *keys, "v") == table
 
-    chunks = _chunk_facts(delta_spark, paths["facts"])
+    chunks = _chunk_facts(delta_spark, paths)
     assert [c["chunk"] for c in chunks] == list(range(total))
     assert chunks[0]["lo"] is None and [c["last"] for c in chunks].index(True) == len(chunks) - 1
     assert all(a["hi"] == b["lo"] for a, b in pairwise(chunks))  # each starts where one ended
@@ -2083,10 +2097,8 @@ def test_an_integer_plan_counts_a_skewed_key_on_the_server_and_backfills_it(
         paths["bronze"], app_id="ck-skew", facts_table=paths["facts"], chunk_rows=100
     )
     assert status["done"] and status["chunks_done"] == status["chunks_total"] == len(plan)
-    facts = delta_spark.read.format("delta").load(paths["facts"])
-    [planned] = facts.where("event = 'snapshot_plan'").collect()
-    assert json.loads(planned["detail"])["chunks"] == plan
-    assert [c["rows"] for c in _chunk_facts(delta_spark, paths["facts"])] == sizes
+    assert _plan_row(delta_spark, paths, "snapshot_plan")["chunks"] == plan
+    assert [c["rows"] for c in _chunk_facts(delta_spark, paths)] == sizes
     _marker(sqlserver, "ck_skew", ci, "id", -1)
     run().awaitTermination()
     assert _apply(delta_spark, paths, ci, ["id"])["rebuilt"]

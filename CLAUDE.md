@@ -111,7 +111,7 @@ src/mssql_cdc/
                    hashes; chunk checks against the facts; report table (ADR 0028).
   tables.py        DeltaTable API: open by name/path, create typed with column comments (ADR 0012).
   migrations/      schema migrations per table kind: control.py, facts.py, bronze.py,
-                   silver.py, reconcile.py (ADR 0013).
+                   silver.py, reconcile.py, plans.py (ADR 0013).
   spark.py         get_spark(): reuse the platform session, a Spark Connect one with
                    SPARK_REMOTE, or build a local one with Delta;
                    available_cores(): what register() uses for numPartitions=auto (ADR 0011).
@@ -190,9 +190,11 @@ notes/             Local only, gitignored: research notes in Portuguese (context
     always >= S (ADR 0028). Snapshot rows are `_operation = 0` with `_snapshot` = S; a
     snapshot is identified by `coalesce(_snapshot, _start_lsn)` and its completion event,
     never by the largest `_start_lsn` of its rows. Never read with `NOLOCK`. A chunked
-    snapshot's chunks are planned once, by the first `backfill()`, into its `'snapshot_plan'`
-    facts row, and never change while it is open; they tile the key space up to just above
-    the MAX recorded at the open. A run takes its snapshots in one mode, and a snapshot open
+    snapshot's chunks are planned once, by the first `backfill()`, into its plans table next
+    to bronze (`<target>_snapshot_plans`; its `'snapshot_plan'` facts row records no key
+    value), and never change while it is open; they tile the key space up to just above
+    the MAX recorded at the open. Key values never go into the facts, but for a snapshot
+    opened before 0.7.0, which keeps them there to its end (ADR 0028 Amendment 4). A run takes its snapshots in one mode, and a snapshot open
     in one mode blocks the other (and `seed()`) until its completion row (ADR 0028).
 13. **SQL injection.** Anything inlined into T-SQL (capture instance, columns, timezone,
     integers) goes through the validators in `client/_validators.py`.

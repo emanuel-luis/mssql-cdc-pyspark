@@ -41,7 +41,9 @@ COMMITTED, Tier 2 reads through the snapshot reader under the ``isolationLevel``
   run. While a chunked snapshot is open, the keys of the chunks silver lacks are
   MISSING_TARGET. Equal counts are a MATCH even then.
 * Chunks, with ``facts_table``: bronze's newest chunked snapshot (ADR 0028) is checked
-  against its 'snapshot_chunk' facts rows, without reading SQL Server. CHUNK_TILING: the
+  against its 'snapshot_chunk' facts rows, their bounds in bronze's plans table
+  (``<bronze>_snapshot_plans``) unless the rows have them (a snapshot opened before 0.7.0),
+  without reading SQL Server. CHUNK_TILING: the
   chunks leave a gap or overlap (each starts where the one before ended, the first open
   below and, once complete, the last the plan's final one); CHUNK_ROWS: a chunk's facts row counts
   other rows than bronze holds of it; CHUNK_STAMP: a chunk stamped below the snapshot's LSN
@@ -676,8 +678,10 @@ def _chunk_checks(spark: SparkSessionLike, bronze: str, facts_table: str) -> lis
         return []
     s = max(opens)  # a newer open abandons an older one
     complete = s in events.completions(rows)
+    kept = events.plans(spark, bronze, s)  # the bounds, unless the facts rows have them
     found: list[dict[str, Any]] = [
-        {**d, "rows": r["rows"], "lsn": r["min_lsn"]} for d, r in events.chunks_of(rows, s)
+        {**kept.whole(events.SNAPSHOT_CHUNK, d), "rows": r["rows"], "lsn": r["min_lsn"]}
+        for d, r in events.chunks_of(rows, s)
     ]
     # bronze after the facts: it holds every wave they announce, whose rows commit first
     held: dict[int, tuple[int, str | None]] = {}

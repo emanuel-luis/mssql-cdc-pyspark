@@ -10,7 +10,8 @@
 **Amended:** 2026-10-07T01:34:59-03:00, the API shape from 0.3.0: options and flags keyword-only, modes typed as `Literal`s, results as `TypedDict`s whose keys are only added (amendment 5)  
 **Amended:** 2026-10-07T01:41:18-03:00, a micro-batch row's `detail` is a payload too, with the added key `warnings` (amendment 6, ADR 0023 Amendment 6)  
 **Amended:** 2026-10-07T09:14:31-03:00, the payloads and the source options get types, and a 'data_skipped' row's `detail` joins the listed payloads (amendment 7)  
-**Amended:** 2026-10-09T11:39:56-03:00, a wave's measured values in its userMetadata may be null where the platform refuses caching (amendment 8, ADR 0032)
+**Amended:** 2026-10-09T11:39:56-03:00, a wave's measured values in its userMetadata may be null where the platform refuses caching (amendment 8, ADR 0032)  
+**Amended:** 2026-10-10T18:02:10-03:00, a chunked snapshot's facts rows leave its key values to a plans table next to bronze: keys removed from the rows 0.7.0 writes only, readers take them from either (amendment 9, ADR 0028 Amendment 4)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -30,7 +31,8 @@ The Python API, on the other hand, is young and will change.
   - the checkpoint layout, including `<checkpoint>/_generations/<n>`, the state file
     `<checkpoint>/_mssql_cdc_generation.json` and the `<app_id>.g<n>` app ids
     ([ADR 0018](0018-automatic-resnapshot-after-data-loss.md));
-  - the schemas of the facts, control, bronze, silver and reconcile report tables: changed
+  - the schemas of the facts, control, bronze, silver, reconcile report and (from 0.7.0)
+    snapshot plans tables: changed
     only by appending migrations ([ADR 0013](0013-schema-migrations-per-table-kind.md)). A
     release keeps writing a table a newer one migrated, so the jobs that share it upgrade,
     or roll back, one at a time; only a migration that sets `mssql_cdc.min_version` makes
@@ -41,7 +43,8 @@ The Python API, on the other hand, is young and will change.
     release reads back (amendment 4):
     - `detail` of `'snapshot_open'`: `mode`, `kind`, `generation`, `lost_from_ts`,
       `lost_to_ts`, and on a chunked one `keys` and `plan`;
-    - `detail` of `'snapshot_plan'`: `snapshot`, `kind`, `keys`, `chunk_rows`, `chunks`;
+    - `detail` of `'snapshot_plan'`: `snapshot`, `kind`, `keys`, `chunk_rows`, `chunks`, and
+      from 0.7.0 `chunk_count`;
     - `detail` of `'snapshot_chunk'`: `snapshot`, `chunk`, `wave`, `lo`, `hi`, `last`;
     - `detail` of a chunked snapshot's `'bootstrap'` or `'resnapshot'` row: `snapshot`,
       `chunks`, `rows`, `last_lsn`;
@@ -53,12 +56,17 @@ The Python API, on the other hand, is young and will change.
       (amendment 6);
     - `detail` of `'data_skipped'`: `from`, `to`, `certain`, and from a task that found
       cleanup had run while it read, `reason`
-      ([ADR 0018](0018-automatic-resnapshot-after-data-loss.md), amendment 7).
+      ([ADR 0018](0018-automatic-resnapshot-after-data-loss.md), amendment 7);
+    - from 0.7.0, the snapshot plans table next to bronze, `<target>_snapshot_plans`, its
+      columns `snapshot`, `event` and `detail`, `detail` the three chunked payloads above
+      whole (amendment 9).
 
     Keys are only added: never renamed, removed or given another meaning. A reader takes a
     key added after its payload first shipped with a default (`.get`), so rows an older
     release wrote stay readable, as the `mode` of a `'snapshot_open'` row (missing or
     unknown reads as chunked) and a chunk's `last` (missing reads as false) already are.
+    The one removal is amendment 9's: the key values of a chunked snapshot's facts rows,
+    from the rows 0.7.0 writes only, which the plans table holds instead.
 
   A migration path means the new version reads the old state and carries it forward on its
   own (as appended table migrations do), or the release notes give the exact steps.
@@ -207,3 +215,26 @@ wave's 'snapshot_chunk' facts rows hold the values. A reader takes null as not k
 `backfill()` counts the chunk's rows in bronze, as it does for a commit log cleanup dropped.
 A release before 0.6.0 that finds such a commit (only after a crash between the wave's
 append and its facts rows) writes NULL counts for its chunks.
+
+## Amendment 9: key values out of the facts
+0.7.0 moves a chunked snapshot's key values out of the facts table, into a plans table next
+to bronze with bronze's access ([ADR 0028](0028-chunked-snapshot-next-to-the-stream.md)
+Amendment 4). Not additive, so recorded here:
+
+* From the rows 0.7.0 writes for a snapshot it opens, the facts payloads drop `keys` and
+  `plan` ('snapshot_open'), `chunks` ('snapshot_plan') and `lo` and `hi`
+  ('snapshot_chunk'); 'snapshot_plan' gains `chunk_count`. The plans table's `detail` holds
+  each payload whole, under the same keys, so a query reads them there as it read them in
+  the facts. Their types make those keys optional (`SnapshotPlanDetail.chunks`,
+  `SnapshotChunkDetail.lo` and `hi`; the open's were optional already).
+* Rows written before stay as they are and are read as before: a reader takes a payload
+  from the plans table, or from the facts row when it has its key values. A snapshot opened
+  before 0.7.0 is finished by 0.7.0 in the shape it started with, its key values in the
+  facts and nothing in a plans table, so that every job sharing those facts reads it,
+  0.6's included; `tests/compat` finishes each release's open snapshot so.
+* The other way round, a release before 0.7.0 on a snapshot 0.7.0 opened: `apply_changes`
+  finds no `keys` on the open and applies the waves without range deletes, the rebuild at
+  completion deleting what they would have; `backfill()` and `reconcile` fail with a
+  `KeyError`. Upgrade the jobs that run those with the stream; none of them writes a wrong
+  row. No migration sets `mssql_cdc.min_version` for it: the facts table's schema is
+  unchanged, and the stream of an older release keeps writing it.

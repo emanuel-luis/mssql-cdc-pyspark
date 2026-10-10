@@ -181,21 +181,25 @@ class _Chunked(_ModeLock):
         The first call plans every chunk (``client.plan_chunks``: one integer key from row
         counts per slice of its range, the slices packed into chunks of at most ``chunk_rows``
         rows whatever the skew; other keys ``chunk_rows`` keys at a time) and records the plan
-        in a 'snapshot_plan' facts row; later calls read it, so the chunks never change while
-        the snapshot is open (but for the end of a keyset plan's last chunk, the first key after
-        MAX: when there was none at planning, it is sought again before each wave).
+        in ``target``'s plans table, ``<target>_snapshot_plans``, then in a 'snapshot_plan'
+        facts row without its bounds (ADR 0028 Amendment 4); later calls read it, so the
+        chunks never change while the snapshot is open (but for the end of a keyset plan's
+        last chunk, the first key after MAX: when there was none at planning, it is sought
+        again before each wave).
         ``chunk_rows``: 1,000,000 when None; a later call's other value is ignored, with a
         warning. A full snapshot of the stream still being read raises (one mode while a
         snapshot is open).
 
         Each wave is stamped with ``max_lsn`` before it is read, at or after the snapshot's
         LSN S, appended to ``target`` in one commit (operation 0, ``_snapshot`` S,
-        ``_chunk``) and then recorded as one 'snapshot_chunk' facts row per chunk; after the
-        last chunk comes the snapshot's 'bootstrap' or 'resnapshot' row, which tells
-        downstream to rebuild from S. After a crash between a wave's append and its facts
-        rows, the rerun's append is skipped by Delta and its rows are rebuilt from the one
-        committed (from its commit's userMetadata or, once log cleanup dropped that, from its
-        rows in ``target``): nothing is appended twice. A wave is read while the one before
+        ``_chunk``) and then recorded as one 'snapshot_chunk' facts row per chunk, its bounds
+        in the plans table first; after the last chunk comes the snapshot's 'bootstrap' or
+        'resnapshot' row, which tells downstream to rebuild from S. A snapshot opened before
+        0.7.0 keeps its bounds in its facts rows to its end, and writes no plans table. After
+        a crash between a wave's append and its facts rows, the rerun's append is skipped by
+        Delta and its rows are rebuilt from the one committed (from its commit's userMetadata
+        or, once log cleanup dropped that, from its rows in ``target``): nothing is appended
+        twice. A wave is read while the one before
         it is appended and recorded, in a background thread, one wave at a time. Where the
         platform refuses to cache a wave (Databricks serverless, ADR 0032), its append reads
         it, once the one before is recorded, and its commit's userMetadata has no counts.
@@ -271,8 +275,13 @@ class _Chunked(_ModeLock):
             }
         top = max(opens, key=lambda r: r["min_lsn"])  # a newer open supersedes an older one
         s, sink_id = top["min_lsn"], top["app_id"]
-        info: SnapshotOpenDetail = json.loads(top["detail"])
-        plan = events.plan_of(rows, s)
+        opened = json.loads(top["detail"])
+        # opened before 0.7.0: its facts rows keep its key values to its end, so a release
+        # before 0.7.0 sharing them reads them as it did (ADR 0028 Amendment 4)
+        whole = events.in_facts(events.SNAPSHOT_OPEN, opened)
+        kept = events.plans(self.spark, target, s)
+        info: SnapshotOpenDetail = kept.whole(events.SNAPSHOT_OPEN, opened)
+        plan = events.plan_of(rows, s, kept)
         if plan and chunk_rows is not None and int(chunk_rows) != plan["chunk_rows"]:
             _log.warning(
                 "mssql_cdc: backfill(chunk_rows=%s) ignored: the snapshot at %s of %s was "
@@ -385,9 +394,11 @@ class _Chunked(_ModeLock):
                             app_id=app_id,
                             chunk_rows=chunk_rows,
                             isolation=isolated,
+                            whole=whole,
                         )
                         # a concurrent call's, if Delta skipped ours
-                        plan = events.plan_of(read_facts(), s)
+                        kept = events.plans(self.spark, target, s)
+                        plan = events.plan_of(read_facts(), s, kept)
                         assert plan is not None  # written just now
                     t1 = time.monotonic()
                     lsn = snapshot_lsn(client, source)  # the wave's stamp, before its read
@@ -462,6 +473,7 @@ class _Chunked(_ModeLock):
                         snapshot=s,
                         every=every,
                         clock=clock,
+                        whole=whole,
                     )
                     future = committer.submit(inherit(commit))
                     pending = _Pending(future, wave, [i for i, *_ in planned])
@@ -517,28 +529,38 @@ class _Chunked(_ModeLock):
         app_id: str,
         chunk_rows: int | None,
         isolation: str | None,
+        whole: bool,
     ) -> None:
-        """Plan every chunk of the snapshot opened by facts row ``top`` (``info``, its detail),
-        under ``isolation``, and record them in its 'snapshot_plan' row, once: Delta skips a
-        rerun's."""
+        """Plan every chunk of the snapshot opened by facts row ``top`` (``info``, its detail
+        whole), under ``isolation``, and record them in its plans table's row, then its
+        'snapshot_plan' facts row without their bounds; in that row alone when ``whole`` (a
+        snapshot opened before 0.7.0). Once: Delta skips a rerun's."""
         from .. import sink
         from ..client import plan_chunks
 
         s, rows = top["min_lsn"], int(chunk_rows or 1_000_000)
         started_at, t0 = sink._utc_now(), time.monotonic()
+        chunks = plan_chunks(client, ci, source, info["plan"], rows, isolation)
         detail: SnapshotPlanDetail = {
             "snapshot": s,
             "kind": info["plan"]["kind"],
             "keys": source.keys,
             "chunk_rows": rows,
-            "chunks": plan_chunks(client, ci, source, info["plan"], rows, isolation),
+            "chunks": chunks,
+            "chunk_count": len(chunks),
         }
+        txn = f"{app_id}#snapplan.{s}"
+        if not whole:
+            events.write_plans(self.spark, target, s, events.SNAPSHOT_PLAN, [detail], txn, 0)
+            # the plan that stands: a concurrent call's, or one that stopped before its facts
+            # row, when Delta skipped ours
+            detail = events.plans(self.spark, target, s).details[(events.SNAPSHOT_PLAN, None, None)]
         events.write_event(
             self.spark,
             facts_table,
             events.SNAPSHOT_PLAN,
             app_id=top["app_id"],
-            txn_app_id=f"{app_id}#snapplan.{s}",
+            txn_app_id=txn,
             version=0,
             target=target,
             lsn=s,
@@ -546,7 +568,7 @@ class _Chunked(_ModeLock):
             rows=0,
             started_at=started_at,
             duration_ms=round((time.monotonic() - t0) * 1000),
-            detail=json.dumps(detail),
+            detail=json.dumps(detail if whole else events.public(events.SNAPSHOT_PLAN, detail)),
         )
 
     def _throttle(
@@ -669,11 +691,14 @@ class _Chunked(_ModeLock):
         snapshot: str,
         every: list[list[Any]],
         clock: CdcClient,
+        whole: bool,
     ) -> list[_ChunkRead]:
-        """Append wave ``w`` to ``target``, unpersist it and record its chunks in the facts,
-        their commit times looked up on ``clock``; ``every``: the plan's chunks. Returns those of
-        the commit that holds the wave, which an earlier attempt may have made with other chunks
-        (``_committed``). Runs in ``backfill()``'s background thread."""
+        """Append wave ``w`` to ``target``, unpersist it and record its chunks in the plans
+        table, then in the facts without their bounds (with them when ``whole``, a snapshot
+        opened before 0.7.0, and nothing in the plans table), their commit times looked up on
+        ``clock``; ``every``: the plan's chunks. Returns those of the commit that holds the
+        wave, which an earlier attempt may have made with other chunks (``_committed``). Runs
+        in ``backfill()``'s background thread."""
         from ..sink import _utc_now, write_facts
         from ..tables import exists
 
@@ -696,6 +721,12 @@ class _Chunked(_ModeLock):
             return times[x]
 
         duration_ms = round((time.monotonic() - t0) * 1000)
+        txn = f"{app_id}#snapchunks.{snapshot}"
+        if not whole:  # the bounds of the chunks the commit holds, as the facts rows' txn
+            bounds = [events.chunk_detail(snapshot, w.wave, c) for c in tag["chunks"]]
+            events.write_plans(
+                self.spark, target, snapshot, events.SNAPSHOT_CHUNK, bounds, txn, w.wave
+            )
         write_facts(
             self.spark,
             facts_table,
@@ -711,10 +742,11 @@ class _Chunked(_ModeLock):
                     high_ts=at(c["high_lsn"]),
                     started_at=started_at,
                     duration_ms=duration_ms,
+                    whole=whole,
                 )
                 for c in tag["chunks"]
             ],
-            f"{app_id}#snapchunks.{snapshot}",
+            txn,
             w.wave,
         )
         held = [

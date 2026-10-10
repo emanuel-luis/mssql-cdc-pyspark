@@ -148,8 +148,9 @@ class _ModeLock(_StreamBase):
         mode: SnapshotMode = "chunked",
     ) -> _Opened:
         """Open a ``kind`` snapshot ('bootstrap' or 'resnapshot') for generation
-        ``generation`` (sink ``sink_id``) in ``mode``: record an LSN S (and, for a chunked
-        one, what its chunks tile) in a 'snapshot_open' facts row before the table is read,
+        ``generation`` (sink ``sink_id``) in ``mode``: record an LSN S in a 'snapshot_open'
+        facts row (for a chunked one, what its chunks tile in the plans table first, ADR 0028
+        Amendment 4) before the table is read,
         and return the offset of the one stored, where a chunked generation's stream starts.
         Nothing is read from the table here: ``backfill()`` reads the chunks (ADR 0028), the
         caller a full one, stamped with its own LSN, at or after S.
@@ -173,8 +174,10 @@ class _ModeLock(_StreamBase):
             "lost_from_ts": _iso(lost_from_ts) or None,
             "lost_to_ts": _iso(lost_to_ts) or None,
         }
-        if plan is not None:  # a chunked one's
+        if plan is not None:  # a chunked one's, in the plans table: before the facts row
             detail["keys"], detail["plan"] = source.keys, plan
+            snapopen = f"{app_id}#snapopen.{lsn}"  # by S: a rerun's S has a row of its own
+            events.write_plans(self.spark, target, lsn, events.SNAPSHOT_OPEN, [detail], snapopen, 0)
         events.write_event(
             self.spark,
             facts_table,
@@ -188,7 +191,7 @@ class _ModeLock(_StreamBase):
             rows=0,
             lost_from_ts=lost_from_ts,
             lost_to_ts=lost_to_ts,
-            detail=json.dumps(detail),
+            detail=json.dumps(events.public(events.SNAPSHOT_OPEN, detail)),
         )
         stored = self._opened(facts_table, target, sink_id) or {
             **offset,

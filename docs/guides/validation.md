@@ -57,7 +57,9 @@ matched. `report` holds one row per bucket and one per key or chunk that failed;
    too, through the capture instances the stream reads. Run again later; it clears once the
    stream and silver catch up.
 4. **Chunks.** With `facts_table`, bronze's newest [chunked snapshot](bootstrap.md#chunked-snapshots)
-   is checked against its facts rows, without reading SQL Server:
+   is checked against its facts rows and the chunk bounds in bronze's
+   [snapshot plans](../reference/tables.md#snapshot-plans) table, without reading SQL
+   Server:
    - CHUNK_TILING: the chunks leave a gap or overlap: a chunk missing or recorded twice, the
      first not open below, one not starting where the one before ended, or the last of a
      complete snapshot not the plan's final one;

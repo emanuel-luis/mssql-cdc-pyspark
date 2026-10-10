@@ -721,7 +721,10 @@ def test_chunk_checks_read_a_pipeline_built_snapshot_whose_rows_are_no_change_in
 
     table.update(chunk(0), {"min_lsn": "'0x00000000000000000000'"})  # stamped below S
     table.delete(chunk(1))  # a gap, and bronze holds 3 rows of a chunk with no facts row
-    table.update(chunk(3), {"detail": "replace(detail, '\"lo\": 9', '\"lo\": 8')"})  # overlap
+    # an overlap: the bounds are in bronze's plans table, the facts rows have none
+    assert '"lo"' not in "".join(r["detail"] for r in table.toDF().collect() if r["detail"])
+    plans = DeltaTable.forPath(delta_spark, f"{o.bronze}_snapshot_plans")
+    plans.update(chunk(3), {"detail": "replace(detail, '\"lo\": 9', '\"lo\": 8')"})
     # silver applied up to S, its rows are stamped above it: a snapshot row is no change in
     # flight, so a row silver lost is a MISMATCH
     o.silver_table().delete("order_id = 4")

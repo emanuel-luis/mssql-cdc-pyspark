@@ -172,16 +172,20 @@ result is a [`BackfillStatus`](../reference/api.md#mssql_cdc.types.BackfillStatu
 How it behaves ([ADR 0028](../decisions/0028-chunked-snapshot-next-to-the-stream.md)):
 
 1. The first `to_delta` records S, `sys.fn_cdc_get_max_lsn()` as for a full snapshot, then
-   the key's MIN and MAX, and writes them in a `snapshot_open` facts row (mode `chunked`). It
-   reads nothing else from the table and starts the stream at S at once. Later runs find
-   that row and start from S again until the checkpoint has offsets.
+   the key's MIN and MAX, and writes them in the target's
+   [snapshot plans](../reference/tables.md#snapshot-plans) table, then S in a
+   `snapshot_open` facts row (mode `chunked`). It reads nothing else from the table and
+   starts the stream at S at once. Later runs find that row and start from S again until
+   the checkpoint has offsets.
 2. The first `backfill()` call plans every chunk ([below](#how-chunks-are-sized)) and records
-   the plan in a `snapshot_plan` facts row. Each call then reads the next chunks of the plan
+   the plan in the plans table, then its chunk count in a `snapshot_plan` facts row: the
+   facts hold no key values. Each call then reads the next chunks of the plan
    in waves, [numPartitions](../reference/options.md#numpartitions) chunks at a time, one
    connection each. Before a wave is read, its stamp L is recorded, `max_lsn` again, at or
    after S. The wave is appended to the target in one Delta commit: operation 0,
-   `_start_lsn` = L, `_snapshot` = S and the chunk in `_chunk`. Then one `snapshot_chunk`
-   facts row per chunk: its rows, L and its key range. The next wave is read meanwhile,
+   `_start_lsn` = L, `_snapshot` = S and the chunk in `_chunk`. Then each chunk's key range
+   in the plans table, and one `snapshot_chunk` facts row per chunk: its rows and L. The
+   next wave is read meanwhile,
    while a background thread writes that commit and those rows.
 3. After the last chunk, which ends just above the MAX recorded at the open, it writes the
    snapshot's `bootstrap` facts row, with min = max = S and the rows of every chunk, and
@@ -354,13 +358,14 @@ whole. With `snapshot="chunked"` the re-snapshot is chunked too
   waves.
 - A chunked snapshot needs the stream running while it is read: a gap after S (data loss,
   `failOnDataLoss=false`) abandons it. Leave `snapshotLsn` unset: a stamp below S breaks it.
-- A chunked snapshot copies source key values out of bronze: its facts rows
-  (`snapshot_open`, `snapshot_plan`, `snapshot_chunk`) and bronze's commit `userMetadata`
-  hold the chunk bounds: the key's MAX at the open and, for a key that is not a single
-  integer, a real key every `chunk_rows` rows. Column masks and row filters on bronze do not reach them, so give the
-  facts table and bronze's history (`DESCRIBE HISTORY`) bronze's access policy. Where keys
-  are natural or personal identifiers (a document number, an e-mail address), use one
-  `facts_table` per access domain ([Many tables](many-tables.md#what-each-stream-has)).
+- A chunked snapshot copies source key values out of bronze: its
+  [plans table](../reference/tables.md#snapshot-plans) next to bronze,
+  `<target>_snapshot_plans`, and bronze's commit `userMetadata` hold the chunk bounds: the
+  key's MIN and MAX at the open and, for a key that is not a single integer, a real key
+  every `chunk_rows` rows. Column masks and row filters on bronze do not reach them, so give
+  the plans table and bronze's history (`DESCRIBE HISTORY`) bronze's access policy; in
+  bronze's schema, the plans table often has it already. The facts rows hold none, but for
+  a snapshot opened before 0.7.0, which keeps them in its facts rows until it completes.
 - `to_delta(bootstrap=True)` with either `snapshot` mode, and `snapshot()`, return the S of
   a chunked snapshot of the target, open or complete, instead of reading the table again
   (given the facts table, a full run raises while it is open:

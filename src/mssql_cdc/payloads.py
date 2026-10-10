@@ -7,7 +7,11 @@ and the ``userMetadata`` of a chunked snapshot's wave commits in bronze.
 
 A release only adds keys to them, never renames or removes one, nor gives one another meaning.
 A key added after its payload first shipped is optional here, and a reader takes it with a
-default (``.get``), so rows an older release wrote stay readable.
+default (``.get``), so rows an older release wrote stay readable. The one exception: since
+0.7.0 a chunked snapshot's facts rows leave its key values (``keys`` and ``plan`` of
+'snapshot_open', ``chunks`` of 'snapshot_plan', ``lo`` and ``hi`` of 'snapshot_chunk') to
+the plans table next to bronze, whose ``detail`` holds the payload whole (ADR 0028
+Amendment 4, ADR 0021): optional here, as a facts row may lack them.
 
 Key values (``lo``, ``hi``, ``max``) are JSON: a scalar for one key column, a list for a
 composite key, ``None`` for an open end; a value JSON has no type for (a date, a decimal) is
@@ -63,39 +67,51 @@ class _SnapshotOpen(TypedDict):
 
 class SnapshotOpenDetail(_SnapshotOpen, total=False):
     """``detail`` of a ``'snapshot_open'`` facts row, written before a snapshot reads the
-    table; ``keys`` and ``plan`` only on a chunked one."""
+    table; ``keys`` and ``plan`` only on a chunked one, and since 0.7.0 only in its plans
+    table's row."""
 
     keys: list[str]
     """The key columns its chunks are cut on."""
     plan: SnapshotExtent
 
 
-class SnapshotPlanDetail(TypedDict):
-    """``detail`` of a ``'snapshot_plan'`` facts row: every chunk of a chunked snapshot,
-    planned by its first ``backfill()`` and fixed while it is open."""
-
+class _SnapshotPlan(TypedDict):
     snapshot: str
     """The snapshot's LSN S."""
     kind: Literal["int", "keyset"]
     """The ``kind`` of its extent."""
     keys: list[str]
     chunk_rows: int
+
+
+class SnapshotPlanDetail(_SnapshotPlan, total=False):
+    """``detail`` of a ``'snapshot_plan'`` facts row: every chunk of a chunked snapshot,
+    planned by its first ``backfill()`` and fixed while it is open; ``chunks`` since 0.7.0
+    only in its plans table's row."""
+
     chunks: list[list[Any]]
     """``[lo, hi]`` of every chunk, in order: from ``lo`` (inclusive) to ``hi`` (exclusive)."""
+    chunk_count: int
+    """How many chunks, since 0.7.0."""
 
 
-class SnapshotChunkDetail(TypedDict):
-    """``detail`` of a ``'snapshot_chunk'`` facts row: a chunk of a chunked snapshot, read."""
-
+class _SnapshotChunk(TypedDict):
     snapshot: str
     wave: int
     """The ``backfill()`` wave that read it, from 0."""
     chunk: int
     """Its index in the plan."""
-    lo: Any
-    hi: Any
     last: bool
     """The plan's final chunk, whose read completes the snapshot."""
+
+
+class SnapshotChunkDetail(_SnapshotChunk, total=False):
+    """``detail`` of a ``'snapshot_chunk'`` facts row: a chunk of a chunked snapshot, read;
+    ``lo`` and ``hi``, the key range it was read in, since 0.7.0 only in its plans table's
+    row."""
+
+    lo: Any
+    hi: Any
 
 
 class SnapshotCompletionDetail(TypedDict):

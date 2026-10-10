@@ -31,9 +31,10 @@ job per stream (ADR 0018).
 
 ``snapshot="chunked"`` (ADR 0028) takes either snapshot next to the stream instead of before
 it, for a table the link cannot read within the CDC retention: ``to_delta`` only opens it at
-an LSN S (a 'snapshot_open' facts row with the key's extent) and starts the stream generation
-at S at once; ``backfill()``, called repeatedly in its own task, plans the chunks once (a
-'snapshot_plan' row), reads the key space in them,
+an LSN S (a 'snapshot_open' facts row; the key's extent in ``<target>_snapshot_plans``, the
+plans table next to the target that holds its key values) and starts the stream generation
+at S at once; ``backfill()``, called repeatedly in its own task, plans the chunks once (into
+the plans table, and a 'snapshot_plan' row), reads the key space in them,
 each stamped with an LSN at or after S, appends them to the target (``_snapshot`` S,
 ``_chunk``) and records them as 'snapshot_chunk' rows, then writes the snapshot's
 'bootstrap' or 'resnapshot' row. Downstream rebuilds from S: its rows and the changes after
