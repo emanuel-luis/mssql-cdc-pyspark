@@ -1255,3 +1255,32 @@ def test_chunk_rows_are_stamped_numbered_and_leave_metrics(spark, workdir):
 
 def _rows_of(reader, partition):
     return [r for b in reader.read(partition) for r in b.to_pylist()]
+
+
+def test_the_uncached_sink_observes_no_timestamp_and_reads_the_same_facts(spark):
+    # Databricks serverless serializes observed metrics with a Jackson that has no java.time
+    # module: a TIMESTAMP_NTZ there killed the query (0.6.0rc2 on serverless). The observed
+    # columns carry the commit times as text; parsed back, they are batch_facts' values.
+    from pyspark.sql.types import TimestampNTZType, TimestampType
+
+    from mssql_cdc.sink import _from_observed, _observed_columns, batch_facts
+
+    df = spark.createDataFrame(
+        [
+            ("0x00000001000000010001", datetime(2026, 10, 9, 22, 3, 0, 123456), 2),
+            ("0x00000001000000020001", datetime(2026, 10, 9, 22, 3, 1), 4),
+            ("0x00000001000000020001", datetime(2026, 10, 9, 22, 3, 1), 3),
+            ("0x00000001000000030001", datetime(2026, 10, 9, 22, 3, 2, 500000), 1),
+        ],
+        "_start_lsn string, _commit_ts timestamp_ntz, _operation int",
+    )
+    for frame in (df, df.limit(0)):
+        observed = frame.agg(*_observed_columns())
+        assert not [
+            f.name
+            for f in observed.schema.fields
+            if isinstance(f.dataType, (TimestampNTZType, TimestampType))
+        ]
+        row = observed.first()
+        assert row is not None
+        assert _from_observed(row.asDict()) == batch_facts(frame)

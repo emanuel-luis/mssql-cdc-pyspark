@@ -12,6 +12,12 @@ compatibility" line.
 
 ## [Unreleased]
 
+## [0.6.0rc3] - 2026-10-10
+
+### Fixed
+
+- On Databricks serverless, a stream died on its first batch with rows: `InvalidDefinitionException: Java 8 date/time type java.time.LocalDateTime not supported` while Spark serialized the query's progress. The uncached sink (0.6.0rc1) observed the batch's first and last commit times as TIMESTAMP_NTZ values, and serverless writes observed metrics with a JSON mapper that has no `java.time` support. They are now observed as text and parsed back, with the same facts values. Found by running the library on serverless (with the fake backend): every other check passed there, and `processingTime` triggers are refused by the platform, as documented.
+
 ## [0.6.0rc2] - 2026-10-10
 
 ### Fixed
@@ -911,7 +917,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc2...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc3...HEAD
+[0.6.0rc3]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc2...v0.6.0rc3
 [0.6.0rc2]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc1...v0.6.0rc2
 [0.6.0rc1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.5.0...v0.6.0rc1
 [0.5.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.4.1...v0.5.0

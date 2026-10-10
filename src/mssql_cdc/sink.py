@@ -314,6 +314,38 @@ def _facts_columns() -> list[Column]:
     ]
 
 
+# Observed metrics travel in the query's progress, which Databricks serverless serializes
+# with a Jackson that has no java.time module: a TIMESTAMP_NTZ value (LocalDateTime) there
+# kills the query. So the commit times are observed as text, six fraction digits (what
+# Python 3.10's fromisoformat reads), and parsed back.
+_OBSERVED_TS = ("min_commit_ts", "max_commit_ts")
+_TS_TEXT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
+
+
+def _observed_columns() -> list[Column]:
+    """``_facts_columns`` with the commit times as text, for ``DataFrame.observe``."""
+    rows, min_lsn, max_lsn, _, _, deletes, inserts, updates = _facts_columns()
+    return [
+        rows,
+        min_lsn,
+        max_lsn,
+        F.date_format(F.min("_commit_ts"), _TS_TEXT).alias("min_commit_ts"),
+        F.date_format(F.max("_commit_ts"), _TS_TEXT).alias("max_commit_ts"),
+        deletes,
+        inserts,
+        updates,
+    ]
+
+
+def _from_observed(observed: Mapping[str, Any]) -> dict[str, Any]:
+    """The facts ``_observed_columns`` observed, as ``batch_facts`` gives them."""
+    facts = dict(observed)
+    for name in _OBSERVED_TS:
+        value = facts.get(name)
+        facts[name] = datetime.fromisoformat(value) if value is not None else None
+    return facts
+
+
 # what batch_facts gives a batch without rows
 _NO_ROWS: dict[str, Any] = {
     "rows": 0,
@@ -505,13 +537,12 @@ def delta_sink(
         ensure(spark, target, "bronze", bronze_columns(out), BRONZE_COMMENT)
         meta = _json({**dict.fromkeys(_NO_ROWS), "batch_id": batch_id, "app_id": app_id})
         seen, before = Observation(), version(spark, target)
-        observed = out.observe(seen, *_facts_columns())
+        observed = out.observe(seen, *_observed_columns())
         _write(observed, target, app_id, batch_id, meta, merge_schema=True)
         # Delta skipped a replay without reading it, or a Spark Connect server answered the
         # write before its metrics were in (the client then has none): counted with one read
-        facts = seen.get if commit_after(spark, target, before, meta) is not None else {}
-        if "rows" not in facts:
-            facts = batch_facts(df)
+        got = seen.get if commit_after(spark, target, before, meta) is not None else {}
+        facts = _from_observed(got) if "rows" in got else batch_facts(df)
         quiet = not facts["rows"]
         return facts
 
