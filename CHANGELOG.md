@@ -12,6 +12,88 @@ compatibility" line.
 
 ## [Unreleased]
 
+State compatibility: offsets and checkpoints unchanged. A new table kind, the snapshot plans
+table (`<target>_snapshot_plans`, next to bronze), starts at schema version 0 with its own
+migrations module, `migrations/plans.py`; facts migration 13 rewrites the comment of `detail`
+(metadata only) the next time a stream opens the facts table. No `mssql_cdc.min_version` is
+set.
+
+- The payload keys that hold key values (`keys` and `plan` of 'snapshot_open', `chunks` of
+  'snapshot_plan', `lo` and `hi` of 'snapshot_chunk') leave only the facts rows this release
+  writes for a chunked snapshot it opens; the plans table holds each payload whole
+  ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)
+  amendment 9). Rows written before are read as before.
+- A chunked snapshot opened by an earlier release finishes on this one the way it started:
+  its key values stay in its facts rows and no plans table is written, so jobs of both
+  releases that share those facts can read it. `tests/compat` finishes each release's open
+  snapshot this way.
+- In the other direction, on a snapshot this release opened, an earlier release's
+  `apply_changes` applies the waves without range deletes (the rebuild at completion removes
+  those keys), and its `backfill()` and `reconcile()` fail with `KeyError`. Upgrade the jobs
+  that run them together with the stream.
+
+### Breaking
+
+- For type checkers only: `SnapshotPlanDetail.chunks`, `SnapshotChunkDetail.lo` and
+  `SnapshotChunkDetail.hi` are now optional keys, since a facts row written by this release
+  lacks them. At run time nothing changes and mypy still accepts `d["chunks"]`, but pyright
+  in strict mode reports `reportTypedDictNotRequiredAccess`: read them with `.get()` or check
+  for the key first.
+
+### Added
+
+- Options `user` and `password`: the login is passed to the driver apart from the
+  connection string (mssql-python's `UID`/`PWD` keyword arguments,
+  `arrow_odbc.connect(user=, password=)`). The driver escapes them, so a password with `;`
+  or `}` needs no braces, and Spark redacts an option named `password` in plans and the UI
+  by default, which it never does for `connectionString`
+  ([ADR 0034](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0034-credentials-outside-the-connection-string/)).
+- Option `accessToken`: a Microsoft Entra ID access token, passed by `mssql-python` as the
+  `SQL_COPT_SS_ACCESS_TOKEN` pre-connect attribute (ADR 0034).
+- Option `tokenProvider`: `package.module:function`, which the library imports and calls
+  with no arguments each time it opens a connection, on the driver and in every executor
+  task. It returns the token, so a long stream renews it by itself. Only the name crosses to
+  the executors; the module (with `azure-identity`, for instance, which the library does not
+  depend on) must be installed on every node (ADR 0034).
+- Combinations that leave the login ambiguous fail with a `ValueError` before anything
+  connects: `accessToken` with `tokenProvider`; a token with `user`, `password`, or
+  `UID`/`PWD`/`Authentication`/`Trusted_Connection` in `connectionString`; `user` with
+  `UID`, `password` with `PWD`. `backend=arrow-odbc` refuses a token: arrow-odbc sets no
+  attribute before it connects.
+- `SnapshotPlanDetail.chunk_count`: the number of chunks of the plan, which a facts row
+  written by this release carries in place of `chunks`.
+
+### Changed
+
+- A chunked snapshot no longer writes source key values to the facts table. Those values
+  are the key's MIN and MAX at its open and the bounds of every chunk, which with a
+  composite, string or date key are real keys of the table. `to_delta(snapshot="chunked")`
+  and `backfill()` now write them to a new table next to bronze, `<target>_snapshot_plans`:
+  bronze's schema for a name, a sibling directory for a path, so they fall under bronze's
+  access policy. `backfill()`, `apply_changes` and `reconcile` find the table by bronze's
+  name; nothing new needs to be passed. For a snapshot opened by this release, the facts
+  rows leave out `keys` and `plan` ('snapshot_open'), `chunks` ('snapshot_plan', which gains
+  `chunk_count`) and `lo` and `hi` ('snapshot_chunk'). The new table's `detail` holds each
+  payload whole, so a query that read them from the facts reads them there
+  ([ADR 0028](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0028-chunked-snapshot-next-to-the-stream/)
+  Amendment 4, [Tables](https://emanuel-luis.github.io/mssql-cdc-pyspark/reference/tables/#snapshot-plans)).
+
+### Security
+
+- The secret need not live in `connectionString` any more (`user`/`password`,
+  `accessToken`, `tokenProvider`, above). Spark's default redaction hides the `password`,
+  `accessToken` and `tokenProvider` options in plans and the UI, but shows
+  `connectionString` and `user` in full.
+- With the `user`, `password`, `accessToken` or `tokenProvider` options, a driver error
+  raised while connecting whose message (or any error down its chain) holds one of their
+  values, SQL Server's "Login failed for user '...'" among them, is raised as a
+  `ConnectionError` with each value replaced by `***`. Errors that hold none, and every
+  error of a connection given only `connectionString`, are raised unchanged, so the retry
+  of transient errors (ADR 0029) still sees them. No option value goes into the facts,
+  the metrics files or a commit's `userMetadata`.
+- The facts table, often readable by more people than bronze, no longer holds source key
+  values for a chunked snapshot this release opens (see Changed).
+
 ## [0.6.0] - 2026-10-10
 
 The changes are listed under 0.6.0rc3, rc2 and rc1 below; this release adds only the

@@ -118,9 +118,10 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 
 ## 0.7.0 (minor): credentials and privacy
 
-- [ ] `user`/`password` and Entra ID `accessToken` options, so the secret need not live in
-      the connection string.
-- [ ] The snapshot plan stops writing key values in clear into the facts table.
+- [x] `user`/`password` and Entra ID `accessToken` options, so the secret need not live in
+      the connection string; `tokenProvider` renews the token on long streams (ADR 0034).
+- [x] The snapshot plan stops writing key values in clear into the facts table: they go to
+      a plans table next to bronze (ADR 0028, Amendment 4).
 
 ## 0.8.0 (minor): operations at scale
 

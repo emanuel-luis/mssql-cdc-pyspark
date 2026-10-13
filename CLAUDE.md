@@ -164,7 +164,8 @@ notes/             Local only, gitignored: research notes in Portuguese (context
    With two capture instances, `ci` is the instance the range reads; the pre-flight uses the
    one the next changes are read from (ADR 0023).
 5. **Executors are stateless.** `read()` opens and closes its own connection; the
-   reader drops `_client` in `__getstate__`. Nothing live gets pickled.
+   reader drops `_client` in `__getstate__`. Nothing live gets pickled: `tokenProvider`
+   crosses as its name and is imported and called at each connection (ADR 0034).
 6. **LSNs cross every boundary as hex strings.** Bound as `CONVERT(binary(10), ?, 1)`,
    returned as `CONVERT(varchar(22), <lsn>, 1)`. That is what keeps backends
    interchangeable; do not bind or decode binary in Python.
@@ -194,8 +195,9 @@ notes/             Local only, gitignored: research notes in Portuguese (context
     to bronze (`<target>_snapshot_plans`; its `'snapshot_plan'` facts row records no key
     value), and never change while it is open; they tile the key space up to just above
     the MAX recorded at the open. Key values never go into the facts, but for a snapshot
-    opened before 0.7.0, which keeps them there to its end (ADR 0028 Amendment 4). A run takes its snapshots in one mode, and a snapshot open
-    in one mode blocks the other (and `seed()`) until its completion row (ADR 0028).
+    opened before 0.7.0, which keeps them there to its end (ADR 0028 Amendment 4). A run
+    takes its snapshots in one mode, and a snapshot open in one mode blocks the other (and
+    `seed()`) until its completion row (ADR 0028).
 13. **SQL injection.** Anything inlined into T-SQL (capture instance, columns, timezone,
     integers) goes through the validators in `client/_validators.py`.
 14. **Schema changes are checked before the read.** DDL inside a batch's range is found on
