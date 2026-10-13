@@ -199,8 +199,10 @@ class _Chunked(_ModeLock):
         a crash between a wave's append and its facts rows, the rerun's append is skipped by
         Delta and its rows are rebuilt from the one committed (from its commit's userMetadata
         or, once log cleanup dropped that, from its rows in ``target``): nothing is appended
-        twice. A wave is read while the one before
-        it is appended and recorded, in a background thread, one wave at a time. Where the
+        twice. After a crash between a wave's plans rows and its facts rows, the rerun reads
+        the chunks those rows hold, whatever ``numPartitions`` and the pace say: Delta skips
+        its plans rows, so its facts rows have to match them. A wave is read while the one
+        before it is appended and recorded, in a background thread, one wave at a time. Where the
         platform refuses to cache a wave (Databricks serverless, ADR 0032), its append reads
         it, once the one before is recorded, and its commit's userMetadata has no counts.
 
@@ -425,8 +427,22 @@ class _Chunked(_ModeLock):
                     else:
                         first = chunks[-1].chunk + 1 if chunks else 0
                         wave = chunks[-1].wave + 1 if chunks else 0
-                    stop = min(first + width(len(every)), len(every))
-                    planned = [[i, *every[i]] for i in range(first, stop)]
+                    # an attempt that stopped between the wave's plans rows and its facts rows:
+                    # its chunks and bounds again, which the plans table keeps (it skips this
+                    # wave's rows), where an empty wave has no commit to hold them
+                    again = sorted(
+                        (d["chunk"], d["lo"], d["hi"])
+                        for (e, _, w), d in kept.details.items()
+                        if e == events.SNAPSHOT_CHUNK and w == wave
+                    )
+                    if again:
+                        every = [*every]
+                        for i, lo, hi in again:
+                            every[i] = [lo, hi]
+                        planned = [list(c) for c in again]
+                    else:
+                        stop = min(first + width(len(every)), len(every))
+                        planned = [[i, *every[i]] for i in range(first, stop)]
                     _log.info(
                         "mssql_cdc: backfill of %s (snapshot %s, %s): wave %s, chunks %s to %s "
                         "of %s, stamped %s",

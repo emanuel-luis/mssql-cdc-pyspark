@@ -199,7 +199,8 @@ so is every row inserted above the MAX: no chunk reads those.
 - A crash between a wave's append and its facts rows reruns that wave: Delta skips the
   append and the facts rows are rebuilt from the commit that holds the wave or, once Delta's
   log cleanup has dropped that commit, from the wave's rows in the target (without its read
-  time and size). Nothing is appended twice.
+  time and size). Nothing is appended twice. A wave whose rows reached the plans table is
+  read again with the same chunks, whatever `numPartitions` the rerun has.
 - `min_headroom_hours` pauses before a wave while the stream's newest facts row shows less
   [retention headroom](monitoring.md), or the stream has written none: the chunks share the
   link with the stream, and a stream that falls behind the retention loses the snapshot too.

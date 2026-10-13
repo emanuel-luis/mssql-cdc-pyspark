@@ -599,6 +599,28 @@ def test_an_open_bootstrap_applies_its_waves_without_resurrecting_deletes_and_ho
     assert not g.apply()["rebuilt"]
 
 
+def test_a_wave_recorded_while_a_call_reads_the_facts_and_plans_waits_for_the_next_call(
+    delta_spark, workdir, monkeypatch
+):
+    g, S = Log(delta_spark, workdir), 100
+    g.open(S)
+    g.wave(S, 0, 110, [(0, None, 4, [(1, "new")])])
+    real, raced = events.plans, []
+
+    def racing(spark, target, snapshot):
+        found = real(spark, target, snapshot)
+        if not raced:  # backfill records wave 1, its plans rows then its facts rows, meanwhile
+            g.wave(S, 1, 120, [(1, 4, None, [(5, "new")])])
+            raced.append(True)
+        return found
+
+    monkeypatch.setattr(events, "plans", racing)
+    g.apply()  # its facts read came first: no wave 1 chunk without its plans row
+    assert g.rows() == [(1, "new")] and g.position()[2:] == (_lsn(S), 0)
+    g.apply()
+    assert g.rows() == [(1, "new"), (5, "new")] and g.position()[2:] == (_lsn(S), 1)
+
+
 def test_a_call_scans_no_bronze_file_it_applied_already(delta_spark, workdir):
     """While a chunked re-snapshot is open, each call reads the waves and the changes since its
     position: every bronze file is moved away after a call, and the next one would fail on any

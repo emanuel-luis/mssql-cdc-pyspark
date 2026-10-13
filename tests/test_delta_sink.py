@@ -1233,6 +1233,19 @@ def _dies_after_the_append(write_facts):
     return crash
 
 
+def _dies_before_the_plans(write_plans):
+    """``events.write_plans`` that raises on a wave's 'snapshot_chunk' rows: the job died after
+    the wave's append, before its plans rows and its facts rows. A rerun then plans the wave
+    afresh, as the plans table holds none of its chunks."""
+
+    def crash(spark, target, snapshot, event, *args):
+        if event == "snapshot_chunk":
+            raise RuntimeError("the job died after the wave's append")
+        write_plans(spark, target, snapshot, event, *args)
+
+    return crash
+
+
 def test_data_loss_resnapshots_into_a_new_generation_once_per_interval(
     delta_spark, workdir, latest
 ):
@@ -1975,7 +1988,7 @@ def test_backfill_resumes_after_a_crash_between_the_append_and_its_facts(
 def test_backfill_keeps_its_plan_and_rebuilds_a_waves_facts_from_bronze_without_its_commit(
     delta_spark, workdir, monkeypatch, caplog
 ):
-    from mssql_cdc import pipeline, sink, stream
+    from mssql_cdc import events, pipeline, stream
 
     spark = delta_spark
     db, options = _orders(workdir, n=6)
@@ -1996,11 +2009,11 @@ def test_backfill_keeps_its_plan_and_rebuilds_a_waves_facts_from_bronze_without_
 
     run()
     s = _events(spark, facts, "snapshot_open")[0]["min_lsn"]
-    write_facts = sink.write_facts
-    monkeypatch.setattr(sink, "write_facts", _dies_after_the_append(write_facts))
+    write_plans = events.write_plans
+    monkeypatch.setattr(events, "write_plans", _dies_before_the_plans(write_plans))
     with pytest.raises(RuntimeError, match="the job died"):
         cdc.backfill(target, app_id="lost-v1", facts_table=facts, chunk_rows=2, max_waves=1)
-    monkeypatch.setattr(sink, "write_facts", write_facts)
+    monkeypatch.setattr(events, "write_plans", write_plans)
     # log cleanup dropped the wave's commit: its facts rows come from its rows in bronze
     monkeypatch.setattr(pipeline._chunked, "_earlier_wave", lambda *args: None)
     db.commit(CI, [(2, {"order_id": -1, "status": "new"})], at=T0 + timedelta(minutes=9))
@@ -2034,6 +2047,58 @@ def test_backfill_keeps_its_plan_and_rebuilds_a_waves_facts_from_bronze_without_
     assert len(snap) == len({r["order_id"] for r in snap}) == 6  # no key twice
     assert sum(r["rows"] for r in _events(spark, facts, "snapshot_chunk")) == 6
     assert _rebuilt(bronze, "order_id", "status", s) == _source(db)  # order -1 by the stream
+
+
+def test_backfill_reads_again_the_chunks_of_an_empty_waves_plans_rows_after_a_crash(
+    delta_spark, workdir, monkeypatch
+):
+    from mssql_cdc import sink, stream
+
+    spark = delta_spark
+    db, options = _orders(workdir, n=12)  # 6 chunks of 2
+    options["numPartitions"] = "2"
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        cdc.to_delta(
+            target,
+            "empty-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    def backfill(**kwargs):
+        return cdc.backfill(target, app_id="empty-v1", facts_table=facts, chunk_rows=2, **kwargs)
+
+    run()
+    s = _events(spark, facts, "snapshot_open")[0]["min_lsn"]
+    assert backfill(max_waves=1)["chunks_done"] == 2  # planned, then wave 0
+    gone = [(1, {"order_id": i, "status": "new"}) for i in range(4, 8)]
+    db.commit(CI, gone, at=T0 + timedelta(minutes=9))  # wave 1, chunks 2 and 3, reads nothing
+    monkeypatch.setattr(sink, "write_facts", _dies_after_the_append(sink.write_facts))
+    with pytest.raises(RuntimeError, match="the job died"):
+        backfill(max_waves=1, target_wave_seconds=0)  # one round
+    monkeypatch.undo()  # no commit holds the wave: its plans rows alone
+    assert [(d["chunk"], d["wave"]) for _, d in _plans(spark, target, "snapshot_chunk")] == [
+        (0, 0),
+        (1, 0),
+        (2, 1),
+        (3, 1),
+    ]
+    assert _waves(spark, facts) == [(0, 0), (1, 0)]
+    # four at a time, wave 1 would take chunks 2 to 5, whose plans rows Delta skips
+    wider = stream(spark, {**options, "numPartitions": "4"})
+    assert wider.backfill(target, app_id="empty-v1", facts_table=facts)["done"]
+    waves = [(0, 0), (1, 0), (2, 1), (3, 1), (4, 2), (5, 2)]
+    assert _waves(spark, facts) == waves
+    assert [(d["chunk"], d["wave"]) for _, d in _plans(spark, target, "snapshot_chunk")] == waves
+    run()
+    bronze = spark.read.format("delta").load(target)
+    assert _rebuilt(bronze, "order_id", "status", s) == _source(db)
 
 
 def _waves(spark, facts) -> list:
@@ -2177,7 +2242,7 @@ def test_backfill_reads_a_wave_while_the_one_before_commits(delta_spark, workdir
 def test_backfill_reads_again_a_wave_read_ahead_of_a_commit_holding_other_chunks(
     delta_spark, workdir, monkeypatch
 ):
-    from mssql_cdc import sink, stream
+    from mssql_cdc import events, stream
 
     spark = delta_spark
     db, options = _orders(workdir, n=10)  # 5 chunks of 2
@@ -2198,10 +2263,10 @@ def test_backfill_reads_again_a_wave_read_ahead_of_a_commit_holding_other_chunks
 
     run()
     s = _events(spark, facts, "snapshot_open")[0]["min_lsn"]
-    monkeypatch.setattr(sink, "write_facts", _dies_after_the_append(sink.write_facts))
+    monkeypatch.setattr(events, "write_plans", _dies_before_the_plans(events.write_plans))
     with pytest.raises(RuntimeError, match="the job died"):
         cdc.backfill(target, app_id="ahead2-v1", facts_table=facts, chunk_rows=2, max_waves=1)
-    monkeypatch.undo()  # wave 0, chunks 0 and 1, appended without its facts rows
+    monkeypatch.undo()  # wave 0, chunks 0 and 1, appended without its plans and facts rows
     # the rerun reads waves of three: wave 0 again, which Delta skips (its commit holds chunks 0
     # and 1), and meanwhile wave 1 from chunk 3, which it reads again from chunk 2
     wider = stream(spark, {**options, "numPartitions": "3"})

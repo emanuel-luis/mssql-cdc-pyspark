@@ -44,8 +44,9 @@ Run it after the stream, in the same job or another; one job per silver table.
   also deletes the silver keys of its range [lo, hi) it does not hold whose image is older
   than its stamp L: it saw every commit up to L. So the keys deleted in a re-snapshot's
   purged gap go wave by wave. The key columns and the ranges are in bronze's plans table
-  (``<bronze>_snapshot_plans``), or in the facts rows of a snapshot opened before 0.7.0. A datetime2(7) bound with digits below the microsecond Spark
-  keeps leaves the keys of that microsecond alone. Either way, the rebuild comes at
+  (``<bronze>_snapshot_plans``), or in the facts rows of a snapshot opened before 0.7.0. A
+  datetime2(7) bound with digits below the microsecond Spark keeps leaves the keys of that
+  microsecond alone. Either way, the rebuild comes at
   completion, and deletes the keys absent from the snapshot and the changes after it.
 * Verdict: silver's ``finalized_until`` advances to the bronze verdict read before bronze
   itself. Bronze commits its rows before its verdict (ADR 0005), so the rows applied hold
@@ -172,13 +173,11 @@ class _Chunk:
     """The LSN it was read under."""
 
 
-def _chunks(facts: DataFrame, snapshot: str, kept: events.Plans) -> dict[int, _Chunk]:
-    """The chunks of ``snapshot`` its 'snapshot_chunk' facts rows announce, by index, their
-    bounds from ``kept`` (its plans) unless the rows have them. They are written after the
-    chunks' bronze rows and plans."""
-    # ponytail: the row of every chunk on each call, read before bronze is pinned, when the
-    # waves applied are not known yet; the bronze reads skip by wave
-    rows = events.where_chunks(facts, snapshot).select("detail", "min_lsn").collect()
+def _chunks(rows: Sequence[Row], kept: events.Plans) -> dict[int, _Chunk]:
+    """The chunks a snapshot's 'snapshot_chunk' facts ``rows`` announce, by index, their
+    bounds from ``kept`` (its plans) unless the rows have them. The rows are written after
+    the chunks' bronze rows and plans, so ``kept`` is read after them: never pinned, a facts
+    read after it could hold a wave whose plans rows it misses."""
     chunks: dict[int, _Chunk] = {}
     for row in rows:
         d: SnapshotChunkDetail = kept.whole(events.SNAPSHOT_CHUNK, json.loads(row["detail"]))
@@ -409,10 +408,15 @@ def apply_changes(
                 .first()
             )
         if opened and (points[0] is None or opened["max_lsn"] > points[0]):
-            kept = events.plans(spark, bronze, opened["max_lsn"])
+            # ponytail: the row of every chunk on each call, read before bronze is pinned, when
+            # the waves applied are not known yet; the bronze reads skip by wave
+            announced = (
+                events.where_chunks(facts, opened["max_lsn"]).select("detail", "min_lsn").collect()
+            )
+            kept = events.plans(spark, bronze, opened["max_lsn"])  # after the facts rows
             info = kept.whole(events.SNAPSHOT_OPEN, json.loads(opened["detail"] or "{}"))
             cut = info.get("keys")
-            chunks = _chunks(facts, opened["max_lsn"], kept)
+            chunks = _chunks(announced, kept)
     latest_commit = delta_table(spark, bronze).history(1).first()
     assert latest_commit is not None  # an existing table has a version
     version = int(latest_commit["version"])

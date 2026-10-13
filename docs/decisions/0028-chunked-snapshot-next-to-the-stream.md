@@ -8,7 +8,8 @@
 **Amended:** 2026-10-06T21:14:15-03:00, `reconcile` takes a difference the change table explains, after what the stream read, as IN_FLIGHT too, and finds a NULL key's change (see Amendment 2)  
 **Amended:** 2026-10-07T00:06:28-03:00, bronze's position is never a whole snapshot's S, which `snapshot_on_switch` takes above the stream's (see Amendment 2)  
 **Amended:** 2026-10-08T13:47:54-03:00, `backfill()` reads the next wave while the one before commits, and a wave takes as many rounds of `numPartitions` chunks as `target_wave_seconds` holds; the plan's chunks unchanged (see Amendment 3)  
-**Amended:** 2026-10-10T18:02:10-03:00, a chunked snapshot's key values move from the facts to a plans table next to bronze; one opened before 0.7.0 finishes with them in the facts (see Amendment 4)
+**Amended:** 2026-10-10T18:02:10-03:00, a chunked snapshot's key values move from the facts to a plans table next to bronze; one opened before 0.7.0 finishes with them in the facts (see Amendment 4)  
+**Amended:** 2026-10-13T13:33:12-03:00, a wave rerun after its plans rows reads the chunks they hold, and `apply_changes` reads the facts before the plans (see Amendment 4)
 
 ## Context
 A snapshot taken before the stream starts (ADR 0016) has to be read within the CDC
@@ -499,7 +500,11 @@ bronze's policy, one facts table per access domain. 0.7.0 moves the values inste
 * **Plans first.** Each plans row is written before its facts row, idempotent like it: the
   plan's and a wave's chunks with the facts rows' own `txnAppId` and version (another
   table, so the keys do not collide), a wave's from the tag of the commit that holds it, as
-  its facts rows. The open's with `<app_id>#snapopen.<S>`, 0, not the facts row's key per
+  its facts rows. An empty wave has no commit, so a rerun after a crash between its plans
+  rows and its facts rows could plan other chunks (`numPartitions=auto` on other cores, the
+  pace, a keyset plan's last bound sought again) whose plans rows Delta then skips: a wave
+  whose plans rows are in reads exactly their chunks and bounds again, whatever the rerun
+  would plan. The open's with `<app_id>#snapopen.<S>`, 0, not the facts row's key per
   generation: a run that stops between the two opens again at another S, whose facts row
   then needs a plans row of its own. After planning, the plan read back from the table is
   the one recorded, so a concurrent call, or one that stopped before its facts row, leaves
@@ -508,9 +513,11 @@ bronze's policy, one facts table per access domain. 0.7.0 moves the values inste
   and so the fallback that rebuilds a wave's facts from bronze), `apply_changes` (the open's
   key columns, each chunk's range for its deletes) and `reconcile` (each chunk's range for
   its tiling checks) read the snapshot's rows of the plans table and complete each facts
-  row from it (`events.Plans.whole`). A facts row that has its key values, written before
-  0.7.0, is taken as it is. A row with neither fails with a `ValueError` naming the plans
-  table: a range without bounds is never read as the whole table.
+  row from it (`events.Plans.whole`), always after the facts rows they complete: a Delta
+  read is not pinned, so a facts read after the plans read could hold a wave the plans read
+  missed. A facts row that has its key values, written before 0.7.0, is taken as it is. A
+  row with neither fails with a `ValueError` naming the plans table: a range without bounds
+  is never read as the whole table.
 * **A snapshot opened before 0.7.0 finishes as it started.** Its open, and maybe its plan
   and some chunks, hold its key values in the facts already; 0.7.0's `backfill()` writes
   its plan and chunk rows whole too, and nothing to a plans table. Every job sharing those
@@ -535,10 +542,13 @@ bronze's policy, one facts table per access domain. 0.7.0 moves the values inste
 ### Tests
 `tests/test_delta_sink.py`: a chunked bootstrap's open, plan and chunk rows whole in the
 plans table and without key values in the facts; a wave rebuilt from bronze after a crash
-gets its plan's bounds there; a keyset plan's last chunk ends there at the key sought before
-its wave; a snapshot opened in the shape before 0.7.0 is planned and read with its key
-values in the facts and none in the plans table. `tests/test_silver.py`: each wave's range
-deletes from the plans table, and from the facts rows of a snapshot opened before 0.7.0.
+gets its plan's bounds there; an empty wave's rerun after its plans rows, with other
+`numPartitions`, reads the chunks they hold; a keyset plan's last chunk ends there at the
+key sought before its wave; a snapshot opened in the shape before 0.7.0 is planned and read
+with its key values in the facts and none in the plans table. `tests/test_silver.py`: each
+wave's range deletes from the plans table, and from the facts rows of a snapshot opened
+before 0.7.0; a wave recorded between the facts read and the plans read waits for the next
+call.
 `tests/test_reconcile.py`: a chunk's bounds changed in the plans table fail its tiling.
 `tests/test_payloads.py`: a facts row completed from the plans table, and a `ValueError`
 without its row. `tests/compat/test_compat.py`: the snapshot each release left open after
