@@ -1612,6 +1612,111 @@ def test_a_chunked_bootstrap_next_to_a_running_stream_and_a_writer_ends_equal_to
     assert snap.where(f"_snapshot != '{s}' OR _start_lsn < '{s}'").isEmpty()
 
 
+def test_a_chunked_snapshot_after_a_switch_fills_the_new_column_next_to_the_stream(
+    delta_spark, sqlserver, workdir
+):
+    # sql/switch_capture_instance.sql's steps, with snapshot_on_switch in chunked mode: the
+    # rows unchanged since the new instance's start get its column from the chunks
+    from mssql_cdc import apply_changes, stream
+
+    sqlserver.run("CREATE TABLE dbo.sw_chunk (id INT NOT NULL PRIMARY KEY, v VARCHAR(10) NOT NULL)")
+    sqlserver.run(f"INSERT INTO dbo.sw_chunk SELECT n, 'old' FROM {_ROWS} WHERE n <= 40")
+    ci = sqlserver.enable_cdc("sw_chunk")
+    options = {
+        "connectionString": _reader(sqlserver, "sw_chunk", ci),
+        "captureInstance": ci,
+        "numPartitions": "2",
+    }
+    paths = {n: os.path.join(workdir, n) for n in ("bronze", "silver", "facts", "control", "ckpt")}
+    cdc = stream(delta_spark, options)
+
+    def run():
+        cdc.to_delta(
+            paths["bronze"],
+            "sw-chunk",
+            paths["ckpt"],
+            paths["facts"],
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+            snapshot_on_switch=True,
+        ).awaitTermination()
+
+    def backfill():
+        for _ in range(20):
+            status = cdc.backfill(
+                paths["bronze"],
+                app_id="sw-chunk",
+                facts_table=paths["facts"],
+                chunk_rows=10,
+                target_wave_seconds=0,
+            )
+            if status["done"]:
+                return
+        raise AssertionError(status)
+
+    def apply():
+        return apply_changes(
+            delta_spark,
+            paths["bronze"],
+            paths["silver"],
+            keys=["id"],
+            control_table=paths["control"],
+            facts_table=paths["facts"],
+            options=options,  # names the table's other capture instance
+        )
+
+    def facts(event):
+        found = delta_spark.read.format("delta").load(paths["facts"]).where(f"event = '{event}'")
+        return sorted(found.collect(), key=lambda r: r["min_lsn"])
+
+    run()  # the chunked bootstrap
+    backfill()
+    apply()
+    sqlserver.run("ALTER TABLE dbo.sw_chunk ADD note VARCHAR(20) NULL")
+    sqlserver.run("UPDATE dbo.sw_chunk SET note = 'before v2' WHERE id = 1")  # no change row
+    sqlserver.run("UPDATE dbo.sw_chunk SET v = 'new' WHERE id = 2")
+    sqlserver.wait_for_changes(ci, 2)
+    run()
+    v2 = sqlserver.enable_cdc("sw_chunk", "dbo_sw_chunk_v2")  # steps 1 and 2
+    sqlserver.run(f"GRANT SELECT ON cdc.[{v2}_CT] TO sw_chunk_reader")
+    sqlserver.run("UPDATE dbo.sw_chunk SET note = 'after v2' WHERE id = 3")
+    sqlserver.run("DELETE FROM dbo.sw_chunk WHERE id = 4")
+    sqlserver.wait_for_changes(v2, 3)  # step 3
+    run()  # the batch that crosses v2's start opens the snapshot there: nothing read
+    [switched] = facts("capture_instance_switched")
+    _, opened = facts("snapshot_open")
+    assert switched["detail"] == f"{ci} -> {v2}"
+    assert opened["min_lsn"] == switched["min_lsn"] == sqlserver.start_lsn(v2)
+    assert json.loads(opened["detail"])["switch_batch_id"] == switched["batch_id"]
+    assert not apply()["rebuilt"]
+
+    source = _source(sqlserver, "sw_chunk", "v, note")
+    assert (1, "old", "before v2") in source
+    backfill()
+    assert apply()["rebuilt"]
+    assert _image(delta_spark, paths["silver"], "id", "v", "note") == set(source)
+    assert [r["max_lsn"] for r in facts("bootstrap")] == [
+        r["min_lsn"] for r in facts("snapshot_open")
+    ]
+
+    sqlserver.run("UPDATE dbo.sw_chunk SET note = 'later' WHERE id = 5")
+    sqlserver.wait_for_changes(v2, 5)
+    run()  # step 4: a batch after the switch's, then step 5
+    sqlserver.run(
+        "EXEC sys.sp_cdc_disable_table @source_schema = N'dbo', @source_name = N'sw_chunk', "
+        "@capture_instance = ?",
+        (ci,),
+    )
+    sqlserver.run("INSERT INTO dbo.sw_chunk (id, v, note) VALUES (100, 'new', 'v2 only')")
+    sqlserver.wait_for_changes(v2, 6)
+    run()
+    assert not apply()["rebuilt"]
+    image = _image(delta_spark, paths["silver"], "id", "v", "note")
+    assert image == set(_source(sqlserver, "sw_chunk", "v, note"))
+    assert len(facts("snapshot_open")) == 2
+
+
 # 'n' and 'N' are one leading value under the database's case-insensitive collation and two
 # in Python, and 'ş' sorts after both: bounds inside one leading value and across them
 _COMP = f"SELECT IIF(n % 3 = 0, N'n', IIF(n % 3 = 1, N'N', N'ş')), n, 'old' FROM {_ROWS}"
