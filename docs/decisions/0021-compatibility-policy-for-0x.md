@@ -11,7 +11,8 @@
 **Amended:** 2026-10-07T01:41:18-03:00, a micro-batch row's `detail` is a payload too, with the added key `warnings` (amendment 6, ADR 0023 Amendment 6)  
 **Amended:** 2026-10-07T09:14:31-03:00, the payloads and the source options get types, and a 'data_skipped' row's `detail` joins the listed payloads (amendment 7)  
 **Amended:** 2026-10-09T11:39:56-03:00, a wave's measured values in its userMetadata may be null where the platform refuses caching (amendment 8, ADR 0032)  
-**Amended:** 2026-10-10T18:02:10-03:00, a chunked snapshot's facts rows leave its key values to a plans table next to bronze: keys removed from the rows 0.7.0 writes only, readers take them from either (amendment 9, ADR 0028 Amendment 4)
+**Amended:** 2026-10-10T18:02:10-03:00, a chunked snapshot's facts rows leave its key values to a plans table next to bronze: keys removed from the rows 0.7.0 writes only, readers take them from either (amendment 9, ADR 0028 Amendment 4)  
+**Amended:** 2026-10-13T18:45:19-03:00, a chunked snapshot opened after a capture instance switch adds `switch_batch_id` to its 'snapshot_open' payload, and its rows take keys by its S (amendment 10, ADR 0023 Amendment 7)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -42,7 +43,8 @@ The Python API, on the other hand, is young and will change.
     `'schema_change'`, `'capture_instance_switched'`, `'data_skipped'`) and the keys of the JSON a later
     release reads back (amendment 4):
     - `detail` of `'snapshot_open'`: `mode`, `kind`, `generation`, `lost_from_ts`,
-      `lost_to_ts`, and on a chunked one `keys` and `plan`;
+      `lost_to_ts`, and on a chunked one `keys` and `plan`, and from 0.8.0 on one opened
+      after a capture instance switch `switch_batch_id` (amendment 10);
     - `detail` of `'snapshot_plan'`: `snapshot`, `kind`, `keys`, `chunk_rows`, `chunks`, and
       from 0.7.0 `chunk_count`;
     - `detail` of `'snapshot_chunk'`: `snapshot`, `chunk`, `wave`, `lo`, `hi`, `last`;
@@ -238,3 +240,24 @@ Amendment 4). Not additive, so recorded here:
   `KeyError`. Upgrade the jobs that run those with the stream; none of them writes a wrong
   row. No migration sets `mssql_cdc.min_version` for it: the facts table's schema is
   unchanged, and the stream of an older release keeps writing it.
+
+## Amendment 10: a snapshot after a switch
+0.8.0 lets `to_delta(snapshot="chunked", snapshot_on_switch=True)` open a chunked snapshot
+after the batch that first reads a newer capture instance
+([ADR 0023](0023-schema-changes-and-capture-instance-switching.md) Amendment 7). Additive:
+
+* Its 'snapshot_open' payload adds `switch_batch_id`, the `batch_id` of the switch's
+  'capture_instance_switched' row (`SnapshotOpenDetail.switch_batch_id`, optional); `kind` is
+  `'bootstrap'`, an existing value, and its completion a `'bootstrap'` row, so a consumer
+  that filters `event IN ('bootstrap', 'resnapshot')` sees it, and so does an older
+  release's `apply_changes`.
+* Its 'snapshot_open' and completion rows take Delta keys by its S (`<app_id>#snapopen.<S>`
+  and `<app_id>#snapdone.<S>`, version 0), as the generation's own may be taken by its
+  bootstrap or re-snapshot. A reader that finds no `switch_batch_id` (every snapshot opened
+  before 0.8.0) keeps the generation's keys.
+* Facts migration 14 and plans migration 1 change comments only; no `mssql_cdc.min_version`.
+* The other way round: a release before 0.8.0 whose `backfill()` finishes a snapshot 0.8.0
+  opened after a switch writes its completion under the generation's key, which Delta skips
+  when the generation's own snapshot took it: the snapshot then never completes, silver
+  keeps its verdict held and a full run raises (one mode while it is open). Run `backfill()`
+  with 0.8.0, which writes the row; nothing wrong is written meanwhile.

@@ -36,7 +36,7 @@ Run it after the stream, in the same job or another; one job per silver table.
 * Chunked snapshots (``_chunk`` set) arrive in waves after their 'snapshot_open' facts row,
   stamped at or above S, and are complete at their completion row: ``facts_table`` is
   required. While one is open (a 'snapshot_open' newer than every complete snapshot), a
-  bootstrap or a re-snapshot, each call applies the waves its 'snapshot_chunk' rows announce,
+  bootstrap, a re-snapshot or one after a capture instance switch, each call applies the waves its 'snapshot_chunk' rows announce,
   tracked by ``open_snapshot_lsn`` and ``snapshot_wave`` (the chunks land below
   ``applied_lsn``), with every change after S of their keys: a chunk row never brings back a
   key deleted since. A call reads those waves' rows alone, not the earlier waves' files.

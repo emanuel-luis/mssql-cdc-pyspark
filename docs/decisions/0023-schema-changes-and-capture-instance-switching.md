@@ -7,7 +7,8 @@
 **Amended:** 2026-10-01T15:55:00-03:00, type widening on silver is a manual `ALTER COLUMN ... TYPE`: `apply_changes` merges without schema evolution  
 **Amended:** 2026-10-01T17:25:27-03:00, lab check t9 runs the switch under a continuous writer on SQL Server 2022 and 2017; the production SQL Server 2016 SP3 change tables have `__$command_id`  
 **Amended:** 2026-10-01T18:15:53-03:00, the switch tests run with the `arrow-odbc` backend too (ADR 0003 Amendment 2)  
-**Amended:** 2026-10-07T01:41:18-03:00, the reader's other warnings (columns not read, unknown options, a fixed UTC offset) reach the batch's facts row as `detail` `{"warnings": [...]}` (Amendment 6)
+**Amended:** 2026-10-07T01:41:18-03:00, the reader's other warnings (columns not read, unknown options, a fixed UTC offset) reach the batch's facts row as `detail` `{"warnings": [...]}` (Amendment 6)  
+**Amended:** 2026-10-13T18:45:19-03:00, `snapshot_on_switch` in chunked mode: the switch batch opens a chunked snapshot at the newer instance's start LSN, which `backfill()` reads next to the stream (Amendment 7)
 
 ## Context
 A capture instance captures a fixed column list, chosen when it is enabled. To capture a
@@ -318,3 +319,52 @@ it converts commit times with on a server older than SQL Server 2022
   its task's metrics file) and `tests/test_delta_sink.py` (a misspelt option and a column a
   newer instance captures reach the batch's row once across a replay; a restart's warnings
   reach the next batch's row when its first batch replays one already in the facts).
+
+## Amendment 7: the snapshot after a switch, chunked
+D5's snapshot reads the whole table inside the batch that read the switch, and the stream
+waits for it, so `to_delta` refused `snapshot_on_switch=True` with `snapshot="chunked"`: the
+tables too big to snapshot, the ones that take chunked snapshots, kept NULL in the new column
+until each row changed. Now, with `snapshot="chunked"`, that batch only opens a chunked
+snapshot ([ADR 0028](0028-chunked-snapshot-next-to-the-stream.md)) and `backfill()` reads it
+next to the stream, as a chunked bootstrap; with `"full"` nothing changes.
+
+* Its S is the newer instance's start LSN, the switch event's `min_lsn`, not `max_lsn` after
+  the batch as the full snapshot takes. The batch read past it, and its changes are in bronze
+  before the snapshot opens, so the stream has every change after S, as a generation has
+  after its chunked snapshot's S. Silver's rebuild (the rows of S and the changes after S)
+  and `reconcile`'s position (a chunked snapshot's S, which the stream has read up to: ADR
+  0028 Amendment 2) hold as they are. Every chunk is stamped with `max_lsn` before its wave,
+  after the batch's end and so after S; S is recorded before any row is read, but is not
+  `max_lsn` (invariant 12). S lies after the batch's start, which is at or after the S of
+  any chunked snapshot of the generation: it is the newest, and supersedes one still open,
+  as a newer open does (`backfill()`, silver and `reconcile` take the newest); that one's
+  chunks are read again, now with the new column.
+* Its 'snapshot_open' row has `kind` `'bootstrap'` (no change was lost: a `'resnapshot'` row
+  is what monitoring alerts on), the running generation, and a new key `switch_batch_id`,
+  the `batch_id` of the switch's 'capture_instance_switched' row. The generation's own Delta
+  keys may be taken by its bootstrap or re-snapshot, so the open is keyed by S,
+  `<app_id>#snapopen.<S>`, 0, as its plans table row, and `backfill()` writes the completion,
+  a `'bootstrap'` row, as `<app_id>#snapdone.<S>`, 0 when the open has `switch_batch_id`. A
+  replay of the switch batch opens it at the same S: Delta skips both rows, and it is read
+  back.
+* One mode per run: a chunked run with `snapshot_on_switch` checks the lock at its start
+  (ADR 0028), and the open snapshot holds the mode for the runs and `backfill()` calls after
+  it.
+* State: facts migration 14 and plans migration 1, comments only (`event` and `detail`), and
+  the added key ([ADR 0021](0021-compatibility-policy-for-0x.md) amendment 10).
+* Considered: S at `max_lsn` after the batch, as the full snapshot: above the stream's
+  position, so `reconcile` would need the facts to tell a switch's S from a generation's, and
+  a commit in between would be in neither bronze nor its read of the change table. A new
+  `kind` or event (`'switch'`): every consumer that filters `event IN ('bootstrap',
+  'resnapshot')`, and an older release's silver, would miss its completion. Keeping the open
+  chunked snapshot and reading only the rest: its chunks read before the switch lack the new
+  column.
+* Tests: `tests/test_silver.py` (a chunked snapshot opened after a switch, read by
+  `backfill()` in two calls with a delete and an update between them: silver equal to the
+  source with the new column; its completion next to the bootstrap's in one generation; the
+  open read back when the switch batch replays; a full run refused while it is open; a rerun
+  opens nothing), `tests/test_migrations.py`
+  (plans migration 1) and `tests/integration` (against SQL Server 2022, the
+  `sql/switch_capture_instance.sql` steps with a chunked bootstrap: the snapshot opened at the
+  new instance's start LSN, silver equal to the table with the new column after `backfill()`,
+  and again after the old instance is disabled).

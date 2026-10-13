@@ -10,7 +10,8 @@
 **Amended:** 2026-10-08T13:47:54-03:00, `backfill()` reads the next wave while the one before commits, and a wave takes as many rounds of `numPartitions` chunks as `target_wave_seconds` holds; the plan's chunks unchanged (see Amendment 3)  
 **Amended:** 2026-10-10T18:02:10-03:00, a chunked snapshot's key values move from the facts to a plans table next to bronze; one opened before 0.7.0 finishes with them in the facts (see Amendment 4)  
 **Amended:** 2026-10-13T13:33:12-03:00, a wave rerun after its plans rows reads the chunks they hold, and `apply_changes` reads the facts before the plans (see Amendment 4)  
-**Amended:** 2026-10-13T18:52:13-03:00, chunks cut on the columns `snapshotKeys` names, unique or not, so a table without a unique index is read in more than one chunk (see Amendment 5)
+**Amended:** 2026-10-13T18:45:19-03:00, `snapshot_on_switch` opens one in chunked mode after a capture instance switch, keyed by its S (see Amendment 5)  
+**Amended:** 2026-10-13T18:52:13-03:00, chunks cut on the columns `snapshotKeys` names, unique or not, so a table without a unique index is read in more than one chunk (see Amendment 6)
 
 ## Context
 A snapshot taken before the stream starts (ADR 0016) has to be read within the CDC
@@ -555,7 +556,20 @@ call.
 without its row. `tests/compat/test_compat.py`: the snapshot each release left open after
 one wave finishes with its key values in the facts and no plans table.
 
-## Amendment 5: chunks cut on a column that is not unique
+## Amendment 5: a third way to open one, after a capture instance switch
+`to_delta(snapshot="chunked", snapshot_on_switch=True)` opens a chunked snapshot in the
+running generation after the batch that first reads a newer capture instance, at that
+instance's start LSN, which the stream has read past
+([ADR 0023](0023-schema-changes-and-capture-instance-switching.md) Amendment 7). For this
+ADR it is one more open: the newest, so it supersedes one still open; read by `backfill()`
+and applied by silver like the others; completed by a `'bootstrap'` row; holding the mode.
+What differs is its Delta keys: by S (`<app_id>#snapopen.<S>`, `<app_id>#snapdone.<S>`),
+since the generation's keys may be taken by the generation's own snapshot, and its open's
+`switch_batch_id` tells `backfill()` which key its completion takes. Its S is no `max_lsn`
+after the batch, so Amendment 2's position (a chunked snapshot's S, which the stream has
+read up to) still holds; the whole snapshot of `snapshot="full"` stays above it, as before.
+
+## Amendment 6: chunks cut on a column that is not unique
 A capture instance of a table without a primary key or unique index has no
 `index_column_list`, so `snapshot_plan` found no key and the snapshot was one chunk: the
 whole table in one read and one wave, what the chunked mode exists to avoid. Such tables
@@ -568,7 +582,8 @@ are often the large ones (logs, staging heaps).
   them as its `snapshotKeys`) and each `last_bound` search take the open's `keys`, so a
   plan never moves to other columns; a `backfill()` whose stream would cut on others (the
   option changed or dropped, or the unique index changed, the check it replaces) raises.
-  A full snapshot reads the option as it did, for its `numPartitions` ranges.
+  A full snapshot reads the option as it did, for its `numPartitions` ranges. The one
+  `snapshot_on_switch` opens (Amendment 5) takes the option as any other open does.
 * **Checked at the open.** A column CDC does not capture, of a type no bound can be bound
   as (`key_types` gives None: `time`, a 100 ns type ahead of the last column) or one SQL
   Server cannot sort (`bit`, which has no MIN or MAX, `text`, `ntext`, `image`, `xml`)

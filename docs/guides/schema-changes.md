@@ -149,10 +149,38 @@ query = stream(spark, options).to_delta(
 ```
 
 After the batch that first reads the new instance, the sink appends a snapshot of the table,
-so every row's latest image carries the new column. It reads the whole table: not for
-[tables too big to snapshot](bootstrap.md). With a URI checkpoint it needs `metricsPath`, and
-`to_delta` raises a `ValueError` without it. A crash right after the switch batch takes the
-snapshot again on the replay: harmless, only slower.
+so every row's latest image carries the new column. It reads the whole table inside that
+batch. With a URI checkpoint it needs `metricsPath`, and `to_delta` raises a `ValueError`
+without it. A crash right after the switch batch takes the snapshot again on the replay:
+harmless, only slower.
+
+For [a table too big to snapshot](bootstrap.md#tables-too-big-to-snapshot), add
+`snapshot="chunked"` (with its `facts_table`): the batch then only opens a chunked snapshot
+at the new instance's start LSN, which the stream has already read past, and
+[backfill()](bootstrap.md#chunked-snapshots), run in a task of its own, reads it next to the
+stream as it reads a chunked bootstrap:
+
+```python
+query = stream(spark, options).to_delta(
+    "bronze.orders",
+    app_id="orders-v1",
+    checkpoint="/Volumes/cat/sch/vol/ckpt/orders",
+    facts_table="ops.ingestion_facts",
+    snapshot="chunked",
+    snapshot_on_switch=True,
+)
+# in another task, until done
+stream(spark, options).backfill(
+    "bronze.orders", app_id="orders-v1", facts_table="ops.ingestion_facts"
+)
+```
+
+Its `snapshot_open` facts row has `switch_batch_id`, the `batch_id` of the switch's
+`capture_instance_switched` row, and its last chunk writes a `bootstrap` row: no change was
+lost, and [silver](silver.md) rebuilds from it then, applying its waves before. A chunked
+snapshot of the stream still open is superseded by it (its chunks so far are read again, now
+with the new column), and a run with `snapshot="full"` raises until it completes. A replay
+of the switch batch finds the snapshot it opened.
 
 ### A column name that needs column mapping
 

@@ -186,7 +186,9 @@ notes/             Local only, gitignored: research notes in Portuguese (context
     grant. The library never creates or drops capture instances.
 12. **Snapshot LSN first.** A snapshot's LSN S is the `max_lsn` recorded *before* any of its
     rows is read, and a rerun returns the S of the snapshot already written (or, chunked,
-    opened), never a newer one (ADR 0016). A chunked snapshot's rows are stamped per wave with
+    opened), never a newer one (ADR 0016). The one exception, a chunked snapshot
+    `snapshot_on_switch` opens: S is the newer capture instance's start LSN, which the stream
+    has read past (ADR 0023 Amendment 7). A chunked snapshot's rows are stamped per wave with
     a `max_lsn` recorded before that wave's read: a lower bound of what the row reflects,
     always >= S (ADR 0028). Snapshot rows are `_operation = 0` with `_snapshot` = S; a
     snapshot is identified by `coalesce(_snapshot, _start_lsn)` and its completion event,

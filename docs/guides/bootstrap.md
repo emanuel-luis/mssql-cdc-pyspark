@@ -288,9 +288,12 @@ one `snapshot` mode. The next run may use the other mode, but not while a snapsh
 other mode is still open. Both modes write a `snapshot_open` facts row before they read the
 table (a chunked one once per generation, a full one at each run), and the snapshot's
 `bootstrap` or `resnapshot` row closes it. With a facts table, `to_delta` (with
-`bootstrap=True` or `on_data_loss="resnapshot"`), `snapshot(app_id=..., facts_table=...)`
-and `backfill()` raise `ValueError` when the stream has an open snapshot of the other mode,
-and `seed(app_id=..., facts_table=...)` when it has one of either mode.
+`bootstrap=True`, `on_data_loss="resnapshot"`, or `snapshot_on_switch=True` and
+`snapshot="chunked"`), `snapshot(app_id=..., facts_table=...)` and `backfill()` raise
+`ValueError` when the stream has an open snapshot of the other mode, and
+`seed(app_id=..., facts_table=...)` when it has one of either mode. A chunked snapshot that
+`snapshot_on_switch` opens after a switch to a newer capture instance holds the mode too
+([Schema changes](schema-changes.md#rows-unchanged-since-the-switch)).
 
 A full snapshot is open only while a run may still be reading it. Once CDC cleanup has
 passed its LSN it can never complete, so it no longer holds the mode, and a chunked run takes

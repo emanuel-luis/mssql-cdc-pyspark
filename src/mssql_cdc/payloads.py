@@ -25,7 +25,8 @@ from typing import Any, Literal, TypedDict
 from .types import SnapshotMode
 
 SnapshotKind = Literal["bootstrap", "resnapshot"]
-"""Why a snapshot is taken: the first one of the target, or one after CDC data loss."""
+"""Why a snapshot is taken: ``bootstrap`` the first one of the target (and a chunked one after
+a capture instance switch, ``switch_batch_id``), ``resnapshot`` one after CDC data loss."""
 
 
 class IntExtent(TypedDict):

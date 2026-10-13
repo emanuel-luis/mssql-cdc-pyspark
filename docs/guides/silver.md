@@ -111,8 +111,9 @@ WHERE table_name IN ('bronze.orders', 'silver.orders');
 A [chunked snapshot](bootstrap.md#chunked-snapshots) arrives in waves over days, so pass
 `facts_table`: a call that finds chunk rows without it raises `ValueError`.
 
-- While a chunked snapshot is open, a bootstrap or a re-snapshot, each call applies the
-  waves that arrived since the last one, tracked by `open_snapshot_lsn` and `snapshot_wave`
+- While a chunked snapshot is open, a bootstrap, a re-snapshot or one after a capture
+  instance switch ([`snapshot_on_switch`](schema-changes.md#rows-unchanged-since-the-switch)),
+  each call applies the waves that arrived since the last one, tracked by `open_snapshot_lsn` and `snapshot_wave`
   in the control table. A chunk row is ranked with every later change of its key in bronze,
   so it never brings back a key the stream deleted after the chunk's stamp. A call reads
   those waves' rows alone: Delta skips the earlier waves' files by their stamps.
