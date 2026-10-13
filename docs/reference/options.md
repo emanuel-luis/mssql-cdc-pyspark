@@ -64,7 +64,7 @@ dict at run time, and every function that takes options takes any mapping too.
 | [metricsPath](#metricspath) | none (see below) | stream |
 | [snapshotLsn](#snapshotlsn) | `max_lsn` before the read | snapshot |
 | [snapshotChunks](#snapshotchunks) | none: the whole table | snapshot |
-| [snapshotKeys](#snapshotkeys) | the unique index's columns | snapshot |
+| [snapshotKeys](#snapshotkeys) | the unique index's columns | snapshot, `to_delta` |
 | [isolationLevel](#isolationlevel) | `readCommitted` | snapshot |
 
 "Snapshot" is `spark.read.format("mssql_cdc_snapshot")`, which `snapshot()`,
@@ -434,11 +434,26 @@ whose key cannot be read in ranges (no unique index, a type no bound can be boun
 
 ### snapshotKeys
 
-For `mssql_cdc_snapshot` only: the columns that key bounds ([snapshotChunks](#snapshotchunks),
-and the ranges of [numPartitions](#numpartitions)) apply to, as a JSON list such as
-`["id"]`. By default, the capture instance's unique index. `reconcile()` sets it to the key
-it compares, which can be another column, or the only key of a table without a unique index;
-on a column no index leads, each range scans the table.
+The columns a snapshot cuts its ranges on, as a JSON list such as `["created_at"]`, instead
+of the capture instance's unique index; anything but a non-empty list of names is a
+`ValueError`. They need not be unique. A table without a unique index is otherwise read as
+one range, and one chunk.
+
+* `mssql_cdc_snapshot`: key bounds ([snapshotChunks](#snapshotchunks), and the ranges of
+  [numPartitions](#numpartitions)) apply to these columns. `reconcile()` sets it to the key
+  it compares, and `backfill()` to the chunked snapshot's columns.
+* `to_delta(..., snapshot="chunked")`: the snapshot it opens cuts its chunks on these
+  columns, recorded with it in the snapshot plans table, so its plan never changes. They
+  must be captured columns of a type a bound can be bound as (not `time`, nor a
+  `datetime2(7)` or `datetimeoffset(7)` before the last one) and SQL Server can sort (not
+  `bit`, `text`, `ntext`, `image` or `xml`), or the open raises `ValueError`. Each chunk is
+  a range `[lo, hi)` of their values, NULL first, so a row is in one chunk only, and a
+  value is never split: one more rows hold than `chunk_rows` makes a bigger chunk. Keep the
+  option while the snapshot is open: `backfill()` raises when the stream's options would
+  cut on other columns ([Tables without a unique index](../guides/bootstrap.md#tables-without-a-unique-index)).
+
+On a column no index leads, each range, and each bound the chunked plan seeks, scans the
+table.
 
 ### isolationLevel
 
@@ -621,7 +636,10 @@ Call it again until `done`.
   `chunk_rows` keys. The last chunk ends just above the MAX recorded at the open (for other
   keys at the first key after it, looked for again before each wave while there is none):
   rows inserted above it come from the stream
-  ([How chunks are sized](../guides/bootstrap.md#how-chunks-are-sized)).
+  ([How chunks are sized](../guides/bootstrap.md#how-chunks-are-sized)). The chunks are cut
+  on the columns the snapshot opened with, the unique index's or
+  [snapshotKeys](#snapshotkeys): a stream whose options would cut on others raises
+  `ValueError`.
 * `max_waves`, `max_seconds`: stop after that many waves, or before a wave once that many
   seconds have passed. `None`: until the snapshot is done.
 * `target_wave_seconds`: how long a wave should take (at least 0; `None` is 300). A wave

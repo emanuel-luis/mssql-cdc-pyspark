@@ -74,7 +74,8 @@ The read is split across `numPartitions` connections:
   skewed keys give uneven ranges);
 - a composite or non-integer key: ranges of about the same number of rows (the table's row
   count from `sys.sp_spaceused`), each bound a seek of its range's keys from the one before;
-- no unique index, or a key the stream cannot split on: one partition.
+- no unique index, or a key the stream cannot split on: one partition, unless
+  [snapshotKeys](../reference/options.md#snapshotkeys) names columns to cut the ranges on.
 
 The snapshot needs no permission beyond the stream's ([Permissions](permissions.md)).
 
@@ -248,6 +249,37 @@ Planning reads the whole key once before the first wave, under READ COMMITTED: o
 billions of rows that is a full scan of the narrowest index on the key, at the start of the
 first call. It needs only the stream's grants ([Permissions](permissions.md)), and reads no
 row over the network but the counts and the bounds.
+
+### Tables without a unique index
+
+CDC tracks a table without a primary key or unique index, a heap of log rows say, but
+identifies none of its rows, so its chunks have no key to be cut on: by default its chunked
+snapshot is one chunk, the whole table. Name the columns to cut on instead in the stream's
+[snapshotKeys](../reference/options.md#snapshotkeys) option, a creation date or an id that
+does not change:
+
+```python
+options = {**options, "snapshotKeys": '["created_at"]'}
+orders = stream(spark, options)  # for to_delta and for backfill() alike
+```
+
+The open records the columns with the snapshot, and its plan stays on them; `backfill()`
+raises if the stream's options would cut on others. The columns are planned as a key is:
+one integer column from row counts per slice, anything else from seeks.
+
+- Each chunk is a range `[lo, hi)` of the columns' values, as SQL Server compares them
+  (a case-insensitive collation's `'a'` and `'A'` are one value), with the NULLs in the
+  first chunk. A row is in one chunk only, and a value is never split: one held by more
+  rows than `chunk_rows` makes a bigger chunk, of fewer than twice its rows. An integer
+  column's plan counts no NULLs, so they all join its first chunk, however many they are.
+- A row that moves to another value while the snapshot is read can be read by two chunks,
+  or by none. Its change rows after S are in bronze, but a table without a key cannot tell
+  which row they change: cut on a column the writers never update.
+- On a column no index leads, each bound the plan seeks and each chunk read scans the
+  table: give the column an index, or take a full snapshot.
+- The snapshot fills bronze only. [`apply_changes`](silver.md) needs a key to MERGE by and
+  refuses a capture instance without a unique index unless given `keys`, columns that
+  identify a row; with no such columns, read bronze as the change log it is.
 
 ### One mode per run
 

@@ -57,7 +57,10 @@ apply_changes(
 )
 ```
 
-A capture instance without a unique index fails with `ValueError` and asks for `keys`. A
+A capture instance without a unique index fails with `ValueError` and asks for `keys`, which
+must identify a row: a chunked snapshot of such a table, cut on
+[snapshotKeys](../reference/options.md#snapshotkeys), fills bronze only
+([Tables without a unique index](bootstrap.md#tables-without-a-unique-index)). A
 `capture_instance` passed too wins over the options' `captureInstance`.
 
 ## How it behaves
@@ -133,7 +136,8 @@ by bronze's name (a snapshot opened before 0.7.0 has them in its facts rows); a 
 range is in neither fails the call rather than delete by a range it cannot bound.
 
 - Which keys: silver's key must be the snapshot's own (the key its chunks are cut on, the
-  table's unique index) and a single column of an integer type, `date`, or a timestamp
+  table's unique index or [snapshotKeys](../reference/options.md#snapshotkeys)) and a
+  single column of an integer type, `date`, or a timestamp
   (`datetime2`, `datetime`, `smalldatetime`), which Spark orders as SQL Server does. A
   string key (SQL Server orders it by its collation, Spark by bytes), a composite key or
   another type gets no range deletes: its stale keys go at the completion's rebuild.

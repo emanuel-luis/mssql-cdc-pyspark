@@ -9,7 +9,8 @@
 **Amended:** 2026-10-07T00:06:28-03:00, bronze's position is never a whole snapshot's S, which `snapshot_on_switch` takes above the stream's (see Amendment 2)  
 **Amended:** 2026-10-08T13:47:54-03:00, `backfill()` reads the next wave while the one before commits, and a wave takes as many rounds of `numPartitions` chunks as `target_wave_seconds` holds; the plan's chunks unchanged (see Amendment 3)  
 **Amended:** 2026-10-10T18:02:10-03:00, a chunked snapshot's key values move from the facts to a plans table next to bronze; one opened before 0.7.0 finishes with them in the facts (see Amendment 4)  
-**Amended:** 2026-10-13T13:33:12-03:00, a wave rerun after its plans rows reads the chunks they hold, and `apply_changes` reads the facts before the plans (see Amendment 4)
+**Amended:** 2026-10-13T13:33:12-03:00, a wave rerun after its plans rows reads the chunks they hold, and `apply_changes` reads the facts before the plans (see Amendment 4)  
+**Amended:** 2026-10-13T18:52:13-03:00, chunks cut on the columns `snapshotKeys` names, unique or not, so a table without a unique index is read in more than one chunk (see Amendment 5)
 
 ## Context
 A snapshot taken before the stream starts (ADR 0016) has to be read within the CDC
@@ -553,3 +554,70 @@ call.
 `tests/test_payloads.py`: a facts row completed from the plans table, and a `ValueError`
 without its row. `tests/compat/test_compat.py`: the snapshot each release left open after
 one wave finishes with its key values in the facts and no plans table.
+
+## Amendment 5: chunks cut on a column that is not unique
+A capture instance of a table without a primary key or unique index has no
+`index_column_list`, so `snapshot_plan` found no key and the snapshot was one chunk: the
+whole table in one read and one wave, what the chunked mode exists to avoid. Such tables
+are often the large ones (logs, staging heaps).
+
+* **The `snapshotKeys` option names the columns.** It already cut the snapshot reader's
+  ranges on other columns for `reconcile`; `to_delta(..., snapshot="chunked")` now opens the
+  snapshot on them too, unique or not, and records them as the open's `keys` in the plans
+  table, the columns its chunks are cut on, as before. The plan, the waves (the reader gets
+  them as its `snapshotKeys`) and each `last_bound` search take the open's `keys`, so a
+  plan never moves to other columns; a `backfill()` whose stream would cut on others (the
+  option changed or dropped, or the unique index changed, the check it replaces) raises.
+  A full snapshot reads the option as it did, for its `numPartitions` ranges.
+* **Checked at the open.** A column CDC does not capture, of a type no bound can be bound
+  as (`key_types` gives None: `time`, a 100 ns type ahead of the last column) or one SQL
+  Server cannot sort (`bit`, which has no MIN or MAX, `text`, `ntext`, `image`, `xml`)
+  raises `ValueError` before anything is recorded, instead of a one-chunk plan. The unique
+  index's own columns are not checked, as before.
+* **Ranges of values, never a value split.** Bounds are values and each chunk the range
+  `[lo, hi)` of `_key_select`, so a row is in exactly one chunk whatever repeats, and every
+  row of a value in the same one; NULL sorts first, into the first chunk (an integer
+  column's plan counts no NULL, so they all join it). One integer column is planned from
+  per-slice counts as an integer key is: a slice of one value is never counted again, so a
+  value held by more than `chunk_rows` rows is a chunk of its own. Other columns walk
+  `key_bound` seeks, and there the (n + 1)-th row from `lo` can hold `lo`'s value, which
+  would end the chunk where it starts and the walk would never move: equal in Python, or
+  equal only on SQL Server (a case-insensitive collation's `'n'` and `'N'`, trailing
+  spaces). When the columns are not the unique index's, each bound is therefore checked by
+  one more `key_bound` seek, of the first row in `[lo, bound)`; when there is none, the
+  seek is repeated twice as far until there is. The chunk then starts on a value held by
+  more than `chunk_rows` rows and holds fewer than twice its rows. `last_bound` checks the
+  first key after MAX the same way, past MAX's own copies. Plans on the unique index make
+  the same reads as before.
+* **Bronze only.** Without a key, silver cannot MERGE: `apply_changes` refuses a capture
+  instance without a unique index unless given `keys` that identify a row, as before, and
+  its range deletes still need silver's key to be the open's `keys`. A row whose cut column
+  changes while the snapshot is read can be read by two chunks or by none; its change rows
+  after S are in bronze, but nothing ties them to a row, so the documentation asks for a
+  column the writers do not update.
+* Cost: on a column no index leads, each seek and each chunk read scans the table, which a
+  unique index never made the plan do. Documented rather than replaced by one NTILE pass:
+  the chunk reads scan anyway, and an index is the fix for both.
+* State: no new key; `keys` keeps its meaning, the columns the chunks are cut on. A release
+  before 0.8.0 resuming such a snapshot finds `keys` unlike its unique index and raises in
+  `backfill()`; its `apply_changes` applies the waves by key alone unless its keys are the
+  open's.
+* Considered: a `backfill(chunk_key=...)` argument. The extent (MIN, MAX) is read at the
+  open, right after S, so the columns must be known there; and a fan-out (ADR 0027) gives
+  each table its own options, where one argument would cut every table on one column.
+* Considered: a new client method that seeks the first key above `lo`. Exact, one seek, but a
+  new member of the `CdcClient` protocol (ADR 0030) that a client of a user's own would lack;
+  the doubling uses the seeks clients already make.
+
+### Tests
+`tests/test_properties.py`: plans on a column that repeats, NULL now and then, compared as a
+case-insensitive collation does, every row up to MAX in one chunk, a value in one only, and
+none empty. `tests/test_client_sql.py`: the open refusing each type no chunk can be cut on
+before any read. `tests/test_reader_units.py`: `snapshotKeys` refused unless a list of names.
+`tests/test_delta_sink.py`: a table without a unique index chunked on a repeated string
+column, NULLs in the first chunk, rows inserted and deleted between waves, and a `backfill()`
+without the option refused. `tests/integration`: a heap on SQL Server 2022 chunked on a
+`varchar` column (case-mixed under a case-insensitive collation) and on an `int` column,
+both repeated and NULL now and then, under a writer inserting, updating and deleting: every
+row there all along read once, none twice, each value in one chunk, and the stream holding
+every insert.
