@@ -94,7 +94,8 @@ server must be reachable from every worker. The login needs the grants in
 - Give the login in options of its own rather than as `UID` and `PWD` here: [user](#user)
   and [password](#password), or an Entra ID access token ([accessToken](#accesstoken),
   [tokenProvider](#tokenprovider)). The driver escapes them, and Spark redacts `password`
-  and `accessToken` where it shows options, which it does not do for this one.
+  and `accessToken` in a query's plan, which it does not do for this one (under Spark
+  Connect, see [password](#password)).
 - A value written here that contains `;` or `}` goes in braces with every `}` doubled:
   `PWD={p;a}}ss}` for `p;a}ss`.
 - Entra ID authentication by the driver itself, where the server takes Entra ID logins
@@ -133,11 +134,24 @@ options = {
 ```
 
 A `PWD` in [connectionString](#connectionstring) as well is a `ValueError`. Spark redacts an
-option named `password` where it shows options (`spark.redaction.regex`, by default
+option named `password` in a query's plan (`spark.redaction.regex`, by default
 `(?i)secret|password|token|access[.]?key`). No error message of the library holds it: a
 driver error that does (and SQL Server's "Login failed for user '...'", which names the
 user) is raised again as a `ConnectionError` with each value of these options replaced by
 `***`.
+
+Under Spark Connect (Databricks Connect, Databricks standard access mode and serverless) the
+plan is not the only place: the server also records the text of each request it runs,
+options included, in the Connect tab of its Spark UI and in its event log, and redacts that
+text only with the session's `spark.sql.redaction.string.regex`, unset by default. Anyone who
+can open that UI or read those logs then sees `password`, `accessToken`, `user` and
+`connectionString` as given. There, log in with [tokenProvider](#tokenprovider) or a managed
+identity (`Authentication=ActiveDirectoryMsi`), which put no secret in the options, or set
+the server's Spark config to redact them in the request's text:
+
+```text
+spark.sql.redaction.string.regex (?i)key: "(password|accesstoken)"\s*value: "(?:[^"\\]|\\.)*"
+```
 
 ### accessToken
 
@@ -151,8 +165,8 @@ It replaces the login, so each of these next to it is a `ValueError`: `tokenProv
 `user`, `password`, and `UID`, `PWD`, `Authentication` or `Trusted_Connection` in
 [connectionString](#connectionstring). `backend=arrow-odbc` cannot pass a token (arrow-odbc
 sets no attribute before it connects), so it is a `ValueError` there too: use an
-`Authentication=` keyword of ODBC Driver 18 instead. Spark redacts it where it shows options,
-as it does `password`.
+`Authentication=` keyword of ODBC Driver 18 instead. Spark redacts it in a query's plan, as
+it does `password`, and shows it under Spark Connect as [password](#password) says.
 
 ### tokenProvider
 

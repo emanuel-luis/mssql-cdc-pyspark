@@ -45,8 +45,9 @@ set.
 - Options `user` and `password`: the login is passed to the driver apart from the
   connection string (mssql-python's `UID`/`PWD` keyword arguments,
   `arrow_odbc.connect(user=, password=)`). The driver escapes them, so a password with `;`
-  or `}` needs no braces, and Spark redacts an option named `password` in plans and the UI
-  by default, which it never does for `connectionString`
+  or `}` needs no braces, and Spark redacts an option named `password` in a query's plan by
+  default, which it never does for `connectionString` (a Spark Connect server's record of
+  the request is another matter: see Security)
   ([ADR 0034](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0034-credentials-outside-the-connection-string/)).
 - Option `accessToken`: a Microsoft Entra ID access token, passed by `mssql-python` as the
   `SQL_COPT_SS_ACCESS_TOKEN` pre-connect attribute (ADR 0034).
@@ -82,8 +83,16 @@ set.
 
 - The secret need not live in `connectionString` any more (`user`/`password`,
   `accessToken`, `tokenProvider`, above). Spark's default redaction hides the `password`,
-  `accessToken` and `tokenProvider` options in plans and the UI, but shows
-  `connectionString` and `user` in full.
+  `accessToken` and `tokenProvider` options in a query's plan, but shows
+  `connectionString` and `user` in full. A Spark Connect server (Databricks Connect,
+  standard access mode, serverless) also records each request's options in the Connect tab
+  of its Spark UI and in its event log, redacted only by `spark.sql.redaction.string.regex`,
+  which is unset by default: there, prefer `tokenProvider` or a managed identity, or set the
+  pattern the [options reference](https://emanuel-luis.github.io/mssql-cdc-pyspark/reference/options/#password)
+  gives.
+- `examples/databricks_notebook.py` passes the login as `user` and `password` from the
+  secret scope, no longer as `UID` and `PWD` in `connectionString`, which Spark shows whole
+  in the streaming query's plan.
 - With the `user`, `password`, `accessToken` or `tokenProvider` options, a driver error
   raised while connecting whose message (or any error down its chain) holds one of their
   values, SQL Server's "Login failed for user '...'" among them, is raised as a

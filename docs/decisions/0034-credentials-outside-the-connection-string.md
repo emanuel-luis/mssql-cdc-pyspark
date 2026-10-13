@@ -1,7 +1,8 @@
 # 0034: Credentials outside the connection string
 
 **Status:** accepted  
-**Date:** 2026-10-10T17:59:29-03:00
+**Date:** 2026-10-10T17:59:29-03:00  
+**Amended:** 2026-10-13T13:33:12-03:00, Spark's redaction covers a query's plan, not the request text a Spark Connect server records (see Consequences)
 
 ## Context
 The connection string was the only way to log in: `UID` and `PWD` inside it, a password with
@@ -56,13 +57,22 @@ nothing live may cross (invariant 5).
   so ADR 0029's test of a transient error still sees the driver's type. The facts, the
   metrics files and `userMetadata` never held options; a test runs a stream with these
   options and finds neither value there, in its progress or in the library's log.
-* Spark's default redaction covers the keys `password`, `accessToken` and `tokenProvider`.
-  `user` it shows, as any option: a name, not a secret. Error messages mask it all the same,
-  since they get pasted into tickets and chats.
+* Spark's default redaction covers the keys `password`, `accessToken` and `tokenProvider` in
+  a query's plan. `user` it shows, as any option: a name, not a secret. Error messages mask
+  it all the same, since they get pasted into tickets and chats.
 
 ## Consequences
-* A password needs no quoting, and Spark hides it by default where it shows options. The
+* A password needs no quoting, and Spark hides it by default in a query's plan. The
   `connectionString` option works as before, `UID` and `PWD` included.
+* Not under Spark Connect (Databricks Connect, standard access mode, serverless) by itself
+  (amended): the server records the text of each request it runs, a stream's options
+  included, in `SparkListenerConnectOperationStarted`, which feeds the Connect tab of its Spark
+  UI and its event log. Spark 4.2's `ExecuteEventsManager` redacts that text only with the
+  session's `spark.sql.redaction.string.regex`, unset by default; `spark.redaction.regex`
+  does not apply to it. The options reference gives a pattern that matches the request's
+  text, and recommends `tokenProvider` or a managed identity there, which put no secret in
+  the options. Read in the bytecode of `spark-connect_2.13-4.2.0.jar`, not run in a test: the
+  Connect server of `tests/test_connect.py` keeps no event log.
 * A stream can log in with a token it renews by itself: each connection calls the provider.
   The driver keeps its connection for the query's life (ADR 0029) and calls the provider again
   only when it reconnects; every executor task calls it once. A provider should cache its

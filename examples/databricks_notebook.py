@@ -20,21 +20,17 @@ from datetime import timezone
 
 from mssql_cdc import finalization, stream
 
-
-def quoted(value: str) -> str:
-    """An ODBC connection-string value in braces: a ';' or '}' in it cannot end it."""
-    return "{" + value.replace("}", "}}") + "}"
-
-
 SCHEMA = "lab.cdc"  # catalog.schema
-conn = (
-    f"Server={dbutils.secrets.get('cdc', 'mssql-host')},1433;Database=cdc_lab;"
-    f"UID={quoted(dbutils.secrets.get('cdc', 'mssql-user'))};"
-    f"PWD={quoted(dbutils.secrets.get('cdc', 'mssql-password'))};"
-    "Encrypt=yes;TrustServerCertificate=no"
-)
-
-options = {"connectionString": conn, "captureInstance": "dbo_orders", "maxCommitsPerBatch": "500"}
+host = dbutils.secrets.get("cdc", "mssql-host")
+options = {
+    # no UID or PWD here: Spark shows connectionString whole in the streaming query's plan
+    "connectionString": f"Server={host},1433;Database=cdc_lab;Encrypt=yes",
+    # passed to the driver apart, escaped by it; or, with an Entra ID login, tokenProvider
+    "user": dbutils.secrets.get("cdc", "mssql-user"),
+    "password": dbutils.secrets.get("cdc", "mssql-password"),
+    "captureInstance": "dbo_orders",
+    "maxCommitsPerBatch": "500",
+}
 # bootstrap: snapshot dbo.orders into bronze once, then stream the changes after it
 query = stream(spark, options).to_delta(
     f"{SCHEMA}.bronze_orders",

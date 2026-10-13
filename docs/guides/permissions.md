@@ -33,9 +33,13 @@ options = {
 Read the password from your platform's secret store rather than writing it in code, and
 give it in the [password](../reference/options.md#password) option rather than as `PWD` in
 the connection string. The driver escapes it, so a `;` or `}` in it needs no quoting; Spark
-redacts an option named `password` where it shows options, and does not redact
+redacts an option named `password` in a query's plan, and does not redact
 `connectionString` by default. No message of the library holds it: a driver error that holds
 it, or the user name, is raised again as a `ConnectionError` with each replaced by `***`.
+Under Spark Connect (Databricks Connect, standard access mode, serverless) the server also
+records each request's options, unredacted by default, in its UI and event log: there,
+prefer a token provider or a managed identity, below, or redact them as
+[password](../reference/options.md#password) shows.
 
 Where the server takes Entra ID logins, the reader can log in without a password: a managed
 identity through the driver (`Authentication=ActiveDirectoryMsi` in the connection string),
