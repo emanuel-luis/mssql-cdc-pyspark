@@ -381,6 +381,17 @@ def test_a_chunked_snapshot_on_switch_fills_the_new_column_through_backfill(delt
     detail = json.loads(opened["detail"])
     assert opened["min_lsn"] == switched["min_lsn"] and switched["detail"] == f"{CI} -> {v2}"
     assert (detail["kind"], detail["switch_batch_id"]) == ("bootstrap", switched["batch_id"])
+    replayed = stream(o.spark, o.options)._open(  # as a replay of the switch batch opens it
+        o.bronze,
+        CI,
+        app_id="orders-v1",
+        sink_id="orders-v1",
+        facts_table=o.facts,
+        generation=0,
+        kind="bootstrap",
+        switch=(switched["batch_id"], switched["min_lsn"]),
+    )
+    assert replayed["lsn"] == opened["min_lsn"] and len(facts("snapshot_open")) == 2
     with pytest.raises(ValueError, match="has a chunked snapshot open"):
         run(snapshot="full")  # one mode while it is open
     assert not o.apply(options=o.options)["rebuilt"]
