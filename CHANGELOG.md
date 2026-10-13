@@ -12,6 +12,8 @@ compatibility" line.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-13
+
 State compatibility: offsets and checkpoints unchanged. A new table kind, the snapshot plans
 table (`<target>_snapshot_plans`, next to bronze), starts at schema version 0 with its own
 migrations module, `migrations/plans.py`; facts migration 13 rewrites the comment of `detail`
@@ -1021,7 +1023,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.5.0...v0.6.0
 [0.6.0rc3]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc2...v0.6.0rc3
 [0.6.0rc2]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc1...v0.6.0rc2

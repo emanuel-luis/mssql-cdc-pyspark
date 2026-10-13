@@ -116,7 +116,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 - [ ] t7 against SQL Server on serverless (needs that network path) and on a non-Databricks
       platform (deferred: no account).
 
-## 0.7.0 (minor): credentials and privacy
+## 0.7.0 (minor, shipped 2026-10-13): credentials and privacy
 
 - [x] `user`/`password` and Entra ID `accessToken` options, so the secret need not live in
       the connection string; `tokenProvider` renews the token on long streams (ADR 0034).
