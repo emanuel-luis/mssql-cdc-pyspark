@@ -529,8 +529,9 @@ class MssqlCdcSnapshotDataSource(MssqlCdcDataSource):
     ``client.plan_chunks`` plans them), only those chunks, one partition each, stamped with
     ``snapshotLsn`` and numbered in an extra ``_chunk INT`` column; with ``metricsPath``,
     each leaves ``chunk-<chunk>.json`` there (ADR 0028). ``snapshotKeys``, a JSON list of
-    columns, cuts ranges on those instead of the unique index. ``isolationLevel=snapshot`` reads
-    under SNAPSHOT isolation instead of READ COMMITTED, where the DBA allows it."""
+    columns, unique or not, cuts ranges on those instead of the unique index (the whole table in
+    one range without one). ``isolationLevel=snapshot`` reads under SNAPSHOT isolation instead
+    of READ COMMITTED, where the DBA allows it."""
 
     @classmethod
     def name(cls) -> str:
@@ -1160,6 +1161,24 @@ class KeyRange(InputPartition):
 ISOLATION_LEVELS: dict[str, str | None] = {"readcommitted": None, "snapshot": "snapshot"}
 
 
+def snapshot_keys(options: Mapping[str, Any]) -> list[str] | None:
+    """The ``snapshotKeys`` option: the columns a snapshot cuts its ranges on, and a chunked
+    one its chunks (ADR 0028 Amendment 5), instead of the capture instance's unique index;
+    None when it is not set."""
+    given = _opt(options, "snapshotKeys")
+    if not given:
+        return None
+    try:
+        keys = json.loads(given)
+    except ValueError:
+        keys = None
+    if not (isinstance(keys, list) and keys and all(isinstance(k, str) and k for k in keys)):
+        raise ValueError(
+            f'snapshotKeys must be a JSON list of column names, such as ["created_at"], not {given!r}'
+        )
+    return keys
+
+
 class MssqlCdcSnapshotReader(_Common, DataSourceReader):
     def __init__(
         self, options: dict[str, str], schema: StructType, default_num_partitions: int | None = None
@@ -1190,10 +1209,10 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         given = _opt(self.options, "snapshotLsn")
         lsn = normalize(given) if given else snapshot_lsn(client, source)
         commit_ts = client.lsn_to_time(lsn)
-        schema, table, keys = source.schema, source.table, source.keys
-        given_keys = _opt(self.options, "snapshotKeys")
-        if given_keys:  # reconcile()'s keys, which bound its ranges: not always the index's
-            keys = [str(k) for k in json.loads(given_keys)]
+        schema, table = source.schema, source.table
+        # the columns the ranges are cut on: reconcile()'s key, a chunked snapshot's (ADR 0028
+        # Amendment 5) or the user's, not always the index's
+        keys = snapshot_keys(self.options) or source.keys
         # a captured column the table no longer has reads NULL, like its later change rows
         present = client.present_columns(ci, self.source_columns)
         columns = None if len(present) == len(self.source_columns) else present

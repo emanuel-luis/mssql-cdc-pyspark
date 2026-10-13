@@ -1419,6 +1419,48 @@ def test_every_planning_read_takes_the_source_capture_instance_key_types_and_iso
     assert all(c.args[-1] == iso for c in client.key_buckets.call_args_list)
 
 
+def test_snapshot_keys_cut_on_captured_columns_sql_server_sorts_and_binds():
+    # snapshotKeys on a table without a unique index (ADR 0028 Amendment 5): checked at the
+    # open, before any read, so a column no chunk can be cut on fails instead of one chunk
+    from unittest.mock import create_autospec
+
+    from mssql_cdc.client import SourceTable, snapshot_plan
+
+    client = create_autospec(CdcClient, instance=True)
+    types = {
+        "g": "varchar(10) COLLATE Latin1_General_CI_AS",
+        "n": "bigint",
+        "flag": "bit",  # no MIN or MAX
+        "doc": "xml",
+        "memo": "text",
+        "img": "image",
+        "note": "ntext",
+        "uncaptured": None,  # or time, or a datetime2(7) before the last column
+    }
+    client.key_types.side_effect = lambda _, keys: [types[k] for k in keys]
+    client.key_range.return_value = ("a", "z")
+    client.key_max.return_value = ("z", 9)
+    heap = SourceTable("dbo", "heap", [], None)
+    assert snapshot_plan(client, "dbo_heap", heap, ["g"]) == {"kind": "keyset", "max": "z"}
+    assert snapshot_plan(client, "dbo_heap", heap, ["g", "n"]) == {
+        "kind": "keyset",
+        "max": ["z", 9],
+    }
+    for bad in ("flag", "doc", "memo", "img", "note", "uncaptured"):
+        client.reset_mock(return_value=False, side_effect=False)
+        with pytest.raises(ValueError, match=rf"no chunk can be cut on \['{bad}'\] of dbo\.heap"):
+            snapshot_plan(client, "dbo_heap", heap, ["g", bad])
+        client.key_range.assert_not_called()
+        client.key_max.assert_not_called()
+    # the unique index's own columns are not checked: a key no bound fits is one chunk
+    keyed = SourceTable("dbo", "heap", ["uncaptured"], None)
+    client.key_range.return_value = (None, None)
+    assert snapshot_plan(client, "dbo_heap", keyed, ["uncaptured"]) == {
+        "kind": "keyset",
+        "max": None,
+    }
+
+
 def test_chunk_bounds_cross_json_as_text_cast_reads_back():
     from mssql_cdc.client import _json_key, _key_select, _key_tuple
 

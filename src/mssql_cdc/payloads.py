@@ -46,7 +46,7 @@ class KeysetExtent(TypedDict):
     kind: Literal["keyset"]
     max: Any
     """The key's MAX; None (one chunk, the whole table) for an empty table, a table without a
-    unique index, or a key type no bound can be bound as."""
+    unique index or ``snapshotKeys``, or a key type no bound can be bound as."""
 
 
 SnapshotExtent = IntExtent | KeysetExtent
@@ -71,7 +71,7 @@ class SnapshotOpenDetail(_SnapshotOpen, total=False):
     table's row."""
 
     keys: list[str]
-    """The key columns its chunks are cut on."""
+    """The key columns its chunks are cut on: the unique index's, or ``snapshotKeys``."""
     plan: SnapshotExtent
 
 

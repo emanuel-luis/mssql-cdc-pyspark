@@ -31,14 +31,38 @@ def _key_tuple(bound: object) -> tuple[Any, ...] | None:
     return tuple(bound) if isinstance(bound, list) else (bound,)
 
 
-def snapshot_plan(client: CdcClient, capture_instance: str, source: SourceTable) -> SnapshotExtent:
+# SQL Server sorts none of these (bit has no MIN or MAX): no chunk is cut on them
+_UNORDERED = ("bit", "text", "ntext", "image", "xml")
+
+
+def snapshot_plan(
+    client: CdcClient,
+    capture_instance: str,
+    source: SourceTable,
+    keys: Sequence[str] | None = None,
+) -> SnapshotExtent:
     """What a chunked snapshot's chunks tile, read after its LSN S was recorded (ADR 0028): a
     key a row lacks below MIN or above MAX was inserted after S, so the stream has it.
 
     One integer key: ``{"kind": "int", "lo": MIN, "hi": MAX, "rows": estimate}``. Other keys:
     ``{"kind": "keyset", "max": MAX}``; ``max`` None (an empty table, no unique index, a key
-    type no bound can be bound as): one chunk, the whole table. ``plan_chunks`` cuts it."""
-    s, t, keys = source.schema, source.table, source.keys
+    type no bound can be bound as): one chunk, the whole table. ``plan_chunks`` cuts it.
+
+    ``keys``: the columns to cut on (``snapshotKeys``) when not the unique index's, unique or
+    not (ADR 0028 Amendment 5); a column CDC does not capture, or of a type no bound can be
+    bound as or SQL Server cannot sort, raises ``ValueError``."""
+    s, t = source.schema, source.table
+    keys = source.keys if keys is None else list(keys)
+    if keys != source.keys:
+        types = client.key_types(capture_instance, keys)
+        bad = [k for k, x in zip(keys, types) if x is None or x.split("(")[0] in _UNORDERED]
+        if bad:
+            raise ValueError(
+                f"snapshotKeys {keys}: no chunk can be cut on {bad} of {s}.{t}: a column "
+                f"{capture_instance} does not capture, or of a type no bound can be bound as "
+                f"(time, a datetime2(7) or datetimeoffset(7) before the last column) or SQL "
+                f"Server cannot sort ({', '.join(_UNORDERED)})"
+            )
     top: tuple[Any, ...] | None = None
     if len(keys) == 1:
         lo, hi = client.key_range(s, t, keys[0])
@@ -66,6 +90,7 @@ def plan_chunks(
     extent: SnapshotExtent,
     chunk_rows: int,
     isolation: str | None = None,
+    keys: Sequence[str] | None = None,
 ) -> list[list[Any]]:
     """Every chunk ``[lo, hi)`` (JSON bounds) of a chunked snapshot whose ``snapshot_plan`` is
     ``extent``, of at most about ``chunk_rows`` rows each, planned once before its first wave
@@ -79,24 +104,54 @@ def plan_chunks(
     One integer key: rows counted per slice of a fixed grid (``_int_chunks``), so a sparse
     region or a sentinel far above the ids neither empties nor overfills a chunk. Other keys:
     the key ``chunk_rows`` rows after the previous bound (``key_bound``), walked up front.
-    ``isolation``: the counts and seeks read as ``iter_table``'s, as the chunks will be."""
-    s, t, keys = source.schema, source.table, source.keys
+    ``isolation``: the counts and seeks read as ``iter_table``'s, as the chunks will be.
+    ``keys``: the columns ``extent`` was read on, when not the unique index's (``_seek``)."""
+    s, t = source.schema, source.table
+    keys = source.keys if keys is None else list(keys)
     if extent["kind"] == "int":
         return _int_chunks(client, s, t, keys[0], extent, chunk_rows, isolation)
     if extent["max"] is None:
         return [[None, None]]
     types = cast("list[str]", client.key_types(capture_instance, keys))  # all set: a MAX
     top = _key_tuple(extent["max"])
+    unique = keys == source.keys
     out: list[list[Any]] = []
     lo = None
     while True:
-        bound = client.key_bound(s, t, keys, types, _key_tuple(lo), top, chunk_rows, isolation)
+        bound = _seek(client, s, t, keys, types, _key_tuple(lo), top, chunk_rows, isolation, unique)
         if bound is None:
             break
         out.append([lo, _json_key(bound, types)])
         lo = out[-1][1]
-    end = last_bound(client, capture_instance, source, extent["max"], isolation)
+    end = last_bound(client, capture_instance, source, extent["max"], isolation, keys)
     return [*out, [lo, end]]
+
+
+def _seek(
+    client: CdcClient,
+    schema: str,
+    table: str,
+    keys: list[str],
+    types: list[str],
+    lo: tuple[Any, ...] | None,
+    hi: tuple[Any, ...] | None,
+    n: int,
+    isolation: str | None,
+    unique: bool,
+) -> tuple[Any, ...] | None:
+    """``key_bound``; on columns that are not the unique index, the (n + 1)-th row from ``lo``
+    can hold ``lo``'s value as SQL Server compares it (equal in Python too, or not: a
+    case-insensitive collation, trailing spaces), which would end the chunk where it starts.
+    Then twice as many rows, until ``[lo, bound)`` holds one (ADR 0028 Amendment 5). Bounds
+    are values, so a value is never split, and a chunk starting on one that more than ``n``
+    rows hold has fewer than twice its rows."""
+    while True:
+        bound = client.key_bound(schema, table, keys, types, lo, hi, n, isolation)
+        if unique or bound is None:
+            return bound
+        if client.key_bound(schema, table, keys, types, lo, bound, 0, isolation) is not None:
+            return bound
+        n *= 2
 
 
 def last_bound(
@@ -105,12 +160,24 @@ def last_bound(
     source: SourceTable,
     top: object,
     isolation: str | None = None,
+    keys: Sequence[str] | None = None,
 ) -> object:
     """The end of a keyset plan's last chunk: the first key after MAX (``top``, as JSON) now,
-    as JSON; None (open) when there is none. ``isolation``: as ``iter_table``'s."""
-    types = cast("list[str]", client.key_types(capture_instance, source.keys))  # all set: a MAX
-    after = client.key_bound(
-        source.schema, source.table, source.keys, types, _key_tuple(top), None, 1, isolation
+    as JSON; None (open) when there is none. ``isolation``: as ``iter_table``'s. ``keys``:
+    the columns the plan is cut on, when not the unique index's (``_seek``)."""
+    keys = source.keys if keys is None else list(keys)
+    types = cast("list[str]", client.key_types(capture_instance, keys))  # all set: a MAX
+    after = _seek(
+        client,
+        source.schema,
+        source.table,
+        keys,
+        types,
+        _key_tuple(top),
+        None,
+        1,
+        isolation,
+        keys == source.keys,
     )
     end = None if after is None else _json_key(after, types)
     # A datetime2(7) last key column comes back truncated to the microsecond (key_types): when

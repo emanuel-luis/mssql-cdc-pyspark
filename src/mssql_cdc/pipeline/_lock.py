@@ -160,12 +160,14 @@ class _ModeLock(_StreamBase):
         from one CDC cleanup has passed. A chunked one of the generation read back by a full
         run raises: a run opened it after this one's ``_reusable``."""
         from ..client import make_client, snapshot_plan
-        from ..source import snapshot_lsn
+        from ..source import snapshot_keys, snapshot_lsn
 
         with closing(make_client(self.options)) as client:
             source = client.source_table(ci)
+            # the chunks' columns: the unique index's, or snapshotKeys (ADR 0028 Amendment 5)
+            keys = snapshot_keys(self.options) or source.keys
             lsn = snapshot_lsn(client, source)  # first: the plan's MIN and MAX come after S
-            plan = snapshot_plan(client, ci, source) if mode == "chunked" else None
+            plan = snapshot_plan(client, ci, source, keys) if mode == "chunked" else None
             offset: Offset = {"lsn": lsn, "commit_ts": client.lsn_to_time(lsn) or ""}
         detail: SnapshotOpenDetail = {
             "mode": mode,
@@ -175,7 +177,7 @@ class _ModeLock(_StreamBase):
             "lost_to_ts": _iso(lost_to_ts) or None,
         }
         if plan is not None:  # a chunked one's, in the plans table: before the facts row
-            detail["keys"], detail["plan"] = source.keys, plan
+            detail["keys"], detail["plan"] = keys, plan
             snapopen = f"{app_id}#snapopen.{lsn}"  # by S: a rerun's S has a row of its own
             events.write_plans(self.spark, target, lsn, events.SNAPSHOT_OPEN, [detail], snapopen, 0)
         events.write_event(

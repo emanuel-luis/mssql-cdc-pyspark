@@ -2478,6 +2478,91 @@ def test_a_keyset_plans_open_last_chunk_ends_at_the_first_key_after_max_when_rea
     assert _rebuilt(bronze, "code", "status", s) == [(c, "new") for c in "abcdefgh"]
 
 
+def test_a_table_without_a_unique_index_is_chunked_on_the_column_snapshot_keys_names(
+    delta_spark, workdir
+):
+    # ADR 0028 Amendment 5: [lo, hi) on a column that is not unique, NULL first, so every row
+    # is in one chunk and a value in one only, however many rows hold it
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI])  # no unique index: the fake keeps no rows, written here
+    statuses = ["b", None, "a", "b", "c", "a", None, "b", "b", "c", "a", "b"]
+    table = {str(i): {"order_id": i, "status": v} for i, v in enumerate(statuses)}
+
+    def write(change, row):  # the table and its change row: a writer between waves
+        if change == 2:
+            table[str(row["order_id"])] = row
+        else:
+            del table[str(row["order_id"])]
+        with open(os.path.join(src, "tables", f"{CI}.json"), "w", encoding="utf-8") as fh:
+            json.dump(table, fh)
+        db.commit(CI, [(change, row)])
+
+    write(2, {"order_id": 12, "status": "c"})
+    plain = {"backend": "fake", "fakePath": src, "captureInstance": CI, "columns": COLUMNS}
+    options = {**plain, "numPartitions": "1", "snapshotKeys": '["status"]'}
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+
+    def run():
+        cdc.to_delta(
+            target,
+            "heap-v1",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            bootstrap=True,
+            snapshot="chunked",
+        ).awaitTermination()
+
+    def backfill():
+        return cdc.backfill(
+            target,
+            app_id="heap-v1",
+            facts_table=facts,
+            chunk_rows=2,
+            max_waves=1,
+            target_wave_seconds=0,  # one chunk a wave
+        )
+
+    run()
+    [(s, opened)] = _plans(spark, target, "snapshot_open")
+    assert (opened["keys"], opened["plan"]) == (["status"], {"kind": "keyset", "max": "c"})
+    assert backfill()["chunks_done"] == 1
+    # NULLs first; 'a' held by more rows than chunk_rows, then 'b' by more than twice as many:
+    # the walk past them looks twice as far until a value ends the chunk
+    [(_, plan)] = _plans(spark, target, "snapshot_plan")
+    assert (plan["keys"], plan["chunks"]) == (["status"], [[None, "a"], ["a", "b"], ["b", None]])
+    # the plan stays on the columns it opened with
+    with pytest.raises(
+        ValueError, match=r"on \['status'\], but this stream would cut them on \[\]"
+    ):
+        stream(spark, {**plain, "numPartitions": "1"}).backfill(
+            target, app_id="heap-v1", facts_table=facts
+        )
+    write(2, {"order_id": 20, "status": "a"})  # into a chunk not read yet
+    write(1, {"order_id": 3, "status": "b"})
+    write(2, {"order_id": 21, "status": None})  # into one read already: the stream's
+    assert not backfill()["done"] and backfill()["done"]
+    run()
+
+    bronze = spark.read.format("delta").load(target)
+    snap = bronze.where("_operation = 0").collect()
+    assert sorted(r["order_id"] for r in snap) == sorted({*range(13), 20} - {3})  # each once
+    chunk = {}
+    for r in snap:
+        chunk.setdefault(r["status"], set()).add(r["_chunk"])
+    assert chunk == {None: {0}, "a": {1}, "b": {2}, "c": {2}}
+    assert {r["_snapshot"] for r in snap} == {s}
+    # the stream has the changes after S, a keyless table's only other rows: bronze, not silver
+    changes = sorted(
+        (r["_operation"], r["order_id"]) for r in bronze.where("_operation > 0").collect()
+    )
+    assert changes == [(1, 3), (2, 20), (2, 21)]
+
+
 def test_backfill_pauses_while_the_stream_lags_or_has_stopped(delta_spark, workdir, monkeypatch):
     from mssql_cdc import sink, stream
 

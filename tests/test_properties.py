@@ -173,6 +173,79 @@ def test_a_keyset_plan_tiles_the_keys_up_to_the_first_after_max(keys, later, chu
     assert all(0 < len(c) <= chunk_rows + 1 for c in held)
 
 
+class _Collated(_Rows):
+    """A column compared ignoring case, as under a case-insensitive collation: 'a' and 'A' are
+    one value on SQL Server and two in Python, so a bound can differ from where its chunk starts
+    and still end it there."""
+
+    def _keys_in(self, table, keys, lo, hi):
+        self.seeks = getattr(self, "seeks", 0) + 1
+        assert self.seeks < 5_000, "the plan makes no progress"
+        found = sorted((tuple(r.get(k) for k in keys) for r in self.rows), key=_folded)
+        return [
+            k
+            for k in found
+            if (lo is None or _folded(k) >= _folded(lo))
+            and (hi is None or _folded(k) < _folded(hi))
+        ]
+
+
+def _folded(key):
+    return tuple((v is not None, v.lower() if isinstance(v, str) else v) for v in key)
+
+
+# few values, many rows each, in either case, and NULLs
+folded_values = st.none() | st.sampled_from(["a", "A", "b", "B", "c", "d", "D"])
+
+
+@FIXED
+@given(
+    values=st.lists(folded_values, min_size=1, max_size=60),
+    later=st.lists(folded_values, max_size=4),
+    chunk_rows=st.integers(1, 10),
+)
+@example(values=["a", "A", "a", "b"], later=[], chunk_rows=1)  # 'A' ends no chunk at 'a'
+def test_a_plan_on_a_column_that_is_not_unique_reads_every_row_once(values, later, chunk_rows):
+    # snapshotKeys on a table without a unique index (ADR 0028 Amendment 5)
+    source = SourceTable("dbo", "t", [], None)
+    table = _Collated([{"g": v} for v in values])
+    extent = snapshot_plan(table, "ci", source, ["g"])
+    present = [v for v in values if v is not None]
+    if not present:  # NULLs only: no MAX, one chunk
+        assert plan_chunks(table, "ci", source, extent, chunk_rows, keys=["g"]) == [[None, None]]
+        return
+    top = _folded([extent["max"]])
+    table.rows += [{"g": v} for v in later]  # inserted after S
+    plan = plan_chunks(table, "ci", source, extent, chunk_rows, keys=["g"])
+    assert plan[0][0] is None and all(a[1] == b[0] for a, b in pairwise(plan))
+
+    def inside(v, lo, hi):
+        k = _folded([v])
+        return (lo is None or k >= _folded([lo])) and (hi is None or k < _folded([hi]))
+
+    every = values + later
+    held = [[v for v in every if inside(v, lo, hi)] for lo, hi in plan]
+    # every row up to MAX in one chunk, NULLs in the first; a row above MAX, the stream's, in
+    # one at most (the first key past MAX's copies can be a later one)
+    rows = [_folded([v]) for c in held for v in c]
+    assert len(rows) <= len(every)
+    assert sorted(k for k in rows if k <= top) == sorted(
+        _folded([v]) for v in every if _folded([v]) <= top
+    )
+    assert held[0].count(None) == every.count(None)
+    # a value never splits, no chunk is empty, and one over chunk_rows starts on a value that
+    # more than chunk_rows rows hold, of fewer than twice its rows
+    chunks_of = {}
+    for i, c in enumerate(held):
+        assert c
+        for v in c:
+            chunks_of.setdefault(_folded([v]), set()).add(i)
+        first = min(c, key=lambda v: _folded([v]))
+        same = sum(_folded([v]) == _folded([first]) for v in c)
+        assert i == len(held) - 1 or len(c) <= chunk_rows or chunk_rows < same > len(c) / 2
+    assert all(len(found) == 1 for found in chunks_of.values())
+
+
 # -- change ordering (ADR 0019) ------------------------------------------------------------------
 LSNS = [lsn.from_int(16 * i) for i in (1, 2)]
 SEQVALS = [lsn.from_int(i) for i in (1, 2)]

@@ -1696,6 +1696,136 @@ def test_keyset_chunks_tile_composite_and_varchar_keys_under_changes(
     assert snap.count() == snap.select(*keys).distinct().count() == sum(c["rows"] for c in chunks)
 
 
+def _heap_churn(sqlserver, table: str, seed: int):
+    """Commit one change to heap ``dbo.<table>`` (ids 1..400) about every 50 ms on its own
+    connection until the returned function is called, which returns the ids it inserted and
+    the ones it deleted: an update of ``v``, a delete of a multiple of 5, or an insert of a
+    new id with values rows already hold, ``grp`` in either case. No row moves to another
+    ``grp`` or ``n``: a heap's row has no key to follow it by."""
+    import random
+
+    stop, state = threading.Event(), {"inserted": set(), "deleted": set(), "error": None}
+
+    def loop():
+        conn, rnd = sqlserver.connect(), random.Random(seed)
+        cur = conn.cursor()
+        i = 0
+        try:
+            while not stop.is_set():
+                op, x = rnd.random(), rnd.randrange(1, 401)
+                if op < 0.6:
+                    cur.execute(f"UPDATE dbo.{table} SET v = ? WHERE id = ?", (f"u{i}", x))
+                elif op < 0.7:
+                    gone = 5 * (x % 80 + 1)
+                    cur.execute(f"DELETE FROM dbo.{table} WHERE id = ?", (gone,))
+                    state["deleted"].add(gone)
+                else:
+                    row = (1000 + i, f"{'gG'[i % 2]}{i % 7}", i % 8)
+                    cur.execute(f"INSERT INTO dbo.{table} VALUES (?, ?, ?, 'new')", row)
+                    state["inserted"].add(row[0])
+                i += 1
+                time.sleep(0.05)
+        except Exception as exc:  # noqa: BLE001 - reported by finish()
+            state["error"] = exc
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+
+    def finish() -> tuple[set, set]:
+        stop.set()
+        thread.join()
+        assert state["error"] is None, state["error"]
+        return state["inserted"], state["deleted"]
+
+    return finish
+
+
+# no unique index; grp repeats 7 values, about 52 rows each, in either case ('g3' and 'G3' are
+# one value under the database's case-insensitive collation, two in Python), n 8 values; both
+# NULL now and then
+_HEAP = (
+    "SELECT n, IIF(n % 11 = 0, NULL, CONCAT(IIF(n % 2 = 0, 'g', 'G'), n % 7)), "
+    f"IIF(n % 13 = 0, NULL, n % 8), 'old' FROM {_ROWS} WHERE n <= 400"
+)
+
+
+@pytest.mark.parametrize("column", ["grp", "n"])  # keyset seeks; an integer plan's counts
+def test_a_heap_chunked_on_a_column_that_is_not_unique_reads_every_row_once_under_a_writer(
+    delta_spark, sqlserver, workdir, column
+):
+    # ADR 0028 Amendment 5: snapshotKeys names the column; each chunk is a [lo, hi) range of its
+    # values, so a value is never split and a row is read by one chunk only, whatever the
+    # writer does meanwhile; NULLs in the first
+    name = f"ck_heap_{column}"
+    sqlserver.run(
+        f"CREATE TABLE dbo.{name} (id INT NOT NULL, grp VARCHAR(10) NULL, n INT NULL, "
+        "v VARCHAR(20) NOT NULL)"
+    )
+    sqlserver.run(f"INSERT INTO dbo.{name} {_HEAP}")
+    ci = sqlserver.enable_cdc(name)
+    options = {
+        "connectionString": _reader(sqlserver, name, ci),
+        "captureInstance": ci,
+        "numPartitions": "2",
+        "snapshotKeys": json.dumps([column]),
+    }
+    paths, cdc, run = _chunked(delta_spark, options, workdir, name)
+    run().awaitTermination()
+    opened = _plan_row(delta_spark, paths, "snapshot_open")
+    assert opened["keys"] == [column]
+    assert opened["plan"]["kind"] == {"grp": "keyset", "n": "int"}[column]
+    finish = _heap_churn(sqlserver, name, seed=31)
+    statuses = []
+    try:
+        while not (statuses and statuses[-1]["done"]):
+            statuses.append(
+                cdc.backfill(
+                    paths["bronze"],
+                    app_id=name,
+                    facts_table=paths["facts"],
+                    chunk_rows=40,  # fewer than any value of grp holds
+                    max_waves=1,
+                    target_wave_seconds=0,
+                )
+            )
+            assert len(statuses) < 20
+    finally:
+        inserted, deleted = finish()
+    assert inserted and deleted
+
+    total = statuses[0]["chunks_total"]
+    assert total > 4 and all(s["chunks_total"] == total for s in statuses)
+    chunks = _chunk_facts(delta_spark, paths)
+    assert [c["chunk"] for c in chunks] == list(range(total))
+    assert chunks[0]["lo"] is None and all(a["hi"] == b["lo"] for a, b in pairwise(chunks))
+    snap = (
+        delta_spark.read.format("delta")
+        .load(paths["bronze"])
+        .where("_operation = 0")
+        .select("id", column, "_chunk")
+        .collect()
+    )
+    ids = [r["id"] for r in snap]
+    assert len(ids) == len(set(ids)) == sum(c["rows"] for c in chunks)  # no row read twice
+    # every row there all along, once; one deleted or inserted meanwhile at most once
+    assert set(range(1, 401)) - deleted <= set(ids) <= set(range(1, 401)) | inserted
+    found: dict = {}  # a value's chunks, as SQL Server compares values
+    for r in snap:
+        value = r[column].lower() if isinstance(r[column], str) else r[column]
+        found.setdefault(value, set()).add(r["_chunk"])
+    assert all(len(c) == 1 for c in found.values()) and found[None] == {0}
+    assert len(found) == {"grp": 8, "n": 9}[column]  # NULL and every value
+
+    # the stream, from S, has the changes: bronze holds the table, silver cannot key it
+    last = max(inserted)
+    sqlserver.wait_for(f"SELECT COUNT(*) FROM cdc.[{ci}_CT] WHERE id = ?", (last,))
+    run().awaitTermination()
+    bronze = delta_spark.read.format("delta").load(paths["bronze"])
+    assert {r["id"] for r in bronze.where("_operation = 2").select("id").collect()} == inserted
+
+
 def test_a_chunk_waits_under_read_committed_for_a_transaction_holding_locks_in_its_range(
     delta_spark, sqlserver, workdir
 ):

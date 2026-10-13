@@ -190,6 +190,12 @@ class _Chunked(_ModeLock):
         warning. A full snapshot of the stream still being read raises (one mode while a
         snapshot is open).
 
+        The chunks are cut on the columns the snapshot opened with: the unique index's, or
+        the stream's ``snapshotKeys`` option, unique or not, which a table without a unique
+        index needs to be read in more than one chunk (ADR 0028 Amendment 5). A value never
+        splits across chunks: one held by more than ``chunk_rows`` rows makes a bigger chunk.
+        Options that would cut on other columns now raise.
+
         Each wave is stamped with ``max_lsn`` before it is read, at or after the snapshot's
         LSN S, appended to ``target`` in one commit (operation 0, ``_snapshot`` S,
         ``_chunk``) and then recorded as one 'snapshot_chunk' facts row per chunk, its bounds
@@ -236,7 +242,7 @@ class _Chunked(_ModeLock):
 
         from .. import sink
         from ..client import last_bound, make_client
-        from ..source import ISOLATION_LEVELS, snapshot_lsn
+        from ..source import ISOLATION_LEVELS, snapshot_keys, snapshot_lsn
         from ..spark import available_cores
 
         if chunk_rows is not None and int(chunk_rows) < 1:
@@ -354,12 +360,15 @@ class _Chunked(_ModeLock):
 
         with closing(make_client(self.options)) as client:
             source = client.source_table(ci)
-            if source.keys != info["keys"]:
+            cut = snapshot_keys(self.options) or source.keys
+            if cut != info["keys"]:
                 raise ValueError(
-                    f"The unique index of {source.schema}.{source.table} is now on {source.keys}, "
-                    f"not on {info['keys']} as when the snapshot at {s} opened: its chunks no "
-                    "longer tile the table. Take a new snapshot."
+                    f"The snapshot at {s} cuts its chunks on {info['keys']}, but this stream "
+                    f"would cut them on {cut} (its snapshotKeys option, else the unique index of "
+                    f"{source.schema}.{source.table}): a plan stays on the columns it opened "
+                    "with. Set snapshotKeys as when it opened, or take a new snapshot."
                 )
+            keys = info["keys"]
             # A wave is read while the one before commits in the background (its append, then
             # its facts rows), one commit at a time: bronze takes the waves in order. The
             # commits look up commit times on a connection of their own.
@@ -419,7 +428,7 @@ class _Chunked(_ModeLock):
                         # a keyset plan's last chunk ends at the first key after MAX, and there
                         # was none at planning: sought again, so that rows inserted above MAX
                         # since, the stream's, do not pile up in the last chunk
-                        end = last_bound(client, ci, source, extent["max"], isolated)
+                        end = last_bound(client, ci, source, extent["max"], isolated, keys)
                         every = [*every[:-1], [every[-1][0], end]]
                     # after the wave committing, as if it holds the chunks it read
                     if pending:
@@ -462,6 +471,7 @@ class _Chunked(_ModeLock):
                         lsn=lsn,
                         planned=planned,
                         every=every,
+                        keys=keys,
                         k=k,
                         client=client,
                         metrics=metrics,
@@ -556,11 +566,11 @@ class _Chunked(_ModeLock):
 
         s, rows = top["min_lsn"], int(chunk_rows or 1_000_000)
         started_at, t0 = sink._utc_now(), time.monotonic()
-        chunks = plan_chunks(client, ci, source, info["plan"], rows, isolation)
+        chunks = plan_chunks(client, ci, source, info["plan"], rows, isolation, info["keys"])
         detail: SnapshotPlanDetail = {
             "snapshot": s,
             "kind": info["plan"]["kind"],
-            "keys": source.keys,
+            "keys": info["keys"],
             "chunk_rows": rows,
             "chunks": chunks,
             "chunk_count": len(chunks),
@@ -641,6 +651,7 @@ class _Chunked(_ModeLock):
         lsn: str,
         planned: list[list[Any]],
         every: list[list[Any]],
+        keys: list[str],
         k: int,
         client: CdcClient,
         metrics: str | None,
@@ -648,8 +659,9 @@ class _Chunked(_ModeLock):
         cache: bool,
     ) -> _Wave:
         """Read the ``planned`` chunks stamped ``lsn``, ``k`` at a time, into cached rows, with
-        the tag their commit will carry; ``every``: the plan's chunks. Without ``cache``, or
-        where the platform refuses to cache, a lazy wave that its append reads (ADR 0032)."""
+        the tag their commit will carry; ``every``: the plan's chunks, cut on ``keys``. Without
+        ``cache``, or where the platform refuses to cache, a lazy wave that its append reads
+        (ADR 0032)."""
         from pyspark.sql import functions as F
 
         from ..sink import _cached, _utc_now, bronze_rows
@@ -662,6 +674,7 @@ class _Chunked(_ModeLock):
             self.spark.read.format("mssql_cdc_snapshot")
             .options(**{o: v for o, v in self.options.items() if o.lower() not in drop})
             .option("snapshotChunks", json.dumps(order))
+            .option("snapshotKeys", json.dumps(keys))  # the bounds' columns
             .option("snapshotLsn", lsn)
         )
         if metrics:

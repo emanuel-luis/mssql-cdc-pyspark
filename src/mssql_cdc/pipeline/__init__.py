@@ -38,7 +38,9 @@ the plans table, and a 'snapshot_plan' row), reads the key space in them,
 each stamped with an LSN at or after S, appends them to the target (``_snapshot`` S,
 ``_chunk``) and records them as 'snapshot_chunk' rows, then writes the snapshot's
 'bootstrap' or 'resnapshot' row. Downstream rebuilds from S: its rows and the changes after
-S. A loss while one is open opens a newer one, which abandons it.
+S. A loss while one is open opens a newer one, which abandons it. The chunks are cut on the
+unique index, or on the columns the ``snapshotKeys`` option names, unique or not: without
+either, a table is one chunk.
 
 A run (one ``to_delta`` call, its bootstrap and its re-snapshot) takes snapshots in one
 mode, and the mode may change between runs, but not while a snapshot of the other mode is

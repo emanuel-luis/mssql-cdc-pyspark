@@ -175,6 +175,17 @@ def test_inferred_columns_are_checked_and_the_snapshot_still_adds_its_chunk(tmp_
     assert MssqlCdcSnapshotDataSource(chunked).schema().endswith(", id INT, _chunk INT")
 
 
+@pytest.mark.parametrize("given", ['"code"', "code", "[]", "[1]", '[""]', '{"a": 1}'])
+def test_snapshot_keys_is_a_json_list_of_column_names(given):
+    from mssql_cdc.source import snapshot_keys
+
+    # a string once read as its letters, one column each
+    with pytest.raises(ValueError, match="snapshotKeys must be a JSON list of column names"):
+        snapshot_keys({"SNAPSHOTKEYS": given})
+    assert snapshot_keys({"snapshotKeys": '["code", "seq"]'}) == ["code", "seq"]
+    assert snapshot_keys({"snapshotKeys": ""}) is None and snapshot_keys({}) is None
+
+
 def test_metrics_path_is_a_path_or_a_uri_pyarrow_fs_opens(tmp_path):
     # pyarrow.fs has no dbfs: every file would fail, so the query fails at its start instead
     with pytest.raises(ValueError, match="metricsPath 'dbfs:/m': pyarrow.fs cannot open it"):
