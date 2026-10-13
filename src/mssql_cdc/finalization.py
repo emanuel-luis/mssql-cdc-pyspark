@@ -38,7 +38,7 @@ from pyspark.sql.streaming.listener import StreamingQueryListener
 from . import migrations
 from .migrations.control import APPLIED_COLUMNS, OPEN_COMMENTS, VERDICT_COMMENTS, WAVE_COLUMNS
 from .tables import delta_table, retrying, table_ref  # noqa: F401 - table_ref re-exported
-from .types import Granularity, Offset
+from .types import Freshness, Granularity, Offset
 
 if TYPE_CHECKING:
     from pyspark.sql import Column
@@ -195,6 +195,30 @@ def finalized_until(
     df = delta_table(spark, control_table).toDF()
     rows = df.where(df.table_name == table_name).select("finalized_until").collect()
     return rows[0][0] if rows else None
+
+
+def freshness(spark: SparkSessionLike, control_table: str, table_name: str) -> Freshness:
+    """How old ``table_name``'s verdict is now, by this machine's clock: its
+    ``finalized_until`` and when it last moved, as ages in seconds, and the chunked snapshot
+    that holds it, if one does. Reads the control table, without writing to it; the times
+    and ages are None before the first verdict. ``docs/guides/monitoring.md`` has the alert
+    query that tells a held verdict from a stopped stream or capture."""
+    df = delta_table(spark, control_table).toDF()
+    row = (
+        df.where(df.table_name == table_name)
+        .select("finalized_until", "updated_at", "open_snapshot_lsn")
+        .first()
+    )
+    until, moved, held = row if row else (None, None, None)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return {
+        "table_name": table_name,
+        "finalized_until": until,
+        "updated_at": moved,
+        "age_seconds": None if until is None else (now - until).total_seconds(),
+        "seconds_since_update": None if moved is None else (now - moved).total_seconds(),
+        "open_snapshot_lsn": held,
+    }
 
 
 def is_final(

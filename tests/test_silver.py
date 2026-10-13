@@ -2,7 +2,9 @@
 
 import json
 import os
-from datetime import date, datetime, timedelta
+import re
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -896,6 +898,75 @@ def test_a_legacy_snapshot_rebuilds_and_an_open_resnapshot_holds_the_verdict_unt
     assert done["rebuilt"] and done["finalized_until"] == latest
     assert g.rows() == [(1, "new"), (8, "new"), (9, "new")]
     assert g.position() == (_lsn(161), _lsn(150), None, None)
+
+
+def test_freshness_ages_a_moving_verdict_and_names_the_snapshot_holding_one(delta_spark, workdir):
+    g = Log(delta_spark, workdir)
+
+    def fresh(name):  # freshness(), its ages checked against the clock around the call
+        before = datetime.now(timezone.utc).replace(tzinfo=None)
+        f = finalization.freshness(delta_spark, g.control, name)
+        after = datetime.now(timezone.utc).replace(tzinfo=None)
+        for age, at in (("age_seconds", "finalized_until"), ("seconds_since_update", "updated_at")):
+            low, high = ((t - f[at]).total_seconds() for t in (before, after))
+            assert low <= f[age] <= high
+        return f
+
+    g.whole(10, [(1, "new")])
+    g.fact("bootstrap", 10)
+    g.verdict(11)
+    g.apply()
+    first = fresh(g.silver)  # T0 is 09:00: the period of 09:11 is not final yet
+    assert first["finalized_until"] == T0 and first["open_snapshot_lsn"] is None
+    assert finalization.freshness(delta_spark, g.control, "nothing") == {
+        "table_name": "nothing",
+        "finalized_until": None,
+        "updated_at": None,
+        "age_seconds": None,
+        "seconds_since_update": None,
+        "open_snapshot_lsn": None,
+    }
+
+    g.verdict(62)  # 10:02: bronze moves to 10:00, and silver with it
+    g.apply()
+    moved = fresh(g.silver)
+    assert moved["finalized_until"] == T0 + timedelta(hours=1)
+    assert moved["updated_at"] > first["updated_at"]
+    assert moved["age_seconds"] < first["age_seconds"] - 3000
+
+    # a chunked re-snapshot opens: bronze moves on to 11:00, silver's verdict is held
+    g.open(130, "resnapshot")
+    g.wave(130, 0, 140, [(0, None, None, [(1, "paid")])])
+    g.verdict(141)
+    g.apply()
+    held = fresh(g.silver)
+    assert held["open_snapshot_lsn"] == _lsn(130)
+    assert (held["finalized_until"], held["updated_at"]) == (
+        moved["finalized_until"],
+        moved["updated_at"],
+    )
+    assert held["seconds_since_update"] > moved["seconds_since_update"]
+    bronze = fresh(g.bronze)
+    assert bronze["finalized_until"] == T0 + timedelta(hours=2)
+    assert bronze["open_snapshot_lsn"] is None  # the change log's verdict is never held
+    g.fact(None, 141)  # bronze's last micro-batch, written days ago
+    assert _alert(delta_spark, g) == {g.silver: "held", g.bronze: "stopped"}
+
+    g.fact("resnapshot", 130, {"snapshot": _lsn(130)})
+    g.apply()  # complete: silver is rebuilt and released
+    released = fresh(g.silver)
+    assert released["open_snapshot_lsn"] is None
+    assert released["finalized_until"] == bronze["finalized_until"]
+    assert _alert(delta_spark, g) == {g.silver: "silver", g.bronze: "stopped"}
+
+
+def _alert(spark, log):
+    """docs/guides/monitoring.md's alert query on ``log``'s tables: the reason by table."""
+    page = (Path(__file__).parents[1] / "docs" / "guides" / "monitoring.md").read_text("utf-8")
+    [sql] = [q for q in re.findall(r"```sql\n(.*?)```", page, re.DOTALL) if "AS reason" in q]
+    sql = sql.replace("ops.table_finalization", f"delta.`{log.control}`")
+    sql = sql.replace("ops.ingestion_facts", f"delta.`{log.facts}`").rstrip().rstrip(";")
+    return {r["table_name"]: r["reason"] for r in spark.sql(sql).collect()}
 
 
 def test_a_newer_whole_snapshot_rebuilds_silver_and_an_older_one_is_ignored(delta_spark, workdir):

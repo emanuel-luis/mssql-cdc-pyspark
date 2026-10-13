@@ -58,7 +58,7 @@ def test_a_wrong_mode_raises_value_error_naming_the_allowed_ones(kwargs, allowed
 def test_the_typed_results_are_exported_and_plain_dicts():
     offset = mssql_cdc.Offset(lsn="0x" + "0" * 20, commit_ts="")
     assert type(offset) is dict and offset == {"lsn": "0x" + "0" * 20, "commit_ts": ""}
-    for name in ("Offset", "BackfillStatus", "ApplyResult", "ReconcileResult"):
+    for name in ("Offset", "BackfillStatus", "ApplyResult", "ReconcileResult", "Freshness"):
         assert name in mssql_cdc.__all__ and getattr(mssql_cdc, name).__total__
     assert finalization.Granularity is mssql_cdc.Granularity  # its home before 0.3
 

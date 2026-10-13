@@ -41,7 +41,7 @@ keyword-only (since 0.3).
 ::: mssql_cdc.finalization
     options:
       show_root_toc_entry: false
-      members: [advance, track, FinalizationListener, finalized_until, is_final, candidate, end_offset_from_progress]
+      members: [advance, track, FinalizationListener, finalized_until, is_final, freshness, candidate, end_offset_from_progress]
 
 `FinalizationListener` is listed for its `join` and its `last_error`. Create it with `track`, which also
 registers it and starts its worker. `finalized_until(spark, control_table, table_name)`
@@ -61,7 +61,7 @@ or renaming one is a break listed under "Breaking" in the changelog.
 ::: mssql_cdc.types
     options:
       show_root_toc_entry: false
-      members: [Offset, BackfillStatus, ApplyResult, ReconcileResult, SnapshotMode, OnDataLoss, Isolation, Granularity, BackfillState, SparkSessionLike, StreamingQueryLike]
+      members: [Offset, BackfillStatus, ApplyResult, ReconcileResult, Freshness, SnapshotMode, OnDataLoss, Isolation, Granularity, BackfillState, SparkSessionLike, StreamingQueryLike]
 
 ::: mssql_cdc.source.SourceOptions
     options:

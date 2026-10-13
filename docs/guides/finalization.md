@@ -128,8 +128,9 @@ tracker.join()  # the last batch's verdict is written
   `tracker.failures` how many failed in a row. The first failure of a streak is logged at
   ERROR with its traceback (logger `mssql_cdc.finalization`), then one WARNING at most every
   10 minutes until one succeeds, so a permanent error (no `MODIFY` on the control table)
-  shows once instead of flooding the log. Alert on the verdict's freshness too
-  ([Monitoring](monitoring.md#freshness-of-the-verdict)).
+  shows once instead of flooding the log. Alert on the verdict's freshness too:
+  `finalization.freshness` gives its age, and an alert query tells a held verdict from a
+  stopped stream ([Monitoring](monitoring.md#freshness-of-the-verdict)).
 - When the query terminates, with or without an error, the worker applies what is left,
   stops and removes the listener. `join(timeout)` waits for that and returns `False` if the
   timeout passes first; whether the last verdict failed is in `last_error`, not in `join`'s
@@ -193,6 +194,6 @@ option where a listener cannot run ([Extension points](../ARCHITECTURE.md#extens
 
 - [Monitoring](monitoring.md): the per-batch facts behind the verdict.
 - [API reference](../reference/api.md#mssql_cdc.finalization.advance): `advance`, `track`,
-  `finalized_until`, `is_final`, `candidate`, `end_offset_from_progress`.
+  `finalized_until`, `is_final`, `freshness`, `candidate`, `end_offset_from_progress`.
 - [Design notes](../DESIGN.md): why SQL Server CDC can give a stronger signal than event
   times.

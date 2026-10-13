@@ -154,22 +154,81 @@ without the heartbeat it sits up to about 5 minutes, so alert above that
 The facts say the data arrived; consumers wait on `finalized_until`. A verdict that stops
 moving (a tracker whose `advance` keeps failing, a job that no longer calls it) shows only
 in the control table. Alert per table when it falls behind by more than the period
-(`granularity`), plus the trigger or schedule interval, plus a margin:
+(`granularity`), plus the trigger or schedule interval, plus a margin. From Python,
+`finalization.freshness` reads one table's row:
 
-```sql
-SELECT table_name, finalized_until, updated_at
-FROM ops.table_finalization
-WHERE finalized_until IS NULL
-   OR finalized_until < convert_timezone('UTC', localtimestamp())
-        - INTERVAL 60 MINUTES   -- granularity "hour"
-        - INTERVAL 1 MINUTE     -- processingTime trigger, or the job's schedule interval
-        - INTERVAL 15 MINUTES;  -- margin: the idle entries' 5 minutes and slow batches
+```python
+from mssql_cdc import finalization
+
+f = finalization.freshness(spark, "ops.table_finalization", "bronze.orders")
+age = f["age_seconds"]  # None before the first verdict
+if f["open_snapshot_lsn"] is None and (age is None or age > 76 * 60):
+    raise RuntimeError(f"bronze.orders: complete only until {f['finalized_until']}")
 ```
 
-A silver table's verdict holds still while a chunked snapshot is open
-([Silver tables](silver.md#chunked-snapshots)), which can be days: leave it out of this
-alert until the snapshot completes. Why a tracker failed is in its `last_error` and the
-driver's log ([Finalization](finalization.md#continuous-mode)).
+- `age_seconds` is how long ago `finalized_until` was: how long the consumers of the first
+  period not final yet have waited since it ended. A current stream keeps it under the
+  period plus the trigger interval plus the idle entries' 5 minutes: 76 minutes above is
+  an hour, a minute and a 15-minute margin.
+- `seconds_since_update` is how long ago the verdict last moved. Small while `age_seconds`
+  is large, the verdict moves but the stream is behind; large too, it stopped.
+- `open_snapshot_lsn` names the chunked snapshot that holds a silver table's verdict
+  ([Silver tables](silver.md#chunked-snapshots)). That can last days and is expected: leave
+  the table out of the alert until the snapshot completes.
+
+The ages are measured with the clock of the machine that calls it, against UTC
+([API](../reference/api.md#mssql_cdc.finalization.freshness)).
+
+Every table at once, with the reason each one is stale, from the control table and the
+facts:
+
+```sql
+WITH batches AS (                     -- each stream's newest micro-batch row
+  SELECT target, max(written_at) AS last_batch_at,
+         max_by(end_commit_ts, written_at) AS end_commit_ts
+  FROM ops.ingestion_facts
+  WHERE event IS NULL
+  GROUP BY target
+),
+verdicts AS (
+  SELECT c.table_name, c.finalized_until, c.updated_at, c.open_snapshot_lsn, c.applied_lsn,
+         b.last_batch_at, b.end_commit_ts,
+         timestampdiff(MINUTE, c.finalized_until, convert_timezone('UTC', localtimestamp()))
+           AS age_minutes,
+         timestampdiff(MINUTE, b.last_batch_at, convert_timezone('UTC', localtimestamp()))
+           AS minutes_since_batch
+  FROM ops.table_finalization AS c
+  LEFT JOIN batches AS b ON b.target = c.table_name
+)
+SELECT table_name, finalized_until, updated_at, age_minutes, minutes_since_batch,
+  CASE
+    WHEN open_snapshot_lsn IS NOT NULL THEN 'held'
+    WHEN applied_lsn IS NOT NULL THEN 'silver'
+    WHEN last_batch_at IS NULL THEN 'no facts'
+    WHEN minutes_since_batch > 15 THEN 'stopped'
+    WHEN end_commit_ts > finalized_until + INTERVAL 76 MINUTES THEN 'not advanced'
+    ELSE 'behind'
+  END AS reason
+FROM verdicts
+WHERE finalized_until IS NULL
+   OR age_minutes > 60 + 1 + 15;  -- granularity "hour", the trigger interval, a margin
+```
+
+| `reason` | What it means | Next |
+|---|---|---|
+| `held` | a chunked snapshot of this silver table is open | expected until it completes: watch the snapshot's progress (what `backfill()` returns) instead |
+| `silver` | an `apply_changes` table: its verdict follows its bronze's | bronze's row; if bronze is current, `apply_changes` stopped running or fails |
+| `no facts` | no micro-batch row under this name | a stream without `facts_table`, or a control row named otherwise than the facts' `target` ([Finalization](finalization.md#pitfalls)) |
+| `stopped` | no micro-batch row for 15 minutes | the stream stopped, or CDC capture did: [below](#capture-from-the-sql-server-side) |
+| `not advanced` | the stream read past the verdict's next period, the verdict stayed | a tracker failing (`last_error`, the driver's log) or a job that no longer calls `advance` ([Finalization](finalization.md#continuous-mode)) |
+| `behind` | facts arrive and the verdict follows them, both late | the stream lags capture: `ingestion_lag_seconds` in the [health query](#health-of-every-stream) |
+
+A stopped stream and stopped capture look the same from the lake: neither writes facts. Capture
+is per database, so when every stream of one source database stops at once, suspect capture
+(or the one job running them all), and confirm on the SQL Server side
+([below](#capture-from-the-sql-server-side)); when one stops while the others write, the stream
+did. For a job run with `availableNow` on a schedule, replace the 15 minutes with the
+schedule interval and the margin.
 
 ## Why a batch was slow
 

@@ -21,6 +21,7 @@ from mssql_cdc import (
     ApplyResult,
     BackfillState,
     BackfillStatus,
+    Freshness,
     Offset,
     ReconcileResult,
     apply_changes,
@@ -67,6 +68,9 @@ def results(spark: SparkSession, options: dict[str, Any], copy: DataFrame) -> No
     # an offset is what advance() takes, as end_offset_from_progress's dict is
     finalization.advance(spark, "c", "bronze.orders", offset, granularity="day")
     assert_type(finalization.end_offset_from_progress(query.lastProgress), Offset | None)
+    fresh = finalization.freshness(spark, "c", "bronze.orders")
+    assert_type(fresh, Freshness)
+    assert_type(fresh["age_seconds"], float | None)
 
 
 def spark_connect(
@@ -84,6 +88,7 @@ def spark_connect(
     finalization.advance(spark, "c", "bronze.orders", None)
     finalization.finalized_until(spark, "c", "bronze.orders")
     finalization.is_final(spark, "c", "bronze.orders", datetime(2026, 1, 1))
+    finalization.freshness(spark, "c", "bronze.orders")
     finalization.track(spark, query, "c", "bronze.orders").join(timeout=60)
     await_all({"dbo_orders": query, **queries})
     stop_all({"dbo_orders": query})

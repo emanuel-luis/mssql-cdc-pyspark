@@ -85,6 +85,27 @@ class ApplyResult(TypedDict):
     """False when ``bronze`` does not exist yet: nothing was applied."""
 
 
+class Freshness(TypedDict):
+    """What ``finalization.freshness()`` returns: how old a table's verdict is, for alerts."""
+
+    table_name: str
+    """The control row's name, as passed."""
+    finalized_until: datetime | None
+    """The verdict, naive UTC; None before the first."""
+    updated_at: datetime | None
+    """When the verdict last moved, naive UTC; None before the first."""
+    age_seconds: float | None
+    """Seconds from ``finalized_until`` to now: how long consumers of the first period not
+    final yet have been waiting since it ended. A current stream keeps it under the
+    period (an hour by default) plus its trigger interval and the idle entries' 5 minutes."""
+    seconds_since_update: float | None
+    """Seconds since the verdict last moved. Small with a large ``age_seconds``: the verdict
+    moves, the stream is behind. Large too: it stopped moving."""
+    open_snapshot_lsn: str | None
+    """Tables built by ``apply_changes``: the LSN of the chunked snapshot still open, which
+    holds the verdict until the snapshot completes; None otherwise."""
+
+
 class ReconcileResult(TypedDict):
     """What ``reconcile()`` returns: a summary of the run, and its report."""
 
