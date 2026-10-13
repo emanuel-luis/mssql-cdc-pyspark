@@ -174,7 +174,8 @@ class _Chunked(_ModeLock):
         isolation: Isolation | None = None,
     ) -> BackfillStatus:
         """Read the newest open chunked snapshot of ``target`` (``to_delta(...,
-        snapshot="chunked")`` opens one) in waves of chunks of at most about ``chunk_rows``
+        snapshot="chunked")`` opens one, and with ``snapshot_on_switch=True`` one more after a
+        capture instance switch) in waves of chunks of at most about ``chunk_rows``
         rows, ``numPartitions`` at a time, next to the running stream; returns how far it
         got. Run it apart from the stream (its own task) and call it again until ``done``.
 
@@ -517,6 +518,8 @@ class _Chunked(_ModeLock):
                 "rows": rows_in,
                 "last_lsn": max(c.lsn for c in chunks),
             }
+            # a switch's, in a generation whose own key another snapshot may have: by its S
+            switched = info.get("switch_batch_id") is not None
             events.write_event(
                 self.spark,
                 facts_table,
@@ -525,8 +528,8 @@ class _Chunked(_ModeLock):
                 # later generation's re-snapshot (ADR 0018)
                 info.get("kind") or (events.RESNAPSHOT if info["generation"] else events.BOOTSTRAP),
                 app_id=sink_id,
-                txn_app_id=f"{app_id}#events",
-                version=info["generation"],
+                txn_app_id=f"{app_id}#snapdone.{s}" if switched else f"{app_id}#events",
+                version=0 if switched else info["generation"],
                 target=target,
                 lsn=s,
                 commit_ts=_iso(top["min_commit_ts"]),

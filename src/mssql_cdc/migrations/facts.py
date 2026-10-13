@@ -441,6 +441,33 @@ KEY_VALUE_COMMENTS = {
 }
 
 
+# Migration 14 (2026-10-13): to_delta(snapshot="chunked", snapshot_on_switch=True) opens a
+# chunked snapshot after a switch to a newer capture instance, at that instance's start LSN,
+# which the stream has read past; its 'snapshot_open' detail has switch_batch_id and its
+# completion is a 'bootstrap' row (ADR 0023 Amendment 7). Comments only; the creation columns
+# take these, over the earlier ones.
+SWITCH_COMMENTS = {
+    "event": POSSIBLE_COMMENTS["event"]
+    .replace(
+        "'bootstrap' for the initial snapshot of the target;",
+        "'bootstrap' for the initial snapshot of the target, and for the chunked one "
+        "stream().to_delta(snapshot_on_switch=True) opens after a switch to a newer capture "
+        "instance;",
+    )
+    .replace(
+        "and its stream generation starts at S;",
+        "and its stream generation starts at S (after a switch, S is the newer capture "
+        "instance's start LSN, which the stream has read past);",
+    ),
+    "detail": KEY_VALUE_COMMENTS["detail"].replace(
+        "generation, lost_from_ts, lost_to_ts}; 'snapshot_plan'",
+        "generation, lost_from_ts, lost_to_ts, and on a chunked one opened after a switch to a "
+        "newer capture instance switch_batch_id, the batch_id of its 'capture_instance_switched' "
+        "row}; 'snapshot_plan'",
+    ),
+}
+
+
 def _end_offset(spark: SparkSessionLike, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT  # the comments new tables are created with
 
@@ -504,5 +531,9 @@ MIGRATIONS: list[Migration] = [
     Migration(
         "key values in the plans table",
         lambda spark, table: set_comments(spark, table, KEY_VALUE_COMMENTS),
+    ),
+    Migration(
+        "snapshots after a capture instance switch",
+        lambda spark, table: set_comments(spark, table, SWITCH_COMMENTS),
     ),
 ]

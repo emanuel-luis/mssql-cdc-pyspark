@@ -574,16 +574,20 @@ default); `0` allows a retry right away.
 
 ### snapshot_on_switch
 
-`True` appends a snapshot of the table after the batch that first reads a newer capture
-instance, so that rows unchanged since the switch carry the columns only the newer instance
-captures instead of NULL. It reads the whole table inside that batch, so the stream waits
-for the read: not for tables too big to snapshot. With `snapshot="chunked"` it is a
-`ValueError`, and with a URI checkpoint it needs `metricsPath` (`ValueError` otherwise). See
+`True` snapshots the table after the batch that first reads a newer capture instance, so
+that rows unchanged since the switch carry the columns only the newer instance captures
+instead of NULL. With `snapshot="full"` it reads the whole table inside that batch, so the
+stream waits for the read: not for tables too big to snapshot. With `snapshot="chunked"` it
+only opens a chunked snapshot at the newer instance's start LSN, which the stream has read
+past, and [backfill()](#backfill-parameters) reads it next to the stream; it supersedes a
+chunked snapshot still open, and a run with `snapshot="full"` raises until it completes.
+With a URI checkpoint it needs `metricsPath` (`ValueError` otherwise). See
 [Schema changes](../guides/schema-changes.md#rows-unchanged-since-the-switch).
 
 ### snapshot
 
-How `bootstrap=True` and `on_data_loss="resnapshot"` take a snapshot.
+How `bootstrap=True`, `on_data_loss="resnapshot"` and `snapshot_on_switch=True` take a
+snapshot.
 
 * `"full"`: read the whole table before the query starts, as above.
 * `"chunked"`: only open one: record its LSN S in a `snapshot_open` facts row, and the

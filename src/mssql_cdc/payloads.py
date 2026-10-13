@@ -58,7 +58,8 @@ class _SnapshotOpen(TypedDict):
     """How it is taken; a reader takes a missing or unknown one as ``chunked``."""
     kind: SnapshotKind
     generation: int
-    """The stream generation it starts (ADR 0018): 0 for a bootstrap."""
+    """The stream generation it starts (ADR 0018): 0 for a bootstrap; for one opened after a
+    capture instance switch, the generation that read the switch."""
     lost_from_ts: str | None
     """A re-snapshot's: the commit time (UTC ISO-8601) of the last offset processed."""
     lost_to_ts: str | None
@@ -68,11 +69,16 @@ class _SnapshotOpen(TypedDict):
 class SnapshotOpenDetail(_SnapshotOpen, total=False):
     """``detail`` of a ``'snapshot_open'`` facts row, written before a snapshot reads the
     table; ``keys`` and ``plan`` only on a chunked one, and since 0.7.0 only in its plans
-    table's row."""
+    table's row; ``switch_batch_id`` only on one opened after a capture instance switch."""
 
     keys: list[str]
     """The key columns its chunks are cut on: the unique index's, or ``snapshotKeys``."""
     plan: SnapshotExtent
+    switch_batch_id: int
+    """Since 0.8.0, on a chunked one ``to_delta(snapshot_on_switch=True)`` opens: the
+    ``batch_id`` of the batch that first read the newer capture instance (its
+    ``'capture_instance_switched'`` row); S is that instance's start LSN, which the stream
+    has read past. Its ``kind`` is ``bootstrap``: no change was lost."""
 
 
 class _SnapshotPlan(TypedDict):

@@ -93,7 +93,8 @@ PLANS_COLUMNS: list[ColumnDef] = [
         "STRING",
         (
             "JSON, the facts row's detail with the keys it leaves out: 'snapshot_open' {mode, "
-            "kind, generation, lost_from_ts, lost_to_ts, keys, plan}, keys the columns the "
+            "kind, generation, lost_from_ts, lost_to_ts, keys, plan, and switch_batch_id on one "
+            "opened after a capture instance switch}, keys the columns the "
             "chunks are cut on and plan the key's extent read just after S ({kind: 'int', lo, "
             "hi, rows} for one integer key, else {kind: 'keyset', max}); 'snapshot_plan' "
             "{snapshot, kind, keys, chunk_rows, chunk_count, chunks}, chunks the [lo, hi] of "

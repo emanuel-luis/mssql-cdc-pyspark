@@ -146,6 +146,7 @@ class _ModeLock(_StreamBase):
         lost_from_ts: datetime | None = None,
         lost_to_ts: datetime | None = None,
         mode: SnapshotMode = "chunked",
+        switch: tuple[int, str] | None = None,
     ) -> _Opened:
         """Open a ``kind`` snapshot ('bootstrap' or 'resnapshot') for generation
         ``generation`` (sink ``sink_id``) in ``mode``: record an LSN S in a 'snapshot_open'
@@ -158,7 +159,13 @@ class _ModeLock(_StreamBase):
         A chunked one once per generation: Delta skips a rerun's append, so the row is read
         back. A full one per run, at its own S, so that ``_lock`` tells a run still reading
         from one CDC cleanup has passed. A chunked one of the generation read back by a full
-        run raises: a run opened it after this one's ``_reusable``."""
+        run raises: a run opened it after this one's ``_reusable``.
+
+        ``switch``: ``(batch_id, S)`` of a chunked one ``snapshot_on_switch`` opens after the
+        batch that first read a newer capture instance, S that instance's start LSN, which
+        the batch read past: the stream has every change after S, as a generation's from its
+        own S (ADR 0023). Once per S, a replay of the batch reads it back; it supersedes a
+        chunked one of the generation still open."""
         from ..client import make_client, snapshot_plan
         from ..source import snapshot_keys, snapshot_lsn
 
@@ -166,7 +173,8 @@ class _ModeLock(_StreamBase):
             source = client.source_table(ci)
             # the chunks' columns: the unique index's, or snapshotKeys (ADR 0028 Amendment 5)
             keys = snapshot_keys(self.options) or source.keys
-            lsn = snapshot_lsn(client, source)  # first: the plan's MIN and MAX come after S
+            # first: the plan's MIN and MAX come after S
+            lsn = switch[1] if switch else snapshot_lsn(client, source)
             plan = snapshot_plan(client, ci, source, keys) if mode == "chunked" else None
             offset: Offset = {"lsn": lsn, "commit_ts": client.lsn_to_time(lsn) or ""}
         detail: SnapshotOpenDetail = {
@@ -176,17 +184,20 @@ class _ModeLock(_StreamBase):
             "lost_from_ts": _iso(lost_from_ts) or None,
             "lost_to_ts": _iso(lost_to_ts) or None,
         }
+        snapopen = f"{app_id}#snapopen.{lsn}"  # by S: a rerun's S has a row of its own
+        txn = f"{app_id}#snapshots" if mode == "chunked" else None
+        if switch:  # the generation's own key may be taken: one by its S, as in the plans table
+            detail["switch_batch_id"], txn = switch[0], snapopen
         if plan is not None:  # a chunked one's, in the plans table: before the facts row
             detail["keys"], detail["plan"] = keys, plan
-            snapopen = f"{app_id}#snapopen.{lsn}"  # by S: a rerun's S has a row of its own
             events.write_plans(self.spark, target, lsn, events.SNAPSHOT_OPEN, [detail], snapopen, 0)
         events.write_event(
             self.spark,
             facts_table,
             events.SNAPSHOT_OPEN,
             app_id=sink_id,
-            txn_app_id=f"{app_id}#snapshots" if mode == "chunked" else None,
-            version=generation,
+            txn_app_id=txn,
+            version=0 if switch else generation,
             target=target,
             lsn=lsn,
             commit_ts=offset["commit_ts"],

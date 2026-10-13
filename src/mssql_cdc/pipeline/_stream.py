@@ -67,10 +67,13 @@ class CdcStream(_Recovery, _Chunked):
         ``resnapshot_interval_days`` must exceed the CDC retention: a second loss within it
         raises ``DataLossError`` instead of snapshotting again.
         ``snapshot_on_switch``: after the batch that first reads a newer capture instance of the
-        table, append a snapshot, so that rows unchanged since then carry the columns only the
+        table, snapshot it, so that rows unchanged since then carry the columns only the
         newer instance captures, instead of NULL (ADR 0023). It reads the reader's events from
-        the metrics directory, so a URI checkpoint needs ``metricsPath``. It reads the whole
-        table inside the batch, so not with ``snapshot="chunked"``.
+        the metrics directory, so a URI checkpoint needs ``metricsPath``. With
+        ``snapshot="full"`` it reads the whole table inside the batch; with ``"chunked"`` it
+        only opens a chunked snapshot at the newer instance's start LSN, which the stream has
+        read past, and ``backfill()`` reads it next to the stream (it supersedes a chunked
+        snapshot still open).
         ``metricsPath``, when given, must be a directory every node sees: executors write it
         and the driver reads it. A local or FUSE path, or a URI ``pyarrow.fs`` opens with the
         credentials every node has (``s3://``, ``gs://``, ``abfss://``, ``hdfs://``); the
@@ -88,11 +91,6 @@ class CdcStream(_Recovery, _Chunked):
             raise ValueError(
                 "snapshot='chunked' needs a facts_table: its event rows record the snapshot "
                 "and which chunks are in"
-            )
-        if snapshot_on_switch and chunked:
-            raise ValueError(
-                "snapshot_on_switch=True reads the whole table inside the stream's batch, which "
-                "snapshot='chunked' exists to avoid: use one or the other"
             )
         if snapshot_on_switch and not _opt(self.options, "metricsPath") and _URI.match(checkpoint):
             raise ValueError(
@@ -121,7 +119,9 @@ class CdcStream(_Recovery, _Chunked):
                 )
         if bootstrap and _opt(self.options, "startingLsn"):
             raise ValueError("bootstrap=True sets startingLsn itself; pass one or the other")
-        if facts_table and (bootstrap or on_data_loss == "resnapshot"):
+        if facts_table and (
+            bootstrap or on_data_loss == "resnapshot" or (snapshot_on_switch and chunked)
+        ):
             self._lock(facts_table, target, app_id, snapshot)  # one mode while one is open
         state = _read_state(checkpoint)
         if on_data_loss == "resnapshot":
@@ -166,8 +166,14 @@ class CdcStream(_Recovery, _Chunked):
         write = delta_sink(target, sink_id, facts_table, metrics_path=metrics)  # removes its files
         if snapshot_on_switch:
             assert metrics  # checked above
+            # chunked: what _open needs to open one in this generation, for the sink's
+            opening = (
+                {"app_id": app_id, "sink_id": sink_id, "facts_table": facts_table, "generation": n}
+                if chunked
+                else None
+            )
             write = _snapshot_after_switch(
-                write, dict(self.options), self._capture_instance(), target, metrics
+                write, dict(self.options), self._capture_instance(), target, metrics, opening
             )
         writer = (
             self.spark.readStream.format("mssql_cdc")
@@ -188,19 +194,30 @@ def _snapshot_after_switch(
     ci: str,
     target: str,
     metrics: str,
+    opening: Mapping[str, Any] | None = None,
 ) -> Callable[[DataFrame, int], None]:
     """``sink``, then a snapshot of the table after the batch that first read a newer capture
-    instance (``to_delta(snapshot_on_switch=True)``). Holds no session: Spark Connect pickles
-    ``foreachBatch`` functions."""
+    instance (``to_delta(snapshot_on_switch=True)``): a whole one, or with ``opening`` (the
+    ``app_id``, ``sink_id``, ``facts_table`` and ``generation`` of ``CdcStream._open``) a
+    chunked one opened at that instance's start LSN S, for ``backfill()`` to read. Holds no
+    session: Spark Connect pickles ``foreachBatch`` functions."""
     from ..sink import _read_events
 
     def write(df: DataFrame, batch_id: int) -> None:
-        switched = any(
-            e.get("event") == events.CAPTURE_INSTANCE_SWITCHED for e in _read_events(metrics)[1]
-        )
+        starts = [
+            e["lsn"]
+            for e in _read_events(metrics)[1]
+            if e.get("event") == events.CAPTURE_INSTANCE_SWITCHED
+        ]
         sink(df, batch_id)  # folds the events into the facts and removes their files
-        if switched:  # a replay after a crash here snapshots again: harmless, only slower
-            CdcStream(df.sparkSession, options)._take_snapshot(target, ci)
+        if not starts:
+            return
+        cdc = CdcStream(df.sparkSession, options)
+        if opening is None:  # a replay after a crash here snapshots again: harmless, only slower
+            cdc._take_snapshot(target, ci)
+        else:  # the batch read past S, and it is in bronze: the stream has every change after S
+            switch = (batch_id, max(starts))  # once per S: a replay reads it back
+            cdc._open(target, ci, kind="bootstrap", switch=switch, **opening)
 
     return write
 

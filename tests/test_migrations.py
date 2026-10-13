@@ -71,6 +71,24 @@ def test_migrate_stamps_a_migration_applied_before_a_crash(delta_spark, workdir)
     assert detail["properties"][migrations.SCHEMA_VERSION_PROPERTY] == str(len(control.MIGRATIONS))
 
 
+def test_a_plans_table_of_0_7_0_gets_the_comment_of_a_snapshot_after_a_switch(delta_spark, workdir):
+    from mssql_cdc.events import PLANS_COLUMNS
+
+    path = os.path.join(workdir, "plans")
+    tables.create_if_not_exists(  # as 0.7.0 created it, with its comments
+        delta_spark,
+        path,
+        [(n, t, "0.7.0's") for n, t, _ in PLANS_COLUMNS],
+        properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
+    )
+    assert migrations.migrate(delta_spark, path, "plans") == 1
+    got = {
+        f.name: f.metadata["comment"] for f in delta_spark.read.format("delta").load(path).schema
+    }
+    assert got == {n: c if n == "detail" else "0.7.0's" for n, _, c in PLANS_COLUMNS}
+    assert "switch_batch_id" in got["detail"]
+
+
 def test_a_table_a_newer_release_migrated_is_written_unless_it_needs_that_release(
     delta_spark, workdir, caplog
 ):

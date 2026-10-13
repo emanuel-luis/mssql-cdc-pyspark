@@ -256,10 +256,10 @@ def test_facts_table_at_version_0_gains_every_column_and_the_current_comments(de
         "one row per non-empty batch",
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(spark, old, "facts") == 13
+    assert migrations.migrate(spark, old, "facts") == 14
     cols, description = _comments(spark, old)
     assert all(name in cols and cols[name][1] for name, _, _ in added)
-    # migrations 5 to 13 rewrote the comments whose meaning changed: as a new table has them
+    # migrations 5 to 14 rewrote the comments whose meaning changed: as a new table has them
     assert {n: cols[n][1] for n, _, _ in FACTS_COLUMNS} == {n: c for n, _, c in FACTS_COLUMNS}
     assert description == FACTS_COMMENT
 
@@ -1581,10 +1581,6 @@ def test_on_data_loss_is_checked_before_the_query_starts(spark, workdir, caplog)
         cdc.to_delta(target, "x", ckpt, bootstrap=True, snapshot="lazy")
     with pytest.raises(ValueError, match="snapshot='chunked' needs a facts_table"):
         cdc.to_delta(target, "x", ckpt, bootstrap=True, snapshot="chunked")
-    with pytest.raises(ValueError, match="snapshot_on_switch=True reads the whole table"):
-        cdc.to_delta(
-            target, "x", ckpt, "facts", bootstrap=True, snapshot="chunked", snapshot_on_switch=True
-        )
     # the generation state is a file, and the checkpoint is read from Python
     for uri in ("abfss://c@a.dfs.core.windows.net/x", "/dbfs/ckpt/orders"):
         with pytest.raises(ValueError, match="same directory"):

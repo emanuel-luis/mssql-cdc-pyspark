@@ -53,7 +53,10 @@ has passed can never complete and stops counting.
 The stream follows a newer capture instance of its table (ADR 0023): snapshots in the target
 are found under any capture instance of the table, and ``snapshot_on_switch=True`` appends a
 snapshot after the batch that first reads the newer one, so that rows unchanged since then
-carry the columns only it captures instead of NULL.
+carry the columns only it captures instead of NULL. With ``snapshot="chunked"`` it opens a
+chunked one instead, at the newer instance's start LSN, which the stream has read past: a
+'snapshot_open' row whose detail has ``switch_batch_id``, read by ``backfill()`` and closed
+by a 'bootstrap' row, as the run's other chunked snapshots.
 """
 
 from __future__ import annotations

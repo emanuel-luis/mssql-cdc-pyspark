@@ -84,6 +84,7 @@ from .migrations.facts import (
     POSSIBLE_COMMENTS,
     RETENTION_COLUMNS,
     SKIP_COMMENTS,
+    SWITCH_COMMENTS,
     WARNING_COMMENTS,
 )
 from .payloads import BatchDetail
@@ -253,10 +254,16 @@ FACTS_COLUMNS = [
     ),
     *NETWORK_COLUMNS,
     *RETENTION_COLUMNS,
-    *((n, t, POSSIBLE_COMMENTS.get(n, SKIP_COMMENTS.get(n, c))) for n, t, c in EVENT_COLUMNS),
+    *(
+        (n, t, SWITCH_COMMENTS.get(n, POSSIBLE_COMMENTS.get(n, SKIP_COMMENTS.get(n, c))))
+        for n, t, c in EVENT_COLUMNS
+    ),
     *LAG_COLUMNS,
     *END_COLUMNS,
-    *((n, t, KEY_VALUE_COMMENTS.get(n, WARNING_COMMENTS.get(n, c))) for n, t, c in DETAIL_COLUMNS),
+    *(
+        (n, t, SWITCH_COMMENTS.get(n, KEY_VALUE_COMMENTS.get(n, WARNING_COMMENTS.get(n, c))))
+        for n, t, c in DETAIL_COLUMNS
+    ),
     ("target", "STRING", "Table name or path the batch was written to."),
     (
         "written_at",

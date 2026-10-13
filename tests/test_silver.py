@@ -344,6 +344,67 @@ def test_silver_follows_the_switch_to_a_newer_capture_instance_and_gains_its_col
     assert rows() == [(1, "paid", "gift"), (3, "new", "rush")]
 
 
+def test_a_chunked_snapshot_on_switch_fills_the_new_column_through_backfill(delta_spark, workdir):
+    o = Orders(delta_spark, workdir, infer=True)
+    o.options["numPartitions"] = "1"  # one chunk per wave
+    del o.options["maxCommitsPerBatch"]  # fewer batches: a faster test
+    for i in range(4):
+        o.commit((2, _row(i, "new")))
+
+    def run(**kw):
+        kw = {"bootstrap": True, "snapshot": "chunked", "snapshot_on_switch": True, **kw}
+        o.run(facts_table=o.facts, **kw)
+
+    def backfill(**kw):
+        cdc = stream(o.spark, o.options)
+        return cdc.backfill(o.bronze, app_id="orders-v1", facts_table=o.facts, chunk_rows=2, **kw)
+
+    def rows():
+        got = o.spark.read.format("delta").load(o.silver).collect()
+        return sorted((r["order_id"], r["status"], r["note"]) for r in got)
+
+    def facts(event):
+        found = o.spark.read.format("delta").load(o.facts).where(f"event = '{event}'")
+        return sorted(found.collect(), key=lambda r: r["min_lsn"])
+
+    run()
+    assert backfill()["done"]  # the chunked bootstrap
+    o.apply(options=o.options)
+    o.db.ddl(CI, "note", "ALTER TABLE [dbo].[orders] ADD [note] varchar(20) NULL")
+    # note alone changed: the old instance writes no change row, only a snapshot brings it
+    o.commit((3, {**_row(0, "new"), "note": None}), (4, {**_row(0, "new"), "note": "vip"}))
+    v2 = o.db.add_capture_instance(CI, COLUMNS + ", note STRING")
+    o.commit((2, {**_row(9, "new"), "note": "gift"}))
+    run()  # the batch that crosses v2's start opens a chunked snapshot at it: nothing read
+    [switched] = facts("capture_instance_switched")
+    _, opened = facts("snapshot_open")
+    detail = json.loads(opened["detail"])
+    assert opened["min_lsn"] == switched["min_lsn"] and switched["detail"] == f"{CI} -> {v2}"
+    assert (detail["kind"], detail["switch_batch_id"]) == ("bootstrap", switched["batch_id"])
+    with pytest.raises(ValueError, match="has a chunked snapshot open"):
+        run(snapshot="full")  # one mode while it is open
+    assert not o.apply(options=o.options)["rebuilt"]
+    assert (0, "new", None) in rows()
+
+    assert not backfill(max_waves=1)["done"]
+    assert not o.apply(options=o.options)["rebuilt"]
+    assert (0, "new", "vip") in rows()  # its wave is in
+    o.commit((1, _row(1, "new")))
+    o.commit((3, {**_row(3, "new"), "note": None}), (4, {**_row(3, "paid"), "note": "rush"}))
+    run()
+    assert backfill()["done"]
+    assert o.apply(options=o.options)["rebuilt"]
+    source = FakeCdcClient(o.src)._table(CI)
+    assert rows() == sorted((r["order_id"], r["status"], r.get("note")) for r in source)
+    assert rows() == [(0, "new", "vip"), (2, "new", None), (3, "paid", "rush"), (9, "new", "gift")]
+    # its completion has a key of its own: the bootstrap's took the generation's
+    assert [r["max_lsn"] for r in facts("bootstrap")] == [
+        r["min_lsn"] for r in facts("snapshot_open")
+    ]
+    run()  # a rerun crosses no switch: nothing opened
+    assert len(facts("snapshot_open")) == 2
+
+
 def test_a_control_table_at_version_0_gains_applied_lsn_and_snapshot_wave(delta_spark, workdir):
     from mssql_cdc import migrations, tables
     from mssql_cdc.finalization import CONTROL_COLUMNS
