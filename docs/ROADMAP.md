@@ -125,11 +125,14 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 
 ## 0.8.0 (minor): operations at scale
 
-- [ ] Chunked snapshots of keyless tables, cut on a chosen column.
+- [x] Chunked snapshots of keyless tables, cut on a chosen column: the `snapshotKeys` option,
+      unique or not (ADR 0028, Amendment 6).
 - [x] `snapshot_on_switch` in chunked mode: the switch batch opens a chunked snapshot at the
       newer instance's start LSN, for `backfill()` (ADR 0023, Amendment 7).
-- [ ] `start_many()`: measure the per-stream driver cost and document a ceiling.
-- [ ] A verdict-freshness metric for alerts.
+- [x] `start_many()`: measure the per-stream driver cost and document a ceiling (lab check
+      t11, ADR 0027 Amendment); each start waits for the source of the one before it.
+- [x] A verdict-freshness metric for alerts: `finalization.freshness()` and an alert query
+      that tells a held verdict from a stopped stream.
 
 ## 1.0.0: stability
 
