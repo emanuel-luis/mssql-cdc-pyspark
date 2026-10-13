@@ -170,7 +170,9 @@ finally:
   meanwhile.
 - **Starts are sequential.** `to_delta` runs a table's bootstrap or re-snapshot before it
   starts the query, so a large snapshot delays the tables after it in the list. For a first
-  run over many large tables, put them last, or bootstrap them in a run of their own.
+  run over many large tables, put them last, or bootstrap them in a run of their own. The
+  next table starts once the query before it has started its source, or stopped
+  ([below](#how-many-streams-per-driver)).
 
 ## Sizing the cluster
 
@@ -186,11 +188,10 @@ The streams share the cluster, and their micro-batches run at the same time.
 - **Connections on SQL Server.** At most one per running task, so no more than the
   executor cores, plus one per stream on the driver, which plans its batches.
 - **The driver** plans every stream and runs every `foreachBatch`, where the sink writes
-  bronze and the facts. Each stream also keeps, for the life of its query, a Python worker
+  bronze and the facts. Each stream also keeps, for the life of its query, a Python
   process of its own on the driver, where Spark runs the source's planning, and that
-  process's connection to SQL Server. Driver memory is therefore the first ceiling, before
-  executor cores: past what one driver holds, split the tables into several jobs. No
-  per-stream figure has been measured yet.
+  process's connection to SQL Server. What that costs, and how many streams one driver
+  holds, is [below](#how-many-streams-per-driver).
 - **Facts commits.** Every trigger of every stream writes a facts commit. A
   `processingTime` trigger bounds them; compact the facts table
   ([Monitoring](monitoring.md#pitfalls)).
@@ -198,6 +199,59 @@ The streams share the cluster, and their micro-batches run at the same time.
   so a large batch of one table can hold the cores while the others wait. Cap it with
   `maxCommitsPerBatch` on that table, or give the queries
   [fair scheduler pools](https://spark.apache.org/docs/latest/job-scheduling.html#fair-scheduler-pools).
+
+## How many streams per driver
+
+What a running stream costs the driver, for the life of its query, measured with lab check
+t11 ([ADR 0027](../decisions/0027-fan-out-one-stream-per-table.md#amendment-the-drivers-cost-per-stream-measured)):
+
+| Per stream | Classic driver | Spark Connect server |
+|---|---|---|
+| Python process that plans the source (Spark's `python_streaming_source_runner`) | one, about 50 MB | one, about 50 MB |
+| Python process that runs `foreachBatch` (`foreach_batch_worker`) | none: the driver's own process, 1–2 threads | one, about 100 MB |
+| JVM heap | about 10 MB | not measured |
+| JVM threads | about 20 | about 50 |
+| Planning per trigger (`latestOffset`, `queryPlanning` in the progress) | tens of milliseconds | tens of milliseconds |
+
+Measured with 1, 5, 10 and 20 tables of the file-backed fake, a row a second each, a
+5-second `processingTime` trigger, on a 16-vCPU host that other jobs kept busy. Memory is
+not what runs out first: 20 streams hold about 1 GB of Python processes. Two things are:
+
+- **Starting a stream.** Spark gives each of those Python processes 10 seconds to start
+  (import PySpark, PyArrow and this package) and connect back, and the limit cannot be
+  configured. On a busy driver a start misses it: the query fails at once with "Python
+  worker failed to connect back" (on Spark Connect, the `foreachBatch` process's miss makes
+  `start_many` raise and stop the queries it started). `start_many` starts each stream
+  once the one before it has started its source, so the processes do not start together;
+  even so, 5 of 20 failed while 13 streams kept the measuring host busy (9 of 20 when
+  started back to back). Start them again as under [Failure isolation](#failure-isolation).
+- **The sink's work.** Each trigger's `foreachBatch` commits bronze and the facts from the
+  driver, which takes far longer than planning. When a trigger outlasts its interval, Spark
+  logs "Current batch is falling behind": the driver, not SQL Server, sets the pace.
+
+Start with up to about 10 always-on streams per driver, and watch for both errors. Past
+that:
+
+- **A longer trigger interval.** A `processingTime` of minutes plans and commits less
+  often per stream. The per-stream memory and threads stay as long as the query runs.
+- **Groups with `availableNow`.** Each query stops once it has caught up, and its Python
+  processes exit with it, so a driver holds only one group's at a time:
+
+  ```python
+  ids = {
+      "target": "bronze.{ci}",
+      "app_id": "{ci}-v1",
+      "checkpoint": "/Volumes/main/ops/checkpoints/{ci}",
+      "facts_table": "ops.ingestion_facts",
+  }
+  failed = {}
+  for i in range(0, len(tables), 10):  # 10 streams at a time
+      group = start_many(spark, options, tables[i : i + 10], trigger={"availableNow": True}, **ids)
+      failed |= await_all(group)
+      # advance the verdict of each table in the group, as in the first example
+  ```
+
+- **More jobs**, each with its own driver ([below](#one-job-or-one-job-per-table)).
 
 ## One job, or one job per table
 

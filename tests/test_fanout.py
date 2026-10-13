@@ -5,7 +5,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import DEFAULT, call, create_autospec, patch
+from unittest.mock import DEFAULT, PropertyMock, call, create_autospec, patch
 
 import pytest
 
@@ -120,9 +120,13 @@ TEMPLATES = {"target": "bronze_{ci}", "app_id": "{ci}-v1", "checkpoint": "ckpt/{
 
 
 def _queries(n):
+    """Running queries whose source has started."""
     from pyspark.sql.streaming import StreamingQuery
 
-    return [create_autospec(StreamingQuery, instance=True) for _ in range(n)]
+    queries = [create_autospec(StreamingQuery, instance=True) for _ in range(n)]
+    for query in queries:
+        query.status = {"message": "Waiting for data to arrive"}
+    return queries
 
 
 @contextmanager
@@ -179,6 +183,29 @@ def test_a_start_that_raises_stops_the_queries_started_before_it():
     assert raised.value is missing  # raised as it was
     q1.stop.assert_called_once_with()
     ensure.assert_not_called()  # no facts_table
+
+
+def test_each_stream_starts_once_the_one_before_it_has_started_its_source(monkeypatch):
+    # Spark gives the Python process that plans a query's source 10 s to start: many at once
+    # on a busy driver miss it (lab check t11)
+    from mssql_cdc import fanout
+
+    q1, q2 = _queries(2)
+    log = []
+    status = iter(["Initializing StreamExecution", "Initializing sources", "Waiting for data"])
+    type(q1).status = PropertyMock(
+        side_effect=lambda: log.append("status") or {"message": next(status)}
+    )
+    monkeypatch.setattr(
+        fanout, "time", SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda s: None)
+    )
+    with _mocked([q1, q2]) as (stream, _, _):
+        started = iter([q1, q2])
+        stream.return_value.to_delta.side_effect = lambda *a, **k: (
+            log.append("start") or next(started)
+        )
+        start_many(object(), {"backend": "fake"}, ["dbo_orders", "dbo_customers"], **TEMPLATES)
+    assert log == ["start", "status", "status", "status", "start"]
 
 
 def test_await_all_waits_for_each_query_within_one_timeout(monkeypatch):

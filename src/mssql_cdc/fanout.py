@@ -56,8 +56,9 @@ def start_many(
 
     The facts table is created, or migrated, once before the first start: writers that
     commit to a new Delta table at the same time conflict. The streams start in order,
-    each after its own bootstrap or re-snapshot. When a start raises, the queries already
-    started are stopped and the error is raised.
+    each after its own bootstrap or re-snapshot, and once the query before it has started
+    its source (or stopped). When a start raises, the queries already started are stopped
+    and the error is raised.
     """
     templates = {"target": target, "app_id": app_id, "checkpoint": checkpoint}
     for name, template in templates.items():
@@ -91,10 +92,25 @@ def start_many(
                 facts_table=facts_table,
                 **to_delta_kwargs,
             )
+            _source_started(queries[ci])
     except BaseException:
         stop_all(queries)
         raise
     return queries
+
+
+def _source_started(query: StreamingQuery) -> None:
+    """Wait until ``query`` has started its source, or stopped, for up to two minutes. Spark
+    starts a Python process per query to plan the source and gives it 10 s to connect back:
+    many starting at once on a busy driver miss that, and their queries fail with "Python
+    worker failed to connect back" (lab check t11, ADR 0027)."""
+    deadline = time.monotonic() + 120
+    while (
+        query.isActive
+        and query.status["message"].startswith("Initializing")
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.1)
 
 
 def await_all(
