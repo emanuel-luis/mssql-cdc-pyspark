@@ -1420,7 +1420,7 @@ def test_every_planning_read_takes_the_source_capture_instance_key_types_and_iso
 
 
 def test_snapshot_keys_cut_on_captured_columns_sql_server_sorts_and_binds():
-    # snapshotKeys on a table without a unique index (ADR 0028 Amendment 5): checked at the
+    # snapshotKeys on a table without a unique index (ADR 0028 Amendment 6): checked at the
     # open, before any read, so a column no chunk can be cut on fails instead of one chunk
     from unittest.mock import create_autospec
 

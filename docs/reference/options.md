@@ -448,7 +448,7 @@ one range, and one chunk.
   `datetime2(7)` or `datetimeoffset(7)` before the last one) and SQL Server can sort (not
   `bit`, `text`, `ntext`, `image` or `xml`), or the open raises `ValueError`. Each chunk is
   a range `[lo, hi)` of their values, NULL first, so a row is in one chunk only, and a
-  value is never split: one more rows hold than `chunk_rows` makes a bigger chunk. Keep the
+  value is never split: one held by more rows than `chunk_rows` makes a bigger chunk. Keep the
   option while the snapshot is open: `backfill()` raises when the stream's options would
   cut on other columns ([Tables without a unique index](../guides/bootstrap.md#tables-without-a-unique-index)).
 

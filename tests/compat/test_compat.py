@@ -40,6 +40,8 @@ def test_the_state_a_release_wrote_resumes(delta_spark, tmp_path, version):
     spark.sql(f"CREATE DATABASE {database}")
     chunked = m.get("chunked")  # written from 0.2.0 on
     names = [*tables.values(), *([chunked["bronze"]] if chunked else [])]
+    if chunked and (tmp_path / "delta" / "bronze_chunked_snapshot_plans").is_dir():  # 0.7.0 on
+        names.append(chunked["bronze"] + "_snapshot_plans")
     try:
         for name in names:
             location = (tmp_path / "delta" / name.split(".")[1]).as_uri()
@@ -63,15 +65,23 @@ def _finish_chunked(spark, m: dict, src: str, ckpt: str) -> None:
     c, key, value = m["chunked"], m["key"], m["value"]
     facts, control = m["tables"]["facts"], m["tables"]["control"]
     ci = m["options"]["captureInstance"]
+    plans = c["bronze"] + "_snapshot_plans"
+    in_plans = spark.catalog.tableExists(plans)  # opened by 0.7.0 or later
     cdc = stream(spark, {**m["options"], "backend": "fake", "fakePath": src, "numPartitions": "2"})
     status = cdc.backfill(c["bronze"], app_id=c["app_id"], facts_table=facts)
     assert status["done"] and status["chunks_done"] == status["chunks_total"] > 2, status
-    # opened by the release: its facts rows keep its key values to its end, this code's too,
-    # and no plans table is written (ADR 0028 Amendment 4)
+    # its key values stay where the release put them, to its end: in the facts rows before
+    # 0.7.0, with no plans table written, and in the plans table from 0.7.0 on (ADR 0028
+    # Amendment 4)
     chunks = spark.table(facts).where(f"event = 'snapshot_chunk' AND target = '{c['bronze']}'")
-    assert all("lo" in json.loads(r["detail"]) for r in chunks.collect())
+    assert all(("lo" in json.loads(r["detail"])) != in_plans for r in chunks.collect())
     assert chunks.count() == status["chunks_done"]
-    assert not spark.catalog.tableExists(c["bronze"] + "_snapshot_plans")
+    assert spark.catalog.tableExists(plans) == in_plans
+    if in_plans:
+        properties = spark.sql(f"DESCRIBE DETAIL {plans}").first()["properties"]
+        assert int(properties[migrations.SCHEMA_VERSION_PROPERTY]) == (
+            migrations.current_version("plans")
+        )
     cdc.to_delta(
         c["bronze"],
         c["app_id"],

@@ -49,7 +49,7 @@ def snapshot_plan(
     type no bound can be bound as): one chunk, the whole table. ``plan_chunks`` cuts it.
 
     ``keys``: the columns to cut on (``snapshotKeys``) when not the unique index's, unique or
-    not (ADR 0028 Amendment 5); a column CDC does not capture, or of a type no bound can be
+    not (ADR 0028 Amendment 6); a column CDC does not capture, or of a type no bound can be
     bound as or SQL Server cannot sort, raises ``ValueError``."""
     s, t = source.schema, source.table
     keys = source.keys if keys is None else list(keys)
@@ -142,7 +142,7 @@ def _seek(
     """``key_bound``; on columns that are not the unique index, the (n + 1)-th row from ``lo``
     can hold ``lo``'s value as SQL Server compares it (equal in Python too, or not: a
     case-insensitive collation, trailing spaces), which would end the chunk where it starts.
-    Then twice as many rows, until ``[lo, bound)`` holds one (ADR 0028 Amendment 5). Bounds
+    Then twice as many rows, until ``[lo, bound)`` holds one (ADR 0028 Amendment 6). Bounds
     are values, so a value is never split, and a chunk starting on one that more than ``n``
     rows hold has fewer than twice its rows."""
     while True:

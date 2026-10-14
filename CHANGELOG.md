@@ -12,6 +12,73 @@ compatibility" line.
 
 ## [Unreleased]
 
+State compatibility: offsets and checkpoints unchanged. Facts migration 14 and snapshot plans
+migration 1 rewrite column comments only (metadata), the next time a stream opens those
+tables. The 'snapshot_open' payload gains the optional key `switch_batch_id`
+([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)
+amendment 10); no other payload key is new. No `mssql_cdc.min_version` is set.
+
+- A chunked snapshot opened with `snapshotKeys` records those columns as its open's `keys`,
+  the columns its chunks are cut on, as before. A `backfill()` before 0.8.0 refuses such a
+  snapshot, as it refuses one whose unique index changed.
+- A release before 0.8.0 cannot complete a chunked snapshot that `snapshot_on_switch` opened
+  once its generation's own snapshot has completed, because Delta skips its completion row.
+  Run `backfill()` with 0.8.0.
+- `finalization.freshness()` only reads the control table.
+
+### Added
+
+- Chunked snapshots of tables without a unique index. The `snapshotKeys` option already cut
+  the snapshot reader's ranges; now it also names the columns `to_delta(...,
+  snapshot="chunked")` cuts a snapshot's chunks on, unique or not
+  ([ADR 0028](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0028-chunked-snapshot-next-to-the-stream/),
+  Amendment 6). Each chunk is a `[lo, hi)` range of the column values, NULL first, so a row
+  is in one chunk only and a value is never split: a value held by more rows than
+  `chunk_rows` makes a bigger chunk. The columns are recorded with the snapshot in its plans
+  table, and its plan stays on them. The open refuses a column CDC does not capture, of a
+  type no bound can be bound as, or one SQL Server cannot sort (`bit`, `text`, `ntext`,
+  `image`, `xml`). Such a snapshot fills bronze only: `apply_changes` still needs `keys` that
+  identify a row.
+- `to_delta(snapshot="chunked", snapshot_on_switch=True)`, which raised `ValueError` before.
+  The batch that first reads a newer capture instance now opens a chunked snapshot at that
+  instance's start LSN, which the stream has already read past, instead of reading the whole
+  table inside the batch. `backfill()` reads it next to the stream, and `apply_changes`
+  applies its waves and rebuilds silver at its `bootstrap` row
+  ([ADR 0023](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0023-schema-changes-and-capture-instance-switching/)
+  Amendment 7). It replaces a chunked snapshot of the stream that is still open, and it
+  holds the snapshot mode like the others: a `snapshot="full"` run raises until it
+  completes. Its 'snapshot_open' row has `kind` 'bootstrap' and the new key
+  `switch_batch_id`, the `batch_id` of the switch's 'capture_instance_switched' row; its
+  open and completion rows use Delta keys based on its S (`<app_id>#snapopen.<S>`,
+  `<app_id>#snapdone.<S>`, version 0), because the generation's own keys may already be
+  taken.
+- `finalization.freshness(spark, control_table, table_name)` returns how old a table's
+  verdict is: `finalized_until`, `updated_at`, their ages in seconds by the caller's clock,
+  and `open_snapshot_lsn` when a chunked snapshot holds a silver verdict. The result is
+  `Freshness`, a `TypedDict` exported from `mssql_cdc`. The monitoring guide's alert query
+  joins the control table with the facts and names why each stale verdict is stale: held,
+  silver, no facts, stopped, not advanced, behind.
+- Lab check `t11_fanout_cost` measures what each `start_many` stream costs the driver: one
+  Python planning process of about 50 MB per running query (and on a Spark Connect server, a
+  `foreachBatch` process of about 100 MB), about 10 MB of heap and 20 JVM threads, tens of
+  milliseconds of planning per trigger.
+  [ADR 0027](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0027-fan-out-one-stream-per-table/)
+  (amendment) and the many-tables guide give about 10 always-on streams per driver as a
+  starting point, and the options past it: a longer trigger interval, `availableNow` groups,
+  more jobs.
+
+### Changed
+
+- `start_many` starts each stream once the query before it has started its source (or
+  stopped, up to two minutes). Spark gives the Python process that plans a query's source a
+  fixed 10 s to connect back, and streams started back to back on a busy driver failed at
+  their start with "Python worker failed to connect back" (9 of 20 in lab check t11).
+- `backfill()` raises `ValueError` when the stream's `snapshotKeys` option (else the unique
+  index) would cut the open snapshot's chunks on other columns than it opened with; before,
+  it raised only when the unique index had changed.
+- `snapshotKeys` must be a non-empty JSON list of column names, or it is a `ValueError`; a
+  JSON string was read as one column per letter.
+
 ## [0.7.0] - 2026-10-13
 
 State compatibility: offsets and checkpoints unchanged. A new table kind, the snapshot plans

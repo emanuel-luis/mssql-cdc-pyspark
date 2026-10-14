@@ -2477,7 +2477,7 @@ def test_a_keyset_plans_open_last_chunk_ends_at_the_first_key_after_max_when_rea
 def test_a_table_without_a_unique_index_is_chunked_on_the_column_snapshot_keys_names(
     delta_spark, workdir
 ):
-    # ADR 0028 Amendment 5: [lo, hi) on a column that is not unique, NULL first, so every row
+    # ADR 0028 Amendment 6: [lo, hi) on a column that is not unique, NULL first, so every row
     # is in one chunk and a value in one only, however many rows hold it
     from mssql_cdc import stream
 

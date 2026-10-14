@@ -1860,7 +1860,7 @@ _HEAP = (
 def test_a_heap_chunked_on_a_column_that_is_not_unique_reads_every_row_once_under_a_writer(
     delta_spark, sqlserver, workdir, column
 ):
-    # ADR 0028 Amendment 5: snapshotKeys names the column; each chunk is a [lo, hi) range of its
+    # ADR 0028 Amendment 6: snapshotKeys names the column; each chunk is a [lo, hi) range of its
     # values, so a value is never split and a row is read by one chunk only, whatever the
     # writer does meanwhile; NULLs in the first
     name = f"ck_heap_{column}"

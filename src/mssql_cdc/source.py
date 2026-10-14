@@ -1163,7 +1163,7 @@ ISOLATION_LEVELS: dict[str, str | None] = {"readcommitted": None, "snapshot": "s
 
 def snapshot_keys(options: Mapping[str, Any]) -> list[str] | None:
     """The ``snapshotKeys`` option: the columns a snapshot cuts its ranges on, and a chunked
-    one its chunks (ADR 0028 Amendment 5), instead of the capture instance's unique index;
+    one its chunks (ADR 0028 Amendment 6), instead of the capture instance's unique index;
     None when it is not set."""
     given = _opt(options, "snapshotKeys")
     if not given:
@@ -1211,7 +1211,7 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         commit_ts = client.lsn_to_time(lsn)
         schema, table = source.schema, source.table
         # the columns the ranges are cut on: reconcile()'s key, a chunked snapshot's (ADR 0028
-        # Amendment 5) or the user's, not always the index's
+        # Amendment 6) or the user's, not always the index's
         keys = snapshot_keys(self.options) or source.keys
         # a captured column the table no longer has reads NULL, like its later change rows
         present = client.present_columns(ci, self.source_columns)

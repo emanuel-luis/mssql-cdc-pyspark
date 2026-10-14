@@ -193,7 +193,7 @@ class _Chunked(_ModeLock):
 
         The chunks are cut on the columns the snapshot opened with: the unique index's, or
         the stream's ``snapshotKeys`` option, unique or not, which a table without a unique
-        index needs to be read in more than one chunk (ADR 0028 Amendment 5). A value never
+        index needs to be read in more than one chunk (ADR 0028 Amendment 6). A value never
         splits across chunks: one held by more than ``chunk_rows`` rows makes a bigger chunk.
         Options that would cut on other columns now raise.
 

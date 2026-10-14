@@ -171,7 +171,7 @@ class _ModeLock(_StreamBase):
 
         with closing(make_client(self.options)) as client:
             source = client.source_table(ci)
-            # the chunks' columns: the unique index's, or snapshotKeys (ADR 0028 Amendment 5)
+            # the chunks' columns: the unique index's, or snapshotKeys (ADR 0028 Amendment 6)
             keys = snapshot_keys(self.options) or source.keys
             # first: the plan's MIN and MAX come after S
             lsn = switch[1] if switch else snapshot_lsn(client, source)

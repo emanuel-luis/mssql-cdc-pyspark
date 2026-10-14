@@ -206,7 +206,7 @@ folded_values = st.none() | st.sampled_from(["a", "A", "b", "B", "c", "d", "D"])
 )
 @example(values=["a", "A", "a", "b"], later=[], chunk_rows=1)  # 'A' ends no chunk at 'a'
 def test_a_plan_on_a_column_that_is_not_unique_reads_every_row_once(values, later, chunk_rows):
-    # snapshotKeys on a table without a unique index (ADR 0028 Amendment 5)
+    # snapshotKeys on a table without a unique index (ADR 0028 Amendment 6)
     source = SourceTable("dbo", "t", [], None)
     table = _Collated([{"g": v} for v in values])
     extent = snapshot_plan(table, "ci", source, ["g"])
