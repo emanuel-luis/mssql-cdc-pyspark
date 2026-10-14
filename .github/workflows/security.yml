@@ -31,8 +31,10 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with: { python-version: "3.11" }
       # Every package uv.lock pins, for every extra and group (dev and docs included), with
-      # its hashes: pip-audit checks exactly that set and resolves nothing itself.
-      - run: uv export --frozen --all-extras --all-groups --no-emit-project -o "$RUNNER_TEMP/locked.txt"
+      # its hashes: pip-audit checks exactly that set and resolves nothing itself. Less mike
+      # (docs group): a git commit, with no hash and nothing on PyPI to audit; its dependencies
+      # stay in.
+      - run: uv export --frozen --all-extras --all-groups --no-emit-project --no-emit-package mike -o "$RUNNER_TEMP/locked.txt"
       - run: uvx pip-audit==2.10.1 --disable-pip --progress-spinner off -r "$RUNNER_TEMP/locked.txt"
 
   zizmor:

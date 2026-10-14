@@ -57,6 +57,9 @@ connect = ["pyspark[connect]>=4.2", "pandas<3"]
 docs = [
     "zensical>=0.0.67",
     "mkdocstrings-python>=2.0.9",
+    # Zensical's fork of mike, which publishes one version of the site at a time to gh-pages
+    # (ADR 0024 amendment 1). It is not on PyPI: pinned to a commit.
+    "mike @ git+https://github.com/squidfunk/mike.git@2d4ad799442f4592db8ad53b179bfb33db8c69ac",
 ]
 
 [project.urls]

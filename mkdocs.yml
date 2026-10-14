@@ -1,6 +1,7 @@
 # The documentation site, built by Zensical (ADR 0024):
 #   uv run --group docs zensical build --strict   # into site/
 #   uv run --group docs zensical serve            # preview on localhost:8000
+# docs.yml publishes it one version at a time with mike (ADR 0024 amendment 1).
 site_name: mssql-cdc-pyspark
 site_description: PySpark streaming source for SQL Server CDC, with a Delta sink and a completeness signal
 site_url: https://emanuel-luis.github.io/mssql-cdc-pyspark/
@@ -34,6 +35,11 @@ theme:
       toggle:
         icon: lucide/moon
         name: Switch to system preference
+
+extra:
+  version:
+    provider: mike  # the version selector, from versions.json at the site's root
+    alias: true     # "1.0.0 stable"
 
 plugins:
   - search

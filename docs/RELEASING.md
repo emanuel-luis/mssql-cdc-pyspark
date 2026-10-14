@@ -31,6 +31,12 @@ What a version number may change is set by the 0.x policy
 4. Optional while there is one maintainer: a tag ruleset (Settings, Rules, Rulesets)
    targeting `v*` that restricts creation, update and deletion to maintainers, so nobody
    else can push or move a release tag.
+5. The documentation site, published per version by `.github/workflows/docs.yml`
+   ([ADR 0024](decisions/0024-documentation-site.md) amendment 1): Settings, Pages,
+   Source "GitHub Actions"; and in Settings, Environments, `github-pages`, under
+   "Deployment branches and tags", a tag rule `v*` next to the `main` branch rule, or a
+   tag's deployment is refused. The first run creates the `gh-pages` branch, which holds
+   every version: do not delete it or make it a Pages source.
 
 ## Dry run (TestPyPI)
 
@@ -75,6 +81,12 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
    triggers counts as publishing, and `ci` restores caches; zizmor's cache-poisoning
    audit). Then install from PyPI in a clean
    environment, as in the dry run without the TestPyPI index.
+
+   The tag also starts a `docs` run, which publishes the site as version `X.Y.Z` and moves
+   `stable` (the site's root) to it. Check that it went green and that the version
+   selector lists `X.Y.Z` with `stable`. Runs share one concurrency group and a newer one
+   cancels one still waiting, so if a push to `main` right after the tag left it cancelled,
+   run `docs` again from the tag (Actions, `docs`, "Run workflow", the tag as the ref).
 6. Keep the state the release writes, so later versions are tested against it
    ([ADR 0021](decisions/0021-compatibility-policy-for-0x.md) amendment 3). On Linux (or
    WSL), in a fresh virtual environment holding the wheel from PyPI and the `pyspark` and
@@ -101,9 +113,21 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
 `## [X.Y.Z]` heading in `CHANGELOG.md`. If `build` fails on the tag (a version mismatch, a
 failed check), nothing was published:
 delete the tag (`git push --delete origin vX.Y.Z` and `git tag -d vX.Y.Z`), fix, and tag
-again. Once PyPI has a version, it cannot be uploaded again: fix forward with the next
+again; the `docs` run of the new tag publishes over the version the first one published.
+Once PyPI has a version, it cannot be uploaded again: fix forward with the next
 patch.
 
-A release candidate follows the same steps with a version like `0.2.0rc1`
-(`uv version 0.2.0rc1`, tag `v0.2.0rc1`); pip installs it only with `--pre` or an exact
-pin.
+A release candidate follows the same steps with a version like `1.0.0rc1`
+(`uv version 1.0.0rc1`, tag `v1.0.0rc1`); pip installs it only with `--pre` or an exact
+pin. Its `docs` run publishes version `1.0.0rc1` and leaves `stable` alone.
+
+A published version stays in the selector. To remove one (a release candidate once its
+final release is out, say), from an up-to-date clone with the docs group:
+
+```bash
+git fetch origin gh-pages:refs/remotes/origin/gh-pages
+uv run --group docs mike delete 1.0.0rc1   # commits to the local gh-pages branch
+git push origin gh-pages
+```
+
+then run `docs` from `main` ("Run workflow") to deploy the branch.

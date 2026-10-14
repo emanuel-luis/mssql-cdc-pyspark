@@ -1,32 +1,75 @@
 name: docs
 
-# Builds the documentation site (ADR 0024) and publishes it to GitHub Pages on every push
-# to main. One-time setup: Settings > Pages > Source: "GitHub Actions".
+# Builds the documentation site (ADR 0024) and publishes it to GitHub Pages one version at a
+# time, with a version selector (amendment 1): a push to main publishes "dev"; a release tag
+# vX.Y.Z publishes X.Y.Z and moves "stable" to it; a tag vX.Y.ZrcN publishes that version and
+# leaves "stable" alone. mike commits each version to the gh-pages branch, which keeps them
+# all; the deploy job publishes that branch's tree. One-time setup (docs/RELEASING.md):
+# Settings > Pages > Source: "GitHub Actions", and a `v*` tag rule on the github-pages
+# environment.
 on:
   push:
     branches: [main]
-  workflow_dispatch:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+rc[0-9]+"
+  workflow_dispatch:  # from main or a release tag: publishes it again
 
 permissions:
   contents: read
 
 concurrency:
   group: pages
-  cancel-in-progress: false  # let a running deployment finish
+  cancel-in-progress: false  # every run commits to gh-pages: one at a time, none cut short
 
 jobs:
   build:
-    name: build the site (strict)
+    name: build the site, commit the version to gh-pages
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # the push to gh-pages, and only that step gets the token
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with: { python-version: "3.11", enable-cache: false }
       # The docs group alone: the API reference is read from src/ statically, no PySpark.
+      # Strict here, since mike's own build is not.
       - run: uv run --locked --only-group docs zensical build --strict
+      - name: Commit the version to gh-pages (mike)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages \
+            || echo "no gh-pages branch yet: this run creates it"
+          mike() { uv run --locked --only-group docs mike "$@"; }
+          case "$GITHUB_REF" in
+            refs/heads/main)
+              mike deploy dev
+              # the site's root opens "stable" once a final release made it, "dev" until then
+              mike list stable > /dev/null 2>&1 || mike set-default dev ;;
+            refs/tags/v*rc*)
+              mike deploy "${GITHUB_REF_NAME#v}" ;;
+            refs/tags/v*)
+              mike deploy --update-aliases "${GITHUB_REF_NAME#v}" stable
+              mike set-default stable ;;
+            *)
+              echo "::error::the docs are published from main or a release tag, not $GITHUB_REF"
+              exit 1 ;;
+          esac
+      - name: Push gh-pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+      # Every version, an alias's symlink dereferenced by upload-pages-artifact, and the root
+      # 404 page that sends links from before the versions on to the default one.
+      - name: Gather the gh-pages tree
+        run: |
+          mkdir _pages
+          git archive gh-pages | tar -x -C _pages
+          cp .github/pages/404.html _pages/
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with: { path: site/ }
+        with: { path: _pages/ }
 
   deploy:
     name: deploy to GitHub Pages

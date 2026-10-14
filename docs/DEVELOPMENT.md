@@ -305,13 +305,29 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
 to `main` and weekly:
 
 * `pip-audit`: every package `uv.lock` pins, for every extra and group, against the known
-  vulnerabilities; one fails the job.
+  vulnerabilities; one fails the job. Less `mike`, a git commit with no hash to check.
 * `zizmor`: the workflows; a finding of medium severity or higher fails the job.
 * `lowest-direct`: `uv sync --resolution lowest-direct` on Python 3.10 installs the lowest
   version of each direct dependency that `pyproject.toml` allows (`pyarrow`, `mssql-python`,
   the dev group), then runs the test files that start no JVM.
 * `scorecard`: the OpenSSF Scorecard, from `main` only (a push, the weekly run or a manual
   one); its results go to the repository's code scanning alerts and to scorecard.dev.
+
+`.github/workflows/docs.yml` publishes this site to GitHub Pages one version at a time
+([ADR 0024](decisions/0024-documentation-site.md) amendment 1): a push to `main` publishes
+`dev`, a release tag publishes its version (a final one also moves `stable`, the site's
+root). It runs the strict build, then mike (Zensical's fork, in the `docs` group) commits
+the version to the `gh-pages` branch, which holds every version; the deploy job publishes
+that branch's tree with `.github/pages/404.html` at the root, which sends links from before
+the versions on to `stable` (or `dev`). CI's `docs` job runs only the strict build.
+
+To see the version selector locally, build into a local `gh-pages` branch and serve it:
+
+```bash
+uv run --group docs mike deploy dev       # a commit on the local gh-pages branch, not pushed
+uv run --group docs mike serve            # http://localhost:8000/dev/
+git branch -D gh-pages                    # when done; never push it from here
+```
 
 ## Releasing
 

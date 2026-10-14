@@ -789,6 +789,15 @@ wheels = [
 ]
 
 [[package]]
+name = "inversion"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8a/56/4b7237fac01882ba3e984c8ac2e62baf81ffb20d2b2ccf933873b9781f0e/inversion-1.0.0.tar.gz", hash = "sha256:a7c9e912d18d68927453b0d654e2ef6f2b9a523818b033383cec9d93e1042edf", size = 27547, upload-time = "2026-10-12T19:08:45.646Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/57/cdb060baae3fcc84347df0f1364beb0b68b4943e2fd736a246dd3eebbdf2/inversion-1.0.0-py3-none-any.whl", hash = "sha256:25c45999ce09aff55effbfa43e83e20b25ef97c99e881925f4eb8d7f7836a179", size = 46241, upload-time = "2026-10-12T19:08:44.404Z" },
+]
+
+[[package]]
 name = "jinja2"
 version = "3.1.6"
 source = { registry = "https://pypi.org/simple" }
@@ -1060,6 +1069,17 @@ wheels = [
 ]
 
 [[package]]
+name = "mike"
+version = "2.2.0+zensical.0.1.0"
+source = { git = "https://github.com/squidfunk/mike.git?rev=2d4ad799442f4592db8ad53b179bfb33db8c69ac#2d4ad799442f4592db8ad53b179bfb33db8c69ac" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "pyparsing" },
+    { name = "verspec" },
+    { name = "zensical" },
+]
+
+[[package]]
 name = "mkdocs"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1208,6 +1228,7 @@ dev = [
     { name = "testcontainers" },
 ]
 docs = [
+    { name = "mike" },
     { name = "mkdocstrings-python" },
     { name = "zensical" },
 ]
@@ -1240,6 +1261,7 @@ dev = [
     { name = "testcontainers", specifier = ">=4.15" },
 ]
 docs = [
+    { name = "mike", git = "https://github.com/squidfunk/mike.git?rev=2d4ad799442f4592db8ad53b179bfb33db8c69ac" },
     { name = "mkdocstrings-python", specifier = ">=2.0.9" },
     { name = "zensical", specifier = ">=0.0.67" },
 ]
@@ -1844,6 +1866,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pyparsing"
+version = "3.3.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/11/b213bebff182584360cb8d17c72c1677fec5c5c228de439e63bcf8ab1c8f/pyparsing-3.3.3.tar.gz", hash = "sha256:928ae7e20211f3b6f3915a72f06a0cfd29ab9d24279dd6346b6b1a7146397d36", size = 1050487, upload-time = "2026-09-20T20:59:05.609Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/bb/d215ee7c73b61497b28a5503f9f53523f294fcc936762b7caf90e0c1c2b5/pyparsing-3.3.3-py3-none-any.whl", hash = "sha256:ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4", size = 126420, upload-time = "2026-09-20T20:59:04.025Z" },
+]
+
+[[package]]
 name = "pyright"
 version = "1.1.414"
 source = { registry = "https://pypi.org/simple" }
@@ -2192,6 +2223,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e3/05/b17359e1cefb4f909b5e40b1b90a496d987258916dbbf88e842c729f510e/urllib3-2.8.0.tar.gz", hash = "sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63", size = 458972, upload-time = "2026-09-15T19:29:36.253Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl", hash = "sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3", size = 135717, upload-time = "2026-09-15T19:29:34.577Z" },
+]
+
+[[package]]
+name = "verspec"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "inversion" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bf/f2/b54333307517b3eb592fe7406a792cffe582cf4444037498c554a18babb8/verspec-0.2.0.tar.gz", hash = "sha256:350c3715601a9cecf78d980c27c87af81124ac74877eba2480dcd7645aaccfe8", size = 2052, upload-time = "2026-10-12T20:45:59.517Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5b/3b/46291770a715b512f65c7b56ff549e718f354b84f3150ae9faff410f3062/verspec-0.2.0-py3-none-any.whl", hash = "sha256:962fed8f88fc7abaffb75c591c699435ea428910153f0efbc96efba1ed484615", size = 5138, upload-time = "2026-10-12T20:45:58.518Z" },
 ]
 
 [[package]]

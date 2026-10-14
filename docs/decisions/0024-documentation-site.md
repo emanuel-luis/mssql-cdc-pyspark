@@ -1,7 +1,8 @@
 # 0024: A documentation site built by Zensical, hosted on GitHub Pages
 
 **Status:** accepted  
-**Date:** 2026-10-01T14:43:57-03:00
+**Date:** 2026-10-01T14:43:57-03:00  
+**Amended:** 2026-10-14T09:21:02-03:00, one site per version with mike: `dev` from main, each release, `stable` (amendment 1)
 
 ## Context
 Usage was documented in a long README and the Markdown files under `docs/`; the API was
@@ -67,3 +68,45 @@ The state of the tools in October 2026:
 * A page missing from `nav` still builds, reachable only by links: new pages and ADRs get a
   `nav` line.
 * GitHub Pages must be enabled once, with "GitHub Actions" as the source.
+
+## Amendment 1: one site per version
+1.0 freezes the public API (ADR 0021), and users on a release need the pages that describe
+it while `main` moves on: the single site, `main`'s, describes the next release, not theirs.
+
+Zensical has no versioning of its own yet. Its documented path is a fork of mike, the tool
+Material for MkDocs used, kept by the Zensical team until native versioning ships
+([Zensical: versioning](https://zensical.org/docs/compatibility/mkdocs/mike/),
+[squidfunk/mike](https://github.com/squidfunk/mike)): it builds with `zensical build` and
+commits each version to a directory of the `gh-pages` branch, with a `versions.json` at its
+root that the theme's version selector reads (`extra.version.provider: mike`). The fork is
+not on PyPI and gets compatibility fixes only.
+
+* The `docs` group pins the fork to a commit (`uv.lock` records it). pip-audit audits what
+  `uv.lock` pins by hash, and a git commit has none and no PyPI entry: `security.yml` leaves
+  that one package out of the export; its dependencies stay in.
+* `docs.yml` publishes one version per run, all from one concurrency group, so the runs
+  that commit to `gh-pages` never overlap:
+  * a push to `main` publishes `dev`;
+  * a tag `vX.Y.Z` publishes `X.Y.Z` and moves the `stable` alias to it;
+  * a tag `vX.Y.ZrcN` publishes `X.Y.ZrcN` and leaves `stable` where it is, so a release
+    candidate in use has its pages without becoming the default;
+  * the site's root opens `stable`, or `dev` until the first final release.
+  Versions start with this amendment: the 0.x releases are not published.
+* GitHub Pages keeps "GitHub Actions" as its source. `gh-pages` is the store of every
+  version; each run commits to it, pushes it, and deploys its whole tree as the Pages
+  artifact (an alias's symlink becomes a copy there). The build job holds `contents: write`
+  for that push; its checkout keeps no credentials, and only the push step gets the token,
+  after the build ran the third-party code of the docs group.
+* Links from before the versions (`/mssql-cdc-pyspark/guides/streaming/`, in the README of
+  every 0.x release on PyPI and in `CHANGELOG.md`) keep working: the site's root `404.html`
+  (`.github/pages/404.html`, added to the artifact) sends a path whose first segment is not
+  a version on to the same path in `stable`, or `dev`. A missing page inside a version stays
+  a 404.
+* mike's build is not strict, so `docs.yml` runs the strict build first.
+
+Consequences: the `github-pages` environment needs a `v*` tag rule next to `main`, or a
+tag's deploy is refused (its version is on `gh-pages` regardless, and the next push to
+`main` deploys it). A tag publishes its version as soon as it is pushed, before PyPI's
+reviewer approves the release; a tag deleted and pushed again publishes over it. When
+Zensical ships native versioning, the fork goes, and the `gh-pages` layout (a directory per
+version, `versions.json`) is what a replacement has to keep or redirect.

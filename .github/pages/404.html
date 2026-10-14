@@ -1,0 +1,21 @@
+<!doctype html>
+<!-- The site's root 404 page on GitHub Pages, added by docs.yml next to the versions
+     (ADR 0024 amendment 1). A link from before the site had versions, such as
+     /mssql-cdc-pyspark/guides/streaming/, goes on to the same page of "stable", or of "dev"
+     until a final release has "stable". A missing page inside a version stays a 404. -->
+<meta charset="utf-8">
+<title>Page not found - mssql-cdc-pyspark</title>
+<p>Page not found. <a href="/mssql-cdc-pyspark/">The documentation</a>.</p>
+<script>
+  var base = "/mssql-cdc-pyspark/";
+  var path = location.pathname.slice(base.length);
+  fetch(base + "versions.json")
+    .then(function (response) { return response.json(); })
+    .then(function (versions) {
+      var names = [];
+      versions.forEach(function (v) { names = names.concat(v.version, v.aliases); });
+      if (location.pathname.indexOf(base) !== 0 || names.indexOf(path.split("/")[0]) !== -1) return;
+      var target = names.indexOf("stable") !== -1 ? "stable" : "dev";
+      location.replace(base + target + "/" + path + location.search + location.hash);
+    });
+</script>
