@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with: { python-version: "3.11" }
       - run: uv sync --locked
       - run: uv run ruff check --output-format=github
@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         # its own cache: lint's key is the same, and a docs-only cache would leave out the dev group
         with: { python-version: "3.11", cache-suffix: docs }
       - run: uv run --locked --only-group docs zensical build --strict
@@ -73,7 +73,7 @@ jobs:
           path: ~/.ivy2.5.2  # Spark 4's Ivy directory: the Delta jars
           key: ivy-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: ivy-${{ runner.os }}-  # a new uv.lock still starts from the jars
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with: { python-version: "${{ matrix.python }}", activate-environment: true }
       - run: uv sync --locked
       - run: pytest -q --timeout=300 ${{ matrix.shard.args }}
@@ -90,7 +90,7 @@ jobs:
         with: { persist-credentials: false }
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with: { distribution: temurin, java-version: "17" }
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with: { python-version: "3.11", activate-environment: true }
       - run: uv sync --locked
       # over the locked 4.2.0; pytest, not uv run, which would sync it back
@@ -122,7 +122,7 @@ jobs:
           path: ~/.ivy2.5.2  # Spark 4's Ivy directory: the Delta jars
           key: ivy-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: ivy-${{ runner.os }}-  # a new uv.lock still starts from the jars
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with: { python-version: "3.11", activate-environment: true }
       - name: System libraries for mssql-python; unixODBC and ODBC Driver 18 for arrow-odbc
         run: |
@@ -159,7 +159,7 @@ jobs:
           restore-keys: |
             ivy-connect-${{ runner.os }}-
             ivy-${{ runner.os }}-
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         # its own cache, with the connect group the other jobs' leaves out
         with: { python-version: "3.11", activate-environment: true, cache-suffix: connect }
       - run: uv sync --locked --group connect
@@ -206,7 +206,7 @@ jobs:
           path: ~/.ivy2.5.2  # Spark 4's Ivy directory: the Delta jars
           key: ivy-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: ivy-${{ runner.os }}-  # a new uv.lock still starts from the jars
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with: { python-version: "3.11", activate-environment: true }
       - name: System libraries for mssql-python
         run: sudo apt-get update && sudo apt-get install -y libltdl7 libkrb5-3 libgssapi-krb5-2
@@ -242,6 +242,6 @@ jobs:
         if: matrix.part == 'idle'
         run: python -m lab.checks.t7_end_to_end --transactions 50 --idle-minutes 6 --destructive
         continue-on-error: true
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with: { name: "lab-results-${{ matrix.part }}", path: lab/results/ }
