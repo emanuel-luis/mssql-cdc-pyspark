@@ -12,6 +12,57 @@ compatibility" line.
 
 ## [Unreleased]
 
+State compatibility: offsets, checkpoints, table schemas and payloads are unchanged. A
+micro-batch row's `warnings` may hold one more message (on Spark without admission control).
+
+### Added
+
+- Build provenance: each release's sdist and wheel get a GitHub artifact attestation (SLSA
+  build provenance, `actions/attest`) from the job that publishes them, before the upload;
+  the TestPyPI dry run attests too. PyPI's PEP 740 attestations, uploaded with every file
+  since 0.1.0, are now documented as well. SECURITY.md, "Verifying a release", shows how to
+  check both (`gh attestation verify ... --signer-workflow .../release.yml --source-ref
+  refs/tags/vX.Y.Z`, `pypi-attestations verify pypi`).
+
+### Changed
+
+- [ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)
+  amendment 11 sets the 1.x policy. From 1.0.0 on, versioning follows Semantic Versioning
+  strictly: a patch fixes, a minor adds, a major breaks, and a type-only break counts.
+  Anything public is deprecated in a 1.x minor before 2.0 removes it. The state contract
+  only grows. It now names the keys of the generation state file and the Delta `txnAppId`s
+  that make replays idempotent. The `warnings`, a task's `reason` and the `detail` of a
+  'capture_instance_switched' row are text for people and may be reworded in any release.
+- `FinalizationListener` is public for `join`, `last_error` and `failures`. Create it with
+  `finalization.track()`; its constructor is not public, because a listener built by hand
+  never started its worker.
+- The documentation site is published per version, with a version selector: `dev` follows
+  `main`, each release tag publishes its own version, and `stable`, the site's root, is the
+  latest final release. A release candidate is published under its version without moving
+  `stable`. Links from before the versions open the same page in `stable` (`dev` until
+  1.0.0)
+  ([ADR 0024](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0024-documentation-site/)
+  amendment 1).
+
+### Deprecated
+
+- Importing `HAS_ADMISSION_CONTROL`, `OPERATIONS`, `MssqlCdcDataSource` or `make_client`
+  from `mssql_cdc`. The API reference never listed them, so they were already internal
+  ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)).
+  They are no longer in `mssql_cdc.__all__`. Importing one from `mssql_cdc` raises a
+  `DeprecationWarning`, and 2.0 removes them from there. `mssql_cdc.source` and
+  `mssql_cdc.client` keep them as internal names. A type checker now flags the import from
+  `mssql_cdc`.
+
+### Fixed
+
+- On a Spark without admission control, `maxCommitsPerBatch` is still ignored, but now with
+  a warning in the driver's log and in the next micro-batch row's `warnings` (with
+  `metricsPath`). Before, it was ignored silently.
+- Documentation: `finalization.finalized_until` has a docstring, and `get_spark` says a
+  local session gets the UTC time zone and 4 shuffle partitions. Public docstrings and
+  `docs/reference/options.md` no longer point at internal names.
+
 ## [0.8.0] - 2026-10-14
 
 State compatibility: offsets and checkpoints unchanged. Facts migration 14 and snapshot plans

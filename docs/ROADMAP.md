@@ -98,8 +98,6 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
       nothing at 4; a later release stops turning it off (ADR 0003, Amendment 4).
 - [x] Validation: a Databricks benchmark against the production source (34M rows: 943 s to
       586 s; 100M rows: 5,096 s to 4,427 s; see the 0.5.0 CHANGELOG entry).
-- [ ] The weeks-long chunked run against the production source, on its largest table
-      (postponed: it holds a cluster for days or weeks; run it on request).
 
 ## 0.6.0 (minor, shipped 2026-10-10): platforms
 
@@ -113,8 +111,6 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
       (environment 4): 24 checks, with `availableNow` (the platform refuses `processingTime`)
       and the cache refused; the SQL Server path needs a network path from serverless, which
       the validation workspace lacks.
-- [ ] t7 against SQL Server on serverless (needs that network path) and on a non-Databricks
-      platform (deferred: no account).
 
 ## 0.7.0 (minor, shipped 2026-10-13): credentials and privacy
 
@@ -136,13 +132,33 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 
 ## 1.0.0: stability
 
-- [ ] Frozen API and state contract; versioned docs (stable and dev).
-- [ ] Databricks classic: t7 `--schema` (needs a lab SQL Server reachable from the
-      cluster).
-- [ ] Build provenance (attestations) in the release.
+1.0 freezes the public API and the state contract: after it, a break needs 2.0 (ADR 0021,
+amendment 11). 1.0.0rc1 comes first and runs a real pipeline for a few weeks; 1.0.0 final
+ships when nothing found there requires an API change.
+
+- [x] Frozen API and state contract: an audit of the public API, the four names
+      `mssql_cdc` exported that the reference never listed deprecated there, and the 1.x
+      policy (ADR 0021, amendment 11).
+- [ ] Decide the audit's breaking candidates before 1.0.0rc1: Spark Connect-wide return
+      types, `CdcClient` public or not, `reconcile(seed=...)` renamed, the metrics files
+      declared internal.
+- [x] Versioned docs, `dev` and `stable`, with a version selector (ADR 0024, amendment 1).
+- [x] Build provenance (attestations) in the release: GitHub's from 1.0.0rc1 on, PyPI's
+      (PEP 740) since 0.1.0.
+- [ ] 1.0.0rc1 in a real pipeline for a few weeks, then 1.0.0.
 
 ## After 1.0
 
+The t7 runs and the weeks-long chunked run check how the library behaves on a platform or
+over weeks, not the API or the state contract that 1.0 freezes, and each needs
+infrastructure the project lacks today. They do not hold 1.0.
+
+- [ ] Databricks classic: t7 `--schema` (needs a lab SQL Server reachable from the
+      cluster).
+- [ ] t7 against SQL Server on serverless (needs a network path from serverless) and on a
+      non-Databricks platform (no account).
+- [ ] The weeks-long chunked run against the production source, on its largest table (it
+      holds a cluster for days or weeks; run it on request).
 - [ ] Scala/Java DSv2 `Changelog` (`TableCatalog.loadChangelog`) so
       `SELECT ... CHANGES FROM VERSION ...` works over SQL Server (Spark 4.2+). Deferred
       until the API settles (ADR 0022).
