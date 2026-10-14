@@ -10,9 +10,10 @@ from uuid import uuid4
 
 import pytest
 
-from mssql_cdc import HAS_ADMISSION_CONTROL, finalization
+from mssql_cdc import finalization
 from mssql_cdc.fake import FakeCdcDatabase
 from mssql_cdc.sink import delta_sink
+from mssql_cdc.source import HAS_ADMISSION_CONTROL
 
 CI = "dbo_orders"
 COLUMNS = "order_id INT, status STRING"

@@ -192,6 +192,8 @@ def advance(
 def finalized_until(
     spark: SparkSessionLike, control_table: str, table_name: str
 ) -> datetime | None:
+    """``table_name``'s verdict in ``control_table``, a naive UTC ``datetime``: every period
+    that ends at or before it is complete. None before the first verdict."""
     df = delta_table(spark, control_table).toDF()
     rows = df.where(df.table_name == table_name).select("finalized_until").collect()
     return rows[0][0] if rows else None

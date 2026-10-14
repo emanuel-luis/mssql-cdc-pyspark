@@ -50,8 +50,9 @@ def get_spark(
 ) -> SparkSession:
     """Return the active SparkSession (Databricks, EMR, Fabric...) or create a
     local one, with Delta configured when ``delta-spark`` is installed (``delta``,
-    keyword-only). With ``SPARK_REMOTE`` set, a Spark Connect session on that server, which
-    has its own configuration: ``master`` and ``delta`` are not used."""
+    keyword-only). A local one also gets the session time zone UTC and 4 shuffle partitions.
+    With ``SPARK_REMOTE`` set, a Spark Connect session on that server, which has its own
+    configuration: ``master`` and ``delta`` are not used."""
     from pyspark.sql import SparkSession
 
     active = SparkSession.getActiveSession()

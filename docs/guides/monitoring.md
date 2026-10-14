@@ -271,7 +271,8 @@ JSON `{"warnings": [...]}`:
   `columns` (NULL in every row), and the columns a newer capture instance captures that
   `columns` leaves out ([Schema changes](schema-changes.md));
 - options it does not know, a misspelt name whose default stays in force
-  ([Options](../reference/options.md));
+  ([Options](../reference/options.md)), and `maxCommitsPerBatch` on a Spark without
+  admission control, which ignores it;
 - the UTC offset it converts commit times with on a server older than SQL Server 2022, when
   it takes it and when it changes ([sourceTimeZone](../reference/options.md#sourcetimezone)).
 

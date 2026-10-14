@@ -13,8 +13,9 @@ STATE_KEYS = {
         "lost_to_ts",
         "keys",
         "plan",
+        "switch_batch_id",  # 0.8.0
     },
-    "SnapshotPlanDetail": {"snapshot", "kind", "keys", "chunk_rows", "chunks"},
+    "SnapshotPlanDetail": {"snapshot", "kind", "keys", "chunk_rows", "chunks", "chunk_count"},
     "SnapshotChunkDetail": {"snapshot", "chunk", "wave", "lo", "hi", "last"},
     "SnapshotCompletionDetail": {"snapshot", "chunks", "rows", "last_lsn"},
     "DataSkippedDetail": {"from", "to", "certain", "reason"},

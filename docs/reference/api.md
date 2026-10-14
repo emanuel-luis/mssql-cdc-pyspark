@@ -43,9 +43,8 @@ keyword-only (since 0.3).
       show_root_toc_entry: false
       members: [advance, track, FinalizationListener, finalized_until, is_final, freshness, candidate, end_offset_from_progress]
 
-`FinalizationListener` is listed for its `join` and its `last_error`. Create it with `track`, which also
-registers it and starts its worker. `finalized_until(spark, control_table, table_name)`
-returns the table's verdict, a naive UTC `datetime`, or `None` before the first one.
+`FinalizationListener` is listed for its `join`, `last_error` and `failures`. Create it with
+`track`, which also registers it and starts its worker: its constructor is not public.
 
 ## Sink
 

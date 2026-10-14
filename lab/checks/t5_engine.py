@@ -17,9 +17,10 @@ import sys
 import tempfile
 from datetime import datetime, timedelta
 
-from mssql_cdc import HAS_ADMISSION_CONTROL, register
+from mssql_cdc import register
 from mssql_cdc.fake import FakeCdcDatabase
 from mssql_cdc.finalization import end_offset_from_progress
+from mssql_cdc.source import HAS_ADMISSION_CONTROL
 from mssql_cdc.spark import get_spark
 
 from ..common import progress, report

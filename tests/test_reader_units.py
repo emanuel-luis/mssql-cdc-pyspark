@@ -10,9 +10,9 @@ from unittest.mock import create_autospec
 
 import pytest
 
-from mssql_cdc import HAS_ADMISSION_CONTROL
 from mssql_cdc.client import Backend, CdcClient, SqlCdcClient
 from mssql_cdc.fake import FakeCdcClient, FakeCdcDatabase
+from mssql_cdc.source import HAS_ADMISSION_CONTROL
 
 # only the tests that use ReadAllAvailable or ReadMaxRows: the rest run on any Spark 4
 needs_admission_control = pytest.mark.skipif(not HAS_ADMISSION_CONTROL, reason="needs Spark 4.2+")
@@ -338,6 +338,10 @@ def test_without_admission_control_the_source_reads_with_the_legacy_reader(monke
     ]:
         monkeypatch.setattr(source, "HAS_ADMISSION_CONTROL", admission)
         assert type(source.MssqlCdcDataSource(options).streamReader(schema)) is reader
+        # an option it cannot honour is not ignored silently: logged, and kept for the facts
+        bounded = source.MssqlCdcDataSource({**options, "maxCommitsPerBatch": "10"})
+        ignored = [w for w in bounded.streamReader(schema)._warnings if "ignored" in w]
+        assert len(ignored) == (not admission)
 
 
 # -- driver-side retries (ADR 0029) ---------------------------------------------------------

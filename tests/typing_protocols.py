@@ -11,8 +11,8 @@ from typing import Any
 import pyarrow as pa
 from typing_extensions import assert_type
 
-from mssql_cdc import Backend, CdcClient, Lsn, make_client
-from mssql_cdc.client import ArrowOdbcBackend, MssqlPythonBackend, SqlCdcClient
+from mssql_cdc import Backend, CdcClient, Lsn
+from mssql_cdc.client import ArrowOdbcBackend, MssqlPythonBackend, SqlCdcClient, make_client
 from mssql_cdc.fake import FakeCdcClient
 from mssql_cdc.lsn import ZERO_LSN, from_int, normalize
 

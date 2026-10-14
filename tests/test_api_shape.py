@@ -1,9 +1,13 @@
 """The 0.3 API shape at run time: the call forms it made keyword-only raise TypeError before
 anything runs, a wrong mode raises ValueError naming the allowed values, and the typed
 results are plain dicts; every name the 0.4.0 modules bound still imports from the packages
-that replaced them. No Spark (tests/typing_api.py checks the same for mypy)."""
+that replaced them; every name ``mssql_cdc`` exports is in the API reference, and the ones it
+exported without listing them warn until 2.0. No Spark (tests/typing_api.py checks the same for
+mypy)."""
 
 import importlib
+import re
+from pathlib import Path
 
 import pytest
 
@@ -153,3 +157,29 @@ def test_every_name_0_4_0_bound_still_imports_and_star_imports_the_public_ones(m
     mod = importlib.import_module(module)
     assert [n for n in NAMES_0_4_0[module] if not hasattr(mod, n)] == []
     assert [n for n in NAMES_0_4_0[module] if n[0] != "_" and n not in mod.__all__] == []
+
+
+def test_every_exported_name_is_in_the_api_reference():
+    # the reference is the public surface (ADR 0021): an export it does not list is internal
+    api = (Path(__file__).parents[1] / "docs" / "reference" / "api.md").read_text(encoding="utf-8")
+    assert [n for n in mssql_cdc.__all__ if not re.search(rf"\b{n}\b", api)] == []
+
+
+@pytest.mark.parametrize(
+    ("name", "home"),
+    [
+        ("HAS_ADMISSION_CONTROL", "mssql_cdc.source"),
+        ("OPERATIONS", "mssql_cdc.source"),
+        ("MssqlCdcDataSource", "mssql_cdc.source"),
+        ("make_client", "mssql_cdc.client"),
+    ],
+)
+def test_the_exports_the_reference_never_listed_warn_until_2_0(name, home):
+    assert name not in mssql_cdc.__all__
+    with pytest.warns(DeprecationWarning, match=f"mssql_cdc.{name} is internal.*from {home}"):
+        assert getattr(mssql_cdc, name) is getattr(importlib.import_module(home), name)
+
+
+def test_an_unknown_name_is_still_an_attribute_error():
+    with pytest.raises(AttributeError, match="no attribute 'reconcil'"):
+        mssql_cdc.reconcil  # noqa: B018 - the access is the test

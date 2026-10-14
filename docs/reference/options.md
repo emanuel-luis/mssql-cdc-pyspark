@@ -317,9 +317,10 @@ long stop or a long snapshot reads the whole backlog in one go: set it to keep t
 bounded. A positive integer: omit the option for unlimited (`0` raises `ValueError`).
 
 It needs Spark 4.2+, or a runtime with its admission control backported, such as Databricks
-Runtime 18.2+ ([Databricks](../DATABRICKS.md)). On older Spark it is ignored. With
-`Trigger.AvailableNow` the run reads up to the `max_lsn` it saw when it started, in batches of
-at most this many commits.
+Runtime 18.2+ ([Databricks](../DATABRICKS.md)). On older Spark it is ignored, with a
+warning in the driver's log and the facts ([Monitoring](../guides/monitoring.md#warnings)).
+With `Trigger.AvailableNow` the run reads up to the `max_lsn` it saw when it started, in
+batches of at most this many commits.
 
 ### numPartitions
 
@@ -426,7 +427,7 @@ For `mssql_cdc_snapshot` only: read only these chunks of the table, one partitio
 its first key (inclusive) and the key it ends before (exclusive). A key is a value for a
 one-column key and a list for a composite one, `null` for an open end; a value JSON has no
 type for is the text `CAST` reads back (a datetime in ISO 8601, binary as `0x` hex), as
-`client.plan_chunks` plans them. With it, the rows gain a `_chunk INT` column with the
+`backfill()` plans them. With it, the rows gain a `_chunk INT` column with the
 chunk's number, and with [metricsPath](#metricspath) each chunk leaves
 `chunk-<chunk>.json` (rows, bytes, seconds, `max_lsn` after the read). Key bounds on a table
 whose key cannot be read in ranges (no unique index, a type no bound can be bound as) are a

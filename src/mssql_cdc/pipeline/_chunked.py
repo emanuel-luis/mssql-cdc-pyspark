@@ -179,9 +179,9 @@ class _Chunked(_ModeLock):
         rows, ``numPartitions`` at a time, next to the running stream; returns how far it
         got. Run it apart from the stream (its own task) and call it again until ``done``.
 
-        The first call plans every chunk (``client.plan_chunks``: one integer key from row
-        counts per slice of its range, the slices packed into chunks of at most ``chunk_rows``
-        rows whatever the skew; other keys ``chunk_rows`` keys at a time) and records the plan
+        The first call plans every chunk (one integer key from row counts per slice of its
+        range, the slices packed into chunks of at most ``chunk_rows`` rows whatever the
+        skew; other keys ``chunk_rows`` keys at a time) and records the plan
         in ``target``'s plans table, ``<target>_snapshot_plans``, then in a 'snapshot_plan'
         facts row without its bounds (ADR 0028 Amendment 4); later calls read it, so the
         chunks never change while the snapshot is open (but for the end of a keyset plan's
@@ -224,10 +224,10 @@ class _Chunked(_ModeLock):
         retention headroom (of its newest facts row, less that row's age) is below it, or
         the stream has written none: the snapshot shares the link with the stream, and a
         stream the retention passes loses the snapshot too. ``isolation``: ``"snapshot"``
-        reads the chunks and plans them (the counts and seeks of ``plan_chunks``, the first
-        key after MAX of ``last_bound``) under SNAPSHOT isolation, which the database must
-        allow; ``"readCommitted"`` under READ COMMITTED. None: the stream's ``isolationLevel``
-        option, READ COMMITTED without one. Either is matched ignoring case.
+        reads the chunks and plans them (the first call's counts and seeks, and the search
+        for the first key after MAX before each wave) under SNAPSHOT isolation, which the
+        database must allow; ``"readCommitted"`` under READ COMMITTED. None: the stream's
+        ``isolationLevel`` option, READ COMMITTED without one. Either is matched ignoring case.
 
         Returns a ``BackfillStatus``, ``{"snapshot", "chunks_done", "chunks_total", "done",
         "paused", "state", "reason"}``: ``chunks_total`` is the plan's, None until a call has

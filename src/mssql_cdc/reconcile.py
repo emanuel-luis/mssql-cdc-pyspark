@@ -411,8 +411,8 @@ def reconcile(
     report_table: str | None = None,
     seed: int | None = None,
 ) -> ReconcileResult:
-    """Compare ``silver`` with the table the capture instance in ``options`` tracks (see the
-    module docstring); returns a ``ReconcileResult``. The parameters after ``silver`` are
+    """Compare ``silver`` with the table the capture instance in ``options`` tracks (how: the
+    Validation guide); returns a ``ReconcileResult``. The parameters after ``silver`` are
     keyword-only.
 
     ``keys``: the source's key columns; without them, the capture instance's unique index.

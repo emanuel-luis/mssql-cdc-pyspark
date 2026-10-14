@@ -3,8 +3,11 @@ completeness ("partition finalization") signal for downstream consumers."""
 
 from __future__ import annotations
 
+import importlib
 import importlib.metadata
 import importlib.util
+import warnings
+from typing import TYPE_CHECKING
 
 try:
     from .client import (
@@ -14,7 +17,6 @@ try:
         SchemaChangedError,
         is_data_loss,
         is_schema_changed,
-        make_client,
     )
     from .fanout import await_all, start_many, stop_all
     from .lsn import Lsn
@@ -30,7 +32,7 @@ try:
     from .pipeline import stream
     from .reconcile import reconcile
     from .silver import apply_changes
-    from .source import HAS_ADMISSION_CONTROL, OPERATIONS, MssqlCdcDataSource, SourceOptions
+    from .source import SourceOptions
     from .types import (
         ApplyResult,
         BackfillState,
@@ -57,8 +59,6 @@ except ModuleNotFoundError as _missing:
     ) from _missing
 
 __all__ = [
-    "HAS_ADMISSION_CONTROL",
-    "OPERATIONS",
     "ApplyResult",
     "Backend",
     "BackfillState",
@@ -71,7 +71,6 @@ __all__ = [
     "Granularity",
     "Isolation",
     "Lsn",
-    "MssqlCdcDataSource",
     "Offset",
     "OnDataLoss",
     "ReconcileResult",
@@ -89,7 +88,6 @@ __all__ = [
     "await_all",
     "is_data_loss",
     "is_schema_changed",
-    "make_client",
     "reconcile",
     "register",
     "start_many",
@@ -110,7 +108,7 @@ def register(spark: SparkSessionLike) -> None:
     plans in a Python worker that has no session, so the count is taken here and rides
     along as an attribute of a registered subclass (Spark pickles it by value).
     """
-    from .source import MssqlCdcSnapshotDataSource
+    from .source import MssqlCdcDataSource, MssqlCdcSnapshotDataSource
     from .spark import available_cores
 
     cores = available_cores(spark)
@@ -118,3 +116,28 @@ def register(spark: SparkSessionLike) -> None:
         spark.dataSource.register(
             type(base.__name__, (base,), {"default_num_partitions": cores or None})
         )
+
+
+# Exported before 1.0 though the API reference never listed them, so internal (ADR 0021): until
+# 2.0 they still import from here, with a DeprecationWarning; their modules keep them, and may
+# change them in any release. Hidden from type checkers, which flag the import instead.
+_DEPRECATED = {
+    "HAS_ADMISSION_CONTROL": "mssql_cdc.source",
+    "OPERATIONS": "mssql_cdc.source",
+    "MssqlCdcDataSource": "mssql_cdc.source",
+    "make_client": "mssql_cdc.client",
+}
+
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> object:
+        home = _DEPRECATED.get(name)
+        if home is None:
+            raise AttributeError(f"module 'mssql_cdc' has no attribute {name!r}")
+        warnings.warn(
+            f"mssql_cdc.{name} is internal and leaves the mssql_cdc namespace in 2.0: import it "
+            f"from {home}, which may change it in any release",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return getattr(importlib.import_module(home), name)

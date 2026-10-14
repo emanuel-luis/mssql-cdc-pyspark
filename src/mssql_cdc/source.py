@@ -167,7 +167,8 @@ class SourceOptions(TypedDict, total=False):
     """The source options (docs/reference/options.md), every one optional to a type checker
     and a string, as Spark passes them. A plain dict at run time: the functions that take
     options take any mapping of them too, and a name in another case (``startinglsn``)
-    still works there, though only this spelling type-checks."""
+    still works there, though only this spelling type-checks. ``fakePath`` is internal, as
+    the ``fake`` backend it serves: it may change in any release."""
 
     captureInstance: str
     connectionString: str
@@ -1111,6 +1112,16 @@ class MssqlCdcLegacyStreamReader(_BaseReader):  # pragma: no cover - Spark < 4.2
     """Spark 4.0/4.1 without admission control: every batch reads up to max_lsn."""
 
     _last: dict[str, str] | None = None  # the offset latestOffset returned last
+
+    def __init__(
+        self, options: dict[str, str], schema: StructType, default_num_partitions: int | None = None
+    ) -> None:
+        super().__init__(options, schema, default_num_partitions)
+        if _opt(options, "maxCommitsPerBatch"):  # an option in force, as far as its user knows
+            self._warn(
+                "maxCommitsPerBatch is ignored: this Spark has no admission control (Spark "
+                "4.2+, or a runtime with its backport), so every batch reads up to max_lsn"
+            )
 
     @_retrying
     def latestOffset(self) -> dict[str, str]:  # type: ignore[override]  # Spark < 4.2 signature; stubs are 4.2

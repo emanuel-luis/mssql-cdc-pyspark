@@ -18,14 +18,13 @@ from typing import ClassVar
 import pytest
 
 from mssql_cdc import (
-    HAS_ADMISSION_CONTROL,
     DataLossError,
-    MssqlCdcDataSource,
     is_data_loss,
     is_schema_changed,
 )
 from mssql_cdc.fake import FakeCdcDatabase
 from mssql_cdc.finalization import candidate, end_offset_from_progress
+from mssql_cdc.source import HAS_ADMISSION_CONTROL, MssqlCdcDataSource
 
 needs_admission_control = pytest.mark.skipif(not HAS_ADMISSION_CONTROL, reason="needs Spark 4.2+")
 

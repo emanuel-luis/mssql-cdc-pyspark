@@ -132,4 +132,5 @@ class ReconcileResult(TypedDict):
     """Report rows by ``failure_type``: ``MISSING_TARGET``, ``MISSING_SOURCE``,
     ``RECORD_DIFF``, ``IN_FLIGHT``, ``CHUNK_TILING``, ``CHUNK_ROWS``, ``CHUNK_STAMP``."""
     report: DataFrame
-    """The run's report rows (``REPORT_COLUMNS``), as ``report_table`` gets them."""
+    """The run's report rows, in the columns of the reconcile report table, as
+    ``report_table`` gets them."""
