@@ -362,7 +362,8 @@ class _Chunked(_ModeLock):
         with closing(make_client(self.options)) as client:
             source = client.source_table(ci)
             cut = snapshot_keys(self.options) or source.keys
-            if cut != info["keys"]:
+            # ignoring case: the open recorded snapshotKeys as captured
+            if [k.lower() for k in cut] != [k.lower() for k in info["keys"]]:
                 raise ValueError(
                     f"The snapshot at {s} cuts its chunks on {info['keys']}, but this stream "
                     f"would cut them on {cut} (its snapshotKeys option, else the unique index of "
@@ -677,9 +678,10 @@ class _Chunked(_ModeLock):
             self.spark.read.format("mssql_cdc_snapshot")
             .options(**{o: v for o, v in self.options.items() if o.lower() not in drop})
             .option("snapshotChunks", json.dumps(order))
-            .option("snapshotKeys", json.dumps(keys))  # the bounds' columns
             .option("snapshotLsn", lsn)
         )
+        if keys:  # the bounds' columns; none for a table read as one chunk
+            reader = reader.option("snapshotKeys", json.dumps(keys))
         if metrics:
             reader = reader.option("metricsPath", metrics)
         if isolation:

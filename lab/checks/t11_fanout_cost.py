@@ -21,6 +21,7 @@ fake's ``latestOffset`` reads local files, where SQL Server takes a round trip: 
 against a real source adds the latency the facts show as ``source_rtt_ms``.
 
 Locally:        python -m lab.checks.t11_fanout_cost [--streams 1,5,10,20] [--seconds 90]
+                [--back-to-back]  (every query started at once: start_many before 37d3d1f)
 Spark Connect:  SPARK_REMOTE=sc://localhost:15002 python -m lab.checks.t11_fanout_cost,
                 on the server's host: it measures the JVM that runs SparkConnectServer.
 """
@@ -38,7 +39,7 @@ import time
 from collections import Counter
 from datetime import datetime
 
-from mssql_cdc import start_many, stop_all
+from mssql_cdc import fanout, start_many, stop_all
 from mssql_cdc.fake import FakeCdcDatabase
 from mssql_cdc.spark import get_spark
 
@@ -223,7 +224,14 @@ def run(spark, jvm: int, n: int, a, workdir: str) -> dict:
             time.sleep(min(10, a.seconds))
             samples.append(sample(jvm))
         running = sample(jvm, spark)
-        failed = [ci for ci, q in queries.items() if q.exception() or not q.isActive]
+        # the first line of why each query stopped: the cause the comparison rests on
+        failed = {
+            ci: (str(q.exception()).strip().splitlines() or ["?"])[0][:300]
+            if q.exception()
+            else "stopped"
+            for ci, q in queries.items()
+            if q.exception() or not q.isActive
+        }
         durations: dict[str, list[float]] = {}
         late = 0
         interval_ms = float(a.trigger.split()[0]) * 1000
@@ -272,7 +280,14 @@ def main(argv=None) -> bool:
         "--master", default="local-cluster[2,4,2048]", help="executors in JVMs of their own"
     )
     p.add_argument("--path", default=None, help="work directory (default: a new temporary one)")
+    p.add_argument(
+        "--back-to-back",
+        action="store_true",
+        help="start every query at once, as start_many did before 37d3d1f (ADR 0027)",
+    )
     a = p.parse_args(argv)
+    if a.back_to_back:  # no wait for the query before to start its source
+        fanout._source_started = lambda query: None
     remote = "SPARK_REMOTE" in os.environ
     spark = get_spark("t11-fanout-cost", a.master)
     # one task per Delta log replay, as the test suite runs: the default 50 tasks for tables of
@@ -329,7 +344,8 @@ def main(argv=None) -> bool:
                 ", ".join(f"{k} {v.get('median')}/{v.get('p95')}" for k, v in d.items()),
             ),
         ]
-    return report("t11_fanout_cost", checks, {"results": results, "trigger": a.trigger})
+    extra = {"results": results, "trigger": a.trigger, "back_to_back": a.back_to_back}
+    return report("t11_fanout_cost", checks, extra)
 
 
 if __name__ == "__main__":

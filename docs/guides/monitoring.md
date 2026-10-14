@@ -166,10 +166,11 @@ if f["open_snapshot_lsn"] is None and (age is None or age > 76 * 60):
     raise RuntimeError(f"bronze.orders: complete only until {f['finalized_until']}")
 ```
 
-- `age_seconds` is how long ago `finalized_until` was: how long the consumers of the first
-  period not final yet have waited since it ended. A current stream keeps it under the
-  period plus the trigger interval plus the idle entries' 5 minutes: 76 minutes above is
-  an hour, a minute and a 15-minute margin.
+- `age_seconds` is how long ago `finalized_until`, the last final instant, was. The first
+  period not final yet ends one period after it, so its consumers have waited `age_seconds`
+  less the period, when that is positive. A current stream keeps it under the period plus
+  the trigger interval plus the idle entries' 5 minutes: 76 minutes above is an hour, a
+  minute and a 15-minute margin.
 - `seconds_since_update` is how long ago the verdict last moved. Small while `age_seconds`
   is large, the verdict moves but the stream is behind; large too, it stopped.
 - `open_snapshot_lsn` names the chunked snapshot that holds a silver table's verdict

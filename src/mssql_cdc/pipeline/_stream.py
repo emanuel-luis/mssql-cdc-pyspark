@@ -119,9 +119,7 @@ class CdcStream(_Recovery, _Chunked):
                 )
         if bootstrap and _opt(self.options, "startingLsn"):
             raise ValueError("bootstrap=True sets startingLsn itself; pass one or the other")
-        if facts_table and (
-            bootstrap or on_data_loss == "resnapshot" or (snapshot_on_switch and chunked)
-        ):
+        if facts_table and (bootstrap or on_data_loss == "resnapshot" or snapshot_on_switch):
             self._lock(facts_table, target, app_id, snapshot)  # one mode while one is open
         state = _read_state(checkpoint)
         if on_data_loss == "resnapshot":

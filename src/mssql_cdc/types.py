@@ -95,9 +95,10 @@ class Freshness(TypedDict):
     updated_at: datetime | None
     """When the verdict last moved, naive UTC; None before the first."""
     age_seconds: float | None
-    """Seconds from ``finalized_until`` to now: how long consumers of the first period not
-    final yet have been waiting since it ended. A current stream keeps it under the
-    period (an hour by default) plus its trigger interval and the idle entries' 5 minutes."""
+    """Seconds from ``finalized_until``, the last final instant, to now. The first period not
+    final yet ends one period after it, so its consumers have waited this less the period,
+    when that is positive. A current stream keeps it under the period (an hour by default)
+    plus its trigger interval and the idle entries' 5 minutes."""
     seconds_since_update: float | None
     """Seconds since the verdict last moved. Small with a large ``age_seconds``: the verdict
     moves, the stream is behind. Large too: it stopped moving."""

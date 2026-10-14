@@ -223,8 +223,9 @@ not what runs out first: 20 streams hold about 1 GB of Python processes. Two thi
   worker failed to connect back" (on Spark Connect, the `foreachBatch` process's miss makes
   `start_many` raise and stop the queries it started). `start_many` starts each stream
   once the one before it has started its source, so the processes do not start together;
-  even so, 5 of 20 failed while 13 streams kept the measuring host busy (9 of 20 when
-  started back to back). Start them again as under [Failure isolation](#failure-isolation).
+  even so, 5 of 20 failed while 13 streams kept the measuring host busy, which other jobs
+  also loaded (9 of 20 when started back to back; none of 20 back to back with the host
+  otherwise idle). Start them again as under [Failure isolation](#failure-isolation).
 - **The sink's work.** Each trigger's `foreachBatch` commits bronze and the facts from the
   driver, which takes far longer than planning. When a trigger outlasts its interval, Spark
   logs "Current batch is falling behind": the driver, not SQL Server, sets the pace.

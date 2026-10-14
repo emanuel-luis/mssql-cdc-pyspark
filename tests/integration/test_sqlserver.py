@@ -1717,6 +1717,60 @@ def test_a_chunked_snapshot_after_a_switch_fills_the_new_column_next_to_the_stre
     assert len(facts("snapshot_open")) == 2
 
 
+def test_a_switch_snapshot_on_a_string_key_is_planned_after_the_old_instance_is_disabled(
+    delta_spark, sqlserver, workdir
+):
+    # the switch's step 5 before the first backfill(), captureInstance still the old name: a
+    # keyset plan's key types come from the newer instance, as the reader's do
+    from mssql_cdc import stream
+
+    sqlserver.run("CREATE TABLE dbo.sw_str (code VARCHAR(10) NOT NULL PRIMARY KEY, v INT NOT NULL)")
+    sqlserver.run(f"INSERT INTO dbo.sw_str SELECT CONCAT('k', n), n FROM {_ROWS} WHERE n <= 30")
+    ci = sqlserver.enable_cdc("sw_str")
+    options = {"connectionString": _reader(sqlserver, "sw_str", ci), "captureInstance": ci}
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(delta_spark, options)
+
+    def run():
+        cdc.to_delta(
+            target,
+            "sw-str",
+            ckpt,
+            facts,
+            trigger={"availableNow": True},
+            snapshot="chunked",
+            snapshot_on_switch=True,
+        ).awaitTermination()
+
+    sqlserver.run("UPDATE dbo.sw_str SET v = -1 WHERE code = 'k1'")
+    sqlserver.wait_for_changes(ci, 2)
+    run()
+    v2 = sqlserver.enable_cdc("sw_str", "dbo_sw_str_v2")
+    sqlserver.run(f"GRANT SELECT ON cdc.[{v2}_CT] TO sw_str_reader")
+    sqlserver.run("UPDATE dbo.sw_str SET v = -2 WHERE code = 'k2'")
+    sqlserver.wait_for_changes(v2, 2)
+    run()  # the switch batch opens the snapshot at v2's start
+    sqlserver.run("UPDATE dbo.sw_str SET v = -3 WHERE code = 'k3'")
+    sqlserver.wait_for_changes(v2, 4)
+    run()  # step 4, then step 5
+    sqlserver.run(
+        "EXEC sys.sp_cdc_disable_table @source_schema = N'dbo', @source_name = N'sw_str', "
+        "@capture_instance = ?",
+        (ci,),
+    )
+    for _ in range(20):
+        status = cdc.backfill(
+            target, app_id="sw-str", facts_table=facts, chunk_rows=10, target_wave_seconds=0
+        )
+        if status["done"]:
+            break
+    assert status["done"] and status["chunks_total"] > 1, status
+    snap = delta_spark.read.format("delta").load(target).where("_operation = 0")
+    assert sorted(tuple(r) for r in snap.select("code", "v").collect()) == sorted(
+        tuple(r) for r in sqlserver.run("SELECT code, v FROM dbo.sw_str")
+    )
+
+
 # 'n' and 'N' are one leading value under the database's case-insensitive collation and two
 # in Python, and 'ş' sorts after both: bounds inside one leading value and across them
 _COMP = f"SELECT IIF(n % 3 = 0, N'n', IIF(n % 3 = 1, N'N', N'ş')), n, 'old' FROM {_ROWS}"

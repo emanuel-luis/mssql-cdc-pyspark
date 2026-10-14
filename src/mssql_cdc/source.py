@@ -1161,10 +1161,11 @@ class KeyRange(InputPartition):
 ISOLATION_LEVELS: dict[str, str | None] = {"readcommitted": None, "snapshot": "snapshot"}
 
 
-def snapshot_keys(options: Mapping[str, Any]) -> list[str] | None:
+def snapshot_keys(options: Mapping[str, Any], columns: Iterable[str] = ()) -> list[str] | None:
     """The ``snapshotKeys`` option: the columns a snapshot cuts its ranges on, and a chunked
     one its chunks (ADR 0028 Amendment 6), instead of the capture instance's unique index;
-    None when it is not set."""
+    None when it is not set. A name is spelled as the one of ``columns`` it matches ignoring
+    case, as 'columns' is matched with the captured ones."""
     given = _opt(options, "snapshotKeys")
     if not given:
         return None
@@ -1176,7 +1177,9 @@ def snapshot_keys(options: Mapping[str, Any]) -> list[str] | None:
         raise ValueError(
             f'snapshotKeys must be a JSON list of column names, such as ["created_at"], not {given!r}'
         )
-    return keys
+    names: list[str] = keys  # checked just above
+    spelled = {c.lower(): c for c in columns}
+    return [spelled.get(k.lower(), k) for k in names]
 
 
 class MssqlCdcSnapshotReader(_Common, DataSourceReader):
@@ -1210,12 +1213,12 @@ class MssqlCdcSnapshotReader(_Common, DataSourceReader):
         lsn = normalize(given) if given else snapshot_lsn(client, source)
         commit_ts = client.lsn_to_time(lsn)
         schema, table = source.schema, source.table
-        # the columns the ranges are cut on: reconcile()'s key, a chunked snapshot's (ADR 0028
-        # Amendment 6) or the user's, not always the index's
-        keys = snapshot_keys(self.options) or source.keys
         # a captured column the table no longer has reads NULL, like its later change rows
         present = client.present_columns(ci, self.source_columns)
         columns = None if len(present) == len(self.source_columns) else present
+        # the columns the ranges are cut on: reconcile()'s key, a chunked snapshot's (ADR 0028
+        # Amendment 6) or the user's, not always the index's
+        keys = snapshot_keys(self.options, present) or source.keys
 
         def ranges(
             keys: list[str], types: list[str] | None, bounds: Sequence[tuple[Any, ...]]

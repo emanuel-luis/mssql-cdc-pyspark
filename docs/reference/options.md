@@ -437,7 +437,7 @@ whose key cannot be read in ranges (no unique index, a type no bound can be boun
 The columns a snapshot cuts its ranges on, as a JSON list such as `["created_at"]`, instead
 of the capture instance's unique index; anything but a non-empty list of names is a
 `ValueError`. They need not be unique. A table without a unique index is otherwise read as
-one range, and one chunk.
+one range, and one chunk. Names match the captured columns ignoring case.
 
 * `mssql_cdc_snapshot`: key bounds ([snapshotChunks](#snapshotchunks), and the ranges of
   [numPartitions](#numpartitions)) apply to these columns. `reconcile()` sets it to the key

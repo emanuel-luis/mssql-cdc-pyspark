@@ -122,7 +122,14 @@ stream; `latestOffset` 3 and 13 ms, `queryPlanning` 10 ms.
   took 4.5 to 5 seconds alone on this host. Started back to back, 9 of 20 queries failed at
   their start with "Python worker failed to connect back"
   (`t11_fanout_cost-20261013T220938Z.json`); with the change below, 5 of 20,
-  those started while 13 streams kept the host busy. On Spark Connect the
+  those started while 13 streams kept the host busy
+  (`t11_fanout_cost-20261013T224322Z.json`). Those two runs recorded only the failed
+  queries' names; the error, the same for each, is in their console logs, copied to
+  `t11_fanout_cost-20261013T220938Z.causes.json` and
+  `t11_fanout_cost-20261013T224322Z.causes.json`, and t11 now records it. Started back to
+  back again with no other jobs on the host (`--streams 20 --back-to-back`,
+  `t11_fanout_cost-20261014T045146Z.json`), none of 20 failed: a start misses the limit on
+  a busy driver. On Spark Connect the
   `foreachBatch` worker has the same limit, and missing it makes `writeStream.start()`
   raise, so `start_many` stops the queries it started and raises (seen once at 5 streams).
 * Planning takes milliseconds per trigger. The sink's commits, run from the driver, take

@@ -687,10 +687,13 @@ def test_planning_lists_the_resolved_table_only_until_it_misses_the_name():
 
 def test_a_disabled_capture_instance_is_followed_to_its_table():
     listed = [r for r in ORDERS if r["capture_instance"] != "dbo_orders"]  # disabled
-    client = SqlCdcClient(Cdc(listed, CAPTURED))
+    captured = {ci: rows for ci, rows in CAPTURED.items() if ci != "dbo_orders"}
+    client = SqlCdcClient(Cdc(listed, captured))
     # its default name (<schema>_<table>) still tells the table
     assert [i.name for i in client.capture_instances("dbo_orders")] == ["dbo_orders_v2"]
     assert client.source_table("dbo_orders") == ("dbo", "orders", ["id"], V2)
+    # a chunked plan's key types too, from the newer instance's columns
+    assert client.key_types("dbo_orders", ["amount"]) == ["decimal(18,4)"]
     # a custom name does not: the error names the instances that may be its table's
     with pytest.raises(ValueError, match=r"not found.*'dbo_orders_v2'.*set captureInstance"):
         client.capture_instances("dbo_orders_old")
@@ -1166,13 +1169,15 @@ def test_key_tiles_and_types_for_composite_or_non_integer_keys():
         client.key_tiles("sales", "orders", ["id"], "3; DROP TABLE x")
     assert len(rec.calls) == sent
 
-    class Meta(Recorder):  # captured columns, then sys.columns
+    class Meta(Recorder):  # the instance, its captured columns, then sys.columns
         def __init__(self, collations):
             super().__init__()
             self.collations = collations
 
         def batches(self, sql, params, batch_size):
             self.calls.append((sql, tuple(params)))
+            if "sp_cdc_help_change_data_capture" in sql:
+                return iter([pa.RecordBatch.from_pylist([_instance("dbo_orders", "orders", V1)])])
             captured = [
                 _col(1, "region", "varchar", length=10),
                 _col(2, "code", "nvarchar", length=20),
@@ -1191,9 +1196,10 @@ def test_key_tiles_and_types_for_composite_or_non_integer_keys():
     cols = SqlCdcClient(meta)
     assert cols.key_types(
         "dbo_orders",
-        ["region", "code", "amount", "at", "day", "id", "t", "g", "missing", "flag", "at"],
+        ["Region", "code", "amount", "at", "day", "id", "t", "g", "missing", "flag", "at"],
     ) == [
-        "varchar(10) COLLATE Greek_CI_AS",  # converted in its own code page, not the default
+        # converted in its own code page, not the default; names matched ignoring case
+        "varchar(10) COLLATE Greek_CI_AS",
         "nvarchar(20)",
         "numeric(18,2)",
         None,  # truncated to microseconds ahead of another key column: bounds could swap

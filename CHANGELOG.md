@@ -72,12 +72,25 @@ amendment 10); no other payload key is new. No `mssql_cdc.min_version` is set.
 - `start_many` starts each stream once the query before it has started its source (or
   stopped, up to two minutes). Spark gives the Python process that plans a query's source a
   fixed 10 s to connect back, and streams started back to back on a busy driver failed at
-  their start with "Python worker failed to connect back" (9 of 20 in lab check t11).
+  their start with "Python worker failed to connect back" (9 of 20 in lab check t11 on a
+  host other jobs kept busy, none of 20 on an idle one; t11 `--back-to-back` repeats it).
 - `backfill()` raises `ValueError` when the stream's `snapshotKeys` option (else the unique
   index) would cut the open snapshot's chunks on other columns than it opened with; before,
   it raised only when the unique index had changed.
 - `snapshotKeys` must be a non-empty JSON list of column names, or it is a `ValueError`; a
-  JSON string was read as one column per letter.
+  JSON string was read as one column per letter. Its names match the captured columns
+  ignoring case, as `columns` does, and a chunked snapshot records them as captured.
+- `to_delta(snapshot="full", snapshot_on_switch=True)` raises `ValueError` while a chunked
+  snapshot of the stream is open, as a full bootstrap does: its switch batch would read a
+  whole snapshot next to the chunked one. Before, only `bootstrap=True` and
+  `on_data_loss="resnapshot"` runs checked.
+
+### Fixed
+
+- `backfill()` plans a keyset plan's chunks, and seeks its last chunk's end, after the
+  stream's configured capture instance was disabled (the last step of a switch): the key
+  types come from the table's newest instance, as the snapshot reader's do. Before, it
+  raised "Capture instance ... not found" until `captureInstance` named the new instance.
 
 ## [0.7.0] - 2026-10-13
 

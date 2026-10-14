@@ -183,6 +183,8 @@ def test_snapshot_keys_is_a_json_list_of_column_names(given):
     with pytest.raises(ValueError, match="snapshotKeys must be a JSON list of column names"):
         snapshot_keys({"SNAPSHOTKEYS": given})
     assert snapshot_keys({"snapshotKeys": '["code", "seq"]'}) == ["code", "seq"]
+    # spelled as the columns are, matched ignoring case as 'columns' is; one none matches stays
+    assert snapshot_keys({"snapshotKeys": '["CODE", "x"]'}, ["Code", "seq"]) == ["Code", "x"]
     assert snapshot_keys({"snapshotKeys": ""}) is None and snapshot_keys({}) is None
 
 

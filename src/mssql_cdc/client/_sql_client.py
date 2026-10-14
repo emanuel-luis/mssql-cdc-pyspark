@@ -660,9 +660,13 @@ class SqlCdcClient(CdcClient):
         return None, None
 
     def key_types(self, capture_instance: str, keys: Sequence[str]) -> list[str | None]:
-        rows = self._captured_rows(capture_instance)
-        by_name = {r["column_name"]: r for r in rows}
-        types = [_sql_type(by_name[k]) if k in by_name else None for k in keys]
+        found, same = self._resolve(capture_instance)
+        # gone (disabled after a switch while its chunked snapshot is open): the table's
+        # newest instance, as source_table follows it (ADR 0023)
+        rows = self._captured_rows((found or same[-1])["capture_instance"])
+        # ignoring case, as present_columns matches them
+        by_name = {r["column_name"].lower(): r for r in rows}
+        types = [_sql_type(by_name[k.lower()]) if k.lower() in by_name else None for k in keys]
         strings = [i for i, t in enumerate(types) if t and t.startswith(("char(", "varchar("))]
         if strings:
             # A string parameter is nvarchar, and CAST to varchar converts it with the code
@@ -675,12 +679,12 @@ class SqlCdcClient(CdcClient):
             )
             params = (rows[0]["source_schema"], rows[0]["source_table"])
             coll = {
-                r["name"]: r["collation_name"]
+                r["name"].lower(): r["collation_name"]
                 for batch in self._b.batches(sql, params, 1000)
                 for r in batch.to_pylist()
             }
             for i in strings:
-                c = coll.get(keys[i])
+                c = coll.get(keys[i].lower())
                 types[i] = f"{types[i]} COLLATE {_check_ident(c, 'collation')}" if c else None
         # A datetime2(7) or datetimeoffset(7) bound comes back truncated to microseconds.
         # That keeps its own column's order, but ahead of another key column two bounds can

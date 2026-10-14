@@ -2559,6 +2559,45 @@ def test_a_table_without_a_unique_index_is_chunked_on_the_column_snapshot_keys_n
     assert changes == [(1, 3), (2, 20), (2, 21)]
 
 
+@pytest.mark.parametrize(("given", "keys"), [(None, []), ('["STATUS"]', ["status"])])
+def test_a_table_without_a_unique_index_backfills_whole_or_on_snapshot_keys_in_any_case(
+    delta_spark, workdir, given, keys
+):
+    # without snapshotKeys its chunked snapshot is one chunk, the whole table, whose waves name
+    # no key columns; with them, they are spelled as captured, matched ignoring case
+    from mssql_cdc import stream
+
+    spark = delta_spark
+    src = os.path.join(workdir, "src")
+    db = FakeCdcDatabase(src, [CI], columns={CI: COLUMNS})  # inferred, as captured
+    table = {str(i): {"order_id": i, "status": "ab"[i % 2]} for i in range(6)}
+    with open(os.path.join(src, "tables", f"{CI}.json"), "w", encoding="utf-8") as fh:
+        json.dump(table, fh)
+    db.commit(CI, [(2, table["5"])])
+    options = {"backend": "fake", "fakePath": src, "captureInstance": CI, "numPartitions": "1"}
+    if given:
+        options["snapshotKeys"] = given
+    target, facts, ckpt = (os.path.join(workdir, n) for n in ("bronze", "facts", "ckpt"))
+    cdc = stream(spark, options)
+    cdc.to_delta(
+        target,
+        "heap-v1",
+        ckpt,
+        facts,
+        trigger={"availableNow": True},
+        bootstrap=True,
+        snapshot="chunked",
+    ).awaitTermination()
+    status = cdc.backfill(target, app_id="heap-v1", facts_table=facts, chunk_rows=2)
+    assert status["done"], status
+    [(_, plan)] = _plans(spark, target, "snapshot_plan")
+    assert plan["keys"] == keys
+    snap = spark.read.format("delta").load(target).where("_operation = 0").collect()
+    assert sorted(r["order_id"] for r in snap) == list(range(6))  # each once
+    if not keys:
+        assert plan["chunks"] == [[None, None]] and {r["_chunk"] for r in snap} == {0}
+
+
 def test_backfill_pauses_while_the_stream_lags_or_has_stopped(delta_spark, workdir, monkeypatch):
     from mssql_cdc import sink, stream
 

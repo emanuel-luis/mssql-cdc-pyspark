@@ -394,8 +394,9 @@ def test_a_chunked_snapshot_on_switch_fills_the_new_column_through_backfill(delt
         switch=(switched["batch_id"], switched["min_lsn"]),
     )
     assert replayed["lsn"] == opened["min_lsn"] and len(facts("snapshot_open")) == 2
-    with pytest.raises(ValueError, match="has a chunked snapshot open"):
-        run(snapshot="full")  # one mode while it is open
+    for bootstrap in (True, False):  # one mode while it is open: a switch takes one too
+        with pytest.raises(ValueError, match="has a chunked snapshot open"):
+            run(snapshot="full", bootstrap=bootstrap)
     assert not o.apply(options=o.options)["rebuilt"]
     assert (0, "new", None) in rows()
 
