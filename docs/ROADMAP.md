@@ -123,7 +123,7 @@ fixes, or changes nothing users can see (tests, CI, docs); a minor may break the
 - [x] The snapshot plan stops writing key values in clear into the facts table: they go to
       a plans table next to bronze (ADR 0028, Amendment 4).
 
-## 0.8.0 (minor): operations at scale
+## 0.8.0 (minor, shipped 2026-10-14): operations at scale
 
 - [x] Chunked snapshots of keyless tables, cut on a chosen column: the `snapshotKeys` option,
       unique or not (ADR 0028, Amendment 6).

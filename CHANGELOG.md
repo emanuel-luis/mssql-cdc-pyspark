@@ -12,6 +12,8 @@ compatibility" line.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-14
+
 State compatibility: offsets and checkpoints unchanged. Facts migration 14 and snapshot plans
 migration 1 rewrite column comments only (metadata), the next time a stream opens those
 tables. The 'snapshot_open' payload gains the optional key `switch_batch_id`
@@ -1103,7 +1105,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.5.0...v0.6.0
 [0.6.0rc3]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0rc2...v0.6.0rc3
