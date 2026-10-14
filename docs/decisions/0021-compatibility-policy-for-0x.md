@@ -12,7 +12,8 @@
 **Amended:** 2026-10-07T09:14:31-03:00, the payloads and the source options get types, and a 'data_skipped' row's `detail` joins the listed payloads (amendment 7)  
 **Amended:** 2026-10-09T11:39:56-03:00, a wave's measured values in its userMetadata may be null where the platform refuses caching (amendment 8, ADR 0032)  
 **Amended:** 2026-10-10T18:02:10-03:00, a chunked snapshot's facts rows leave its key values to a plans table next to bronze: keys removed from the rows 0.7.0 writes only, readers take them from either (amendment 9, ADR 0028 Amendment 4)  
-**Amended:** 2026-10-13T18:45:19-03:00, a chunked snapshot opened after a capture instance switch adds `switch_batch_id` to its 'snapshot_open' payload, and its rows take keys by its S (amendment 10, ADR 0023 Amendment 7)
+**Amended:** 2026-10-13T18:45:19-03:00, a chunked snapshot opened after a capture instance switch adds `switch_batch_id` to its 'snapshot_open' payload, and its rows take keys by its S (amendment 10, ADR 0023 Amendment 7)  
+**Amended:** 2026-10-14T09:06:30-03:00, the 1.x policy: Semantic Versioning from 1.0, the state contract frozen but for additions, a deprecation before every removal (amendment 11)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -100,7 +101,7 @@ The Python API, on the other hand, is young and will change.
 * Changing the state is expensive on purpose: reading the old format stays in the code.
 * Documenting something in the reference pages makes it public; keep internals out of them
   or accept the contract. The guides and the README may show public things only.
-* 1.0 will freeze the Python API as well; nothing here decides when.
+* 1.0 will freeze the Python API as well; nothing here decides when (amendment 11 does).
 
 ## Amendment 4: the snapshot payloads are state
 A chunked snapshot stays open for days or weeks, so its `'snapshot_open'` and
@@ -261,3 +262,82 @@ after the batch that first reads a newer capture instance
   when the generation's own snapshot took it: the snapshot then never completes, silver
   keeps its verdict held and a full run raises (one mode while it is open). Run `backfill()`
   with 0.8.0, which writes the row; nothing wrong is written meanwhile.
+
+## Amendment 11: the 1.x policy
+1.0 freezes the public Python API and the state contract. 1.0.0rc1 comes first and runs a
+real pipeline for a few weeks; 1.0.0 ships when nothing that run finds needs an API change,
+and a change it does need goes into another release candidate, not after 1.0.0. From
+1.0.0 on, this amendment replaces the Decision's first two bullets (what a minor and a
+patch may change); the state contract, the "State compatibility" line and `tests/compat`
+stay, with the additions below.
+
+* Semantic Versioning, strictly:
+  - a patch (1.x.y) only fixes: it adds no public name, parameter, option, payload key or
+    table column;
+  - a minor (1.x) adds: public names, parameters whose default keeps today's behaviour,
+    source options, keys of a result's `TypedDict`, values of a `Literal` (a mode,
+    `BackfillState`), facts `event` values, payload keys, table columns by an appended
+    migration; and it deprecates;
+  - a major (2.0) breaks: it removes or renames any of those, changes a signature so that
+    a call or a type check that passed fails, changes what a default does, or changes the
+    state contract other than by adding to it.
+
+  A type-only break is a break (amendment 5): a narrower parameter type, a wider return
+  type, a member added to a protocol that a class implements without inheriting
+  ([ADR 0030](0030-protocols-for-the-pluggable-seams.md)).
+* What is public does not change: what the reference documents (amendment 4), the formats
+  `mssql_cdc` and `mssql_cdc_snapshot`, and `CdcStream` only as what `stream()` returns.
+  Every name `mssql_cdc` exports is in `docs/reference/api.md` (`tests/test_api_shape.py`).
+  The four it exported before 1.0 that the reference never listed, `HAS_ADMISSION_CONTROL`,
+  `OPERATIONS`, `MssqlCdcDataSource` and `make_client`, leave its `__all__` and warn when
+  imported from it: internal, as this ADR already made them, they stay in
+  `mssql_cdc.source` and `mssql_cdc.client`, and leave `mssql_cdc` in 2.0.
+  `FinalizationListener` is public for `join`, `last_error` and `failures`; `track()`
+  creates it, and its constructor is not public: a listener it built never started its
+  worker.
+* Readers handle what they do not know: in any minor, a result or a payload may gain keys,
+  and `BackfillState` and the facts `event` may gain values. A consumer that matches on
+  them keeps a default branch, and reads a key added after its payload first shipped with
+  a default (`.get`), as the library does.
+* A deprecation before every removal. Nothing public is removed, renamed or made to behave
+  otherwise in 2.0 unless a 1.x minor deprecated it first: from then on it kept working and
+  warned, naming what replaces it, with a `DeprecationWarning` attributed to the caller
+  (`stacklevel=2`, so that a notebook or a test run shows it) for Python, and a WARNING
+  logged where the option is read for a source option. The changelog lists it under
+  "Deprecated", and the major that removes it under "Removed". A deprecated name stays for
+  the rest of 1.x.
+* The state contract only grows. Besides the Decision's list and amendments 4 to 10, it
+  names what a later release reads back that the list left implicit:
+  - the keys of the generation state file `<checkpoint>/_mssql_cdc_generation.json`:
+    `generation`, `snapshot_lsn`, `commit_ts`, `at`, `recovering`, `failed_at`;
+  - the Delta `txnAppId`s and versions that make each write idempotent, since a release
+    that wrote under another would write a replayed row twice. The sink's app_id
+    (`<app_id>`, or `<app_id>.g<n>` in generation n) with the batch id, on bronze and, as
+    `<sink app_id>#facts`, on the facts table. From the stream's `app_id`, on the facts
+    table: `#events` and `#snapshots` (the generation), `#snapopen.<S>`, `#snapplan.<S>`
+    and `#snapdone.<S>` (0), `#snapchunks.<S>` (the wave); on the plans table
+    `#snapopen.<S>` and `#snapplan.<S>` (0), `#snapchunks.<S>` (the wave); on bronze, a
+    wave's `#snap.<S>` (the wave).
+
+  Table schemas change only by appended migrations that add columns or rewrite comments,
+  and no 1.x migration sets `mssql_cdc.min_version`: every 1.x release reads and writes
+  every 1.x table, so the jobs that share one upgrade, or roll back, one at a time. A change
+  that cannot be additive (a key renamed, a column dropped or retyped, a `min_version`) is a
+  2.0, with an ADR and a migration path; so is a change that fails `tests/compat`.
+* Text for people is not state: the messages in a micro-batch row's `warnings`, a task's
+  `reason`, the text of an error, and the `detail` of a 'capture_instance_switched' row
+  (`old -> new`, then the columns no longer captured) may be reworded in any release. A
+  'schema_change' row's `detail` is the DDL statement as SQL Server recorded it (its first
+  500 characters).
+
+Considered:
+
+* Keeping the 0.x rule, a minor may break the API, through 1.x. What 1.0 tells a user is
+  that an upgrade within the major needs no change to their code; a break waits for 2.0,
+  and the deprecation before it says what to change.
+* A deprecation window in time (six months). Releases are small and irregular; a window in
+  releases can be checked from the changelog alone, and a deprecated name stays for the rest
+  of 1.x anyway.
+* Freezing the internal modules too (`client`, `events`, the sink but `delta_sink`, the
+  fake). They change with every feature; only the reference is promised, and an internal
+  name a user needs is listed there in a minor, which freezes it from then on.
