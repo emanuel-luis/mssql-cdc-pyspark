@@ -3,17 +3,26 @@
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
-project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) with the 0.x
-policy of [ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/): a minor release
-may break the Python API (listed under "Breaking"), a patch only fixes, and the state a
-stream leaves behind (offsets, checkpoint layout, table schemas) never breaks without a
-migration path. Every release says what it does to that state in its "State
-compatibility" line.
+project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) under the policy
+of [ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)
+(amendment 11 from 1.0.0): a patch only fixes, a minor adds and deprecates, and only a major
+breaks the Python API, each break listed under "Breaking" with what to change. Before 1.0.0
+a minor release could break it. The state a stream leaves behind (offsets, checkpoint
+layout, table schemas) never breaks without a migration path, and within 1.x it only grows.
+Every release says what it does to that state in its "State compatibility" line.
 
 ## [Unreleased]
 
 State compatibility: offsets, checkpoints, table schemas and payloads are unchanged. A
 micro-batch row's `warnings` may hold one more message (on Spark without admission control).
+
+### Breaking
+
+- `HAS_ADMISSION_CONTROL`, `OPERATIONS`, `MssqlCdcDataSource` and `make_client` left
+  `mssql_cdc.__all__` (see "Deprecated"). A type checker now rejects importing them from
+  `mssql_cdc`, and `from mssql_cdc import *` no longer binds them, without a warning. Import
+  them from their modules instead: the first three from `mssql_cdc.source`, `make_client`
+  from `mssql_cdc.client`, internal names that may change in any release.
 
 ### Added
 
@@ -49,10 +58,9 @@ micro-batch row's `warnings` may hold one more message (on Spark without admissi
 - Importing `HAS_ADMISSION_CONTROL`, `OPERATIONS`, `MssqlCdcDataSource` or `make_client`
   from `mssql_cdc`. The API reference never listed them, so they were already internal
   ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)).
-  They are no longer in `mssql_cdc.__all__`. Importing one from `mssql_cdc` raises a
-  `DeprecationWarning`, and 2.0 removes them from there. `mssql_cdc.source` and
-  `mssql_cdc.client` keep them as internal names. A type checker now flags the import from
-  `mssql_cdc`.
+  They are no longer in `mssql_cdc.__all__`. Importing one from `mssql_cdc` warns at run
+  time (`DeprecationWarning`), and 2.0 removes them from there. `mssql_cdc.source` and
+  `mssql_cdc.client` keep them as internal names.
 
 ### Fixed
 

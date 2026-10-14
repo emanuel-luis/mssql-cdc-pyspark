@@ -28,10 +28,11 @@ built on Spark's Python DataSource V2 API, plus a **completeness signal**
 
 **Documentation: <https://emanuel-luis.github.io/mssql-cdc-pyspark/>**
 
-> Status: **experimental** (0.x; the version is in `pyproject.toml`). Streaming-engine behaviour (offsets, checkpoints,
-> `AvailableNow`, admission control, retention guard) is covered by unit tests
-> against a file-backed CDC simulator. SQL Server behaviour is covered by the
-> `lab/` checks, which run locally against Docker and in GitHub Actions against
+> Status: 1.x (the version is in `pyproject.toml`): the public API and the state a stream
+> leaves behind break only in a major release ("Compatibility", below). Streaming-engine
+> behaviour (offsets, checkpoints, `AvailableNow`, admission control, retention guard) is
+> covered by unit tests against a file-backed CDC simulator. SQL Server behaviour is covered
+> by the `lab/` checks, which run locally against Docker and in GitHub Actions against
 > SQL Server 2022; `tests/integration` runs the source against SQL Server 2022 in Docker
 > (testcontainers). See [LAB.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/LAB.md).
 
@@ -145,13 +146,15 @@ The rest is in the documentation:
 
 ## Compatibility
 
-Within 0.x, a minor release may break the Python API (each break listed under "Breaking" in
-[CHANGELOG.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md), with what to change) and a patch only fixes. The state a
-stream leaves behind never breaks without a migration path: the offsets in its checkpoints,
-the checkpoint layout, and the schemas of the tables it writes, which change only through
-migrations that run on their own. Every release's "State compatibility" line says what it
-does to that state. The public API is what the documentation's reference documents (the
-Python API, the options and the output schema); everything else may change in any release
+From 1.0.0 on, versions follow Semantic Versioning: a patch only fixes, a minor adds and
+deprecates, and only a major breaks the Python API (each break listed under "Breaking" in
+[CHANGELOG.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md), with what to change), after a 1.x minor deprecated what
+it removes. The state a stream leaves behind never breaks without a migration path, and
+within 1.x it only grows: the offsets in its checkpoints, the checkpoint layout, and the
+schemas of the tables it writes, which change only through migrations that run on their own.
+Every release's "State compatibility" line says what it does to that state. The public API
+is what the documentation's reference documents (the Python API, the options and the output
+schema); everything else may change in any release
 ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)).
 
 ## Development

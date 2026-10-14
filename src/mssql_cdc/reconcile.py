@@ -53,7 +53,7 @@ COMMITTED, Tier 2 reads through the snapshot reader under the ``isolationLevel``
 Returns a ``ReconcileResult``, ``{"run_id", "silver_version", "silver_lsn", "source_lsn",
 "buckets", "match", "in_flight", "mismatch", "hashed", "failures": {failure_type: rows},
 "report"}``, ``report`` the run's report as a DataFrame, which ``report_table`` also gets
-(``REPORT_COLUMNS``).
+(its columns: "Reconcile report" in the tables reference).
 """
 
 from __future__ import annotations

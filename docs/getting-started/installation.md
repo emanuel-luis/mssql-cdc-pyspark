@@ -1,10 +1,10 @@
 # Installation
 
-!!! note "These pages document `main`"
-    The latest release on PyPI may be older, and `pip install mssql-cdc-pyspark` skips
-    release candidates: a feature not released yet needs `pip install --pre
-    mssql-cdc-pyspark` or the candidate's exact pin, such as `==0.2.0rc1`. What each release
-    has is in the
+!!! note "Versions"
+    These pages describe the version picked in the selector; `dev` describes `main`, which
+    may be ahead of PyPI. `pip install mssql-cdc-pyspark` skips release candidates: install
+    one with `pip install --pre mssql-cdc-pyspark` or its exact pin, such as `==1.0.0rc1`.
+    What each release has is in the
     [changelog](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md).
 
 ## Requirements

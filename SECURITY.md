@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-Only the latest 0.x release gets fixes, in the next patch or minor release; older releases
-get no backports
+Only the latest release gets fixes, in the next patch or minor release; older releases get
+no backports
 ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)).
 
 ## Reporting a vulnerability
@@ -56,5 +56,7 @@ gh attestation verify dist/mssql_cdc_pyspark-X.Y.Z-py3-none-any.whl \
 
 `--source-ref` asks for the build of the release tag: the TestPyPI dry runs attest builds of
 a branch too. A pass means the file is what that workflow built from the tagged commit,
-unchanged since; it says nothing about what the code does. A file that fails either check
-did not come from this repository's release: do not install it, and report it as above.
+unchanged since; it says nothing about what the code does. A file that fails a check that
+applies to it did not come from this repository's release: do not install it, and report it
+as above. Before 1.0.0rc1 only PyPI's check applies (those releases have no GitHub
+attestation); from 1.0.0rc1 on, a file must pass both.

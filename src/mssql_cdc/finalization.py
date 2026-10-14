@@ -251,8 +251,9 @@ class FinalizationListener(StreamingQueryListener):
     progress tries again. ``last_error`` is the error of the last attempt (None once one
     succeeds) and ``failures`` how many failed in a row: the first of a streak is logged as
     an ERROR, then a WARNING at most every 10 minutes until one succeeds. When the run
-    terminates, the worker applies what is left, stops and removes the listener (on Spark
-    Connect it leaves it registered: see ``_run``).
+    terminates, the worker applies what is left, stops and removes the listener. On Spark
+    Connect it leaves it registered, where removing it can hang the client (PySpark 4.2.0),
+    and it ignores every other run's events.
     """
 
     def __init__(

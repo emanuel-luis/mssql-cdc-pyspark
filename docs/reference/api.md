@@ -54,8 +54,8 @@ keyword-only (since 0.3).
 
 Exported from `mssql_cdc`. The mode parameters take a `Literal`, so a type checker flags a
 misspelt mode; a wrong value still raises `ValueError` naming the allowed ones. The results
-are `TypedDict`s, plain dicts at run time; a minor release may add keys to them, and removing
-or renaming one is a break listed under "Breaking" in the changelog.
+are `TypedDict`s, plain dicts at run time; a minor release may add keys to them, and only a
+major release removes or renames one, listed under "Breaking" in the changelog.
 
 ::: mssql_cdc.types
     options:
@@ -75,7 +75,8 @@ one without inheriting, and `isinstance` checks that it has them (by name; a typ
 checks the signatures). A subclass inherits the methods that have a body. The data source
 builds its client from its options, so the [backend](options.md#backend) option names a
 built-in backend only. A method added to a protocol is a break for a class that implements
-it without inheriting, listed under "Breaking" in the changelog.
+it without inheriting: only a major release adds one, listed under "Breaking" in the
+changelog.
 
 ::: mssql_cdc.Backend
 

@@ -14,18 +14,19 @@ serverless to your server, which has not been tried ([Databricks](DATABRICKS.md)
 [metricsPath](reference/options.md#metricspath) on a local or FUSE path every node sees, or
 on a URI `pyarrow.fs` opens (`s3://`, `abfss://`...).
 
-!!! warning "Experimental"
+!!! note "Compatibility"
     The streaming engine is covered by unit tests and the SQL Server behaviour by
-    integration tests against SQL Server 2022. Within 0.x a minor release may change the
-    Python API; the state a stream leaves behind (checkpoints, table schemas) never breaks
-    without a migration path ([ADR 0021](decisions/0021-compatibility-policy-for-0x.md)).
+    integration tests against SQL Server 2022. From 1.0.0 on, only a major release breaks
+    the Python API, and the state a stream leaves behind (checkpoints, table schemas) never
+    breaks without a migration path ([ADR 0021](decisions/0021-compatibility-policy-for-0x.md)).
 
-!!! note "These pages document `main`"
-    The latest release on PyPI may be older: the
+!!! note "Versions"
+    Each release has its own pages: pick yours in the version selector. `stable` is the
+    latest final release; `dev` follows `main`, which may be ahead of PyPI. A release
+    candidate installs only with `pip install --pre mssql-cdc-pyspark` or its exact pin,
+    such as `mssql-cdc-pyspark==0.8.0`. The
     [changelog](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md)
-    says what each release has. A release candidate installs only with
-    `pip install --pre mssql-cdc-pyspark` or its exact pin, such as
-    `mssql-cdc-pyspark==0.8.0`. Versioned docs come later.
+    says what each release has.
 
 ## The problem
 

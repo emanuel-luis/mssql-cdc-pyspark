@@ -304,8 +304,8 @@ stay, with the additions below.
   warned, naming what replaces it, with a `DeprecationWarning` attributed to the caller
   (`stacklevel=2`, so that a notebook or a test run shows it) for Python, and a WARNING
   logged where the option is read for a source option. The changelog lists it under
-  "Deprecated", and the major that removes it under "Removed". A deprecated name stays for
-  the rest of 1.x.
+  "Deprecated", and the major that removes it under "Breaking", where every break is
+  listed with what to change. A deprecated name stays for the rest of 1.x.
 * The state contract only grows. Besides the Decision's list and amendments 4 to 10, it
   names what a later release reads back that the list left implicit:
   - the keys of the generation state file `<checkpoint>/_mssql_cdc_generation.json`:

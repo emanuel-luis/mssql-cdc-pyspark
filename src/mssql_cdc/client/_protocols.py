@@ -47,8 +47,8 @@ class DdlChange(NamedTuple):
 # --------------------------------------------------------------------------- #
 @runtime_checkable
 class CdcClient(Protocol):
-    """What the data source needs from SQL Server: ``SqlCdcClient``, or the ``fake`` backend's
-    client. A ``typing.Protocol`` (ADR 0030): any class with these methods is one, and
+    """What the data source needs from SQL Server: the client of a ``backend``, the built-in
+    drivers' or the ``fake`` one's. A ``typing.Protocol`` (ADR 0030): any class with these methods is one, and
     ``isinstance`` checks that it has them (by name; a type checker checks their signatures).
     A subclass inherits the methods that have a body here, and must define the abstract ones.
 
@@ -155,7 +155,7 @@ class CdcClient(Protocol):
         from 1970-01-01 ("date"); ``key_sum`` sums ``o``. A NULL key is in no bucket. ``key``
         None: ``[(0, rows, None)]``, the whole table. ``lo``/``hi``: an integer key's rows in
         ``[lo, hi)`` only (None: open). ``isolation``: as ``iter_table``'s. Tier 1 of
-        ``reconcile()``; a chunked snapshot's integer plan (``plan_chunks``)."""
+        ``reconcile()``, and the chunks of a chunked snapshot on one integer key."""
 
     @abstractmethod
     def iter_table(
@@ -262,7 +262,7 @@ class CdcClient(Protocol):
 # --------------------------------------------------------------------------- #
 @runtime_checkable
 class Backend(Protocol):
-    """What ``SqlCdcClient`` needs from a database driver: run a query, return Apache Arrow.
+    """What the SQL Server client needs from a database driver: run a query, return Apache Arrow.
     A ``typing.Protocol`` (ADR 0030): a class with ``batches``, ``scalar`` and ``close`` is
     one, inheriting or not; a subclass inherits ``scalar`` and ``close``. Every parameter is
     text, which the T-SQL converts on the server (ADR 0003)."""

@@ -1,8 +1,9 @@
 # Roadmap
 
-Small releases, one theme each, plus fixes. Under the 0.x policy (ADR 0021) a patch only
-fixes, or changes nothing users can see (tests, CI, docs); a minor may break the Python API
-(listed under "Breaking" in `CHANGELOG.md`) or add public API, such as exported types.
+Small releases, one theme each, plus fixes. Under the 1.x policy (ADR 0021 amendment 11) a
+patch only fixes, or changes nothing users can see (tests, CI, docs); a minor adds public API
+or deprecates; only a major breaks the Python API (listed under "Breaking" in
+`CHANGELOG.md`). Before 1.0, a minor could break it.
 
 ## Shipped
 
