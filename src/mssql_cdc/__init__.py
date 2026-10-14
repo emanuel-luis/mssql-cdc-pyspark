@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import importlib.util
+import sys
 import warnings
 from typing import TYPE_CHECKING
 
@@ -134,10 +135,13 @@ if not TYPE_CHECKING:
         home = _DEPRECATED.get(name)
         if home is None:
             raise AttributeError(f"module 'mssql_cdc' has no attribute {name!r}")
-        warnings.warn(
-            f"mssql_cdc.{name} is internal and leaves the mssql_cdc namespace in 2.0: import it "
-            f"from {home}, which may change it in any release",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        # `from mssql_cdc import x` asks twice: importlib's fromlist probe, then the import
+        # itself; only the second warns.
+        if sys._getframe(1).f_code.co_name != "_handle_fromlist":
+            warnings.warn(
+                f"mssql_cdc.{name} is internal and leaves the mssql_cdc namespace in 2.0: "
+                f"import it from {home}, which may change it in any release",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return getattr(importlib.import_module(home), name)

@@ -180,6 +180,13 @@ def test_the_exports_the_reference_never_listed_warn_until_2_0(name, home):
         assert getattr(mssql_cdc, name) is getattr(importlib.import_module(home), name)
 
 
+def test_a_from_import_of_one_warns_once():  # importlib's fromlist probe asks first
+    with pytest.warns(DeprecationWarning) as record:
+        from mssql_cdc import make_client  # noqa: F401 - the import is the test
+    assert len(record) == 1
+    assert record[0].filename == __file__
+
+
 def test_an_unknown_name_is_still_an_attribute_error():
     with pytest.raises(AttributeError, match="no attribute 'reconcil'"):
         mssql_cdc.reconcil  # noqa: B018 - the access is the test
