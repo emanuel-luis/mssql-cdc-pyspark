@@ -87,16 +87,25 @@ not on PyPI and gets compatibility fixes only.
 * `docs.yml` publishes one version per run, all from one concurrency group, so the runs
   that commit to `gh-pages` never overlap:
   * a push to `main` publishes `dev`;
-  * a tag `vX.Y.Z` publishes `X.Y.Z` and moves the `stable` alias to it;
+  * a tag `vX.Y.Z` publishes `X.Y.Z` and moves the `stable` alias to it, unless `stable`
+    is on a newer version already (a run again from an older tag publishes its version
+    only);
   * a tag `vX.Y.ZrcN` publishes `X.Y.ZrcN` and leaves `stable` where it is, so a release
     candidate in use has its pages without becoming the default;
   * the site's root opens `stable`, or `dev` until the first final release.
+  A tag publishes only when `release.yml` would release it: its version is the one in
+  `pyproject.toml`, its commit is on `main`, and `CHANGELOG.md` has its section. A tag
+  pushed by mistake (`v1.0.1` for a 1.0.0) never shows as a version.
   Versions start with this amendment: the 0.x releases are not published.
 * GitHub Pages keeps "GitHub Actions" as its source. `gh-pages` is the store of every
   version; each run commits to it, pushes it, and deploys its whole tree as the Pages
-  artifact (an alias's symlink becomes a copy there). The build job holds `contents: write`
-  for that push; its checkout keeps no credentials, and only the push step gets the token,
-  after the build ran the third-party code of the docs group.
+  artifact (an alias's symlink becomes a copy there). The job that builds, which runs the
+  third-party code of the docs group (Zensical, mkdocstrings, the mike fork), has a
+  read-only token: on a hosted runner every step of a job can read its token, so a token
+  given to one step only is given to the job. mike commits to a local `gh-pages`, and the job
+  hands the new commits on as a git bundle. A second job, which runs nothing but git,
+  holds `contents: write` and pushes them, without force: `gh-pages` only, and only as a
+  fast-forward.
 * Links from before the versions (`/mssql-cdc-pyspark/guides/streaming/`, in the README of
   every 0.x release on PyPI and in `CHANGELOG.md`) keep working: the site's root `404.html`
   (`.github/pages/404.html`, added to the artifact) sends a path whose first segment is not
@@ -107,6 +116,8 @@ not on PyPI and gets compatibility fixes only.
 Consequences: the `github-pages` environment needs a `v*` tag rule next to `main`, or a
 tag's deploy is refused (its version is on `gh-pages` regardless, and the next push to
 `main` deploys it). A tag publishes its version as soon as it is pushed, before PyPI's
-reviewer approves the release; a tag deleted and pushed again publishes over it. When
+reviewer approves the release; a tag deleted and pushed again publishes over it. A version
+that passes the checks but never reaches PyPI (abandoned for the next number) stays in the
+selector, and in `stable`, until removed by hand (`RELEASING.md`). When
 Zensical ships native versioning, the fork goes, and the `gh-pages` layout (a directory per
 version, `versions.json`) is what a replacement has to keep or redirect.

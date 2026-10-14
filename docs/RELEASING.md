@@ -16,8 +16,9 @@ with the file (`gh-action-pypi-publish`'s default). The OIDC token that signs is
 publish job's, never `build`'s, which runs code installed from PyPI. How to check them:
 [SECURITY.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/SECURITY.md#verifying-a-release).
 
-What a version number may change is set by the 0.x policy
-([ADR 0021](decisions/0021-compatibility-policy-for-0x.md)); every release is recorded in
+What a version number may change is set by the compatibility policy
+([ADR 0021](decisions/0021-compatibility-policy-for-0x.md), amendment 11 from 1.0.0); every
+release is recorded in
 [`CHANGELOG.md`](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md).
 
 ## One-time setup
@@ -77,9 +78,9 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
 
 ## Release
 
-1. Set the version: `uv version --bump patch` for fixes, `uv version --bump minor`
-   otherwise (ADR 0021); it updates `uv.lock` too. For 0.1.0 skip this: `pyproject.toml`
-   already says `0.1.0`.
+1. Set the version (ADR 0021 amendment 11): `uv version --bump patch` for fixes only,
+   `uv version --bump minor` for anything added or deprecated, `uv version --bump major`
+   for a break; it updates `uv.lock` too.
 2. In `CHANGELOG.md`, turn `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` with the date
    of the tag (for 0.1.0, replace `unreleased` in `## [0.1.0] - unreleased` with it), keep
    an empty `## [Unreleased]` above it, check the "State compatibility" line, and update
@@ -133,10 +134,14 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
    committed keep their own `manifest.json`. A release candidate gets none.
 
 `build` refuses a tag whose commit is not on `main`, and a version without its
-`## [X.Y.Z]` heading in `CHANGELOG.md`. If `build` fails on the tag (a version mismatch, a
-failed check), nothing was published:
+`## [X.Y.Z]` heading in `CHANGELOG.md`; the `docs` run refuses the same tags. If `build`
+fails on the tag (a version mismatch, a failed check), nothing was published:
 delete the tag (`git push --delete origin vX.Y.Z` and `git tag -d vX.Y.Z`), fix, and tag
 again; the `docs` run of the new tag publishes over the version the first one published.
+If the version is abandoned instead, for the next number, its pages stay in the selector
+(and in `stable`, for a final one): remove them as below. For a final version, point
+`stable` back at the release before it first, before the `mike delete`:
+`uv run --group docs mike alias --update-aliases <previous X.Y.Z> stable`.
 If `pypi` fails at the attestation, nothing was published either: re-run the failed job,
 or, if the workflow needs the fix, do as above. Once PyPI has a version, it cannot be
 uploaded again: fix forward with the next patch.

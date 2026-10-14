@@ -317,7 +317,8 @@ to `main` and weekly:
 ([ADR 0024](decisions/0024-documentation-site.md) amendment 1): a push to `main` publishes
 `dev`, a release tag publishes its version (a final one also moves `stable`, the site's
 root). It runs the strict build, then mike (Zensical's fork, in the `docs` group) commits
-the version to the `gh-pages` branch, which holds every version; the deploy job publishes
+the version to a local `gh-pages` branch, which holds every version, with a read-only token;
+a second job, which runs only git, pushes the new commits, and the deploy job publishes
 that branch's tree with `.github/pages/404.html` at the root, which sends links from before
 the versions on to `stable` (or `dev`). CI's `docs` job runs only the strict build.
 

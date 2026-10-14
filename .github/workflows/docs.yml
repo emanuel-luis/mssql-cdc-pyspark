@@ -2,9 +2,10 @@ name: docs
 
 # Builds the documentation site (ADR 0024) and publishes it to GitHub Pages one version at a
 # time, with a version selector (amendment 1): a push to main publishes "dev"; a release tag
-# vX.Y.Z publishes X.Y.Z and moves "stable" to it; a tag vX.Y.ZrcN publishes that version and
-# leaves "stable" alone. mike commits each version to the gh-pages branch, which keeps them
-# all; the deploy job publishes that branch's tree. One-time setup (docs/RELEASING.md):
+# vX.Y.Z publishes X.Y.Z and moves "stable" to it (unless stable is newer); a tag vX.Y.ZrcN
+# publishes that version and leaves "stable" alone. A tag release.yml would refuse publishes
+# nothing. mike commits each version to the gh-pages branch, which keeps them all; the
+# deploy job publishes that branch's tree. One-time setup (docs/RELEASING.md):
 # Settings > Pages > Source: "GitHub Actions", and a `v*` tag rule on the github-pages
 # environment.
 on:
@@ -24,19 +25,25 @@ concurrency:
 
 jobs:
   build:
-    name: build the site, commit the version to gh-pages
+    name: build the site, commit the version to a local gh-pages
     runs-on: ubuntu-latest
-    permissions:
-      contents: write  # the push to gh-pages, and only that step gets the token
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with: { python-version: "3.11", enable-cache: false }
+      # release.yml's checks: a tag it refuses, which never reaches PyPI, publishes no docs.
+      - name: The tag is a release (its version, on main, in CHANGELOG.md)
+        if: github.ref_type == 'tag'
+        run: |
+          test "v$(uv version --short)" = "$GITHUB_REF_NAME"
+          git fetch --no-tags --unshallow origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD
+          grep -q "^## \[$(uv version --short)\]" CHANGELOG.md
       # The docs group alone: the API reference is read from src/ statically, no PySpark.
       # Strict here, since mike's own build is not.
       - run: uv run --locked --only-group docs zensical build --strict
-      - name: Commit the version to gh-pages (mike)
+      - name: Commit the version to the local gh-pages (mike)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -45,22 +52,32 @@ jobs:
           mike() { uv run --locked --only-group docs mike "$@"; }
           case "$GITHUB_REF" in
             refs/heads/main)
-              mike deploy dev
+              mike deploy --allow-empty dev
               # the site's root opens "stable" once a final release made it, "dev" until then
               mike list stable > /dev/null 2>&1 || mike set-default dev ;;
             refs/tags/v*rc*)
-              mike deploy "${GITHUB_REF_NAME#v}" ;;
+              mike deploy --allow-empty "${GITHUB_REF_NAME#v}" ;;
             refs/tags/v*)
-              mike deploy --update-aliases "${GITHUB_REF_NAME#v}" stable
-              mike set-default stable ;;
+              v="${GITHUB_REF_NAME#v}"
+              stable="$(mike list stable --json 2> /dev/null | jq -r .version)"
+              if [ "$(printf '%s\n' "$stable" "$v" | sort -V | tail -n 1)" = "$v" ]; then
+                mike deploy --allow-empty --update-aliases "$v" stable
+                mike set-default stable
+              else  # run again from an older tag: its pages only, stable stays newer
+                mike deploy --allow-empty "$v"
+              fi ;;
             *)
               echo "::error::the docs are published from main or a release tag, not $GITHUB_REF"
               exit 1 ;;
           esac
-      - name: Push gh-pages
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+          # The new commits (--allow-empty: at least one) for the push job.
+          if git rev-parse -q --verify refs/remotes/origin/gh-pages > /dev/null; then
+            git bundle create "$RUNNER_TEMP/gh-pages.bundle" origin/gh-pages..gh-pages
+          else
+            git bundle create "$RUNNER_TEMP/gh-pages.bundle" gh-pages
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: gh-pages-bundle, path: "${{ runner.temp }}/gh-pages.bundle" }
       # Every version, an alias's symlink dereferenced by upload-pages-artifact, and the root
       # 404 page that sends links from before the versions on to the default one.
       - name: Gather the gh-pages tree
@@ -71,9 +88,31 @@ jobs:
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with: { path: _pages/ }
 
+  # The only job that can write to the repository runs nothing but git: on a hosted runner any
+  # step can read its job's token, so the build, which runs the docs group's third-party code,
+  # keeps a read-only one. A non-forced push of gh-pages alone: a fast-forward of the branch.
+  push:
+    name: push gh-pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # the push of gh-pages
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: gh-pages-bundle, path: "${{ runner.temp }}" }
+      - name: Push gh-pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git init -q "$RUNNER_TEMP/repo" && cd "$RUNNER_TEMP/repo"
+          git fetch --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" gh-pages \
+            || echo "no gh-pages branch yet: the bundle holds all of it"
+          git fetch "$RUNNER_TEMP/gh-pages.bundle" gh-pages:gh-pages
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+
   deploy:
     name: deploy to GitHub Pages
-    needs: build
+    needs: push
     runs-on: ubuntu-latest
     environment:
       name: github-pages
