@@ -9,6 +9,13 @@ anywhere:
   `pypi` environment;
 * running the workflow by hand (workflow_dispatch) publishes to TestPyPI: the dry run.
 
+The job that publishes attests each file first, signed through Sigstore with the workflow's
+identity: a GitHub artifact attestation (`actions/attest`, SLSA build provenance; nothing to
+set up in a public repository) and, with the upload, a PEP 740 attestation the index stores
+with the file (`gh-action-pypi-publish`'s default). The OIDC token that signs is the
+publish job's, never `build`'s, which runs code installed from PyPI. How to check them:
+[SECURITY.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/SECURITY.md#verifying-a-release).
+
 What a version number may change is set by the 0.x policy
 ([ADR 0021](decisions/0021-compatibility-policy-for-0x.md)); every release is recorded in
 [`CHANGELOG.md`](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md).
@@ -40,8 +47,8 @@ What a version number may change is set by the 0.x policy
 
 ## Dry run (TestPyPI)
 
-1. Actions, `release`, "Run workflow" on `main`. The `testpypi` job publishes what `build`
-   built.
+1. Actions, `release`, "Run workflow" on `main`. The `testpypi` job attests and publishes
+   what `build` built.
 2. In a clean virtual environment:
 
    ```bash
@@ -49,6 +56,19 @@ What a version number may change is set by the 0.x policy
    pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ mssql-cdc-pyspark
    pip install "pyspark>=4.2"   # platforms ship their own; a plain venv needs it to import
    python -c "import mssql_cdc; print(mssql_cdc.__version__)"
+   ```
+
+3. Check the run's GitHub attestation on the files it attested, as
+   [SECURITY.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/SECURITY.md#verifying-a-release)
+   does, with the branch the run built (`refs/heads/main` here) as `--source-ref`:
+
+   ```bash
+   gh run download <run id> -n dist -D /tmp/dry-dist
+   for f in /tmp/dry-dist/*; do
+     gh attestation verify "$f" --repo emanuel-luis/mssql-cdc-pyspark \
+       --signer-workflow emanuel-luis/mssql-cdc-pyspark/.github/workflows/release.yml \
+       --source-ref refs/heads/main
+   done
    ```
 
 TestPyPI, like PyPI, accepts a file name only once, even after a delete. A second dry run
@@ -80,7 +100,10 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
    the tag points at that commit, so it gets no `ci` run of its own (a workflow a tag
    triggers counts as publishing, and `ci` restores caches; zizmor's cache-poisoning
    audit). Then install from PyPI in a clean
-   environment, as in the dry run without the TestPyPI index.
+   environment, as in the dry run without the TestPyPI index, and check both attestations
+   of the wheel and the sdist as
+   [SECURITY.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/SECURITY.md#verifying-a-release)
+   says (1.0.0rc1 is the first release with the GitHub one).
 
    The tag also starts a `docs` run, which publishes the site as version `X.Y.Z` and moves
    `stable` (the site's root) to it. Check that it went green and that the version
@@ -114,8 +137,9 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
 failed check), nothing was published:
 delete the tag (`git push --delete origin vX.Y.Z` and `git tag -d vX.Y.Z`), fix, and tag
 again; the `docs` run of the new tag publishes over the version the first one published.
-Once PyPI has a version, it cannot be uploaded again: fix forward with the next
-patch.
+If `pypi` fails at the attestation, nothing was published either: re-run the failed job,
+or, if the workflow needs the fix, do as above. Once PyPI has a version, it cannot be
+uploaded again: fix forward with the next patch.
 
 A release candidate follows the same steps with a version like `1.0.0rc1`
 (`uv version 1.0.0rc1`, tag `v1.0.0rc1`); pip installs it only with `--pre` or an exact
