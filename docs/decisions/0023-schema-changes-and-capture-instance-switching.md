@@ -8,7 +8,8 @@
 **Amended:** 2026-10-01T17:25:27-03:00, lab check t9 runs the switch under a continuous writer on SQL Server 2022 and 2017; the production SQL Server 2016 SP3 change tables have `__$command_id`  
 **Amended:** 2026-10-01T18:15:53-03:00, the switch tests run with the `arrow-odbc` backend too (ADR 0003 Amendment 2)  
 **Amended:** 2026-10-07T01:41:18-03:00, the reader's other warnings (columns not read, unknown options, a fixed UTC offset) reach the batch's facts row as `detail` `{"warnings": [...]}` (Amendment 6)  
-**Amended:** 2026-10-13T18:45:19-03:00, `snapshot_on_switch` in chunked mode: the switch batch opens a chunked snapshot at the newer instance's start LSN, which `backfill()` reads next to the stream (Amendment 7)
+**Amended:** 2026-10-13T18:45:19-03:00, `snapshot_on_switch` in chunked mode: the switch batch opens a chunked snapshot at the newer instance's start LSN, which `backfill()` reads next to the stream (Amendment 7)  
+**Amended:** 2026-10-15T09:50:28-03:00, a `capture_instance_switched` row's `detail` is JSON: `old`, `new`, `start_lsn`, `not_captured` and the former line as `text` (Amendment 8)
 
 ## Context
 A capture instance captures a fixed column list, chosen when it is enabled. To capture a
@@ -368,3 +369,22 @@ next to the stream, as a chunked bootstrap; with `"full"` nothing changes.
   `sql/switch_capture_instance.sql` steps with a chunked bootstrap: the snapshot opened at the
   new instance's start LSN, silver equal to the table with the new column after `backfill()`,
   and again after the old instance is disabled).
+
+## Amendment 8: the switch's detail as JSON
+The switch's `detail` was a line for people (`old -> new`, then the columns no longer
+captured), so a consumer that wanted the instance names, to wait for a switch in step 4 of
+`sql/switch_capture_instance.sql` or to alert on uncaptured columns, parsed text that may
+be reworded in any release ([ADR 0021](0021-compatibility-policy-for-0x.md) amendment 11).
+From 1.0.0rc1 the reader writes it as JSON, through `events.switch_detail`:
+`{"old", "new", "start_lsn", "not_captured", "text"}`, `text` the former line, so every piece
+it held is still there, and `start_lsn` the row's `min_lsn`. The driver's warning still logs
+the line.
+
+* State: rows written before keep the text ([ADR 0021](0021-compatibility-policy-for-0x.md)
+  amendment 12); `events.switch_of` reads either as the same payload, and the queries in the
+  schema changes guide and the SQL script read `coalesce(get_json_object(detail, '$.text'),
+  detail)`. Facts migration 15 rewrites the `detail` comment only.
+* Tests: `tests/test_source_fake.py` (the event file's JSON, with and without a column the
+  newer instance does not capture), `tests/test_delta_sink.py` (the facts row through
+  `to_delta`), `tests/test_payloads.py` (`switch_of` on both forms) and `tests/integration`
+  (against SQL Server 2022); lab check t9 reads it with `switch_of`.

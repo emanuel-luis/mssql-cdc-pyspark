@@ -468,6 +468,21 @@ SWITCH_COMMENTS = {
 }
 
 
+# Migration 15 (2026-10-15): a 'capture_instance_switched' row's detail is JSON from 1.0.0rc1;
+# rows written before keep the line (ADR 0023 Amendment 8, ADR 0021 amendment 12). Comment only;
+# the creation columns take it, over migration 14's.
+SWITCH_DETAIL_COMMENTS = {
+    "detail": SWITCH_COMMENTS["detail"].replace(
+        "on 'capture_instance_switched' rows, 'old -> new' capture instance, plus the columns "
+        "the query reads that the new one does not capture (NULL from then on).",
+        "on 'capture_instance_switched' rows, JSON {old, new, start_lsn, not_captured, text}: "
+        "the older and the newer capture instance, the newer one's start LSN (min_lsn), the "
+        "columns the query reads that the newer one does not capture (NULL from then on), and "
+        "text, 'old -> new' then those columns, the line alone on rows written before 1.0.0rc1.",
+    ),
+}
+
+
 def _end_offset(spark: SparkSessionLike, table: str) -> None:
     from ..sink import FACTS_COLUMNS, FACTS_COMMENT  # the comments new tables are created with
 
@@ -535,5 +550,9 @@ MIGRATIONS: list[Migration] = [
     Migration(
         "snapshots after a capture instance switch",
         lambda spark, table: set_comments(spark, table, SWITCH_COMMENTS),
+    ),
+    Migration(
+        "capture instance switch detail as JSON",
+        lambda spark, table: set_comments(spark, table, SWITCH_DETAIL_COMMENTS),
     ),
 ]

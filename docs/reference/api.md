@@ -94,7 +94,7 @@ Their keys are state: a release only adds one.
       show_root_toc_entry: false
       inherited_members: true
       show_if_no_docstring: true
-      members: [SnapshotOpenDetail, SnapshotPlanDetail, SnapshotChunkDetail, SnapshotCompletionDetail, DataSkippedDetail, BatchDetail, WaveMetadata, WaveChunk, SnapshotExtent, IntExtent, KeysetExtent, SnapshotKind]
+      members: [SnapshotOpenDetail, SnapshotPlanDetail, SnapshotChunkDetail, SnapshotCompletionDetail, DataSkippedDetail, CaptureInstanceSwitchedDetail, BatchDetail, WaveMetadata, WaveChunk, SnapshotExtent, IntExtent, KeysetExtent, SnapshotKind]
 
 ## Errors
 

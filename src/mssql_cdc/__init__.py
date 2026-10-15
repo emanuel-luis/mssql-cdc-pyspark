@@ -22,6 +22,7 @@ try:
     from .lsn import Lsn
     from .payloads import (
         BatchDetail,
+        CaptureInstanceSwitchedDetail,
         DataSkippedDetail,
         SnapshotChunkDetail,
         SnapshotCompletionDetail,
@@ -65,6 +66,7 @@ __all__ = [
     "BackfillState",
     "BackfillStatus",
     "BatchDetail",
+    "CaptureInstanceSwitchedDetail",
     "DataFrameLike",
     "DataLossError",
     "DataSkippedDetail",

@@ -1143,7 +1143,14 @@ def test_a_capture_instance_enabled_under_writes_takes_over_at_its_start_lsn(
     facts_df = delta_spark.read.format("delta").load(facts)
     assert latest(bronze, "id", "v", facts_df) == _source(sqlserver, "sw_live")
     [switch] = facts_df.where("event = 'capture_instance_switched'").collect()
-    assert (switch["detail"], switch["min_lsn"]) == (f"{ci} -> {v2}", s)
+    assert switch["min_lsn"] == s
+    assert json.loads(switch["detail"]) == {
+        "old": ci,
+        "new": v2,
+        "start_lsn": s,
+        "not_captured": [],
+        "text": f"{ci} -> {v2}",
+    }
 
 
 def test_an_older_instance_dropped_before_the_stream_reached_the_newer_start_is_data_loss(
@@ -1370,7 +1377,7 @@ def test_a_column_added_reaches_bronze_through_a_new_instance_with_its_values(
     bronze, facts_df = run()  # load() infers note from v2; the batch crosses its start
     assert "note" in bronze.columns
     [switched] = facts_df.where("event = 'capture_instance_switched'").collect()
-    assert switched["detail"] == f"{ci} -> {v2}"
+    assert json.loads(switched["detail"])["text"] == f"{ci} -> {v2}"
     # id 1 changed before v2 existed: only the snapshot after the switch has its note
     source = _source(sqlserver, "ddl_add", "note")
     assert source == [(1, "before v2"), (2, None), (3, "after v2")]
@@ -1686,7 +1693,8 @@ def test_a_chunked_snapshot_after_a_switch_fills_the_new_column_next_to_the_stre
     run()  # the batch that crosses v2's start opens the snapshot there: nothing read
     [switched] = facts("capture_instance_switched")
     _, opened = facts("snapshot_open")
-    assert switched["detail"] == f"{ci} -> {v2}"
+    switch = json.loads(switched["detail"])
+    assert (switch["old"], switch["new"]) == (ci, v2)
     assert opened["min_lsn"] == switched["min_lsn"] == sqlserver.start_lsn(v2)
     assert json.loads(opened["detail"])["switch_batch_id"] == switched["batch_id"]
     assert not apply()["rebuilt"]

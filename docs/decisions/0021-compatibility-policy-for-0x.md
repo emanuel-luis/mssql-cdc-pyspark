@@ -15,7 +15,8 @@
 **Amended:** 2026-10-13T18:45:19-03:00, a chunked snapshot opened after a capture instance switch adds `switch_batch_id` to its 'snapshot_open' payload, and its rows take keys by its S (amendment 10, ADR 0023 Amendment 7)  
 **Amended:** 2026-10-14T09:06:30-03:00, the 1.x policy: Semantic Versioning from 1.0, the state contract frozen but for additions, a deprecation before every removal (amendment 11)  
 **Amended:** 2026-10-15T09:39:58-03:00, the files in `metricsPath` are internal, not state: the facts table is the record (amendment 11)  
-**Amended:** 2026-10-15T09:49:09-03:00, dropping a Python, Spark, Delta or SQL Server version past its end of life is a minor, announced a release before; 1.0 keeps Python 3.10 (amendment 11)
+**Amended:** 2026-10-15T09:49:09-03:00, dropping a Python, Spark, Delta or SQL Server version past its end of life is a minor, announced a release before; 1.0 keeps Python 3.10 (amendment 11)  
+**Amended:** 2026-10-15T09:50:28-03:00, a 'capture_instance_switched' row's `detail` is JSON from 1.0.0rc1, its keys state, its `text` for people (amendment 12, ADR 0023 Amendment 8)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -62,6 +63,8 @@ The Python API, on the other hand, is young and will change.
     - `detail` of `'data_skipped'`: `from`, `to`, `certain`, and from a task that found
       cleanup had run while it read, `reason`
       ([ADR 0018](0018-automatic-resnapshot-after-data-loss.md), amendment 7);
+    - `detail` of `'capture_instance_switched'`, from 1.0.0rc1: `old`, `new`, `start_lsn`,
+      `not_captured`, `text`; before, the text alone (amendment 12);
     - from 0.7.0, the snapshot plans table next to bronze, `<target>_snapshot_plans`, its
       columns `snapshot`, `event` and `detail`, `detail` the three chunked payloads above
       whole (amendment 9).
@@ -333,8 +336,9 @@ stay, with the additions below.
   that cannot be additive (a key renamed, a column dropped or retyped, a `min_version`) is a
   2.0, with an ADR and a migration path; so is a change that fails `tests/compat`.
 * Text for people is not state: the messages in a micro-batch row's `warnings`, a task's
-  `reason`, the text of an error, and the `detail` of a 'capture_instance_switched' row
-  (`old -> new`, then the columns no longer captured) may be reworded in any release. A
+  `reason`, the text of an error, and the `text` of a 'capture_instance_switched' row's
+  `detail` (`old -> new`, then the columns no longer captured; the whole `detail` of a row
+  written before 1.0.0rc1, amendment 12) may be reworded in any release. A
   'schema_change' row's `detail` is the DDL statement as SQL Server recorded it (its first
   500 characters).
 * The files in `metricsPath` are not state, nor public: the partitions' metrics, the
@@ -360,3 +364,26 @@ Considered:
 * Freezing the internal modules too (`client`, `events`, the sink but `delta_sink`, the
   fake). They change with every feature; only the reference is promised, and an internal
   name a user needs is listed there in a minor, which freezes it from then on.
+
+## Amendment 12: a switch's detail as JSON
+Before 1.0.0rc1 a 'capture_instance_switched' row's `detail` was a line for people,
+`old -> new`, then `; no longer captured, read as NULL: ` and the columns, which a query had
+to parse for the instance names. Amendment 11 left it text that may be reworded, so nothing
+could rely on it. 1.0.0rc1 writes it as JSON instead, typed `CaptureInstanceSwitchedDetail`
+in `mssql_cdc.payloads` and exported from `mssql_cdc` with the other row payloads
+(amendment 7) ([ADR 0023](0023-schema-changes-and-capture-instance-switching.md)
+Amendment 8). Not additive, so recorded here:
+
+* Its keys are state, only added from now on: `old` and `new`, the capture instances;
+  `start_lsn`, the newer one's start LSN S, which is also the row's `min_lsn`;
+  `not_captured`, the columns the query reads that the newer one does not capture (NULL
+  from S on), empty when none; and `text`, the line rows before held. `text` stays text for
+  people (amendment 11).
+* Rows written before keep their text. A reader tells the two apart by the first character
+  (`{`), or reads both through `events.switch_of(detail, min_lsn)`, which gives the old text
+  with the row's `min_lsn` the same payload; a query reads
+  `coalesce(get_json_object(detail, '$.text'), detail)`. The library itself never parsed
+  it: the lab's check t9 and the documentation's queries did, and now read both.
+* Facts migration 15 rewrites the `detail` comment only; no `mssql_cdc.min_version`. A
+  release before 1.0.0rc1 sharing the facts table keeps writing the text, which every reader
+  above accepts.

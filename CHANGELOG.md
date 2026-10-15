@@ -13,8 +13,13 @@ Every release says what it does to that state in its "State compatibility" line.
 
 ## [Unreleased]
 
-State compatibility: offsets, checkpoints, table schemas and payloads are unchanged. A
-micro-batch row's `warnings` may hold one more message (on Spark without admission control).
+State compatibility: offsets and checkpoints are unchanged. The facts table gets migration
+15, which rewrites the `detail` comment only (no `mssql_cdc.min_version`: older releases keep
+writing it). A 'capture_instance_switched' row's `detail` is JSON from this release; rows
+written before keep their text
+([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)
+amendment 12). Other payloads are unchanged. A micro-batch row's `warnings` may hold one more
+message (on Spark without admission control).
 
 ### Breaking
 
@@ -48,6 +53,8 @@ micro-batch row's `warnings` may hold one more message (on Spark without admissi
   since 0.1.0, are now documented as well. SECURITY.md, "Verifying a release", shows how to
   check both (`gh attestation verify ... --signer-workflow .../release.yml --source-ref
   refs/tags/vX.Y.Z`, `pypi-attestations verify pypi`).
+- `CaptureInstanceSwitchedDetail`, exported from `mssql_cdc` with the other payload types:
+  the JSON of a 'capture_instance_switched' row's `detail`.
 
 ### Changed
 
@@ -58,8 +65,18 @@ micro-batch row's `warnings` may hold one more message (on Spark without admissi
   only grows. It now names the keys of the generation state file and the Delta `txnAppId`s
   that make replays idempotent. Dropping support for a Python, Spark, Delta or SQL Server
   version that has reached its end of life is a minor release, announced here at least one
-  release before; 1.0 keeps Python 3.10. The `warnings`, a task's `reason` and the `detail` of a
-  'capture_instance_switched' row are text for people and may be reworded in any release.
+  release before; 1.0 keeps Python 3.10. The `warnings`, a task's `reason` and the `text` of
+  a 'capture_instance_switched' row's `detail` are text for people and may be reworded in
+  any release.
+- A 'capture_instance_switched' facts row's `detail` is JSON, `{"old", "new", "start_lsn",
+  "not_captured", "text"}`: the capture instances, the newer one's start LSN (the row's
+  `min_lsn`), the columns the query reads that the newer one does not capture, and `text`,
+  the line the row held before (`old -> new`, then those columns). A query no longer parses
+  text for the instance names. Rows written before keep the line: read both with
+  `coalesce(get_json_object(detail, '$.text'), detail)`, or take the names from the JSON
+  only on rows whose `detail` starts with `{`
+  ([ADR 0023](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0023-schema-changes-and-capture-instance-switching/)
+  amendment 8).
 - The files in `metricsPath` are internal: the options reference no longer documents their
   names or contents (a chunk's `chunk-<n>.json` was), which may change in any release. The
   facts table is the public record of what they carry

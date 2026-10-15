@@ -19,6 +19,7 @@ STATE_KEYS = {
     "SnapshotChunkDetail": {"snapshot", "chunk", "wave", "lo", "hi", "last"},
     "SnapshotCompletionDetail": {"snapshot", "chunks", "rows", "last_lsn"},
     "DataSkippedDetail": {"from", "to", "certain", "reason"},
+    "CaptureInstanceSwitchedDetail": {"old", "new", "start_lsn", "not_captured", "text"},  # 1.0
     "BatchDetail": {"warnings"},
     "WaveMetadata": {"backfill", "wave", "lsn", "attempt", "chunks"},
 }
@@ -54,3 +55,24 @@ def test_a_facts_row_without_key_values_is_completed_from_the_plans_table_or_fai
         kept.whole(events.SNAPSHOT_CHUNK, {**new, "wave": 1})  # never a range without its bounds
     opened = {"mode": "chunked", "kind": "bootstrap", "keys": ["id"], "plan": {"kind": "keyset"}}
     assert events.public(events.SNAPSHOT_OPEN, opened) == {"mode": "chunked", "kind": "bootstrap"}
+
+
+def test_a_switch_detail_is_json_and_the_reader_takes_the_line_rows_held_before_1_0():
+    import json
+
+    from mssql_cdc import events
+
+    s = "0x0000002A000001000031"
+    plain = events.switch_detail("dbo_t", "dbo_t_v2", s, [])
+    lost = events.switch_detail("dbo_t", "dbo_t_v2", s, ["a", "b"])
+    assert json.loads(plain) == {
+        "old": "dbo_t",
+        "new": "dbo_t_v2",
+        "start_lsn": s,
+        "not_captured": [],
+        "text": "dbo_t -> dbo_t_v2",  # the line such a row held before
+    }
+    assert json.loads(lost)["text"] == "dbo_t -> dbo_t_v2; no longer captured, read as NULL: a, b"
+    for detail in (plain, lost):  # JSON, or the line a release before 1.0.0rc1 wrote
+        assert events.switch_of(detail, s) == json.loads(detail)
+        assert events.switch_of(json.loads(detail)["text"], s) == json.loads(detail)

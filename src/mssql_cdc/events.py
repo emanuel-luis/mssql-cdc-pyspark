@@ -40,7 +40,12 @@ from typing import TYPE_CHECKING, Any, Final
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame, Row
 
-    from .payloads import SnapshotChunkDetail, SnapshotPlanDetail, WaveChunk
+    from .payloads import (
+        CaptureInstanceSwitchedDetail,
+        SnapshotChunkDetail,
+        SnapshotPlanDetail,
+        WaveChunk,
+    )
     from .tables import ColumnDef
     from .types import SnapshotMode, SparkSessionLike
 
@@ -310,6 +315,23 @@ def chunk_row(
     }
 
 
+def switch_detail(old: str, new: str, start_lsn: str, not_captured: Sequence[str]) -> str:
+    """The JSON ``detail`` of a 'capture_instance_switched' row (``CaptureInstanceSwitchedDetail``):
+    the stream read ``old`` below ``start_lsn`` and ``new`` from there, which captures none of
+    ``not_captured``; ``text`` the line such a row held before 1.0.0rc1."""
+    text = f"{old} -> {new}"
+    if not_captured:
+        text += f"; no longer captured, read as NULL: {', '.join(not_captured)}"
+    detail: CaptureInstanceSwitchedDetail = {
+        "old": old,
+        "new": new,
+        "start_lsn": start_lsn,
+        "not_captured": list(not_captured),
+        "text": text,
+    }
+    return json.dumps(detail)
+
+
 def chunk_detail(snapshot: str, wave: int, c: WaveChunk) -> SnapshotChunkDetail:
     """A 'snapshot_chunk' row's detail; ``last`` false when an older release's tag lacks it."""
     return {
@@ -387,6 +409,24 @@ def chunks_of(rows: Iterable[Row], snapshot: str) -> list[tuple[SnapshotChunkDet
             if d["snapshot"] == snapshot:
                 found.append((d, r))
     return found
+
+
+def switch_of(detail: str, min_lsn: str) -> CaptureInstanceSwitchedDetail:
+    """``detail`` of a 'capture_instance_switched' row whose ``min_lsn`` is ``min_lsn``: the JSON
+    written from 1.0.0rc1, or the line written before (``old -> new``, then ``; no longer
+    captured, read as NULL: `` and the columns), as the same payload."""
+    if detail.startswith("{"):
+        parsed: CaptureInstanceSwitchedDetail = json.loads(detail)
+        return parsed
+    names, _, lost = detail.partition("; no longer captured, read as NULL: ")
+    old, _, new = names.partition(" -> ")
+    return {
+        "old": old,
+        "new": new,
+        "start_lsn": min_lsn,
+        "not_captured": lost.split(", ") if lost else [],
+        "text": detail,
+    }
 
 
 def where_chunked_open(facts: DataFrame) -> DataFrame:

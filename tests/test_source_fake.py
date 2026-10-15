@@ -687,14 +687,21 @@ def test_a_newer_capture_instance_takes_over_at_its_start_lsn(spark, workdir):
     got = sorted((r["order_id"], r["_capture_instance"], r["_command_id"]) for r in rows)
     assert got == [(i, CI, 1) if i < 5 else (i, v2, 2) for i in range(10)]
     assert all((r["_start_lsn"] < s) == (r["_capture_instance"] == CI) for r in rows)
-    # the batch that crossed S left the switch there, for the sink's facts
-    assert _events(metrics) == {
+    # the batch that crossed S left the switch there, for the sink's facts, its detail JSON
+    events = _events(metrics)
+    assert {n: {**e, "detail": json.loads(e["detail"])} for n, e in events.items()} == {
         f"event-capture_instance_switched-{s}.json": {
             "event": "capture_instance_switched",
             "capture_instance": v2,
             "lsn": s,
             "commit_ts": _ms(5),
-            "detail": f"{CI} -> {v2}",
+            "detail": {
+                "old": CI,
+                "new": v2,
+                "start_lsn": s,
+                "not_captured": [],
+                "text": f"{CI} -> {v2}",
+            },
         }
     }
 
@@ -740,7 +747,7 @@ def test_replays_across_the_newer_start_plan_and_read_the_same(spark, workdir):
 
 
 def test_the_schema_is_the_union_and_a_missing_column_reads_null(spark, workdir):
-    _, v2, _, _ = _switch(workdir, v2_columns=V2_COLUMNS)  # no updated_at, a note, wider amount
+    _, v2, s, _ = _switch(workdir, v2_columns=V2_COLUMNS)  # no updated_at, a note, wider amount
     assert (
         MssqlCdcDataSource(_opts(workdir, columns=None))
         .schema()
@@ -756,8 +763,14 @@ def test_the_schema_is_the_union_and_a_missing_column_reads_null(spark, workdir)
     got = sorted((r["order_id"], r["updated_at"] is None, r["note"]) for r in df.collect())
     assert got == [(i, False, None) if i < 5 else (i, True, f"n{i}") for i in range(10)]
     # the switch's warning and event say which column reads NULL from there on
-    assert [e["detail"] for e in _events(metrics).values()] == [
-        f"{CI} -> {v2}; no longer captured, read as NULL: updated_at"
+    assert [json.loads(e["detail"]) for e in _events(metrics).values()] == [
+        {
+            "old": CI,
+            "new": v2,
+            "start_lsn": s,
+            "not_captured": ["updated_at"],
+            "text": f"{CI} -> {v2}; no longer captured, read as NULL: updated_at",
+        }
     ]
 
 
@@ -896,7 +909,7 @@ def test_a_newer_instance_with_new_columns_stops_at_its_start(spark, workdir):
     metrics = os.path.join(workdir, "metrics")
     again = _stream_reader(spark, workdir, columns=None, metricsPath=metrics)
     assert [r["note"] for r in _rows(again, _plan(again, c[2], c[4]))] == ["n3", "n4"]
-    assert [e["detail"] for e in _events(metrics).values()] == [f"{CI} -> {v2}"]
+    assert [json.loads(e["detail"])["text"] for e in _events(metrics).values()] == [f"{CI} -> {v2}"]
 
 
 def test_a_newer_instance_skipped_ahead_to_is_checked_like_one_reached(spark, workdir):

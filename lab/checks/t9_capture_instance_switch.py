@@ -31,6 +31,7 @@ import threading
 import time
 
 from mssql_cdc import apply_changes, finalization, stream
+from mssql_cdc.events import switch_of
 from mssql_cdc.lsn import normalize
 from mssql_cdc.spark import get_spark
 
@@ -333,8 +334,13 @@ def main(argv=None) -> bool:
     checks.append(
         ("schema_change event names the ADD", any("ADD note" in d for d in add), str(add))
     )
-    sw = [(e["detail"], e["min_lsn"]) for e in events if e["event"] == "capture_instance_switched"]
-    checks.append(("capture_instance_switched at S", sw == [(f"{V1} -> {V2}", s)], str(sw)))
+    sw = [  # JSON from 1.0.0rc1, the text before: switch_of reads both
+        switch_of(e["detail"], e["min_lsn"])
+        for e in events
+        if e["event"] == "capture_instance_switched"
+    ]
+    got = [(d["old"], d["new"], d["start_lsn"]) for d in sw]
+    checks.append(("capture_instance_switched at S", got == [(V1, V2, s)], str(sw)))
     return report(
         "t9_capture_instance_switch",
         checks,

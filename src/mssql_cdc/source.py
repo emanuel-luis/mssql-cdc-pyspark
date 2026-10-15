@@ -58,7 +58,7 @@ from pyspark.sql.datasource import (
 )
 
 from . import _metricsfs
-from .events import CAPTURE_INSTANCE_SWITCHED, DATA_SKIPPED, SCHEMA_CHANGE
+from .events import CAPTURE_INSTANCE_SWITCHED, DATA_SKIPPED, SCHEMA_CHANGE, switch_detail
 from .lsn import ZERO_LSN
 from .spark import _arrow_schema
 
@@ -734,11 +734,10 @@ class _BaseReader(_Common, DataSourceStreamReader):
         for older, inst in pairwise(instances):
             s = inst.start_lsn
             if s is not None and any(p[0] is inst and p[1] == s for p in pieces):  # crosses S
-                detail = f"{older.name} -> {inst.name}"
                 kept = {c.lower() for c in inst.columns}
+                # NULL from S on: the warning and the facts say so
                 lost = [c for c in older.columns if kept and c.lower() in wanted - kept]
-                if lost:  # NULL from S on: the warning and the facts say so
-                    detail += f"; no longer captured, read as NULL: {', '.join(lost)}"
+                detail = switch_detail(older.name, inst.name, s, lost)
                 ts = client.lsn_to_time(s)
                 events.append((CAPTURE_INSTANCE_SWITCHED, inst.name, s, ts, detail))
         ranges: list[LsnRange] = []
@@ -772,7 +771,9 @@ class _BaseReader(_Common, DataSourceStreamReader):
         for r in ranges:
             r.start_ts = start.get("commit_ts") or None
         for kind, ci, lsn, ts, detail in events:
-            _log.warning("mssql_cdc: %s on %s at %s: %s", kind, ci, lsn, detail)
+            # the switch's JSON says its line for people in text
+            said = json.loads(detail)["text"] if kind == CAPTURE_INSTANCE_SWITCHED else detail
+            _log.warning("mssql_cdc: %s on %s at %s: %s", kind, ci, lsn, said)
             if self.metrics_path:  # for the sink to fold into the facts
                 _write_event(self.metrics_path, kind, ci, lsn, ts, detail)
         for ci, lo, low in skipped:  # the guard logged each; the facts keep the gap (ADR 0018)

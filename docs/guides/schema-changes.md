@@ -24,10 +24,13 @@ query = stream(spark, options).to_delta(
 ```
 
 Each DDL statement and each move to a newer capture instance becomes a facts row of the
-batch that read past it:
+batch that read past it. A switch's `detail` is JSON (`old`, `new`, `start_lsn`,
+`not_captured`, and `text`, the line rows written before 1.0.0rc1 hold instead), so the
+query reads its `text`, or the DDL statement:
 
 ```sql
-SELECT app_id, batch_id, event, detail, min_lsn, written_at
+SELECT app_id, batch_id, event,
+       coalesce(get_json_object(detail, '$.text'), detail) AS detail, min_lsn, written_at
 FROM ops.ingestion_facts
 WHERE event IN ('schema_change', 'capture_instance_switched')
 ORDER BY written_at DESC;

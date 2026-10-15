@@ -381,7 +381,8 @@ def test_a_chunked_snapshot_on_switch_fills_the_new_column_through_backfill(delt
     [switched] = facts("capture_instance_switched")
     _, opened = facts("snapshot_open")
     detail = json.loads(opened["detail"])
-    assert opened["min_lsn"] == switched["min_lsn"] and switched["detail"] == f"{CI} -> {v2}"
+    assert opened["min_lsn"] == switched["min_lsn"]
+    assert json.loads(switched["detail"])["new"] == v2
     assert (detail["kind"], detail["switch_batch_id"]) == ("bootstrap", switched["batch_id"])
     replayed = stream(o.spark, o.options)._open(  # as a replay of the switch batch opens it
         o.bronze,

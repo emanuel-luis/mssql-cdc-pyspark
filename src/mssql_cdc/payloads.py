@@ -153,6 +153,25 @@ class DataSkippedDetail(_DataSkipped, total=False):
     """Why the task flagged its range, from a task only; text for people, which may change."""
 
 
+class CaptureInstanceSwitchedDetail(TypedDict):
+    """``detail`` of a ``'capture_instance_switched'`` facts row (ADR 0023), JSON from 1.0.0rc1:
+    a row written before holds only ``text``'s line, as plain text (``events.switch_of`` reads
+    both)."""
+
+    old: str
+    """The older capture instance, read below ``start_lsn``."""
+    new: str
+    """The newer one, read from ``start_lsn`` on."""
+    start_lsn: str
+    """The newer instance's start LSN S, where the stream switched: the row's ``min_lsn``."""
+    not_captured: list[str]
+    """The columns the query reads that the newer instance does not capture, NULL from S on;
+    empty when none."""
+    text: str
+    """``old -> new``, then the columns no longer captured: the line a row written before
+    held. Text for people, which may change."""
+
+
 class BatchDetail(TypedDict):
     """``detail`` of a micro-batch row (``event`` NULL), set only when it has warnings."""
 

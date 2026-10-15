@@ -34,7 +34,8 @@ SELECT sys.fn_cdc_get_min_lsn(N'dbo_orders_v2') AS new_min_lsn;
 GO
 
 -- 4. Wait for every stream that reads the table. Each one writes a facts row with
---    event = 'capture_instance_switched' (detail 'dbo_orders -> dbo_orders_v2') once it has
+--    event = 'capture_instance_switched' (detail {"old": "dbo_orders", "new": "dbo_orders_v2",
+--    ...}; before 1.0.0rc1 the text 'dbo_orders -> dbo_orders_v2') once it has
 --    read past the new instance's start. Spark commits that batch after its facts row: wait
 --    for the stream's next batch too (a row of the same app_id with a larger batch_id). The
 --    event reaches the facts only through metricsPath, which to_delta sets on its own only for
@@ -45,7 +46,9 @@ GO
 --    captures stops there with SchemaChangedError instead: restart it, and it infers the new
 --    columns and goes on.
 --    In the lakehouse, for example:
---      SELECT app_id, batch_id, detail, written_at FROM ops.ingestion_facts
+--      SELECT app_id, batch_id, coalesce(get_json_object(detail, '$.text'), detail) AS detail,
+--             written_at
+--      FROM ops.ingestion_facts
 --      WHERE event = 'capture_instance_switched' AND target = 'bronze.orders';
 --    Until step 5 both instances capture every change: twice the change-table writes.
 

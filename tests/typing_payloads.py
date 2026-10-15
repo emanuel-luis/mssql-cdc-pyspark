@@ -16,6 +16,7 @@ from typing_extensions import assert_type
 
 from mssql_cdc import (
     BatchDetail,
+    CaptureInstanceSwitchedDetail,
     DataSkippedDetail,
     SnapshotChunkDetail,
     SnapshotCompletionDetail,
@@ -57,6 +58,9 @@ def details(text: str) -> None:
     assert_type(skipped["from"], str)
     assert_type(skipped["certain"], bool)
     assert_type(skipped.get("reason"), str | None)  # a task's only
+    switched: CaptureInstanceSwitchedDetail = json.loads(text)
+    assert_type(switched["not_captured"], list[str])
+    assert_type(switched["start_lsn"], str)
     batch: BatchDetail = json.loads(text)
     assert_type(batch["warnings"], list[str])
     wave: WaveMetadata = json.loads(text)

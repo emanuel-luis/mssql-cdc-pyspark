@@ -257,10 +257,10 @@ def test_facts_table_at_version_0_gains_every_column_and_the_current_comments(de
         "one row per non-empty batch",
         properties={migrations.SCHEMA_VERSION_PROPERTY: "0"},
     )
-    assert migrations.migrate(spark, old, "facts") == 14
+    assert migrations.migrate(spark, old, "facts") == 15
     cols, description = _comments(spark, old)
     assert all(name in cols and cols[name][1] for name, _, _ in added)
-    # migrations 5 to 14 rewrote the comments whose meaning changed: as a new table has them
+    # migrations 5 to 15 rewrote the comments whose meaning changed: as a new table has them
     assert {n: cols[n][1] for n, _, _ in FACTS_COLUMNS} == {n: c for n, _, c in FACTS_COLUMNS}
     assert description == FACTS_COMMENT
 
@@ -740,11 +740,12 @@ def test_the_readers_events_become_event_rows_and_new_columns_join_bronze(delta_
     os.makedirs(metrics)
     added, switch = "0x0000002A000001000021", "0x0000002A000001000031"
     purged_from, purged_to = "0x0000002A000001000001", "0x0000002A000001000011"
+    switched_detail = json.dumps({"old": CI, "new": "dbo_orders_v2", "start_lsn": switch})
 
     def plan():  # what the reader leaves while it plans the batch (ADR 0023)
         for kind, lsn, ts, detail in (
             ("schema_change", added, "2026-09-28T13:51:00.000", "note: ALTER TABLE ADD note"),
-            ("capture_instance_switched", switch, None, "dbo_orders -> dbo_orders_v2"),
+            ("capture_instance_switched", switch, None, switched_detail),
         ):
             event = {"event": kind, "capture_instance": CI, "lsn": lsn, "commit_ts": ts}
             with open(os.path.join(metrics, f"event-{kind}-{lsn}.json"), "w") as fh:
@@ -798,7 +799,7 @@ def test_the_readers_events_become_event_rows_and_new_columns_join_bronze(delta_
         "events-v1",
         target,
     )
-    assert switched["detail"] == "dbo_orders -> dbo_orders_v2" and switched["end_commit_ts"] is None
+    assert switched["detail"] == switched_detail and switched["end_commit_ts"] is None
 
     write(df.withColumn("note", F.lit("gift")), 4)  # a column a newer instance captures
     bronze = spark.read.format("delta").load(target)
@@ -884,7 +885,14 @@ def test_a_switch_adds_the_new_column_and_its_events_and_a_rerun_takes_no_snapsh
         events["schema_change"]["min_lsn"] == added and "note" in events["schema_change"]["detail"]
     )
     switched = events["capture_instance_switched"]
-    assert switched["detail"] == f"{CI} -> {v2}" and switched["min_lsn"] == start
+    assert switched["min_lsn"] == start
+    assert json.loads(switched["detail"]) == {  # JSON from 1.0.0rc1, its text as before
+        "old": CI,
+        "new": v2,
+        "start_lsn": start,
+        "not_captured": [],
+        "text": f"{CI} -> {v2}",
+    }
 
     # the bootstrap snapshot is stamped with the older name: found by any name of the table
     assert _snapshots(run(captureInstance=v2)) == 1
