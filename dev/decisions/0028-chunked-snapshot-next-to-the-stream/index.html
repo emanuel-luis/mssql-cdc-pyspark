@@ -1,0 +1,3520 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="PySpark streaming source for SQL Server CDC, with a Delta sink and a completeness signal">
+      
+      
+      
+        <link rel="canonical" href="https://emanuel-luis.github.io/mssql-cdc-pyspark/dev/decisions/0028-chunked-snapshot-next-to-the-stream/">
+      
+      
+        <link rel="prev" href="../0027-fan-out-one-stream-per-table/">
+      
+      
+        <link rel="next" href="../0029-driver-retries-and-lock-timeout/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.67">
+    
+    
+      
+        <title>0028: Chunked snapshots read next to the running stream - mssql-cdc-pyspark</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../../assets/stylesheets/modern/main.4ae390e2.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/modern/palette.96d1a7e4.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#0028-chunked-snapshots-read-next-to-the-running-stream" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="mssql-cdc-pyspark" class="md-header__button md-logo" aria-label="mssql-cdc-pyspark" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            mssql-cdc-pyspark
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              0028: Chunked snapshots read next to the running stream
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun-moon" viewBox="0 0 24 24"><path d="M12 2v2M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715M16 12a4 4 0 0 0-4-4M19 5l-1.256 1.256M20 12h2"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-moon" viewBox="0 0 24 24"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    emanuel-luis/mssql-cdc-pyspark
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="mssql-cdc-pyspark" class="md-nav__button md-logo" aria-label="mssql-cdc-pyspark" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    mssql-cdc-pyspark
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    emanuel-luis/mssql-cdc-pyspark
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Home
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_2">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Getting started
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quickstart
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_3">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Guides
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Streaming into Delta
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/many-tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Many tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/bootstrap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Bootstrap
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/data-loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data loss and re-snapshots
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/silver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Silver tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/finalization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Finalization
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Monitoring
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/permissions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Permissions
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/schema-changes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Schema changes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DATABRICKS/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Running on Databricks
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_4">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Reference
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/options/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Options
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/output-schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Output schema
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Internals
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_5">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Internals
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DESIGN/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Design notes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../CONNECTORS/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  SQL Server drivers with native Arrow output
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DEVELOPMENT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../RELEASING/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Releasing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ROADMAP/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Roadmap
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../REFERENCES/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  References
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Decisions
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+            <label class="md-nav__title" for="__nav_6">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Decisions
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture Decision Records
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0001-python-datasource-v2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0001: Python DataSource V2 instead of a JVM connector
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0002-lsn-offsets-with-commit-time/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0002: Offsets are hex LSNs carrying the commit time
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0003-mssql-python-default-backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0003: mssql-python as default driver, arrow-odbc as fallback
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0004-verdict-in-control-table/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0004: finalized_until in a control table, never in table properties
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0005-ordering-over-atomicity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0005: Data first, verdict after, monotonic
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0006-file-backed-fake-for-engine-tests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0006: A file-backed CDC fake to test the real Spark engine
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0007-infer-columns-from-cdc-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0007: Infer captured columns from CDC metadata
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0008-detect-source-time-zone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0008: Detect the server time zone by name
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0009-read-change-tables-directly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0009: Read the change table directly
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0010-heartbeat-for-quiet-databases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0010: Idle lag of ~5 minutes; an optional Agent heartbeat for less
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0011-num-partitions-from-cores/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0011: numPartitions defaults to the compute's cores
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0012-delta-tables-through-the-deltatable-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0012: Delta tables through the DeltaTable API, created typed and commented
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0013-schema-migrations-per-table-kind/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0013: Schema migrations per table kind
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0014-network-and-read-metrics-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0014: Network and read metrics in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0015-split-batches-by-change-rows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0015: Split batches by the change table's rows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0016-bootstrap-snapshot-at-a-recorded-lsn/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0016: Bootstrap with a snapshot stamped with an LSN recorded before the read
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0017-retention-headroom-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0017: Retention headroom in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0018-automatic-resnapshot-after-data-loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0018: Automatic re-snapshot after CDC data loss
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0019-silver-helper-applies-the-change-log/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0019: A silver helper applies the bronze change log to a current-state table
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0020-capture-and-ingestion-lag-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0020: Capture and ingestion lag in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0021-compatibility-policy-for-0x/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0021: Compatibility policy for 0.x
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0022-defer-spark-changes-changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0022: Defer a Spark CHANGES changelog connector
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0023-schema-changes-and-capture-instance-switching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0023: Schema changes on the source, and switching to a newer capture instance
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0024-documentation-site/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0024: A documentation site built by Zensical, hosted on GitHub Pages
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0025-seed-from-an-existing-copy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0025: Seed a target from an existing copy of the table
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0026-continuous-finalization-listener/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0026: Continuous-mode finalization through a streaming query listener
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0027-fan-out-one-stream-per-table/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0027: Many tables: one stream per capture instance, started by a fan-out helper
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0028: Chunked snapshots read next to the running stream
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0028: Chunked snapshots read next to the running stream
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#context" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Context
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Decision
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consequences" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Consequences
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-a-fixed-plan-one-mode-per-run-range-deletes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment: a fixed plan, one mode per run, range deletes
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Amendment: a fixed plan, one mode per run, range deletes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#chunks-planned-once-sized-by-row-counts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Chunks planned once, sized by row counts
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-waves-facts-rebuilt-from-bronze" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A wave's facts rebuilt from bronze
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#one-snapshot-mode-per-run-locked-while-a-snapshot-is-open" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        One snapshot mode per run, locked while a snapshot is open
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#range-deletes-per-wave-in-re-snapshots-and-on-datetime2-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Range deletes per wave, in re-snapshots and on datetime2 keys
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-2-in-flight-up-to-what-the-change-table-holds" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 2: in flight up to what the change table holds
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Amendment 2: in flight up to what the change table holds">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tests_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-3-waves-read-ahead-sized-toward-a-duration" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 3: waves read ahead, sized toward a duration
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Amendment 3: waves read ahead, sized toward a duration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tests_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-4-key-values-in-a-table-next-to-bronze" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 4: key values in a table next to bronze
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Amendment 4: key values in a table next to bronze">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tests_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-5-a-third-way-to-open-one-after-a-capture-instance-switch" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 5: a third way to open one, after a capture instance switch
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-6-chunks-cut-on-a-column-that-is-not-unique" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 6: chunks cut on a column that is not unique
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Amendment 6: chunks cut on a column that is not unique">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tests_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0029-driver-retries-and-lock-timeout/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0029: Driver-side retries, and an optional lock timeout
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0030-protocols-for-the-pluggable-seams/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0030: typing.Protocol for the pluggable seams
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0031-strict-typing-gates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0031: Strict typing: mypy strict on src, pyright --verifytypes on the public API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0032-facts-without-caching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0032: Facts without caching where the platform refuses it
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0033-spark-connect-tested-on-a-local-server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0033: Spark Connect, tested against a local Connect server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0034-credentials-outside-the-connection-string/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0034: Credentials outside the connection string
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Changelog
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Contributing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#context" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Context
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Decision
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consequences" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Consequences
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-a-fixed-plan-one-mode-per-run-range-deletes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment: a fixed plan, one mode per run, range deletes
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Amendment: a fixed plan, one mode per run, range deletes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#chunks-planned-once-sized-by-row-counts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Chunks planned once, sized by row counts
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-waves-facts-rebuilt-from-bronze" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A wave's facts rebuilt from bronze
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#one-snapshot-mode-per-run-locked-while-a-snapshot-is-open" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        One snapshot mode per run, locked while a snapshot is open
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#range-deletes-per-wave-in-re-snapshots-and-on-datetime2-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Range deletes per wave, in re-snapshots and on datetime2 keys
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-2-in-flight-up-to-what-the-change-table-holds" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 2: in flight up to what the change table holds
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Amendment 2: in flight up to what the change table holds">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tests_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-3-waves-read-ahead-sized-toward-a-duration" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 3: waves read ahead, sized toward a duration
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Amendment 3: waves read ahead, sized toward a duration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tests_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-4-key-values-in-a-table-next-to-bronze" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 4: key values in a table next to bronze
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Amendment 4: key values in a table next to bronze">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tests_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-5-a-third-way-to-open-one-after-a-capture-instance-switch" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 5: a third way to open one, after a capture instance switch
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-6-chunks-cut-on-a-column-that-is-not-unique" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 6: chunks cut on a column that is not unique
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Amendment 6: chunks cut on a column that is not unique">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tests_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tests
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+  
+    <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark/edit/main/docs/decisions/0028-chunked-snapshot-next-to-the-stream.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-file-pen" viewBox="0 0 24 24"><path d="M12.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v9.34"/><path d="M14 2v5a1 1 0 0 0 1 1h5M10.378 12.622a1 1 0 0 1 3 3.003L8.36 20.637a2 2 0 0 1-.854.506l-2.867.837a.5.5 0 0 1-.62-.62l.836-2.869a2 2 0 0 1 .506-.853z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="0028-chunked-snapshots-read-next-to-the-running-stream">0028: Chunked snapshots read next to the running stream<a class="headerlink" href="#0028-chunked-snapshots-read-next-to-the-running-stream" title="Permanent link">&para;</a></h1>
+<p><strong>Status:</strong> accepted<br />
+<strong>Date:</strong> 2026-10-02T20:30:12-03:00<br />
+<strong>Amended:</strong> 2026-10-03T14:30:38-03:00, chunks planned once from per-slice counts and fixed in a <code>'snapshot_plan'</code> row; a wave's facts rebuilt from bronze; one snapshot mode per run, locked while a snapshot is open; per-wave range deletes in silver, in re-snapshots and on datetime2 keys (see the Amendment)
+<strong>Amended:</strong> 2026-10-03T18:10:05-03:00, a full snapshot opens once per run and stops holding the mode once CDC cleanup passes it; a wave rebuilt from the chunks bronze holds; a keyset plan's open last chunk closed when read (see the Amendment)
+<strong>Amended:</strong> 2026-10-04T17:20:07-03:00, the plan counted and sought under the backfill's isolation, so <code>isolation="snapshot"</code> planning does not wait for writers' locks (see the Amendment)
+<strong>Amended:</strong> 2026-10-06T21:14:15-03:00, <code>reconcile</code> takes a difference the change table explains, after what the stream read, as IN_FLIGHT too, and finds a NULL key's change (see Amendment 2)<br />
+<strong>Amended:</strong> 2026-10-07T00:06:28-03:00, bronze's position is never a whole snapshot's S, which <code>snapshot_on_switch</code> takes above the stream's (see Amendment 2)<br />
+<strong>Amended:</strong> 2026-10-08T13:47:54-03:00, <code>backfill()</code> reads the next wave while the one before commits, and a wave takes as many rounds of <code>numPartitions</code> chunks as <code>target_wave_seconds</code> holds; the plan's chunks unchanged (see Amendment 3)<br />
+<strong>Amended:</strong> 2026-10-10T18:02:10-03:00, a chunked snapshot's key values move from the facts to a plans table next to bronze; one opened before 0.7.0 finishes with them in the facts (see Amendment 4)<br />
+<strong>Amended:</strong> 2026-10-13T13:33:12-03:00, a wave rerun after its plans rows reads the chunks they hold, and <code>apply_changes</code> reads the facts before the plans (see Amendment 4)<br />
+<strong>Amended:</strong> 2026-10-13T18:45:19-03:00, <code>snapshot_on_switch</code> opens one in chunked mode after a capture instance switch, keyed by its S (see Amendment 5)<br />
+<strong>Amended:</strong> 2026-10-13T18:52:13-03:00, chunks cut on the columns <code>snapshotKeys</code> names, unique or not, so a table without a unique index is read in more than one chunk (see Amendment 6)</p>
+<h2 id="context">Context<a class="headerlink" href="#context" title="Permanent link">&para;</a></h2>
+<p>A snapshot taken before the stream starts (ADR 0016) has to be read within the CDC
+retention: the stream starts at its LSN, and whatever cleanup purges after that LSN while
+the table is still being read is lost, which an automatic re-snapshot can only repeat
+(ADR 0018). The read time is the table's size over the link: runs against a production
+source moved 1.8 to 5.9 MB/s of source data over four connections, 18,000 to 105,000 rows
+per second depending on the row width. At those rates a table of ten billion rows takes 1 to 6
+days, against a default retention of 3 days, and longer for wider rows or a slower link
+shared with the stream. Seeding from a copy (ADR 0025) needs a copy someone already has.
+A long snapshot also shows no progress until its one Delta
+commit at the end, and a failed task reads its whole range again.</p>
+<p>What removes the retention limit is starting the stream <strong>first</strong>, at a recorded LSN S,
+and keeping it running without a gap while the table is read in chunks next to it. Each
+chunk then only needs a stamp L ≥ S recorded before its SELECT. That is the market's
+pattern:</p>
+<ul>
+<li>Netflix's <a href="https://arxiv.org/abs/2010.12597">DBLog</a> interleaves chunk reads with the log
+  between low and high watermarks it writes to the source;
+  <a href="https://debezium.io/blog/2021/10/07/incremental-snapshots/">Debezium's incremental snapshots</a>
+  (<a href="https://github.com/debezium/debezium-design-documents/blob/main/DDD-3.md">DDD-3</a>) implement it.</li>
+<li><a href="https://nightlies.apache.org/flink/flink-cdc-docs-stable/docs/connectors/flink-sources/sqlserver-cdc/">Flink CDC's SQL Server connector</a>
+  reads its watermark without writing (the largest <code>start_lsn</code> of
+  <code>cdc.lsn_time_mapping</code>), and with <code>scan.incremental.snapshot.backfill.skip</code> it leaves the
+  changes made during a chunk to the change-log phase instead of merging them into the
+  chunk: this design.</li>
+<li><a href="https://airbyte.com/blog/supporting-very-large-cdc-syncs-with-wass">Airbyte's WASS</a> reads
+  the log between snapshot chunks so a long initial load does not outlive its retention;
+  <a href="https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Introduction.HighLevelView.html">AWS DMS</a>
+  caches the changes made during a full load and applies them after it; Oracle GoldenGate's
+  <a href="https://docs.oracle.com/goldengate/c1230/gg-winux/GWURF/handlecollisions-nohandlecollisions.htm"><code>HANDLECOLLISIONS</code></a>
+  lets the replicated changes overwrite the rows an initial load wrote; Databricks
+  <a href="https://docs.databricks.com/aws/en/data-engineering/what-is-cdc">AUTO CDC</a> orders changes
+  by a <code>sequence_by</code> column and builds changes from snapshots.</li>
+</ul>
+<p>DBLog and Debezium write watermarks and keep dedup windows because they emit one ordered
+stream. Here bronze is a change log ordered by LSN downstream (silver's MERGE keeps the
+newer image, ADR 0019), so a lower bound read from the source is enough, and nothing is
+written to it (invariant 11 unchanged). The conditions the design rests on:</p>
+<ul>
+<li><strong>P1, no stale chunk:</strong> a read stamped L sees every commit at or before L. L is
+  <code>max_lsn</code> read before the SELECT; capture processes commits in order and only committed
+  ones; READ COMMITTED and RCSI see what was committed before the statement started.</li>
+<li><strong>P2:</strong> every stamp is at or after S (<code>max_lsn</code> only moves forward, S is read first).</li>
+<li><strong>P3:</strong> bronze holds every change after S without a gap: the stream generation starts at S.</li>
+<li><strong>P4:</strong> the chunks tile the key space up to MAX: complementary predicates
+  (<code>client._key_select</code>), the first open below, the last ending just above MAX. Keys
+  outside [MIN, MAX] read after S were inserted after S, so the stream has them.</li>
+<li><strong>P5:</strong> removing a key always reaches bronze as a row: a delete (operation 1), a key
+  update recorded as a delete and an insert (1 and 2), or a before-image (3) with the old key.</li>
+</ul>
+<p>Rebuild rule: the rows of the snapshot S and the changes with <code>_start_lsn</code> above S; the
+latest row per key by <code>(_start_lsn, _command_id, _seqval, _operation)</code>; a key whose latest
+row is a delete is dropped, and a key in neither is absent. A chunk row can be newer than
+its stamp (a commit after L the SELECT saw); that commit's change row comes after S and
+ties or wins, so the overlap only replays. Three places took the snapshot's LSN as the
+largest <code>_start_lsn</code> of operation-0 rows (<code>_last_snapshot</code>, <code>_recover</code>'s reuse check,
+silver's rebuild point), which chunk stamps break.</p>
+<h2 id="decision">Decision<a class="headerlink" href="#decision" title="Permanent link">&para;</a></h2>
+<ol>
+<li><strong>Execution: <code>CdcStream.backfill()</code>, a batch call in waves, called again until done.</strong>
+   <code>to_delta(..., snapshot="chunked")</code> (with <code>bootstrap=True</code> or
+   <code>on_data_loss="resnapshot"</code>) only opens a snapshot: it records S and the key's extent and
+   starts the stream generation at S at once, reading nothing from the table; the first
+   <code>backfill()</code> call plans the chunks (Amendment).
+   <code>backfill(target, *, app_id, facts_table, chunk_rows=None, max_waves=None,
+   max_seconds=None, min_headroom_hours=None, isolation=None)</code> reads the newest open
+   snapshot in waves of <code>numPartitions</code> chunks (rounds of them, read ahead: Amendment 3), in
+   its own task next to the stream task, and returns
+   <code>{snapshot, chunks_done, chunks_total, done, paused, reason}</code>.</li>
+<li>Considered: a second streaming query over the chunks. Its offsets would be chunk
+     indices in a second checkpoint, with a query that ends; a batch call is the same reads
+     with a bound (<code>max_waves</code>, <code>max_seconds</code>) and a retry the scheduler already gives.</li>
+<li>Considered: a thread inside <code>to_delta</code>. It dies with the stream's driver, cannot be
+     scheduled or bounded apart, and two writers in one process share one failure.</li>
+<li><strong>State: facts event rows and two bronze columns; no new table.</strong> Bronze gains
+   <code>_snapshot</code> (S of the snapshot a row belongs to; NULL on change rows; on rows written
+   before it, <code>_start_lsn</code> stands in) and <code>_chunk</code> (bronze migration 2). The facts carry
+   <code>'snapshot_open'</code> (min = max = S, detail: mode, kind, keys, the key's extent, generation,
+   the gap; a full snapshot writes one too since the Amendment), <code>'snapshot_plan'</code> with every
+   chunk (Amendment), one <code>'snapshot_chunk'</code> row per chunk (rows, min = its stamp L, max =
+   <code>max_lsn</code> after the read, detail: snapshot, chunk, wave, bounds, last) and, once the last
+   chunk is in, the usual <code>'bootstrap'</code> or <code>'resnapshot'</code> row with min = max = S (facts
+   migrations 7 and 8 rewrite the comments). Only those two remain snapshots (invariant 14).
+   The chunked mode requires <code>facts_table</code>. A wave is one bronze append (<code>txnAppId
+   &lt;app_id&gt;#snap.&lt;S&gt;</code>, <code>txnVersion</code> the wave, its chunks in <code>userMetadata</code>), then its facts
+   rows (<code>&lt;app_id&gt;#snapchunks.&lt;S&gt;</code>, the wave): a crash between the two reruns the wave, Delta
+   skips the append and the facts rows are rebuilt from the commit that holds it, or from
+   the wave's rows in bronze once log cleanup has dropped that commit (Amendment). Every
+   reader of "the snapshot" now uses <code>coalesce(_snapshot, _start_lsn)</code> and the completion
+   events, never the largest operation-0 <code>_start_lsn</code>.</li>
+<li>Considered: a state table of its own. Another kind to migrate, and a third table to
+     keep consistent with bronze and the facts, which already record every other event.</li>
+<li>Considered: state in the checkpoint directory. Local or Volume paths only, and
+     downstream (silver) could not read it. Bronze <code>userMetadata</code> alone: log cleanup drops it.</li>
+<li><strong>Silver: waves applied as they arrive, rebuild at completion by absence.</strong>
+   At the completion row silver is rebuilt from the rows of S and the changes after S, with
+   <code>whenNotMatchedBySourceDelete</code>: absence from the snapshot deletes, whatever the key type.
+   While a snapshot is open, a bootstrap or (since the Amendment) a re-snapshot, its waves
+   are applied as their <code>'snapshot_chunk'</code> rows arrive (position <code>open_snapshot_lsn</code> and
+   <code>snapshot_wave</code>, control migration 2), each chunk row with every bronze change of its key
+   after S, so a chunk row never brings back a key the stream deleted after its stamp. With
+   one integer, date or timestamp key that the chunks are cut on, each wave also deletes the
+   silver keys of its chunks' ranges that the chunks lack (Amendment). Silver's verdict is
+   held while a snapshot is open, and never advanced without <code>facts_table</code>, the only place a
+   snapshot shows before its first wave.
+   Operation 3 now deletes its own key, outranked by the 4 of the
+   same key and commit: a key update SQL Server records as 3 and 4 no longer leaves the
+   old key behind.</li>
+<li>Considered: only the rebuild at completion. A weeks-long bootstrap would leave silver
+     without most rows for weeks.</li>
+<li>Considered at first and rejected, then taken by the Amendment for the keys Spark
+     orders as SQL Server does: each chunk deleting the silver keys of its range it lacks. A
+     silver table fresh at the open only gets keys from chunk rows and changes after S,
+     whose removals reach bronze (P5); the rest are stale keys of a silver built before a
+     lost history, which the rebuild removes for every key type while the verdict is held,
+     but only at the completion, weeks away for a large re-snapshot. Spark also orders
+     strings by bytes, SQL Server by the column's collation.</li>
+<li><strong>Isolation: READ COMMITTED, optionally SNAPSHOT, never <code>NOLOCK</code>.</strong> A chunk reads as a
+   whole snapshot does. <code>isolation="snapshot"</code> (reader option <code>isolationLevel=snapshot</code>)
+   prefixes <code>SET TRANSACTION ISOLATION LEVEL SNAPSHOT</code> where the DBA set
+   <code>ALLOW_SNAPSHOT_ISOLATION</code>; SQL Server refuses it otherwise.</li>
+<li>Considered: <code>NOLOCK</code>. A dirty read breaks P1 and the absence the deletes rely on.</li>
+<li>Under locking READ COMMITTED a chunk waits for a writer's locks and delays writers
+     behind it; SNAPSHOT and RCSI hold the version store instead. The chunk size bounds both.</li>
+<li><strong>Validation: <code>reconcile()</code>.</strong> Tier 1 counts rows and sums keys per bucket of one
+   integer or date key on both sides (one scan on SQL Server, <code>COUNT_BIG</code> and <code>SUM</code>
+   as <code>decimal(38,0)</code>); any other key gets a whole-table count. Tier
+   2 reads every mismatched bucket and a sample of the rest through the snapshot reader and
+   compares <code>sha2(to_json(struct(...)), 256)</code> computed by the same Spark function on both
+   sides, classifying keys as AWS DMS validation does (MISSING_TARGET, MISSING_SOURCE,
+   RECORD_DIFF), or IN_FLIGHT when bronze holds a change (no snapshot row) newer than
+   silver's <code>applied_lsn</code> (<code>control_table</code>, not the newest stamp silver holds) or the source
+   read: check again later (also when only the change table holds it yet: Amendment 2).
+   Its ranges are cut on the key it compares (<code>snapshotKeys</code>), not always the unique index.
+   With <code>facts_table</code>, the newest chunked snapshot's chunks are checked against bronze
+   (CHUNK_TILING, CHUNK_ROWS, CHUNK_STAMP). The report is a new table kind, <code>reconcile</code>.</li>
+<li>Considered: server-side <code>HASHBYTES</code> per bucket (a later tier, not now); never
+     <code>CHECKSUM_AGG</code> or <code>BINARY_CHECKSUM</code>, which XOR and collide.</li>
+</ol>
+<p>Planning, after S: the open records the key's extent (<code>client.snapshot_plan</code>) and the first
+<code>backfill()</code> call plans every chunk (<code>client.plan_chunks</code>) into a <code>'snapshot_plan'</code> row that
+no later call changes. One integer key gets chunks packed from row counts per slice of a
+fixed grid; any other key gets keyset bounds, the key <code>chunk_rows</code> rows after the previous
+bound (<code>key_bound</code>: a <code>TOP (n + 1)</code> per seekable piece of the range), walked up front below
+the MAX recorded at the open. This supersedes arithmetic steps over [MIN, MAX] from a
+<code>sys.sp_spaceused</code> estimate and keyset bounds found wave by wave (Amendment). The final
+chunk ends at MAX + 1, or at the first key after MAX (open when there is none, or when it
+reads back as MAX: Amendment): a table written while it is read does not pile the rows
+inserted since S into the last chunk. Facts mark it <code>last</code>, which is what
+completes the snapshot. Each wave is stamped with <code>snapshot_lsn()</code> before it is read and
+fails if that is below S (a readable secondary). <code>min_headroom_hours</code> pauses <code>backfill()</code>
+while the stream's newest facts row has less retention headroom, or there is none. A loss
+while a chunked snapshot is open opens a newer one in the next generation, which abandons
+the older. A chunked re-snapshot (ADR 0018) records its state and starts the generation at S
+before anything is read, so the failure of a re-snapshot whose own LSN is purged before its
+read ends no longer exists for it.</p>
+<h2 id="consequences">Consequences<a class="headerlink" href="#consequences" title="Permanent link">&para;</a></h2>
+<ul>
+<li>A table no longer has to be read within the CDC retention, only while the stream runs
+  without a gap. The chunks share the link with the stream: size a snapshot by its data
+  size over the measured MB/s, and keep <code>min_headroom_hours</code> above the cleanup interval.</li>
+<li>Operation-0 rows are no exact history points: a chunk's image can be newer than change
+  rows stamped after it. The rebuilt state is right; as-of queries over bronze must not
+  read a chunk row as the state at its stamp.</li>
+<li>It breaks when the stream has a gap after S (data loss, <code>failOnDataLoss=false</code>, an older
+  capture instance dropped early): the snapshot is abandoned and a newer one supersedes it.
+  Also with a stamp below S (a manual <code>snapshotLsn</code>), <code>NOLOCK</code>, chunks read from a readable
+  secondary with S from the primary, and a type change during a weeks-long snapshot, which
+  fails the chunk's cast like the stream's (ADR 0023).</li>
+<li>State: bronze migration 2, facts migrations 7 and 8, control migration 2 and the
+  <code>reconcile</code> kind; existing tables migrate when next opened, and the legacy snapshots read
+  <code>coalesce(_snapshot, _start_lsn)</code>.</li>
+<li><code>to_delta(bootstrap=True)</code> in either <code>snapshot</code> mode, and <code>snapshot()</code>, return the S of a
+  chunked snapshot opened for the stream instead of reading the table again (with the facts
+  table, a full run only once it is complete: the Amendment's lock); seeding refuses
+  a target that holds one. A recovery that opened a chunked re-snapshot and stopped before
+  writing its state reuses it, unless cleanup has passed it too: then it opens a newer one, a
+  generation on.</li>
+<li>Tests: <code>tests/test_source_fake.py</code> and <code>tests/test_delta_sink.py</code> run the plans, the waves,
+  a commit between a chunk's stamp and its read (the fake's <code>commit_before_read</code>), a crash
+  between a wave's append and its facts rows, the throttle and a loss while a snapshot is
+  open; <code>tests/test_silver.py</code> the waves and the rebuild;
+  <code>tests/test_reconcile.py</code> the tiers and the chunk checks. <code>tests/integration</code>, on SQL
+  Server 2022 with a least-privilege login: a chunked bootstrap next to a running stream and
+  a writer making inserts, updates, deletes and key updates ends with silver equal to the
+  table; keyset chunks on a composite key (case-insensitive leading values) and a varchar key
+  under changes; a chunk that waits under READ COMMITTED (<code>LCK_M_S</code>) for a transaction
+  holding locks in its range; SNAPSHOT isolation refused until allowed, then reading the
+  committed rows without waiting; <code>sp_spaceused</code>, <code>key_max</code>, <code>key_bound</code> and a keyset plan
+  with a table grant or column grants only; <code>key_bound</code> reading at most <code>n + 1</code> rows per
+  piece; reconcile matching a quiet table and classifying injected differences; and, since
+  the Amendment, the tests listed there. Lab check t10 runs it under a continuous writer and
+  a held range, and <code>--resnapshot</code> through a purged gap.</li>
+<li>Not verified: the RCSI-versus-capture visibility window behind P1 (theoretical,
+  microseconds; the tests run under locking READ COMMITTED and SNAPSHOT); key updates on SQL
+  Server 2017 (t9 covers 2017 for switches only); readable secondaries; Databricks, the
+  production link and weeks-long runs; a schema change during a backfill; the first wave
+  creating bronze while the stream's first batch does (one retry on Delta's protocol or
+  metadata conflict).</li>
+<li>ponytail: <code>backfill()</code> and <code>apply_changes</code> read the snapshot's facts rows on every call;
+  filter by wave if that shows up.</li>
+</ul>
+<h2 id="amendment-a-fixed-plan-one-mode-per-run-range-deletes">Amendment: a fixed plan, one mode per run, range deletes<a class="headerlink" href="#amendment-a-fixed-plan-one-mode-per-run-range-deletes" title="Permanent link">&para;</a></h2>
+<p>The first version cut an integer key in equal steps over [MIN, MAX], so chunks were as
+uneven as the key, and re-planned keyset chunks on every call, so a later <code>backfill()</code> with
+another <code>chunk_rows</code> changed an open snapshot's chunks. A full and a chunked snapshot could
+both open on one generation, and silver kept the keys a re-snapshot's purged gap deleted
+until the completion, weeks away for a large table. Four changes, each superseding the
+passage of the Decision that points here.</p>
+<h3 id="chunks-planned-once-sized-by-row-counts">Chunks planned once, sized by row counts<a class="headerlink" href="#chunks-planned-once-sized-by-row-counts" title="Permanent link">&para;</a></h3>
+<ul>
+<li>The first <code>backfill()</code> call plans every chunk (<code>client.plan_chunks</code>) and records them in a
+  <code>'snapshot_plan'</code> facts row (<code>txnAppId &lt;app_id&gt;#snapplan.&lt;S&gt;</code>, version 0; detail
+  <code>{snapshot, kind, keys, chunk_rows, chunks}</code>). Later calls read it: their <code>chunk_rows</code> is
+  ignored with a warning, and <code>chunks_total</code> is exact from the first call on. A rerun's plan
+  row is skipped by Delta and the rerun reads the stored one; for two calls committing it at
+  the same instant this rests on Delta's conflict check on the <code>txnAppId</code>, which fails the
+  second (not tested here). The open still records only
+  the key's extent (the <code>plan</code> of <code>'snapshot_open'</code>), so the stream starts at S without
+  waiting for the planning.</li>
+<li>One integer key: its rows are counted per slice of a fixed grid over [MIN, MAX] in one
+  server-side <code>GROUP BY</code> (<code>key_buckets</code>, about 16 slices per <code>chunk_rows</code>, at most 100,000 in
+  one query); a slice holding more than <code>chunk_rows</code> is counted again on a finer grid over
+  its own MIN..MAX (<code>key_range</code>), down to one value. Consecutive slices are then packed, in
+  key order, into chunks of at most <code>chunk_rows</code>. The ranges stay fixed and the sizes follow
+  the counts, not the key's spread: a dense cluster is split, a sparse region or a sentinel
+  far above the ids joins its neighbours, and no chunk starts on an empty slice. When
+  planned, every chunk but the last holds at most <code>chunk_rows</code> rows and more than
+  <code>chunk_rows</code> less the slice after it (on an even key a slice is about a sixteenth of
+  <code>chunk_rows</code>); rows written since then change that a little. The <code>sys.sp_spaceused</code>
+  estimate only sizes the first grid.</li>
+<li>Other keys keep keyset bounds, <code>chunk_rows</code> rows apart when planned, now all found before
+  the first wave. The drivers return a <code>datetime2(7)</code> key truncated to the microsecond (only
+  the last key column may be one, <code>key_types</code>), so its bounds sit on a microsecond, and when
+  the key after MAX shares MAX's microsecond its bound reads back as MAX's, at or below MAX:
+  the last chunk is then open, or the keys of that microsecond would be in no chunk (found
+  while amending, <code>tests/integration</code>).</li>
+<li>The end of a keyset plan's last chunk is the first key after MAX. When there is none at
+  planning, <code>backfill()</code> seeks it again before each wave (<code>client.last_bound</code>), so the rows
+  inserted above MAX while a long backfill runs, the stream's, do not pile up in the last
+  chunk (a key that grows at the top: a <code>datetime2</code> creation time, a sequential
+  <code>uniqueidentifier</code>). Every other bound stays as planned.</li>
+<li>Cost: planning reads the whole key once before the first wave (one <code>GROUP BY</code> over the
+  narrowest index on the key plus the recounts, or one <code>TOP (n + 1)</code> seek per chunk), under
+  the backfill's isolation: READ COMMITTED by default, where a writer holding locks delays
+  it as it delays a chunk read. With <code>isolation="snapshot"</code> the counts, the seeks and
+  <code>last_bound</code>'s search before each wave read under SNAPSHOT too, as the chunks do, and do
+  not wait (the first version planned under READ COMMITTED whatever the isolation).</li>
+<li>Considered: equal steps over [MIN, MAX] (the first version). One dense cluster or a
+  sentinel puts nearly every row in one chunk, and the switch to keyset bounds past 4
+  values per row was a guess.</li>
+<li>Considered: planning wave by wave from the last bound. Cheaper up front, but the chunks
+  of an open snapshot then depend on each call's arguments, and <code>chunks_total</code> is unknown.</li>
+</ul>
+<h3 id="a-waves-facts-rebuilt-from-bronze">A wave's facts rebuilt from bronze<a class="headerlink" href="#a-waves-facts-rebuilt-from-bronze" title="Permanent link">&para;</a></h3>
+<p>When a rerun's append is skipped and the commit that holds the wave is no longer in the
+target's history (Delta log cleanup), its <code>'snapshot_chunk'</code> rows are rebuilt from its rows
+in bronze: the chunks of <code>_snapshot</code> = S from the wave's first to the last that has rows
+there, whatever the rerun planned (its <code>numPartitions</code> may differ from the attempt's), with
+the bounds of the plan, the stamp and the counts of the rows, and <code>read_seconds</code> and
+<code>read_mb</code> NULL. The attempt's empty chunks after those are read again by the next wave. A
+rerun whose own read is empty looks for that commit too, and a skipped append whose rows
+are nowhere raises. Before, <code>backfill()</code> raised and the snapshot had to be taken again,
+though all its rows were in bronze. The history lookup stays the first try.</p>
+<h3 id="one-snapshot-mode-per-run-locked-while-a-snapshot-is-open">One snapshot mode per run, locked while a snapshot is open<a class="headerlink" href="#one-snapshot-mode-per-run-locked-while-a-snapshot-is-open" title="Permanent link">&para;</a></h3>
+<ul>
+<li>A run (one <code>to_delta</code> call: its bootstrap and its re-snapshot) takes its snapshots in one
+  <code>snapshot</code> mode. The mode may change from one run to the next, never while a snapshot of
+  the other mode is open: a full read over a chunked snapshot still being backfilled, or a
+  chunked open over an unfinished full one, would put two snapshots in one generation.</li>
+<li>A full snapshot now writes <code>'snapshot_open'</code> too, before it reads the table: one per run,
+  at the run's own S and with no <code>txnAppId</code>; a chunked one stays one per generation
+  (<code>&lt;app_id&gt;#snapshots</code>, the generation). Its detail <code>mode</code> is <code>'full'</code> or <code>'chunked'</code>, and
+  <code>kind</code> holds <code>'bootstrap'</code> or <code>'resnapshot'</code> (the first version, unreleased, put the kind
+  in <code>mode</code>). A snapshot is open until a <code>'bootstrap'</code> or <code>'resnapshot'</code> row of the same
+  stream, any generation, has <code>max_lsn</code> at or after its S.</li>
+<li>A full one holds the mode only while a run may still be reading it: not once CDC cleanup
+  has passed its S, as it can then never complete (a re-snapshot that outlived the
+  retention, a run killed long ago), nor next to a chunked one of its generation. A chunked
+  run then opens the generation over it. That is why a full run writes its own open: a
+  rerun under the first attempt's S would count as dead while it reads.</li>
+<li>With a facts table, <code>to_delta</code> (with <code>bootstrap=True</code> or <code>on_data_loss="resnapshot"</code>),
+  <code>snapshot(app_id=, facts_table=)</code> and <code>backfill()</code> raise on an open snapshot of the other
+  mode, and <code>seed(app_id=, facts_table=)</code> on one of either mode. The error says how to
+  finish it: <code>backfill()</code> until done for a chunked one, a rerun with <code>snapshot="full"</code>
+  (which reads the table again) for a full one. A run that finds an open of the other mode
+  committed after its own check stops too: a chunked run whose generation holds only a
+  full open still being read, and a full run that reads back a chunked open of its
+  generation after writing its own. Two chunked opens of one generation at the same
+  instant rest on Delta's conflict check on the shared <code>txnAppId</code> (not tested here).
+  <code>backfill()</code> checks once per call, first, so a full open made during a call stops the
+  next one.</li>
+<li>Considered: no lock, the newest open wins. Silver's rebuild point and reconcile's chunk
+  checks would then mix two snapshots.</li>
+<li>Considered: one mode for the stream's lifetime. A table that grows past what the
+  retention allows needs to move to chunked without a new checkpoint.</li>
+<li>Considered: a row closing a full open when its run raises, so that a chunked run could
+  follow at once. A killed process writes none, so the cleanup test is needed anyway; the
+  row would only shorten the wait after an exception.</li>
+<li>Consequence: a full snapshot no run reads any more holds the mode until CDC cleanup passes
+  its S, the retention at most: the library cannot tell it from one still being read. A
+  full re-snapshot that outlived the retention is past that already, so its rerun may be
+  chunked at once.</li>
+</ul>
+<h3 id="range-deletes-per-wave-in-re-snapshots-and-on-datetime2-keys">Range deletes per wave, in re-snapshots and on datetime2 keys<a class="headerlink" href="#range-deletes-per-wave-in-re-snapshots-and-on-datetime2-keys" title="Permanent link">&para;</a></h3>
+<ul>
+<li>An open re-snapshot's waves are applied as a bootstrap's are: chunk rows with every later
+  change of their keys, tracked by <code>open_snapshot_lsn</code> and <code>snapshot_wave</code>, the verdict held
+  until the completion. Before, it applied changes only and waited for the rebuild.</li>
+<li>Each wave also deletes, at each chunk's stamp L, the silver keys of its range [lo, hi)
+  that the chunk does not hold and whose image is older than L: the chunk saw every commit
+  up to L, so those keys were gone by then. They are ranked as delete rows stamped L, so a
+  later change of the key still wins. The keys a re-snapshot's purged gap deleted leave
+  silver wave by wave instead of at the completion.</li>
+<li>Only when silver's key is the snapshot's own (the open row's <code>keys</code>: the bounds are cut on
+  it) and is one column of an integer, date or timestamp type (<code>datetime2</code>, <code>datetime</code>,
+  <code>smalldatetime</code>), which Spark orders as SQL Server does. Other keys (strings, whose
+  collation Spark ignores, composite keys, other types) keep leaving stale keys to the
+  rebuild at the completion.</li>
+<li>Integer bounds are read as BIGINT; the plan's last bound, MAX + 1, counts as open when it
+  is past BIGINT's range.</li>
+<li>A <code>datetime2(7)</code> key holds 100 ns, Spark only microseconds (the drivers truncate). The
+  plan's bounds are truncated the same way, so each key falls on the same side of them in
+  Spark as on SQL Server. A bound with digits below the microsecond would not place the keys
+  of its microsecond: a lower one moves up one microsecond and an upper one is truncated, so
+  no chunk deletes those keys and the rebuild does, never the wrong chunk.</li>
+</ul>
+<h3 id="tests">Tests<a class="headerlink" href="#tests" title="Permanent link">&para;</a></h3>
+<p><code>tests/test_source_fake.py</code>: an integer plan packing counted slices whatever the skew.
+<code>tests/test_delta_sink.py</code>: the plan kept across calls and a wave's facts rebuilt from
+bronze without its commit, a rerun planning more chunks than the commit holds; a rerun
+reading nothing finding the commit; a keyset plan's open last chunk closed at the first key
+after MAX when read; a full snapshot a crash left open holding its mode until a full run
+completes it; a full re-snapshot past the retention giving its generation to a chunked
+rerun; runs finding the other mode opened after their check. <code>tests/test_silver.py</code>: each
+wave deleting the stale keys of its ranges, a chunked re-snapshot deleting the gap's keys
+wave by wave, an integer plan's last bound past BIGINT, no range deletes on a composite key
+or on a key the bounds were not cut on. <code>tests/test_client_sql.py</code>: the
+counting and seeking SQL. <code>tests/integration</code>: an integer plan counted on the server for a
+skewed BIGINT key (a dense cluster, a sparse region, a key at BIGINT's maximum) and
+backfilled; a <code>datetime2(7)</code> plan reading the keys in MAX's microsecond; a chunked
+re-snapshot deleting stale <code>datetime2(7)</code> keys wave by wave but not one in a bound's
+microsecond; integer and keyset plans under SNAPSHOT isolation not waiting for the locks a
+writer holds, which a READ COMMITTED plan waits on. Lab check t10 passes in both modes with
+the plan (LAB.md).</p>
+<h2 id="amendment-2-in-flight-up-to-what-the-change-table-holds">Amendment 2: in flight up to what the change table holds<a class="headerlink" href="#amendment-2-in-flight-up-to-what-the-change-table-holds" title="Permanent link">&para;</a></h2>
+<p><code>reconcile</code> took a difference as IN_FLIGHT only when bronze held a change to it. With the
+stream behind the source, every key changed in between came out as MISMATCH,
+MISSING_TARGET, MISSING_SOURCE or RECORD_DIFF: stream lag reported as an integrity failure.
+And the join that finds a key's changes compared keys with <code>=</code>, so a change of a NULL key
+never made its difference IN_FLIGHT. CDC refuses a unique index over nullable columns, but
+<code>keys</code> may name other columns.</p>
+<ul>
+<li>Once the source is read (the counts, then the rows of the buckets compared), bronze is
+  pinned and <code>sys.fn_cdc_get_max_lsn()</code> read. The change table's changes after bronze's
+  position (its newest change, or the S of a chunked snapshot, which the stream reads from)
+  up to that LSN are what the stream has not read yet; their keys count with bronze's
+  changes after the older of E and M. They are read through each capture instance's piece
+  of the range, as the stream reads them (ADR 0023), with <code>iter_changes</code> on the key columns:
+  the change table the stream already reads (invariant 11), no new grant and no new T-SQL.</li>
+<li>Not a whole snapshot's S: <code>to_delta(snapshot_on_switch=True)</code> takes one at <code>max_lsn</code> after
+  the batch that read the switch, while the stream's checkpoint stays at the batch's end, so
+  a commit in between would be in neither bronze's changes nor the read. Reading from the
+  newest change instead only finds more IN_FLIGHT, and costs more only while silver has not
+  applied a bootstrap or a re-snapshot.</li>
+<li>Still unseen: a commit the capture job has not harvested yet, in no change table (its lag,
+  seconds). A MISMATCH that causes clears on the next run.</li>
+<li>That join is null-safe (<code>&lt;=&gt;</code>), as reconcile's and silver's other key joins already were,
+  and the report's <code>key</code> writes a NULL key column as <code>null</code> instead of leaving it out (<code>{}</code>).</li>
+<li>Cost: every change row of the stream's lag crosses to the driver, keys only. A stream far
+  behind makes that large, and most buckets IN_FLIGHT, which they are.</li>
+<li>Considered: the change table from silver's <code>applied_lsn</code> E, without bronze. One read, but
+  of every change silver has not applied (hours of them for an hourly <code>apply_changes</code>), and
+  blind to the ones cleanup purged that bronze still holds.</li>
+<li>Considered: a <code>SELECT DISTINCT</code> of the keys on the server, a new client method. Less to
+  transfer, but new T-SQL on every client for a window that is a stream's lag; added if a
+  stream far behind shows up.</li>
+<li>The report's column comments on <code>status</code> and <code>failure_type</code> still name bronze alone: a
+  comment migration of the <code>reconcile</code> kind waits for a minor release.</li>
+</ul>
+<h3 id="tests_1">Tests<a class="headerlink" href="#tests_1" title="Permanent link">&para;</a></h3>
+<p><code>tests/test_reconcile.py</code>: an insert, a delete and an update only the change table holds
+IN_FLIGHT, then with bronze holding part of the lag, a real difference next to them still
+RECORD_DIFF, and a commit after M that the count sees; the change table read per capture
+instance from bronze's position up to the LSN read after the source (pure, on the fake); an
+insert below a whole snapshot appended above the stream's position IN_FLIGHT; a
+NULL key's change in bronze IN_FLIGHT, a real difference of it RECORD_DIFF, both named
+<code>null</code>. <code>tests/integration</code>: the same lag on SQL Server 2022, read by the stream's
+least-privilege login.</p>
+<h2 id="amendment-3-waves-read-ahead-sized-toward-a-duration">Amendment 3: waves read ahead, sized toward a duration<a class="headerlink" href="#amendment-3-waves-read-ahead-sized-toward-a-duration" title="Permanent link">&para;</a></h2>
+<p>Against a production source (DBR 18.2, <code>numPartitions</code> 4, <code>chunk_rows</code> 1,000,000), a chunked
+snapshot of 34 million rows took 943 s where a full one took 325 s, and one of 100 million rows
+5,096 s where a full one took 3,364 s: the waves read 58,000 and 24,500 rows/s, the full
+snapshots 105,000 and 30,000. Per wave of 4 chunks, read in 46 to 78 s and in 98 to 197 s,
+15 to 25 s went from its slowest chunk's read to the end of its append (the Spark jobs, the
+cache, the commit, the history read back), 6 to 8 s more before the next wave's read (its
+facts rows, the throttle, the stamp), and its slowest chunk took 12 to 15 s longer than the
+mean of the four, which the other three connections spent idle. The chunks stay as planned
+(the Amendment's plan): what changes is how a wave is read and how many of them it takes.</p>
+<ul>
+<li><strong>Read ahead.</strong> Once a wave is read (cached and counted, its metrics folded into its
+  tag), its append and then its facts rows go to one background thread, and the next wave
+  is stamped and read meanwhile. That wave's commit is handed over only once the one before
+  has finished: at most one wave reads while one commits, bronze takes the waves in order
+  (<code>txnVersion</code> the wave, as before), a wave's facts rows still follow its commit, and its
+  stamp is still recorded before its read. A crash still leaves at most the last committed
+  wave without its facts rows, which a rerun rebuilds as before. The read ahead assumes the
+  wave committing holds the chunks it read; when its commit holds others (a rerun's first
+  wave, which Delta skips for an earlier attempt's of another width, or a concurrent call's),
+  the wave read ahead is dropped and read again after the commit's last chunk. A failure in
+  either thread fails the call once the other has finished: a commit under way completes.
+  The commit thread inherits the caller's job group and scheduler pool
+  (<code>inheritable_thread_target</code>), and looks up commit times on a connection of its own, one
+  more per call.</li>
+<li><strong>Waves of rounds, sized toward <code>target_wave_seconds</code>.</strong> A wave takes whole rounds of
+  <code>numPartitions</code> chunks; its one partition per chunk is coalesced into <code>numPartitions</code>
+  partitions, partition p reading chunks p, p + <code>numPartitions</code>... one after the other, so
+  the connections stay <code>numPartitions</code> and neighbouring chunks are still read side by side.
+  The rounds are <code>target_wave_seconds</code> (300 when None) over the pace of the last wave: its
+  read, from its stamp to its rows cached, per round; for a call's first wave the facts
+  rows of the last wave committed (<code>duration_ms</code>, its read and its append); one round
+  without either. No more rounds than the rest of <code>max_seconds</code> holds, and at least one;
+  <code>target_wave_seconds=0</code> reads one round per wave, as before.</li>
+<li>The default: production waves of 4 chunks read in 1 to 3 minutes, so 300 s means about 4
+  rounds on the 34-million-row table and 2 on the 100-million-row one, 3 waves instead of 9
+  and about 14 instead of 27, each still a few minutes of work lost to a crash.</li>
+<li>Cost: a wave's rows stay cached until its commit, two waves at once while one reads
+  ahead (<code>MEMORY_AND_DISK</code>): about <code>numPartitions</code> × <code>target_wave_seconds</code> × a connection's
+  rate, 2 to 4 GB of wire bytes on that source at 300 s. <code>max_seconds</code> now also bounds a
+  wave's size; a call may still pass it by up to a wave and the commit under way.</li>
+<li>Considered: adapting <code>chunk_rows</code>. Ruled out: the plan's chunks never change while the
+  snapshot is open, and a rerun or <code>reconcile</code> reads them back as planned.</li>
+<li>Considered: one partition per chunk, scheduled by Spark. A cluster with more cores than
+  <code>numPartitions</code> would open as many connections as a wave has chunks.</li>
+<li>Considered: the FAIR scheduler pool for the commit. Pools do not preempt running tasks:
+  with fewer partitions than cores the append finds free cores anyway, and with as many
+  the read's tasks hold them in either mode. The thread keeps the caller's pool.</li>
+<li>Considered: reading two waves ahead. More rows cached for no more overlap: a commit is
+  shorter than a read.</li>
+<li>Considered: capping a wave's growth. The target bounds its duration already; a first wave
+  much faster than the rest (a warm buffer pool) makes the next one longer, which the one
+  after corrects.</li>
+<li>Not yet measured against SQL Server: on the fake almost all of a wave is its fixed cost, so
+  a local run shows that cost going, not the production gain. The Databricks benchmark
+  against the production source runs after the release candidate.</li>
+</ul>
+<h3 id="tests_2">Tests<a class="headerlink" href="#tests_2" title="Permanent link">&para;</a></h3>
+<p><code>tests/test_delta_sink.py</code>: a wave of four chunks read two at a time, one file per partition;
+waves of one round, then of the rounds <code>target_wave_seconds</code> holds at an earlier call's pace
+from its facts rows, then of what is left of <code>max_seconds</code>; the next wave stamped while the
+wave before still writes its facts rows, and that commit completing when the next wave's
+read fails; a wave read ahead of a rerun's commit that holds fewer chunks than it read,
+dropped and read again from the commit's last chunk.</p>
+<h2 id="amendment-4-key-values-in-a-table-next-to-bronze">Amendment 4: key values in a table next to bronze<a class="headerlink" href="#amendment-4-key-values-in-a-table-next-to-bronze" title="Permanent link">&para;</a></h2>
+<p>A chunked snapshot wrote source key values into the facts table: its open the key's MIN and
+MAX, its plan the bounds of every chunk and each chunk row its own; with a composite,
+string or date key those bounds are real keys of the table every <code>chunk_rows</code> rows (a
+document number, an e-mail address). The facts table is the one an operator, a dashboard or
+a monitoring job reads, often shared by every table of a fan-out
+(<a href="../0027-fan-out-one-stream-per-table/">ADR 0027</a>), while bronze, which holds those values
+anyway, sits behind the table's own access policy. Column masks and row filters on bronze do
+not reach a copy in another table, so the documentation asked for the facts table to get
+bronze's policy, one facts table per access domain. 0.7.0 moves the values instead.</p>
+<ul>
+<li><strong>A plans table next to bronze.</strong> <code>&lt;target&gt;_snapshot_plans</code>, in bronze's schema for a
+  name and a sibling directory for a path, so that it gets bronze's access by where it
+  lives; named after the target, as the facts rows match it already, so no option names
+  it and <code>apply_changes</code> and <code>reconcile</code> find it from <code>bronze</code>. Created typed and commented
+  through the <code>DeltaTable</code> API (<a href="../0012-delta-tables-through-the-deltatable-api/">ADR 0012</a>),
+  a table kind of its own with its migrations module
+  (<a href="../0013-schema-migrations-per-table-kind/">ADR 0013</a>). Its columns: <code>snapshot</code> (S),
+  <code>event</code> and <code>detail</code>. One row per 'snapshot_open', 'snapshot_plan' and 'snapshot_chunk'
+  facts row of a chunked snapshot, whose <code>detail</code> is that row's payload whole: the shape
+  the facts row had before 0.7.0, plus <code>chunk_count</code> on the plan. A chunk's row is found
+  by its event, chunk and wave.</li>
+<li><strong>The facts rows leave out the key values.</strong> 'snapshot_open' drops <code>keys</code> and <code>plan</code>, so
+  a chunked open has a full one's keys; 'snapshot_plan' drops <code>chunks</code> and gets
+  <code>chunk_count</code>; 'snapshot_chunk' drops <code>lo</code> and <code>hi</code>. <code>keys</code> names columns, not values,
+  but leaves the open too: <code>apply_changes</code> before 0.7.0 cuts ranges only when the open has
+  <code>keys</code>, and with no bounds on the chunk rows it would take each chunk as the whole table
+  and delete every key the chunk does not hold until the rebuild. Without <code>keys</code> it applies
+  the waves by key alone. A <code>backfill()</code> or <code>reconcile</code> before 0.7.0 fails on such a
+  snapshot with a <code>KeyError</code> (<code>keys</code>, <code>chunks</code> or <code>lo</code>) instead of reading wrong bounds.</li>
+<li><strong>Plans first.</strong> Each plans row is written before its facts row, idempotent like it: the
+  plan's and a wave's chunks with the facts rows' own <code>txnAppId</code> and version (another
+  table, so the keys do not collide), a wave's from the tag of the commit that holds it, as
+  its facts rows. An empty wave has no commit, so a rerun after a crash between its plans
+  rows and its facts rows could plan other chunks (<code>numPartitions=auto</code> on other cores, the
+  pace, a keyset plan's last bound sought again) whose plans rows Delta then skips: a wave
+  whose plans rows are in reads exactly their chunks and bounds again, whatever the rerun
+  would plan. The open's with <code>&lt;app_id&gt;#snapopen.&lt;S&gt;</code>, 0, not the facts row's key per
+  generation: a run that stops between the two opens again at another S, whose facts row
+  then needs a plans row of its own. After planning, the plan read back from the table is
+  the one recorded, so a concurrent call, or one that stopped before its facts row, leaves
+  one plan.</li>
+<li><strong>Readers take the payload whole.</strong> <code>backfill()</code> (the open's extent and keys, the plan,
+  and so the fallback that rebuilds a wave's facts from bronze), <code>apply_changes</code> (the open's
+  key columns, each chunk's range for its deletes) and <code>reconcile</code> (each chunk's range for
+  its tiling checks) read the snapshot's rows of the plans table and complete each facts
+  row from it (<code>events.Plans.whole</code>), always after the facts rows they complete: a Delta
+  read is not pinned, so a facts read after the plans read could hold a wave the plans read
+  missed. A facts row that has its key values, written before 0.7.0, is taken as it is. A
+  row with neither fails with a <code>ValueError</code> naming the plans table: a range without bounds
+  is never read as the whole table.</li>
+<li><strong>A snapshot opened before 0.7.0 finishes as it started.</strong> Its open, and maybe its plan
+  and some chunks, hold its key values in the facts already; 0.7.0's <code>backfill()</code> writes
+  its plan and chunk rows whole too, and nothing to a plans table. Every job sharing those
+  facts, of either release, then reads its chunks: <code>apply_changes</code> of 0.6 included, whose
+  range deletes need bounds on every chunk row. A snapshot 0.7.0 opens keeps them out of the
+  facts from its open.</li>
+<li>The wave commits' <code>userMetadata</code> keeps each chunk's <code>lo</code> and <code>hi</code>: bronze's history, under
+  bronze's access, from which a rerun rebuilds a wave's facts.</li>
+<li>State: the payload keys go from rows 0.7.0 writes only; a reader takes them from the
+  plans table, or from the row when it has them
+  (<a href="../0021-compatibility-policy-for-0x/">ADR 0021</a>, amendment 9). Facts migration 13
+  updates the <code>detail</code> comment. No <code>mssql_cdc.min_version</code>: an older release keeps writing
+  the facts table, and fails only on a snapshot 0.7.0 opened, as above.</li>
+<li>Considered: hashing or encrypting the values in the facts. A hash cannot bound a range,
+  and a key to decrypt with is one more secret to keep, where bronze's access is one already.</li>
+<li>Considered: an option naming the plans table. A name derived from the target needs none,
+  and cannot be given wrong to one of the three readers.</li>
+<li>Considered: one row per snapshot, its chunks in an array. A chunk's row is written with
+  its wave, so a crash leaves no row half updated; and a chunk read again by a later wave
+  (after a crash, a rebuilt wave's empty chunks at its end) has a row per wave.</li>
+</ul>
+<h3 id="tests_3">Tests<a class="headerlink" href="#tests_3" title="Permanent link">&para;</a></h3>
+<p><code>tests/test_delta_sink.py</code>: a chunked bootstrap's open, plan and chunk rows whole in the
+plans table and without key values in the facts; a wave rebuilt from bronze after a crash
+gets its plan's bounds there; an empty wave's rerun after its plans rows, with other
+<code>numPartitions</code>, reads the chunks they hold; a keyset plan's last chunk ends there at the
+key sought before its wave; a snapshot opened in the shape before 0.7.0 is planned and read
+with its key values in the facts and none in the plans table. <code>tests/test_silver.py</code>: each
+wave's range deletes from the plans table, and from the facts rows of a snapshot opened
+before 0.7.0; a wave recorded between the facts read and the plans read waits for the next
+call.
+<code>tests/test_reconcile.py</code>: a chunk's bounds changed in the plans table fail its tiling.
+<code>tests/test_payloads.py</code>: a facts row completed from the plans table, and a <code>ValueError</code>
+without its row. <code>tests/compat/test_compat.py</code>: the snapshot each release left open after
+one wave finishes with its key values in the facts and no plans table.</p>
+<h2 id="amendment-5-a-third-way-to-open-one-after-a-capture-instance-switch">Amendment 5: a third way to open one, after a capture instance switch<a class="headerlink" href="#amendment-5-a-third-way-to-open-one-after-a-capture-instance-switch" title="Permanent link">&para;</a></h2>
+<p><code>to_delta(snapshot="chunked", snapshot_on_switch=True)</code> opens a chunked snapshot in the
+running generation after the batch that first reads a newer capture instance, at that
+instance's start LSN, which the stream has read past
+(<a href="../0023-schema-changes-and-capture-instance-switching/">ADR 0023</a> Amendment 7). For this
+ADR it is one more open: the newest, so it supersedes one still open; read by <code>backfill()</code>
+and applied by silver like the others; completed by a <code>'bootstrap'</code> row; holding the mode.
+What differs is its Delta keys: by S (<code>&lt;app_id&gt;#snapopen.&lt;S&gt;</code>, <code>&lt;app_id&gt;#snapdone.&lt;S&gt;</code>),
+since the generation's keys may be taken by the generation's own snapshot, and its open's
+<code>switch_batch_id</code> tells <code>backfill()</code> which key its completion takes. Its S is no <code>max_lsn</code>
+after the batch, so Amendment 2's position (a chunked snapshot's S, which the stream has
+read up to) still holds; the whole snapshot of <code>snapshot="full"</code> stays above it, as before.</p>
+<h2 id="amendment-6-chunks-cut-on-a-column-that-is-not-unique">Amendment 6: chunks cut on a column that is not unique<a class="headerlink" href="#amendment-6-chunks-cut-on-a-column-that-is-not-unique" title="Permanent link">&para;</a></h2>
+<p>A capture instance of a table without a primary key or unique index has no
+<code>index_column_list</code>, so <code>snapshot_plan</code> found no key and the snapshot was one chunk: the
+whole table in one read and one wave, what the chunked mode exists to avoid. Such tables
+are often the large ones (logs, staging heaps).</p>
+<ul>
+<li><strong>The <code>snapshotKeys</code> option names the columns.</strong> It already cut the snapshot reader's
+  ranges on other columns for <code>reconcile</code>; <code>to_delta(..., snapshot="chunked")</code> now opens the
+  snapshot on them too, unique or not, and records them as the open's <code>keys</code> in the plans
+  table, the columns its chunks are cut on, as before. The plan, the waves (the reader gets
+  them as its <code>snapshotKeys</code>) and each <code>last_bound</code> search take the open's <code>keys</code>, so a
+  plan never moves to other columns; a <code>backfill()</code> whose stream would cut on others (the
+  option changed or dropped, or the unique index changed, the check it replaces) raises.
+  A full snapshot reads the option as it did, for its <code>numPartitions</code> ranges. The one
+  <code>snapshot_on_switch</code> opens (Amendment 5) takes the option as any other open does.</li>
+<li><strong>Checked at the open.</strong> A column CDC does not capture, of a type no bound can be bound
+  as (<code>key_types</code> gives None: <code>time</code>, a 100 ns type ahead of the last column) or one SQL
+  Server cannot sort (<code>bit</code>, which has no MIN or MAX, <code>text</code>, <code>ntext</code>, <code>image</code>, <code>xml</code>)
+  raises <code>ValueError</code> before anything is recorded, instead of a one-chunk plan. The unique
+  index's own columns are not checked, as before.</li>
+<li><strong>Ranges of values, never a value split.</strong> Bounds are values and each chunk the range
+  <code>[lo, hi)</code> of <code>_key_select</code>, so a row is in exactly one chunk whatever repeats, and every
+  row of a value in the same one; NULL sorts first, into the first chunk (an integer
+  column's plan counts no NULL, so they all join it). One integer column is planned from
+  per-slice counts as an integer key is: a slice of one value is never counted again, so a
+  value held by more than <code>chunk_rows</code> rows is a chunk of its own. Other columns walk
+  <code>key_bound</code> seeks, and there the (n + 1)-th row from <code>lo</code> can hold <code>lo</code>'s value, which
+  would end the chunk where it starts and the walk would never move: equal in Python, or
+  equal only on SQL Server (a case-insensitive collation's <code>'n'</code> and <code>'N'</code>, trailing
+  spaces). When the columns are not the unique index's, each bound is therefore checked by
+  one more <code>key_bound</code> seek, of the first row in <code>[lo, bound)</code>; when there is none, the
+  seek is repeated twice as far until there is. The chunk then starts on a value held by
+  more than <code>chunk_rows</code> rows and holds fewer than twice its rows. <code>last_bound</code> checks the
+  first key after MAX the same way, past MAX's own copies. Plans on the unique index make
+  the same reads as before.</li>
+<li><strong>Bronze only.</strong> Without a key, silver cannot MERGE: <code>apply_changes</code> refuses a capture
+  instance without a unique index unless given <code>keys</code> that identify a row, as before, and
+  its range deletes still need silver's key to be the open's <code>keys</code>. A row whose cut column
+  changes while the snapshot is read can be read by two chunks or by none; its change rows
+  after S are in bronze, but nothing ties them to a row, so the documentation asks for a
+  column the writers do not update.</li>
+<li>Cost: on a column no index leads, each seek and each chunk read scans the table, which a
+  unique index never made the plan do. Documented rather than replaced by one NTILE pass:
+  the chunk reads scan anyway, and an index is the fix for both.</li>
+<li>State: no new key; <code>keys</code> keeps its meaning, the columns the chunks are cut on. A release
+  before 0.8.0 resuming such a snapshot finds <code>keys</code> unlike its unique index and raises in
+  <code>backfill()</code>; its <code>apply_changes</code> applies the waves by key alone unless its keys are the
+  open's.</li>
+<li>Considered: a <code>backfill(chunk_key=...)</code> argument. The extent (MIN, MAX) is read at the
+  open, right after S, so the columns must be known there; and a fan-out (ADR 0027) gives
+  each table its own options, where one argument would cut every table on one column.</li>
+<li>Considered: a new client method that seeks the first key above <code>lo</code>. Exact, one seek, but a
+  new member of the <code>CdcClient</code> protocol (ADR 0030) that a client of a user's own would lack;
+  the doubling uses the seeks clients already make.</li>
+</ul>
+<h3 id="tests_4">Tests<a class="headerlink" href="#tests_4" title="Permanent link">&para;</a></h3>
+<p><code>tests/test_properties.py</code>: plans on a column that repeats, NULL now and then, compared as a
+case-insensitive collation does, every row up to MAX in one chunk, a value in one only, and
+none empty. <code>tests/test_client_sql.py</code>: the open refusing each type no chunk can be cut on
+before any read. <code>tests/test_reader_units.py</code>: <code>snapshotKeys</code> refused unless a list of names.
+<code>tests/test_delta_sink.py</code>: a table without a unique index chunked on a repeated string
+column, NULLs in the first chunk, rows inserted and deleted between waves, and a <code>backfill()</code>
+without the option refused. <code>tests/integration</code>: a heap on SQL Server 2022 chunked on a
+<code>varchar</code> column (case-mixed under a case-insensitive collation) and on an <code>int</code> column,
+both repeated and NULL now and then, under a writer inserting, updating and deleting: every
+row there all along read once, none twice, each value in one chunk, and the stream holding
+every insert.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../0027-fan-out-one-stream-per-table/" class="md-footer__link md-footer__link--prev" aria-label="Previous: 0027: Many tables: one stream per capture instance, started by a fan-out helper">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                0027: Many tables: one stream per capture instance, started by a fan-out helper
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../0029-driver-retries-and-lock-timeout/" class="md-footer__link md-footer__link--next" aria-label="Next: 0029: Driver-side retries, and an optional lock timeout">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                0029: Driver-side retries, and an optional lock timeout
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      &copy; 2026 Emanuel Luis, MIT license
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog" role="status" aria-atomic="true">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      
+      
+        
+        
+      <script id="__config" type="application/json">{"annotate":null,"base":"../..","features":["content.action.edit","content.code.copy","navigation.sections","navigation.footer","search.highlight","toc.follow"],"redirect":null,"search":"../../assets/javascripts/workers/search.7d14d953.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","clipboard.error":"Could not copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":{"alias":true,"provider":"mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.67a597eb.min.js"></script>
+      
+    
+  </body>
+</html>

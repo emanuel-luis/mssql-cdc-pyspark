@@ -1,0 +1,3084 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="PySpark streaming source for SQL Server CDC, with a Delta sink and a completeness signal">
+      
+      
+      
+        <link rel="canonical" href="https://emanuel-luis.github.io/mssql-cdc-pyspark/dev/decisions/0021-compatibility-policy-for-0x/">
+      
+      
+        <link rel="prev" href="../0020-capture-and-ingestion-lag-in-facts/">
+      
+      
+        <link rel="next" href="../0022-defer-spark-changes-changelog/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.67">
+    
+    
+      
+        <title>0021: Compatibility policy for 0.x - mssql-cdc-pyspark</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../../assets/stylesheets/modern/main.4ae390e2.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/modern/palette.96d1a7e4.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#0021-compatibility-policy-for-0x" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="mssql-cdc-pyspark" class="md-header__button md-logo" aria-label="mssql-cdc-pyspark" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            mssql-cdc-pyspark
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              0021: Compatibility policy for 0.x
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun-moon" viewBox="0 0 24 24"><path d="M12 2v2M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715M16 12a4 4 0 0 0-4-4M19 5l-1.256 1.256M20 12h2"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-moon" viewBox="0 0 24 24"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    emanuel-luis/mssql-cdc-pyspark
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="mssql-cdc-pyspark" class="md-nav__button md-logo" aria-label="mssql-cdc-pyspark" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    mssql-cdc-pyspark
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    emanuel-luis/mssql-cdc-pyspark
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Home
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_2">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Getting started
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quickstart
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_3">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Guides
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Streaming into Delta
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/many-tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Many tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/bootstrap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Bootstrap
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/data-loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data loss and re-snapshots
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/silver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Silver tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/finalization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Finalization
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Monitoring
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/permissions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Permissions
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/schema-changes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Schema changes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DATABRICKS/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Running on Databricks
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_4">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Reference
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/options/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Options
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/output-schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Output schema
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Internals
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_5">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Internals
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DESIGN/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Design notes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../CONNECTORS/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  SQL Server drivers with native Arrow output
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DEVELOPMENT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../RELEASING/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Releasing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ROADMAP/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Roadmap
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../REFERENCES/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  References
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Decisions
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+            <label class="md-nav__title" for="__nav_6">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Decisions
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture Decision Records
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0001-python-datasource-v2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0001: Python DataSource V2 instead of a JVM connector
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0002-lsn-offsets-with-commit-time/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0002: Offsets are hex LSNs carrying the commit time
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0003-mssql-python-default-backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0003: mssql-python as default driver, arrow-odbc as fallback
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0004-verdict-in-control-table/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0004: finalized_until in a control table, never in table properties
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0005-ordering-over-atomicity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0005: Data first, verdict after, monotonic
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0006-file-backed-fake-for-engine-tests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0006: A file-backed CDC fake to test the real Spark engine
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0007-infer-columns-from-cdc-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0007: Infer captured columns from CDC metadata
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0008-detect-source-time-zone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0008: Detect the server time zone by name
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0009-read-change-tables-directly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0009: Read the change table directly
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0010-heartbeat-for-quiet-databases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0010: Idle lag of ~5 minutes; an optional Agent heartbeat for less
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0011-num-partitions-from-cores/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0011: numPartitions defaults to the compute's cores
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0012-delta-tables-through-the-deltatable-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0012: Delta tables through the DeltaTable API, created typed and commented
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0013-schema-migrations-per-table-kind/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0013: Schema migrations per table kind
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0014-network-and-read-metrics-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0014: Network and read metrics in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0015-split-batches-by-change-rows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0015: Split batches by the change table's rows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0016-bootstrap-snapshot-at-a-recorded-lsn/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0016: Bootstrap with a snapshot stamped with an LSN recorded before the read
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0017-retention-headroom-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0017: Retention headroom in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0018-automatic-resnapshot-after-data-loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0018: Automatic re-snapshot after CDC data loss
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0019-silver-helper-applies-the-change-log/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0019: A silver helper applies the bronze change log to a current-state table
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0020-capture-and-ingestion-lag-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0020: Capture and ingestion lag in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0021: Compatibility policy for 0.x
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0021: Compatibility policy for 0.x
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#context" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Context
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Decision
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consequences" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Consequences
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-4-the-snapshot-payloads-are-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 4: the snapshot payloads are state
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-5-the-api-shape-from-030" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 5: the API shape from 0.3.0
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-6-a-micro-batch-rows-warnings" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 6: a micro-batch row's warnings
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-7-types-for-the-payloads-and-the-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 7: types for the payloads and the options
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-8-a-waves-counts-may-be-null" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 8: a wave's counts may be null
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-9-key-values-out-of-the-facts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 9: key values out of the facts
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-10-a-snapshot-after-a-switch" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 10: a snapshot after a switch
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-11-the-1x-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 11: the 1.x policy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-12-a-switchs-detail-as-json" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 12: a switch's detail as JSON
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0022-defer-spark-changes-changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0022: Defer a Spark CHANGES changelog connector
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0023-schema-changes-and-capture-instance-switching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0023: Schema changes on the source, and switching to a newer capture instance
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0024-documentation-site/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0024: A documentation site built by Zensical, hosted on GitHub Pages
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0025-seed-from-an-existing-copy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0025: Seed a target from an existing copy of the table
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0026-continuous-finalization-listener/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0026: Continuous-mode finalization through a streaming query listener
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0027-fan-out-one-stream-per-table/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0027: Many tables: one stream per capture instance, started by a fan-out helper
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0028-chunked-snapshot-next-to-the-stream/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0028: Chunked snapshots read next to the running stream
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0029-driver-retries-and-lock-timeout/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0029: Driver-side retries, and an optional lock timeout
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0030-protocols-for-the-pluggable-seams/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0030: typing.Protocol for the pluggable seams
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0031-strict-typing-gates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0031: Strict typing: mypy strict on src, pyright --verifytypes on the public API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0032-facts-without-caching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0032: Facts without caching where the platform refuses it
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0033-spark-connect-tested-on-a-local-server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0033: Spark Connect, tested against a local Connect server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0034-credentials-outside-the-connection-string/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0034: Credentials outside the connection string
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Changelog
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Contributing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#context" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Context
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Decision
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consequences" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Consequences
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-4-the-snapshot-payloads-are-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 4: the snapshot payloads are state
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-5-the-api-shape-from-030" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 5: the API shape from 0.3.0
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-6-a-micro-batch-rows-warnings" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 6: a micro-batch row's warnings
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-7-types-for-the-payloads-and-the-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 7: types for the payloads and the options
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-8-a-waves-counts-may-be-null" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 8: a wave's counts may be null
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-9-key-values-out-of-the-facts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 9: key values out of the facts
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-10-a-snapshot-after-a-switch" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 10: a snapshot after a switch
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-11-the-1x-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 11: the 1.x policy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-12-a-switchs-detail-as-json" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 12: a switch's detail as JSON
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+  
+    <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark/edit/main/docs/decisions/0021-compatibility-policy-for-0x.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-file-pen" viewBox="0 0 24 24"><path d="M12.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v9.34"/><path d="M14 2v5a1 1 0 0 0 1 1h5M10.378 12.622a1 1 0 0 1 3 3.003L8.36 20.637a2 2 0 0 1-.854.506l-2.867.837a.5.5 0 0 1-.62-.62l.836-2.869a2 2 0 0 1 .506-.853z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="0021-compatibility-policy-for-0x">0021: Compatibility policy for 0.x<a class="headerlink" href="#0021-compatibility-policy-for-0x" title="Permanent link">&para;</a></h1>
+<p><strong>Status:</strong> accepted<br />
+<strong>Date:</strong> 2026-09-30T11:07:08-03:00<br />
+<strong>Amended:</strong> 2026-10-01T15:55:00-03:00, the public surface is the documentation site's reference (API, options, output schema), not the README<br />
+<strong>Amended:</strong> 2026-10-05T06:01:09-03:00, an older release keeps writing tables a newer one migrated, unless a migration sets <code>mssql_cdc.min_version</code> (amendment 2, ADR 0013)<br />
+<strong>Amended:</strong> 2026-10-05T12:35:09-03:00, every release keeps the state its wheel writes under <code>tests/compat/&lt;version&gt;</code>, and the current code must resume it (amendment 3)<br />
+<strong>Amended:</strong> 2026-10-05T12:49:29-03:00, the state contract covers the silver and reconcile schemas, the facts <code>event</code> values, the JSON of snapshot rows and a backfill wave's userMetadata, whose keys are only added; the public surface is what <code>docs/reference/api.md</code> lists (amendment 4)<br />
+<strong>Amended:</strong> 2026-10-05T20:51:10-03:00, the kept state includes a chunked snapshot left open, and the <code>fake</code> backend's files in it stay readable (amendment 3)<br />
+<strong>Amended:</strong> 2026-10-07T01:34:59-03:00, the API shape from 0.3.0: options and flags keyword-only, modes typed as <code>Literal</code>s, results as <code>TypedDict</code>s whose keys are only added (amendment 5)<br />
+<strong>Amended:</strong> 2026-10-07T01:41:18-03:00, a micro-batch row's <code>detail</code> is a payload too, with the added key <code>warnings</code> (amendment 6, ADR 0023 Amendment 6)<br />
+<strong>Amended:</strong> 2026-10-07T09:14:31-03:00, the payloads and the source options get types, and a 'data_skipped' row's <code>detail</code> joins the listed payloads (amendment 7)<br />
+<strong>Amended:</strong> 2026-10-09T11:39:56-03:00, a wave's measured values in its userMetadata may be null where the platform refuses caching (amendment 8, ADR 0032)<br />
+<strong>Amended:</strong> 2026-10-10T18:02:10-03:00, a chunked snapshot's facts rows leave its key values to a plans table next to bronze: keys removed from the rows 0.7.0 writes only, readers take them from either (amendment 9, ADR 0028 Amendment 4)<br />
+<strong>Amended:</strong> 2026-10-13T18:45:19-03:00, a chunked snapshot opened after a capture instance switch adds <code>switch_batch_id</code> to its 'snapshot_open' payload, and its rows take keys by its S (amendment 10, ADR 0023 Amendment 7)<br />
+<strong>Amended:</strong> 2026-10-14T09:06:30-03:00, the 1.x policy: Semantic Versioning from 1.0, the state contract frozen but for additions, a deprecation before every removal (amendment 11)<br />
+<strong>Amended:</strong> 2026-10-15T09:39:58-03:00, the files in <code>metricsPath</code> are internal, not state: the facts table is the record (amendment 11)<br />
+<strong>Amended:</strong> 2026-10-15T09:49:09-03:00, dropping a Python, Spark, Delta or SQL Server version past its end of life is a minor, announced a release before; 1.0 keeps Python 3.10 (amendment 11)<br />
+<strong>Amended:</strong> 2026-10-15T09:50:28-03:00, a 'capture_instance_switched' row's <code>detail</code> is JSON from 1.0.0rc1, its keys state, its <code>text</code> for people (amendment 12, ADR 0023 Amendment 8)</p>
+<h2 id="context">Context<a class="headerlink" href="#context" title="Permanent link">&para;</a></h2>
+<p>0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
+a stream leaves state behind that outlives any version: offsets in Spark checkpoints,
+checkpoint directories, and Delta tables in users' catalogs. A user who upgrades a patch
+or a minor and finds a checkpoint that no longer resumes, or a facts table the new version
+cannot write, has lost more than an API: they have to re-snapshot, or rebuild by hand.
+The Python API, on the other hand, is young and will change.</p>
+<h2 id="decision">Decision<a class="headerlink" href="#decision" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Minor releases (0.x to 0.x+1) may break the public Python API. Every break is listed
+  under "Breaking" in <code>CHANGELOG.md</code>, with what to change.</li>
+<li>Patch releases (0.x.y to 0.x.y+1) are fixes only.</li>
+<li>The state contract never breaks without a migration path and an ADR, in any release:</li>
+<li>the offset JSON <code>{"lsn", "commit_ts"}</code> (invariant 1,
+    <a href="../0002-lsn-offsets-with-commit-time/">ADR 0002</a>);</li>
+<li>the checkpoint layout, including <code>&lt;checkpoint&gt;/_generations/&lt;n&gt;</code>, the state file
+    <code>&lt;checkpoint&gt;/_mssql_cdc_generation.json</code> and the <code>&lt;app_id&gt;.g&lt;n&gt;</code> app ids
+    (<a href="../0018-automatic-resnapshot-after-data-loss/">ADR 0018</a>);</li>
+<li>the schemas of the facts, control, bronze, silver, reconcile report and (from 0.7.0)
+    snapshot plans tables: changed
+    only by appending migrations (<a href="../0013-schema-migrations-per-table-kind/">ADR 0013</a>). A
+    release keeps writing a table a newer one migrated, so the jobs that share it upgrade,
+    or roll back, one at a time; only a migration that sets <code>mssql_cdc.min_version</code> makes
+    older releases refuse it, and its release notes say so (amendment 2);</li>
+<li>
+<p>the facts table's <code>event</code> values (NULL for a micro-batch, <code>'bootstrap'</code>,
+    <code>'resnapshot'</code>, <code>'snapshot_open'</code>, <code>'snapshot_plan'</code>, <code>'snapshot_chunk'</code>,
+    <code>'schema_change'</code>, <code>'capture_instance_switched'</code>, <code>'data_skipped'</code>) and the keys of the JSON a later
+    release reads back (amendment 4):</p>
+<ul>
+<li><code>detail</code> of <code>'snapshot_open'</code>: <code>mode</code>, <code>kind</code>, <code>generation</code>, <code>lost_from_ts</code>,
+  <code>lost_to_ts</code>, and on a chunked one <code>keys</code> and <code>plan</code>, and from 0.8.0 on one opened
+  after a capture instance switch <code>switch_batch_id</code> (amendment 10);</li>
+<li><code>detail</code> of <code>'snapshot_plan'</code>: <code>snapshot</code>, <code>kind</code>, <code>keys</code>, <code>chunk_rows</code>, <code>chunks</code>, and
+  from 0.7.0 <code>chunk_count</code>;</li>
+<li><code>detail</code> of <code>'snapshot_chunk'</code>: <code>snapshot</code>, <code>chunk</code>, <code>wave</code>, <code>lo</code>, <code>hi</code>, <code>last</code>;</li>
+<li><code>detail</code> of a chunked snapshot's <code>'bootstrap'</code> or <code>'resnapshot'</code> row: <code>snapshot</code>,
+  <code>chunks</code>, <code>rows</code>, <code>last_lsn</code>;</li>
+<li>the userMetadata of a backfill wave's bronze commit: <code>backfill</code>, <code>wave</code>, <code>lsn</code>,
+  <code>attempt</code>, <code>chunks</code>, each chunk with <code>chunk</code>, <code>lo</code>, <code>hi</code>, <code>last</code>, <code>rows</code>, <code>high_lsn</code>,
+  <code>read_seconds</code>, <code>read_mb</code>
+  (<a href="../0028-chunked-snapshot-next-to-the-stream/">ADR 0028</a>);</li>
+<li><code>detail</code> of a micro-batch row (<code>event</code> NULL): <code>warnings</code>, added in 0.3.0
+  (amendment 6);</li>
+<li><code>detail</code> of <code>'data_skipped'</code>: <code>from</code>, <code>to</code>, <code>certain</code>, and from a task that found
+  cleanup had run while it read, <code>reason</code>
+  (<a href="../0018-automatic-resnapshot-after-data-loss/">ADR 0018</a>, amendment 7);</li>
+<li><code>detail</code> of <code>'capture_instance_switched'</code>, from 1.0.0rc1: <code>old</code>, <code>new</code>, <code>start_lsn</code>,
+  <code>not_captured</code>, <code>text</code>; before, the text alone (amendment 12);</li>
+<li>from 0.7.0, the snapshot plans table next to bronze, <code>&lt;target&gt;_snapshot_plans</code>, its
+  columns <code>snapshot</code>, <code>event</code> and <code>detail</code>, <code>detail</code> the three chunked payloads above
+  whole (amendment 9).</li>
+</ul>
+<p>Keys are only added: never renamed, removed or given another meaning. A reader takes a
+key added after its payload first shipped with a default (<code>.get</code>), so rows an older
+release wrote stay readable, as the <code>mode</code> of a <code>'snapshot_open'</code> row (missing or
+unknown reads as chunked) and a chunk's <code>last</code> (missing reads as false) already are.
+The one removal is amendment 9's: the key values of a chunked snapshot's facts rows,
+from the rows 0.7.0 writes only, which the plans table holds instead.</p>
+</li>
+</ul>
+<p>A migration path means the new version reads the old state and carries it forward on its
+  own (as appended table migrations do), or the release notes give the exact steps.
+* Every release entry in <code>CHANGELOG.md</code> has a "State compatibility" line: what it does to
+  offsets, checkpoint layout, table migrations and event payloads, with ADR links.
+* Every release keeps the state it writes (amendment 3): <code>tests/compat/generate.py</code>, run
+  with the published wheel, writes a checkpoint with two generations and the bronze,
+  silver, facts and control tables to <code>tests/compat/&lt;version&gt;</code>, and from 0.2.0 on a
+  second stream's chunked snapshot left open after one wave (amendment 4's payloads); and
+  <code>tests/compat/test_compat.py</code> resumes each such directory with the current code, and
+  finishes that snapshot (<a href="../../RELEASING/">RELEASING.md</a>, step 6). Tests that rebuild an
+  old table from today's column lists follow any edit of those lists; bytes a release wrote
+  do not. 0.1.0's were written from its PyPI wheel after the fact. The directories also
+  hold the source the release's <code>fake</code> backend wrote (<code>src/</code>), which the test reads with
+  today's fake: the fake stays internal, but a change to its files must keep reading the
+  old ones.
+* The public surface is what the documentation site's reference documents (amendment, ADR
+  0024): the objects <code>docs/reference/api.md</code> lists, the formats <code>mssql_cdc</code> and
+  <code>mssql_cdc_snapshot</code>, the options in <code>docs/reference/options.md</code> and the output schema in
+  <code>docs/reference/output-schema.md</code> (amendment 4: the page is the list; the copy kept here
+  fell behind it). <code>CdcStream</code> is public only as what <code>stream()</code> returns, not its name or
+  constructor. Everything else is internal and may change in any release, including names
+  exported from <code>mssql_cdc</code> that the API reference does not list, and the <code>fake</code> backend
+  with its <code>fakePath</code> option.</p>
+<h2 id="consequences">Consequences<a class="headerlink" href="#consequences" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Upgrading within 0.x never costs a re-snapshot or a new checkpoint unless an ADR and the
+  CHANGELOG say so, with the steps.</li>
+<li>Changing the state is expensive on purpose: reading the old format stays in the code.</li>
+<li>Documenting something in the reference pages makes it public; keep internals out of them
+  or accept the contract. The guides and the README may show public things only.</li>
+<li>1.0 will freeze the Python API as well; nothing here decides when (amendment 11 does).</li>
+</ul>
+<h2 id="amendment-4-the-snapshot-payloads-are-state">Amendment 4: the snapshot payloads are state<a class="headerlink" href="#amendment-4-the-snapshot-payloads-are-state" title="Permanent link">&para;</a></h2>
+<p>A chunked snapshot stays open for days or weeks, so its <code>'snapshot_open'</code> and
+<code>'snapshot_plan'</code> rows are often written by one release and read by the next, and a wave
+interrupted before its facts rows is rebuilt from its commit's userMetadata, maybe by a
+newer release. <code>backfill()</code>, <code>apply_changes</code> and <code>reconcile</code> all read these payloads, yet the
+contract listed only offsets, the checkpoint layout and the facts, control and bronze
+schemas, although the silver and reconcile tables have migration kinds of their own.</p>
+<ul>
+<li>Every payload a release wrote has the shape listed above: 0.2.0rc1 introduced them and no
+  release has changed one since. An unreleased build put the kind in <code>mode</code> and wrote no
+  <code>kind</code>; <code>backfill()</code> now completes such an open, taking generation 0 as a bootstrap and a
+  later one as a re-snapshot.</li>
+<li>Considered: a version field in every payload. Additive keys read with defaults need none,
+  and a version adds a second rule to keep. A change that cannot be additive gets a new
+  key, or a new event value, and an ADR.</li>
+<li>Considered: one module that owns the payloads and derives a snapshot's state for every
+  reader. The readers' rules differ on purpose: <code>backfill()</code> and <code>apply_changes</code> take any
+  <code>'bootstrap'</code> or <code>'resnapshot'</code> row at or after S as complete (a newer full re-snapshot
+  supersedes the chunks), while <code>reconcile</code> checks the chunks only against a completion row
+  at S itself.</li>
+</ul>
+<h2 id="amendment-5-the-api-shape-from-030">Amendment 5: the API shape from 0.3.0<a class="headerlink" href="#amendment-5-the-api-shape-from-030" title="Permanent link">&para;</a></h2>
+<p>0.2 grew <code>to_delta</code> to eleven parameters, all positional, each new one appended so that
+positional calls kept working: <code>to_delta(t, a, c, None, None, None, True)</code> was a bootstrap,
+and <code>snapshot("bronze.x", True)</code> a re-snapshot. Its siblings took options by keyword only,
+but <code>apply_changes</code> took four strings in a row. Modes were plain <code>str</code> and results untyped
+dicts, so a misspelt mode or key surfaced only at run time.</p>
+<ul>
+<li>Leading arguments stay positional: what a call is about, such as <code>to_delta(target,
+  app_id, checkpoint, facts_table)</code> (<a href="../0014-network-and-read-metrics-in-facts/">ADR 0014</a>'s
+  form), <code>apply_changes(spark, bronze, target)</code>, <code>reconcile(spark, options, silver)</code>,
+  <code>advance(spark, control_table, table_name, end_offset)</code>, <code>get_spark(app_name, master)</code>.
+  Everything after them, options, flags and modes, is keyword-only. Breaking, in 0.3.0:
+  <code>to_delta</code> after <code>facts_table</code>; <code>snapshot</code>'s <code>resnapshot</code>; <code>apply_changes</code>'s
+  <code>capture_instance</code> and <code>keys</code>; <code>reconcile</code>'s <code>keys</code>; <code>granularity</code> of <code>advance</code>, <code>track</code>,
+  <code>candidate</code> and the <code>FinalizationListener</code> constructor; <code>timeout</code> of <code>await_all</code> and
+  <code>FinalizationListener.join</code>; <code>end_offset_from_progress</code>'s <code>source_index</code>; <code>delta_sink</code>'s
+  <code>metrics_path</code>; <code>get_spark</code>'s <code>delta</code>.</li>
+<li>Every mode parameter is a <code>Literal</code> alias defined once in <code>mssql_cdc.types</code> and exported
+  from <code>mssql_cdc</code>: <code>SnapshotMode</code>, <code>OnDataLoss</code>, <code>Isolation</code>, <code>Granularity</code>, and
+  <code>BackfillState</code> for <code>backfill()</code>'s <code>state</code>. The run-time check stays: a wrong value raises
+  <code>ValueError</code> naming the allowed ones. A <code>Literal</code> names the canonical spelling; where the
+  check ignores case (<code>isolation</code>, <code>granularity</code>) it still does, so <code>"readcommitted"</code> runs
+  but does not type-check. <code>backfill()</code>'s <code>isolation</code> and <code>candidate</code>'s <code>granularity</code> took
+  any <code>str</code> before: a type-check break, listed under "Breaking".</li>
+<li>Results are <code>TypedDict</code>s, plain dicts at run time: <code>Offset</code> (<code>snapshot()</code>, <code>seed()</code>,
+  <code>end_offset_from_progress()</code>),
+  <code>BackfillStatus</code>, <code>ApplyResult</code>, <code>ReconcileResult</code>. Their keys are public API: a minor
+  release may add one, and removing or renaming one is a break listed under "Breaking".
+  Parameters that take an offset accept any mapping, so an <code>Offset</code> and a parsed progress
+  offset both fit.</li>
+<li>Considered: a release with shims that warn (<code>FutureWarning</code>) on the old positional forms,
+  as pandas 2.0 did. A positional call fails at once with Python's own <code>TypeError</code> naming
+  the call, before anything runs, so the change cannot go unnoticed or half-run; a shim
+  would be code kept for one release only.</li>
+<li><code>tests/typing_api.py</code>, checked by mypy, pins the result types and keeps the old forms and
+  wrong modes type errors.</li>
+</ul>
+<h2 id="amendment-6-a-micro-batch-rows-warnings">Amendment 6: a micro-batch row's warnings<a class="headerlink" href="#amendment-6-a-micro-batch-rows-warnings" title="Permanent link">&para;</a></h2>
+<p>0.3.0 writes a micro-batch row's <code>detail</code> for the first time: JSON <code>{"warnings": [...]}</code>, the
+warnings the reader logged on the driver, when there were any
+(<a href="../0023-schema-changes-and-capture-instance-switching/">ADR 0023</a> Amendment 6). An added
+payload, no change to a shipped one: rows written before, and batches without warnings,
+keep <code>detail</code> NULL, so a query reads the key with a default. The key is state; the messages
+in the list are text for people and may change in any release.</p>
+<h2 id="amendment-7-types-for-the-payloads-and-the-options">Amendment 7: types for the payloads and the options<a class="headerlink" href="#amendment-7-types-for-the-payloads-and-the-options" title="Permanent link">&para;</a></h2>
+<p>0.4.0 types what the library writes and reads back. The payloads listed above were dicts
+built inline at each writer and parsed at each reader, so a writer that dropped or misspelt a
+key failed only when a later call, maybe a later release, read the row.</p>
+<ul>
+<li>Every listed payload is a <code>TypedDict</code> in <code>mssql_cdc.payloads</code>, the row payloads also
+  exported from <code>mssql_cdc</code> for queries of the facts table: <code>SnapshotOpenDetail</code>,
+  <code>SnapshotPlanDetail</code>, <code>SnapshotChunkDetail</code>, <code>SnapshotCompletionDetail</code>,
+  <code>DataSkippedDetail</code>, <code>BatchDetail</code> and <code>WaveMetadata</code> (its chunks <code>WaveChunk</code>). Writers
+  build them as these types, so mypy fails one that leaves out a key; readers annotate what
+  <code>json.loads</code> returns and keep their <code>.get</code> defaults. <code>tests/test_payloads.py</code> keeps every
+  key listed here in its type. The types describe the state, they do not change it: keys,
+  formats and meanings are as before, and the rule stays that a key is only added.</li>
+<li>A key a payload does not always have, a chunked open's <code>keys</code> and <code>plan</code> or a task's
+  <code>reason</code>, or one added after its payload first shipped, is optional in its type. Not
+  through <code>NotRequired</code>, which <code>typing</code> has from Python 3.11 while the package supports
+  3.10 without depending on <code>typing_extensions</code>: the required keys sit in a private base
+  class and the optional ones in a <code>total=False</code> subclass, which gives the same keys at run
+  time on every version.</li>
+<li>A 'data_skipped' row's <code>detail</code>, written since 0.2.0 and documented with the facts table,
+  joins the list: no release reads it back, but a query of the facts does. Its <code>reason</code> is
+  text for people, like the warnings.</li>
+<li><code>SourceOptions</code>, a <code>TypedDict</code> with <code>total=False</code>, names every source option with a <code>str</code>
+  value, as Spark passes them, and <code>KNOWN_OPTIONS</code> is derived from it, so the two cannot
+  drift. The functions that take options (<code>stream</code>, <code>reconcile</code>, <code>apply_changes</code>,
+  <code>start_many</code>) take <code>SourceOptions | Mapping[str, Any]</code>: wider than 0.3's <code>dict</code>, so every
+  call that type-checked still does, and a dict annotated as <code>SourceOptions</code> gets its names
+  checked. Considered: <code>Literal</code> values for <code>backend</code>, <code>isolationLevel</code> or the booleans; the
+  reader takes them in any case, and booleans in several spellings, so a <code>Literal</code> would
+  refuse values that run.</li>
+<li>Considered: frozen dataclasses for the payloads. They are JSON that other releases and
+  users' queries read, so a dataclass would need converting both ways. Internal records
+  nothing persists are frozen dataclasses instead: the chunks <code>backfill()</code> counts, and the
+  chunks a 'snapshot_chunk' row announces to <code>apply_changes</code>.</li>
+<li>A chunked 'snapshot_open' row now writes <code>keys</code> and <code>plan</code> after <code>lost_to_ts</code> rather than
+  after <code>kind</code>. A JSON object has no order, and every reader takes its keys by name.</li>
+<li><code>tests/typing_payloads.py</code>, checked by mypy with <code>tests/typing_api.py</code>, pins the payloads'
+  key types and keeps a misspelt option in a <code>SourceOptions</code> a type error.</li>
+</ul>
+<h2 id="amendment-8-a-waves-counts-may-be-null">Amendment 8: a wave's counts may be null<a class="headerlink" href="#amendment-8-a-waves-counts-may-be-null" title="Permanent link">&para;</a></h2>
+<p>Where the platform refuses to cache a wave (Databricks serverless), <code>backfill()</code> writes the
+wave's commit while it reads it, so the commit's userMetadata cannot hold what the read
+measures (<a href="../0032-facts-without-caching/">ADR 0032</a>). Not additive, so recorded here: the
+keys stay, and a chunk's <code>rows</code>, <code>high_lsn</code>, <code>read_seconds</code> and <code>read_mb</code> are null in such a
+commit (<code>WaveChunk.rows</code> becomes <code>int | None</code>; the other three were nullable already). The
+wave's 'snapshot_chunk' facts rows hold the values. A reader takes null as not known:
+<code>backfill()</code> counts the chunk's rows in bronze, as it does for a commit log cleanup dropped.
+A release before 0.6.0 that finds such a commit (only after a crash between the wave's
+append and its facts rows) writes NULL counts for its chunks.</p>
+<h2 id="amendment-9-key-values-out-of-the-facts">Amendment 9: key values out of the facts<a class="headerlink" href="#amendment-9-key-values-out-of-the-facts" title="Permanent link">&para;</a></h2>
+<p>0.7.0 moves a chunked snapshot's key values out of the facts table, into a plans table next
+to bronze with bronze's access (<a href="../0028-chunked-snapshot-next-to-the-stream/">ADR 0028</a>
+Amendment 4). Not additive, so recorded here:</p>
+<ul>
+<li>From the rows 0.7.0 writes for a snapshot it opens, the facts payloads drop <code>keys</code> and
+  <code>plan</code> ('snapshot_open'), <code>chunks</code> ('snapshot_plan') and <code>lo</code> and <code>hi</code>
+  ('snapshot_chunk'); 'snapshot_plan' gains <code>chunk_count</code>. The plans table's <code>detail</code> holds
+  each payload whole, under the same keys, so a query reads them there as it read them in
+  the facts. Their types make those keys optional (<code>SnapshotPlanDetail.chunks</code>,
+  <code>SnapshotChunkDetail.lo</code> and <code>hi</code>; the open's were optional already).</li>
+<li>Rows written before stay as they are and are read as before: a reader takes a payload
+  from the plans table, or from the facts row when it has its key values. A snapshot opened
+  before 0.7.0 is finished by 0.7.0 in the shape it started with, its key values in the
+  facts and nothing in a plans table, so that every job sharing those facts reads it,
+  0.6's included; <code>tests/compat</code> finishes each release's open snapshot so.</li>
+<li>The other way round, a release before 0.7.0 on a snapshot 0.7.0 opened: <code>apply_changes</code>
+  finds no <code>keys</code> on the open and applies the waves without range deletes, the rebuild at
+  completion deleting what they would have; <code>backfill()</code> and <code>reconcile</code> fail with a
+  <code>KeyError</code>. Upgrade the jobs that run those with the stream; none of them writes a wrong
+  row. No migration sets <code>mssql_cdc.min_version</code> for it: the facts table's schema is
+  unchanged, and the stream of an older release keeps writing it.</li>
+</ul>
+<h2 id="amendment-10-a-snapshot-after-a-switch">Amendment 10: a snapshot after a switch<a class="headerlink" href="#amendment-10-a-snapshot-after-a-switch" title="Permanent link">&para;</a></h2>
+<p>0.8.0 lets <code>to_delta(snapshot="chunked", snapshot_on_switch=True)</code> open a chunked snapshot
+after the batch that first reads a newer capture instance
+(<a href="../0023-schema-changes-and-capture-instance-switching/">ADR 0023</a> Amendment 7). Additive:</p>
+<ul>
+<li>Its 'snapshot_open' payload adds <code>switch_batch_id</code>, the <code>batch_id</code> of the switch's
+  'capture_instance_switched' row (<code>SnapshotOpenDetail.switch_batch_id</code>, optional); <code>kind</code> is
+  <code>'bootstrap'</code>, an existing value, and its completion a <code>'bootstrap'</code> row, so a consumer
+  that filters <code>event IN ('bootstrap', 'resnapshot')</code> sees it, and so does an older
+  release's <code>apply_changes</code>.</li>
+<li>Its 'snapshot_open' and completion rows take Delta keys by its S (<code>&lt;app_id&gt;#snapopen.&lt;S&gt;</code>
+  and <code>&lt;app_id&gt;#snapdone.&lt;S&gt;</code>, version 0), as the generation's own may be taken by its
+  bootstrap or re-snapshot. A reader that finds no <code>switch_batch_id</code> (every snapshot opened
+  before 0.8.0) keeps the generation's keys.</li>
+<li>Facts migration 14 and plans migration 1 change comments only; no <code>mssql_cdc.min_version</code>.</li>
+<li>The other way round: a release before 0.8.0 whose <code>backfill()</code> finishes a snapshot 0.8.0
+  opened after a switch writes its completion under the generation's key, which Delta skips
+  when the generation's own snapshot took it: the snapshot then never completes, silver
+  keeps its verdict held and a full run raises (one mode while it is open). Run <code>backfill()</code>
+  with 0.8.0, which writes the row; nothing wrong is written meanwhile.</li>
+</ul>
+<h2 id="amendment-11-the-1x-policy">Amendment 11: the 1.x policy<a class="headerlink" href="#amendment-11-the-1x-policy" title="Permanent link">&para;</a></h2>
+<p>1.0 freezes the public Python API and the state contract. 1.0.0rc1 comes first and runs a
+real pipeline for a few weeks; 1.0.0 ships when nothing that run finds needs an API change,
+and a change it does need goes into another release candidate, not after 1.0.0. From
+1.0.0 on, this amendment replaces the Decision's first two bullets (what a minor and a
+patch may change); the state contract, the "State compatibility" line and <code>tests/compat</code>
+stay, with the additions below.</p>
+<ul>
+<li>Semantic Versioning, strictly:</li>
+<li>a patch (1.x.y) only fixes: it adds no public name, parameter, option, payload key or
+    table column;</li>
+<li>a minor (1.x) adds: public names, parameters whose default keeps today's behaviour,
+    source options, keys of a result's <code>TypedDict</code>, values of a <code>Literal</code> (a mode,
+    <code>BackfillState</code>), facts <code>event</code> values, payload keys, table columns by an appended
+    migration; and it deprecates;</li>
+<li>a major (2.0) breaks: it removes or renames any of those, changes a signature so that
+    a call or a type check that passed fails, changes what a default does, or changes the
+    state contract other than by adding to it.</li>
+</ul>
+<p>A type-only break is a break (amendment 5): a narrower parameter type, a wider return
+  type, a member added to a protocol that a class implements without inheriting
+  (<a href="../0030-protocols-for-the-pluggable-seams/">ADR 0030</a>).
+* What is public does not change: what the reference documents (amendment 4), the formats
+  <code>mssql_cdc</code> and <code>mssql_cdc_snapshot</code>, and <code>CdcStream</code> only as what <code>stream()</code> returns.
+  Every name <code>mssql_cdc</code> exports is in <code>docs/reference/api.md</code> (<code>tests/test_api_shape.py</code>).
+  The four it exported before 1.0 that the reference never listed, <code>HAS_ADMISSION_CONTROL</code>,
+  <code>OPERATIONS</code>, <code>MssqlCdcDataSource</code> and <code>make_client</code>, leave its <code>__all__</code> and warn when
+  imported from it: internal, as this ADR already made them, they stay in
+  <code>mssql_cdc.source</code> and <code>mssql_cdc.client</code>, and leave <code>mssql_cdc</code> in 2.0.
+  <code>FinalizationListener</code> is public for <code>join</code>, <code>last_error</code> and <code>failures</code>; <code>track()</code>
+  creates it, and its constructor is not public: a listener it built never started its
+  worker.
+* Readers handle what they do not know: in any minor, a result or a payload may gain keys,
+  and <code>BackfillState</code> and the facts <code>event</code> may gain values. A consumer that matches on
+  them keeps a default branch, and reads a key added after its payload first shipped with
+  a default (<code>.get</code>), as the library does.
+* A deprecation before every removal. Nothing public is removed, renamed or made to behave
+  otherwise in 2.0 unless a 1.x minor deprecated it first: from then on it kept working and
+  warned, naming what replaces it, with a <code>DeprecationWarning</code> attributed to the caller
+  (<code>stacklevel=2</code>, so that a notebook or a test run shows it) for Python, and a WARNING
+  logged where the option is read for a source option. The changelog lists it under
+  "Deprecated", and the major that removes it under "Breaking", where every break is
+  listed with what to change. A deprecated name stays for the rest of 1.x.
+* Supported versions follow their own end of life. Dropping support for a Python, Spark
+  (PySpark), Delta (delta-spark) or SQL Server version that has reached its end of life is
+  a minor release, not a major: the changelog announces it under "Deprecated" at least one
+  release before, and the minor that drops it says so under "Changed", with the new floor
+  (<code>requires-python</code>, the <code>[spark]</code> extra, or the SQL Server versions tested). A version
+  still supported upstream is dropped only in a major. 1.0 keeps Python 3.10.
+* The state contract only grows. Besides the Decision's list and amendments 4 to 10, it
+  names what a later release reads back that the list left implicit:
+  - the keys of the generation state file <code>&lt;checkpoint&gt;/_mssql_cdc_generation.json</code>:
+    <code>generation</code>, <code>snapshot_lsn</code>, <code>commit_ts</code>, <code>at</code>, <code>recovering</code>, <code>failed_at</code>;
+  - the Delta <code>txnAppId</code>s and versions that make each write idempotent, since a release
+    that wrote under another would write a replayed row twice. The sink's app_id
+    (<code>&lt;app_id&gt;</code>, or <code>&lt;app_id&gt;.g&lt;n&gt;</code> in generation n) with the batch id, on bronze and, as
+    <code>&lt;sink app_id&gt;#facts</code>, on the facts table. From the stream's <code>app_id</code>, on the facts
+    table: <code>#events</code> and <code>#snapshots</code> (the generation), <code>#snapopen.&lt;S&gt;</code>, <code>#snapplan.&lt;S&gt;</code>
+    and <code>#snapdone.&lt;S&gt;</code> (0), <code>#snapchunks.&lt;S&gt;</code> (the wave); on the plans table
+    <code>#snapopen.&lt;S&gt;</code> and <code>#snapplan.&lt;S&gt;</code> (0), <code>#snapchunks.&lt;S&gt;</code> (the wave); on bronze, a
+    wave's <code>#snap.&lt;S&gt;</code> (the wave).</p>
+<p>Table schemas change only by appended migrations that add columns or rewrite comments,
+  and no 1.x migration sets <code>mssql_cdc.min_version</code>: every 1.x release reads and writes
+  every 1.x table, so the jobs that share one upgrade, or roll back, one at a time. A change
+  that cannot be additive (a key renamed, a column dropped or retyped, a <code>min_version</code>) is a
+  2.0, with an ADR and a migration path; so is a change that fails <code>tests/compat</code>.
+* Text for people is not state: the messages in a micro-batch row's <code>warnings</code>, a task's
+  <code>reason</code>, the text of an error, and the <code>text</code> of a 'capture_instance_switched' row's
+  <code>detail</code> (<code>old -&gt; new</code>, then the columns no longer captured; the whole <code>detail</code> of a row
+  written before 1.0.0rc1, amendment 12) may be reworded in any release. A
+  'schema_change' row's <code>detail</code> is the DDL statement as SQL Server recorded it (its first
+  500 characters).
+* The files in <code>metricsPath</code> are not state, nor public: the partitions' metrics, the
+  reader's events and a chunk's read metrics carry what the facts table records, from the
+  executors and the planning to the sink and <code>backfill()</code>, which remove them once folded.
+  Their names and contents may change in any release; the facts table is the public record.
+  A release that changes them still folds, or knowingly drops, what the one before left
+  there, as an upgrade may restart a stream with them: until the sink writes it, an event
+  file is the only trace of a skip past purged changes.</p>
+<p>Considered:</p>
+<ul>
+<li>Keeping the 0.x rule, a minor may break the API, through 1.x. What 1.0 tells a user is
+  that an upgrade within the major needs no change to their code; a break waits for 2.0,
+  and the deprecation before it says what to change.</li>
+<li>A deprecation window in time (six months). Releases are small and irregular; a window in
+  releases can be checked from the changelog alone, and a deprecated name stays for the rest
+  of 1.x anyway.</li>
+<li>A major for every version dropped. Python, Spark and SQL Server end versions on their own
+  calendars; tying the library's major to them would make 2.0 a matter of dates, or keep a
+  dead runtime in the test matrix for the rest of 1.x. A platform past its end of life gets
+  no fixes of its own either, and the release before the drop keeps working on it.</li>
+<li>Freezing the internal modules too (<code>client</code>, <code>events</code>, the sink but <code>delta_sink</code>, the
+  fake). They change with every feature; only the reference is promised, and an internal
+  name a user needs is listed there in a minor, which freezes it from then on.</li>
+</ul>
+<h2 id="amendment-12-a-switchs-detail-as-json">Amendment 12: a switch's detail as JSON<a class="headerlink" href="#amendment-12-a-switchs-detail-as-json" title="Permanent link">&para;</a></h2>
+<p>Before 1.0.0rc1 a 'capture_instance_switched' row's <code>detail</code> was a line for people,
+<code>old -&gt; new</code>, then <code>; no longer captured, read as NULL:</code> and the columns, which a query had
+to parse for the instance names. Amendment 11 left it text that may be reworded, so nothing
+could rely on it. 1.0.0rc1 writes it as JSON instead, typed <code>CaptureInstanceSwitchedDetail</code>
+in <code>mssql_cdc.payloads</code> and exported from <code>mssql_cdc</code> with the other row payloads
+(amendment 7) (<a href="../0023-schema-changes-and-capture-instance-switching/">ADR 0023</a>
+Amendment 8). Not additive, so recorded here:</p>
+<ul>
+<li>Its keys are state, only added from now on: <code>old</code> and <code>new</code>, the capture instances;
+  <code>start_lsn</code>, the newer one's start LSN S, which is also the row's <code>min_lsn</code>;
+  <code>not_captured</code>, the columns the query reads that the newer one does not capture (NULL
+  from S on), empty when none; and <code>text</code>, the line rows before held. <code>text</code> stays text for
+  people (amendment 11).</li>
+<li>Rows written before keep their text. A reader tells the two apart by the first character
+  (<code>{</code>), or reads both through <code>events.switch_of(detail, min_lsn)</code>, which gives the old text
+  with the row's <code>min_lsn</code> the same payload; a query reads
+  <code>coalesce(get_json_object(detail, '$.text'), detail)</code>. The library itself never parsed
+  it: the lab's check t9 and the documentation's queries did, and now read both.</li>
+<li>Facts migration 15 rewrites the <code>detail</code> comment only; no <code>mssql_cdc.min_version</code>. A
+  release before 1.0.0rc1 sharing the facts table keeps writing the text, which every reader
+  above accepts.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../0020-capture-and-ingestion-lag-in-facts/" class="md-footer__link md-footer__link--prev" aria-label="Previous: 0020: Capture and ingestion lag in the ingestion facts">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                0020: Capture and ingestion lag in the ingestion facts
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../0022-defer-spark-changes-changelog/" class="md-footer__link md-footer__link--next" aria-label="Next: 0022: Defer a Spark CHANGES changelog connector">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                0022: Defer a Spark CHANGES changelog connector
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      &copy; 2026 Emanuel Luis, MIT license
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog" role="status" aria-atomic="true">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      
+      
+        
+        
+      <script id="__config" type="application/json">{"annotate":null,"base":"../..","features":["content.action.edit","content.code.copy","navigation.sections","navigation.footer","search.highlight","toc.follow"],"redirect":null,"search":"../../assets/javascripts/workers/search.7d14d953.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","clipboard.error":"Could not copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":{"alias":true,"provider":"mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.67a597eb.min.js"></script>
+      
+    
+  </body>
+</html>
