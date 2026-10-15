@@ -10,7 +10,7 @@ documentation site (`docs/`, built by Zensical from `mkdocs.yml`, ADR 0024) for 
 
 ## Status (read first)
 
-Experimental; the version is in `pyproject.toml`.
+1.0 release candidate (the public API and state contract are frozen, ADR 0021 amendment 11); the version is in `pyproject.toml`.
 
 | Area | State |
 |---|---|

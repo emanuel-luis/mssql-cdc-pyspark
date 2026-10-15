@@ -13,6 +13,8 @@ Every release says what it does to that state in its "State compatibility" line.
 
 ## [Unreleased]
 
+## [1.0.0rc1] - 2026-10-15
+
 State compatibility: offsets and checkpoints are unchanged. The facts table gets migration
 15, which rewrites the `detail` comment only (no `mssql_cdc.min_version`: older releases keep
 writing it). A 'capture_instance_switched' row's `detail` is JSON from this release; rows
@@ -1210,7 +1212,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v1.0.0rc1...HEAD
+[1.0.0rc1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.8.0...v1.0.0rc1
 [0.8.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.5.0...v0.6.0
