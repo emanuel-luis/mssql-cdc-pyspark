@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     from pyspark.sql import Column
 
     from .tables import ColumnDef
-    from .types import SparkSessionLike
+    from .types import DataFrameLike, SparkSessionLike
 
 _log = logging.getLogger(__name__)
 
@@ -496,7 +496,7 @@ def _write(
 
 def delta_sink(
     target: str, app_id: str, facts_table: str | None = None, *, metrics_path: str | None = None
-) -> Callable[[DataFrame, int], None]:
+) -> Callable[[DataFrameLike, int], None]:
     """Return a ``foreachBatch`` function; ``metrics_path`` is keyword-only.
 
     ``app_id`` must be stable for the lifetime of a checkpoint. If the checkpoint is

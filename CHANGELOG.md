@@ -18,6 +18,16 @@ micro-batch row's `warnings` may hold one more message (on Spark without admissi
 
 ### Breaking
 
+- Typing: the results that Spark Connect returns as its own class are typed as the union
+  ([ADR 0031](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0031-strict-typing-gates/)
+  amendment 2). `to_delta` returns `StreamingQueryLike` (was `StreamingQuery`), `start_many`
+  a `dict[str, StreamingQueryLike]`, and `spark.get_spark` a `SparkSessionLike` (was
+  `SparkSession`). A type checker now flags code that annotated them with the classic class
+  or used a member only one of the two has. At run time nothing changed. To migrate,
+  annotate with the `*Like` types, or narrow (`isinstance`) or `cast` where you need the
+  classic class. The new `DataFrameLike` types `ReconcileResult.report`, `seed()`'s `df` and
+  the function `delta_sink` returns; it is the same type as `pyspark.sql.DataFrame` for a
+  type checker (the Connect DataFrame subclasses it), so nothing to change there.
 - `HAS_ADMISSION_CONTROL`, `OPERATIONS`, `MssqlCdcDataSource` and `make_client` left
   `mssql_cdc.__all__` (see "Deprecated"). A type checker now rejects importing them from
   `mssql_cdc`, and `from mssql_cdc import *` no longer binds them, without a warning. Import

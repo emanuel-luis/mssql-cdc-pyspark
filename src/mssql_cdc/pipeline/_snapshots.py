@@ -18,6 +18,8 @@ from ._lock import _ModeLock
 if TYPE_CHECKING:
     from pyspark.sql import Column, DataFrame
 
+    from ..types import DataFrameLike
+
 
 class _Snapshots(_ModeLock):
     """Whole snapshots: taken, seeded, found again, and a bootstrap's."""
@@ -64,7 +66,7 @@ class _Snapshots(_ModeLock):
     def seed(
         self,
         target: str,
-        df: DataFrame,
+        df: DataFrameLike,
         as_of: str | datetime,
         *,
         app_id: str | None = None,

@@ -1,7 +1,8 @@
 """Type checks of the public API, run by mypy (``files`` in pyproject.toml), never by pytest.
 
-The results' types and the mode ``Literal``s; a Spark Connect session and query where a classic
-one goes; and the call forms 0.3 made keyword-only, and
+The results' types and the mode ``Literal``s; a Spark Connect session, query and DataFrame where a
+classic one goes, and returned where Spark Connect returns its own (``*Like``); and the call
+forms 0.3 made keyword-only, and
 wrong modes, which must stay type errors: ``warn_unused_ignores`` fails on an ignore that no
 longer hides one.
 """
@@ -12,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
 from pyspark.sql.connect.session import SparkSession as ConnectSparkSession
 from pyspark.sql.connect.streaming.query import StreamingQuery as ConnectStreamingQuery
 from pyspark.sql.streaming.query import StreamingQuery
@@ -21,9 +23,12 @@ from mssql_cdc import (
     ApplyResult,
     BackfillState,
     BackfillStatus,
+    DataFrameLike,
     Freshness,
     Offset,
     ReconcileResult,
+    SparkSessionLike,
+    StreamingQueryLike,
     apply_changes,
     await_all,
     finalization,
@@ -54,7 +59,7 @@ def results(spark: SparkSession, options: dict[str, Any], copy: DataFrame) -> No
     assert_type(applied["finalized_until"], datetime | None)
     result = reconcile(spark, options, "silver.orders", bronze="bronze.orders", control_table="c")
     assert_type(result, ReconcileResult)
-    assert_type(result["report"], DataFrame)
+    assert_type(result["report"], DataFrameLike)
     query = cdc.to_delta(
         "bronze.orders",
         "orders-v1",
@@ -64,7 +69,7 @@ def results(spark: SparkSession, options: dict[str, Any], copy: DataFrame) -> No
         on_data_loss="resnapshot",
         snapshot="chunked",
     )
-    assert_type(query, StreamingQuery)
+    assert_type(query, StreamingQueryLike)
     # an offset is what advance() takes, as end_offset_from_progress's dict is
     finalization.advance(spark, "c", "bronze.orders", offset, granularity="day")
     assert_type(finalization.end_offset_from_progress(query.lastProgress), Offset | None)
@@ -74,15 +79,26 @@ def results(spark: SparkSession, options: dict[str, Any], copy: DataFrame) -> No
 
 
 def spark_connect(
-    spark: ConnectSparkSession, options: dict[str, Any], query: ConnectStreamingQuery
+    spark: ConnectSparkSession,
+    options: dict[str, Any],
+    query: ConnectStreamingQuery,
+    copy: ConnectDataFrame,
 ) -> None:
     # not a subclass of the classic SparkSession or StreamingQuery: SparkSessionLike takes both
     register(spark)
     cdc = stream(spark, options)
     cdc.snapshot("bronze.orders")
+    cdc.seed("bronze.orders", copy, "0x" + "0" * 20)
     queries = start_many(
         spark, options, ["dbo_orders"], target="b.{ci}", app_id="{ci}", checkpoint="/c/{ci}"
     )
+    assert_type(queries, dict[str, StreamingQueryLike])  # Spark Connect returns its own
+    assert_type(get_spark(), SparkSessionLike)
+    # Connect's DataFrame subclasses DataFrame: a DataFrame annotation still fits, and so does
+    # the sink in Connect's foreachBatch
+    report: DataFrame = reconcile(spark, options, "s", bronze="b", control_table="c")["report"]
+    report.count()
+    spark.readStream.load().writeStream.foreachBatch(delta_sink("t", "a"))
     apply_changes(spark, "bronze.orders", "silver.orders", control_table="c")
     reconcile(spark, options, "silver.orders", bronze="bronze.orders", control_table="c")
     finalization.advance(spark, "c", "bronze.orders", None)

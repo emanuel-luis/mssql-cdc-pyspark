@@ -485,7 +485,8 @@ stream(spark, options).to_delta(
 )
 ```
 
-It starts the query and returns its `StreamingQuery`. `stream(spark, options)` registers the
+It starts the query and returns its `StreamingQuery` (`StreamingQueryLike`: a Spark Connect
+one on a Spark Connect session). `stream(spark, options)` registers the
 data source on the session first. The parameters after `facts_table` are keyword-only;
 `on_data_loss` and `snapshot` are typed `OnDataLoss` and `SnapshotMode`
 ([Types](api.md#types)). A guide to all of it: [Streaming](../guides/streaming.md).

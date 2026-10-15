@@ -12,7 +12,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     import pyarrow as pa
-    from pyspark.sql import SparkSession
     from pyspark.sql.types import StructType
 
     from .types import SparkSessionLike
@@ -47,12 +46,13 @@ def available_cores(spark: SparkSessionLike) -> int:
 
 def get_spark(
     app_name: str = "mssql-cdc", master: str = "local[*]", *, delta: bool = True
-) -> SparkSession:
+) -> SparkSessionLike:
     """Return the active SparkSession (Databricks, EMR, Fabric...) or create a
     local one, with Delta configured when ``delta-spark`` is installed (``delta``,
     keyword-only). A local one also gets the session time zone UTC and 4 shuffle partitions.
     With ``SPARK_REMOTE`` set, a Spark Connect session on that server, which has its own
-    configuration: ``master`` and ``delta`` are not used."""
+    configuration: ``master`` and ``delta`` are not used. On Spark Connect (that, or the
+    platform's own session) it is a Spark Connect ``SparkSession``."""
     from pyspark.sql import SparkSession
 
     active = SparkSession.getActiveSession()

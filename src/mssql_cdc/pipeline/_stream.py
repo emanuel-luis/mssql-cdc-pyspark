@@ -16,10 +16,9 @@ from ._recovery import _generation, _read_state, _Recovery
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame
-    from pyspark.sql.streaming.query import StreamingQuery
 
     from ..source import SourceOptions
-    from ..types import SparkSessionLike
+    from ..types import SparkSessionLike, StreamingQueryLike
 
 
 class CdcStream(_Recovery, _Chunked):
@@ -46,8 +45,9 @@ class CdcStream(_Recovery, _Chunked):
         resnapshot_interval_days: float = 7.0,
         snapshot_on_switch: bool = False,
         snapshot: SnapshotMode = "full",
-    ) -> StreamingQuery:
-        """Start the stream into ``target`` through ``delta_sink``; returns the StreamingQuery.
+    ) -> StreamingQueryLike:
+        """Start the stream into ``target`` through ``delta_sink``; returns the StreamingQuery,
+        a Spark Connect one on a Spark Connect session.
         The parameters after ``facts_table`` are keyword-only.
 
         ``trigger``: keyword arguments for ``DataStreamWriter.trigger``, e.g.

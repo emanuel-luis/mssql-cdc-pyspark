@@ -24,8 +24,6 @@ from typing import TYPE_CHECKING, Any
 from .pipeline import stream
 
 if TYPE_CHECKING:
-    from pyspark.sql.streaming.query import StreamingQuery
-
     from .source import SourceOptions
     from .types import SparkSessionLike, StreamingQueryLike
 
@@ -40,7 +38,7 @@ def start_many(
     checkpoint: str,
     facts_table: str | None = None,
     **to_delta_kwargs: Any,
-) -> dict[str, StreamingQuery]:
+) -> dict[str, StreamingQueryLike]:
     """Start one ``to_delta`` stream per capture instance; returns the queries by capture
     instance, in the order given.
 
@@ -76,7 +74,7 @@ def start_many(
         from .sink import FACTS_COLUMNS, FACTS_COMMENT
 
         migrations.ensure(spark, facts_table, "facts", FACTS_COLUMNS, FACTS_COMMENT)
-    queries: dict[str, StreamingQuery] = {}
+    queries: dict[str, StreamingQueryLike] = {}
     try:
         for ci, own in tables.items():
             # options match ignoring case: the stream's own replace the shared ones
@@ -99,7 +97,7 @@ def start_many(
     return queries
 
 
-def _source_started(query: StreamingQuery) -> None:
+def _source_started(query: StreamingQueryLike) -> None:
     """Wait until ``query`` has started its source, or stopped, for up to two minutes. Spark
     starts a Python process per query to plan the source and gives it 10 s to connect back:
     many starting at once on a busy driver miss that, and their queries fail with "Python

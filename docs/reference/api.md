@@ -60,7 +60,7 @@ major release removes or renames one, listed under "Breaking" in the changelog.
 ::: mssql_cdc.types
     options:
       show_root_toc_entry: false
-      members: [Offset, BackfillStatus, ApplyResult, ReconcileResult, Freshness, SnapshotMode, OnDataLoss, Isolation, Granularity, BackfillState, SparkSessionLike, StreamingQueryLike]
+      members: [Offset, BackfillStatus, ApplyResult, ReconcileResult, Freshness, SnapshotMode, OnDataLoss, Isolation, Granularity, BackfillState, SparkSessionLike, StreamingQueryLike, DataFrameLike]
 
 ::: mssql_cdc.source.SourceOptions
     options:

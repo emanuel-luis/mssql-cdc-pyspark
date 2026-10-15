@@ -12,18 +12,26 @@ from typing import TYPE_CHECKING, Literal, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
+    from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
     from pyspark.sql.connect.session import SparkSession as ConnectSparkSession
     from pyspark.sql.connect.streaming.query import StreamingQuery as ConnectStreamingQuery
     from pyspark.sql.streaming.query import StreamingQuery
 
 SparkSessionLike: TypeAlias = "SparkSession | ConnectSparkSession"
-"""What a ``spark`` parameter takes: a classic SparkSession or a Spark Connect one (Databricks
-Connect, serverless compute), which is not its subclass. For type checkers: at run time it is
-a string."""
+"""What a ``spark`` parameter takes, and ``get_spark()`` returns: a classic SparkSession or a
+Spark Connect one (Databricks Connect, serverless compute), which is not its subclass. For
+type checkers: at run time it is a string."""
 
 StreamingQueryLike: TypeAlias = "StreamingQuery | ConnectStreamingQuery"
-"""What a ``query`` parameter takes: a classic StreamingQuery or a Spark Connect one. For type
-checkers: at run time it is a string."""
+"""What a ``query`` parameter takes, and ``to_delta()`` returns: a classic StreamingQuery or a
+Spark Connect one, which is not its subclass. For type checkers: at run time it is a
+string."""
+
+DataFrameLike: TypeAlias = "DataFrame | ConnectDataFrame"
+"""What a DataFrame parameter takes, and ``ReconcileResult.report`` is: a classic DataFrame or
+a Spark Connect one. PySpark 4 makes the Connect class a subclass of ``pyspark.sql.DataFrame``,
+so code annotated with that still type-checks. For type checkers: at run time it is a
+string."""
 
 SnapshotMode = Literal["full", "chunked"]
 """How ``to_delta(snapshot=...)`` takes a snapshot: before the stream, or in chunks next to it."""
@@ -131,6 +139,6 @@ class ReconcileResult(TypedDict):
     failures: dict[str, int]
     """Report rows by ``failure_type``: ``MISSING_TARGET``, ``MISSING_SOURCE``,
     ``RECORD_DIFF``, ``IN_FLIGHT``, ``CHUNK_TILING``, ``CHUNK_ROWS``, ``CHUNK_STAMP``."""
-    report: DataFrame
+    report: DataFrameLike
     """The run's report rows, in the columns of the reconcile report table, as
     ``report_table`` gets them."""

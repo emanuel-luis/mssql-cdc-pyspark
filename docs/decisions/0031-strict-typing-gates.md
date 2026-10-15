@@ -2,7 +2,8 @@
 
 **Status:** accepted  
 **Date:** 2026-10-07T10:49:11-03:00  
-**Amended:** 2026-10-07T13:39:33-03:00, `spark` and `query` parameters take a Spark Connect session or query too (amendment 1)
+**Amended:** 2026-10-07T13:39:33-03:00, `spark` and `query` parameters take a Spark Connect session or query too (amendment 1)  
+**Amended:** 2026-10-15T09:29:08-03:00, the results are the `*Like` unions too, and `DataFrameLike` joins them (amendment 2)
 
 ## Context
 Through 0.3 mypy ran with `check_untyped_defs`: it read the bodies of unannotated functions,
@@ -75,3 +76,20 @@ annotation, and a Connect caller's type checker accepted them.
 * delta-spark annotates its session parameters as the classic `SparkSession`; `tables.py`
   casts to it in one place.
 * `tests/typing_api.py` calls the public functions with a Connect session and query.
+
+## Amendment 2: the results are the unions too
+Amendment 1 kept the results classic so that callers need not narrow them. On Spark Connect
+they are not: `to_delta` returns Connect's `StreamingQuery`, and `get_spark` with
+`SPARK_REMOTE` Connect's `SparkSession`, so a Connect user's type checker trusted a type the
+call does not return. 1.0 freezes the API ([ADR 0021](0021-compatibility-policy-for-0x.md)
+amendment 11), and widening a return type after it is a break, so it happens before
+1.0.0rc1.
+
+* `to_delta` returns `StreamingQueryLike`, `start_many` a `dict[str, StreamingQueryLike]` and
+  `get_spark` a `SparkSessionLike`. A caller that needs a member only one class has narrows
+  it (`isinstance`) or casts; the members a stream's caller uses (`awaitTermination`,
+  `stop`, `lastProgress`...) are on both.
+* `DataFrameLike`, `DataFrame | ConnectDataFrame`, is the type of `ReconcileResult.report`
+  and of `seed()`'s `df`, and `delta_sink` returns a function of one. PySpark 4 makes the
+  Connect DataFrame a subclass of `pyspark.sql.DataFrame`, so for a type checker it is the
+  same type: no break, a name that says Connect is meant, as the other two do.
