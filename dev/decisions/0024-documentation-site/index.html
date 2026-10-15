@@ -2461,7 +2461,7 @@
 <strong>Date:</strong> 2026-10-01T14:43:57-03:00<br />
 <strong>Amended:</strong> 2026-10-14T09:21:02-03:00, one site per version with mike: <code>dev</code> from main, each release, <code>stable</code> (amendment 1)<br />
 <strong>Amended:</strong> 2026-10-15T09:43:36-03:00, a final release's run deletes its release candidates from the selector (amendment 2)<br />
-<strong>Amended:</strong> 2026-10-15T12:20:00-03:00, each run's Pages deployment has its own name, so a tag on main's last commit publishes (amendment 3)</p>
+<strong>Amended:</strong> 2026-10-15T12:20:00-03:00, each run's Pages deployment is named after its gh-pages commit, so a tag on main's last commit publishes (amendment 3)</p>
 <h2 id="context">Context<a class="headerlink" href="#context" title="Permanent link">&para;</a></h2>
 <p>Usage was documented in a long README and the Markdown files under <code>docs/</code>; the API was
 documented only in docstrings. Users need guides, an options and tables reference, and an
@@ -2594,8 +2594,9 @@ one, as a success. A release tag is pushed on the commit <code>main</code> has j
 release commit, once CI passes), so 1.0.0rc1's run reported success and left the site as
 <code>main</code>'s run had it: the version was on <code>gh-pages</code>, not on the site, until the next push to
 <code>main</code>. The deploy job now calls the Pages API itself (create the deployment from the build
-job's artifact with the job's OIDC token, then wait for <code>succeed</code>), naming it
-<code>&lt;commit&gt;.&lt;run id&gt;.&lt;attempt&gt;</code>: every run, and a re-run, publishes its tree.</p>
+job's artifact with the job's OIDC token, then wait for <code>succeed</code>), naming it after the
+<code>gh-pages</code> commit the run pushed: mike always commits (<code>--allow-empty</code>), so every run, and
+a re-run, publishes its tree. (Pages takes only a commit of the repository as that name.)</p>
 
 
 
