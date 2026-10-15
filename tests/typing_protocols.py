@@ -1,7 +1,7 @@
 """Type checks of the pluggable seams (ADR 0030), run by mypy (``files`` in pyproject.toml),
 never by pytest: a backend of one's own fits without inheriting, both clients are
-``CdcClient``s, and the client's LSNs are ``Lsn``s. ``tests/test_client_sql.py`` checks the
-same with ``isinstance`` at run time."""
+``CdcClient``s (internal since 1.0, ADR 0030 amendment 1), and the client's LSNs are ``Lsn``s.
+``tests/test_client_sql.py`` checks the same with ``isinstance`` at run time."""
 
 from __future__ import annotations
 
@@ -11,8 +11,14 @@ from typing import Any
 import pyarrow as pa
 from typing_extensions import assert_type
 
-from mssql_cdc import Backend, CdcClient, Lsn
-from mssql_cdc.client import ArrowOdbcBackend, MssqlPythonBackend, SqlCdcClient, make_client
+from mssql_cdc import Backend, Lsn
+from mssql_cdc.client import (
+    ArrowOdbcBackend,
+    CdcClient,
+    MssqlPythonBackend,
+    SqlCdcClient,
+    make_client,
+)
 from mssql_cdc.fake import FakeCdcClient
 from mssql_cdc.lsn import ZERO_LSN, from_int, normalize
 

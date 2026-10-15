@@ -31,7 +31,7 @@
 | [0027](0027-fan-out-one-stream-per-table.md) | Many tables: one stream per capture instance, started by a fan-out helper | accepted | 2026-10-01T16:30:09-03:00 | 2026-10-13T20:07:28-03:00 |
 | [0028](0028-chunked-snapshot-next-to-the-stream.md) | Chunked snapshots read next to the running stream | accepted | 2026-10-02T20:30:12-03:00 | 2026-10-03T14:30:38-03:00, 2026-10-03T18:10:05-03:00, 2026-10-04T17:20:07-03:00, 2026-10-06T21:14:15-03:00, 2026-10-07T00:06:28-03:00, 2026-10-08T13:47:54-03:00, 2026-10-10T18:02:10-03:00, 2026-10-13T13:33:12-03:00, 2026-10-13T18:45:19-03:00, 2026-10-13T18:52:13-03:00 |
 | [0029](0029-driver-retries-and-lock-timeout.md) | Driver-side retries, and an optional lock timeout | accepted | 2026-10-05T12:23:04-03:00 |  |
-| [0030](0030-protocols-for-the-pluggable-seams.md) | `typing.Protocol` for the pluggable seams | accepted | 2026-10-07T09:05:52-03:00 |  |
+| [0030](0030-protocols-for-the-pluggable-seams.md) | `typing.Protocol` for the pluggable seams | accepted | 2026-10-07T09:05:52-03:00 | 2026-10-15T09:35:58-03:00 |
 | [0031](0031-strict-typing-gates.md) | Strict typing: mypy strict on `src`, `pyright --verifytypes` on the public API | accepted | 2026-10-07T10:49:11-03:00 | 2026-10-07T13:39:33-03:00, 2026-10-15T09:29:08-03:00 |
 | [0032](0032-facts-without-caching.md) | Facts without caching where the platform refuses it | accepted | 2026-10-09T11:39:56-03:00 | 2026-10-09T19:26:50-03:00 |
 | [0033](0033-spark-connect-tested-on-a-local-server.md) | Spark Connect, tested against a local Connect server | accepted | 2026-10-09T11:39:43-03:00 | 2026-10-09T19:26:50-03:00 |

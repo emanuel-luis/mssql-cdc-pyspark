@@ -33,6 +33,12 @@ micro-batch row's `warnings` may hold one more message (on Spark without admissi
   `mssql_cdc`, and `from mssql_cdc import *` no longer binds them, without a warning. Import
   them from their modules instead: the first three from `mssql_cdc.source`, `make_client`
   from `mssql_cdc.client`, internal names that may change in any release.
+- `CdcClient` left `mssql_cdc.__all__` and the API reference: it is internal, and a minor
+  release may add methods to it
+  ([ADR 0030](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0030-protocols-for-the-pluggable-seams/)
+  amendment 1; see "Deprecated"). A type checker now rejects importing it from `mssql_cdc`,
+  and `from mssql_cdc import *` no longer binds it, without a warning. Import it from
+  `mssql_cdc.client`. `Backend` and `Lsn` stay public.
 
 ### Added
 
@@ -71,6 +77,9 @@ micro-batch row's `warnings` may hold one more message (on Spark without admissi
   They are no longer in `mssql_cdc.__all__`. Importing one from `mssql_cdc` warns at run
   time (`DeprecationWarning`), and 2.0 removes them from there. `mssql_cdc.source` and
   `mssql_cdc.client` keep them as internal names.
+- Importing `CdcClient` from `mssql_cdc`: it warns at run time (`DeprecationWarning`), and
+  2.0 removes it from there. `mssql_cdc.client` keeps it, internal: the data source builds
+  its own client, so none of one's own plugs in, and a minor release may add methods to it.
 
 ### Fixed
 

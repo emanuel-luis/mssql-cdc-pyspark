@@ -1,8 +1,8 @@
 """The 0.3 API shape at run time: the call forms it made keyword-only raise TypeError before
 anything runs, a wrong mode raises ValueError naming the allowed values, and the typed
 results are plain dicts; every name the 0.4.0 modules bound still imports from the packages
-that replaced them; every name ``mssql_cdc`` exports is in the API reference, and the ones it
-exported without listing them warn until 2.0. No Spark (tests/typing_api.py checks the same for
+that replaced them; every name ``mssql_cdc`` exports is in the API reference, and the internal
+ones it exported before 1.0 warn until 2.0. No Spark (tests/typing_api.py checks the same for
 mypy)."""
 
 import importlib
@@ -172,9 +172,10 @@ def test_every_exported_name_is_in_the_api_reference():
         ("OPERATIONS", "mssql_cdc.source"),
         ("MssqlCdcDataSource", "mssql_cdc.source"),
         ("make_client", "mssql_cdc.client"),
+        ("CdcClient", "mssql_cdc.client"),  # listed until 1.0, internal since (ADR 0030)
     ],
 )
-def test_the_exports_the_reference_never_listed_warn_until_2_0(name, home):
+def test_the_internal_names_exported_before_1_0_warn_until_2_0(name, home):
     assert name not in mssql_cdc.__all__
     with pytest.warns(DeprecationWarning, match=f"mssql_cdc.{name} is internal.*from {home}"):
         assert getattr(mssql_cdc, name) is getattr(importlib.import_module(home), name)

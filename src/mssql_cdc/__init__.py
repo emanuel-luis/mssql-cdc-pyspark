@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 try:
     from .client import (
         Backend,
-        CdcClient,
         DataLossError,
         SchemaChangedError,
         is_data_loss,
@@ -66,7 +65,6 @@ __all__ = [
     "BackfillState",
     "BackfillStatus",
     "BatchDetail",
-    "CdcClient",
     "DataFrameLike",
     "DataLossError",
     "DataSkippedDetail",
@@ -121,14 +119,16 @@ def register(spark: SparkSessionLike) -> None:
         )
 
 
-# Exported before 1.0 though the API reference never listed them, so internal (ADR 0021): until
-# 2.0 they still import from here, with a DeprecationWarning; their modules keep them, and may
-# change them in any release. Hidden from type checkers, which flag the import instead.
+# Exported before 1.0 but internal: the reference never listed the first four (ADR 0021), and
+# CdcClient left it before 1.0 (ADR 0030). Until 2.0 they still import from here, with a
+# DeprecationWarning; their modules keep them, and may change them in any release. Hidden from
+# type checkers, which flag the import instead.
 _DEPRECATED = {
     "HAS_ADMISSION_CONTROL": "mssql_cdc.source",
     "OPERATIONS": "mssql_cdc.source",
     "MssqlCdcDataSource": "mssql_cdc.source",
     "make_client": "mssql_cdc.client",
+    "CdcClient": "mssql_cdc.client",
 }
 
 if not TYPE_CHECKING:

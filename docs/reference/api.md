@@ -68,19 +68,17 @@ major release removes or renames one, listed under "Breaking" in the changelog.
 
 ## Protocols
 
-The seams a client and a driver plug into
+The seam a driver plugs into
 ([ADR 0030](../decisions/0030-protocols-for-the-pluggable-seams.md)), exported from
-`mssql_cdc`. Both are `typing.Protocol`s, `runtime_checkable`: a class with their methods is
-one without inheriting, and `isinstance` checks that it has them (by name; a type checker
+`mssql_cdc`. `Backend` is a `typing.Protocol`, `runtime_checkable`: a class with its methods
+is one without inheriting, and `isinstance` checks that it has them (by name; a type checker
 checks the signatures). A subclass inherits the methods that have a body. The data source
 builds its client from its options, so the [backend](options.md#backend) option names a
-built-in backend only. A method added to a protocol is a break for a class that implements
+built-in backend only. A method added to the protocol is a break for a class that implements
 it without inheriting: only a major release adds one, listed under "Breaking" in the
 changelog.
 
 ::: mssql_cdc.Backend
-
-::: mssql_cdc.CdcClient
 
 ::: mssql_cdc.Lsn
 

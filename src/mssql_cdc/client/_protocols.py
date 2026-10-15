@@ -51,6 +51,7 @@ class CdcClient(Protocol):
     drivers' or the ``fake`` one's. A ``typing.Protocol`` (ADR 0030): any class with these methods is one, and
     ``isinstance`` checks that it has them (by name; a type checker checks their signatures).
     A subclass inherits the methods that have a body here, and must define the abstract ones.
+    Internal since 1.0 (ADR 0030 amendment 1): a minor release may add methods to it.
 
     LSNs are hex strings (invariant 6): returned as ``Lsn``, taken as any ``str`` in that form.
     """

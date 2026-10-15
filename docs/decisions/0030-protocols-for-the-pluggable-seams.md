@@ -1,7 +1,8 @@
 # 0030: `typing.Protocol` for the pluggable seams
 
 **Status:** accepted  
-**Date:** 2026-10-07T09:05:52-03:00
+**Date:** 2026-10-07T09:05:52-03:00  
+**Amended:** 2026-10-15T09:35:58-03:00, `CdcClient` is internal and may gain methods in a minor; `Backend` stays the public, frozen protocol (amendment 1)
 
 ## Context
 The library has two seams. `CdcClient` is what the data source needs from SQL Server:
@@ -64,3 +65,24 @@ Considered:
   narrower; at run time nothing changed.
 * The protocols' methods are public API: renaming or removing one, or changing its
   signature, is a break listed in the changelog.
+
+## Amendment 1: `CdcClient` is internal
+1.0 freezes what the reference lists ([ADR 0021](0021-compatibility-policy-for-0x.md)
+amendment 11), and a member added to a protocol breaks a class that implements it without
+inheriting. `CdcClient` grows with the features: the capture instance switch and the
+chunked snapshot each added methods to it
+([ADR 0023](0023-schema-changes-and-capture-instance-switching.md),
+[ADR 0028](0028-chunked-snapshot-next-to-the-stream.md)). Frozen, every such
+feature would wait for 2.0. And no user's client plugs in: the data source builds its own
+from its options in every task, so a `CdcClient` of one's own runs nowhere the library
+calls it.
+
+* `CdcClient` leaves `mssql_cdc.__all__` and the API reference before 1.0.0rc1. It stays in
+  `mssql_cdc.client`, internal: a minor release may add methods to it, or change it
+  otherwise. Imported from `mssql_cdc` it still works until 2.0, with a
+  `DeprecationWarning`, as the names amendment 11 of ADR 0021 took out of the namespace.
+* `Backend` stays public and frozen: what a driver needs to give `SqlCdcClient` is small and
+  settled, and a method added to it waits for 2.0. `Lsn` stays public too.
+* `SqlCdcClient`, `FakeCdcClient` and `make_client` keep implementing and returning
+  `CdcClient`; `tests/typing_protocols.py` and `tests/test_client_sql.py` keep checking
+  both protocols.
