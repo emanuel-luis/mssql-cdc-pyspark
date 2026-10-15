@@ -140,9 +140,10 @@ ships when nothing found there requires an API change.
 - [x] Frozen API and state contract: an audit of the public API, the four names
       `mssql_cdc` exported that the reference never listed deprecated there, and the 1.x
       policy (ADR 0021, amendment 11).
-- [ ] Decide the audit's breaking candidates before 1.0.0rc1: Spark Connect-wide return
-      types, `CdcClient` public or not, `reconcile(seed=...)` renamed, the metrics files
-      declared internal.
+- [x] Decide the audit's breaking candidates before 1.0.0rc1: the results typed for Spark
+      Connect too (`*Like`, ADR 0031 amendment 2), `CdcClient` internal (ADR 0030 amendment
+      1), `reconcile(sample_seed=...)` with `seed` deprecated, the metrics files internal,
+      and a switch's facts `detail` as JSON (ADR 0021 amendments 11 and 12).
 - [x] Versioned docs, `dev` and `stable`, with a version selector (ADR 0024, amendment 1).
 - [x] Build provenance (attestations) in the release: GitHub's from 1.0.0rc1 on, PyPI's
       (PEP 740) since 0.1.0.
