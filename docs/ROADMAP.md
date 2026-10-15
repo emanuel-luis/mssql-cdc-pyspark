@@ -147,6 +147,7 @@ ships when nothing found there requires an API change.
 - [x] Versioned docs, `dev` and `stable`, with a version selector (ADR 0024, amendment 1).
 - [x] Build provenance (attestations) in the release: GitHub's from 1.0.0rc1 on, PyPI's
       (PEP 740) since 0.1.0.
+- [x] 1.0.0rc1, shipped 2026-10-15.
 - [ ] 1.0.0rc1 in a real pipeline for a few weeks, then 1.0.0.
 
 ## After 1.0
