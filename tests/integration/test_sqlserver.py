@@ -2530,7 +2530,7 @@ def test_reconcile_matches_a_quiet_table_and_classifies_differences_injected_in_
             control_table=paths["control"],
             facts_table=paths["facts"],
             bucket_rows=50,
-            seed=3,
+            sample_seed=3,
             **kw,
         )
 

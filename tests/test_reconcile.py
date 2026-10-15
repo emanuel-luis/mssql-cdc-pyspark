@@ -51,7 +51,7 @@ class Orders:
         )
 
     def reconcile(self, **kw):
-        kw = {"bucket_rows": 10, "seed": 7, "report_table": self.report, **kw}
+        kw = {"bucket_rows": 10, "sample_seed": 7, "report_table": self.report, **kw}
         return reconcile(
             self.spark,
             self.options,
@@ -365,6 +365,38 @@ def test_reconcile_rejects_buckets_below_one_row_and_a_sample_outside_0_to_1(bad
     # checked before any Spark call: no session is needed to reach it
     with pytest.raises(ValueError, match="bucket_rows must be at least 1, and sample between"):
         reconcile(None, {}, "silver", bronze="bronze", control_table="control", **bad)
+
+
+@pytest.mark.parametrize("given", ["sample_seed", "seed"])
+def test_sample_seed_seeds_the_sample_and_seed_its_deprecated_name_still_does(monkeypatch, given):
+    import importlib
+    import types
+    import warnings
+
+    seeds = []
+
+    def recorded(seed):  # the sample's generator, reached before any Spark call
+        seeds.append(seed)
+        raise LookupError("recorded")
+
+    module = importlib.import_module("mssql_cdc.reconcile")  # the package binds the function
+    monkeypatch.setattr(module, "random", types.SimpleNamespace(Random=recorded))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(LookupError, match="recorded"):
+            reconcile(None, {}, "silver", bronze="b", control_table="c", **{given: 7})
+    assert seeds == [7]
+    deprecated = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    if given == "sample_seed":
+        assert deprecated == []
+    else:  # until 2.0, attributed to the caller
+        [warning] = deprecated
+        assert "pass sample_seed=" in str(warning.message) and warning.filename == __file__
+
+
+def test_sample_seed_and_its_deprecated_name_at_once_raise_type_error():
+    with pytest.raises(TypeError, match="sample_seed or seed, its deprecated name, not both"):
+        reconcile(None, {}, "silver", bronze="b", control_table="c", sample_seed=7, seed=7)
 
 
 def test_a_report_row_with_a_key_that_is_no_column_fails_rather_than_write_null():

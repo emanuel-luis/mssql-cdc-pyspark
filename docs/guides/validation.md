@@ -81,7 +81,8 @@ matched. `report` holds one row per bucket and one per key or chunk that failed;
 - `bucket_rows`: rows per bucket (default 1,000,000).
 - `sample`: the fraction of MATCH buckets also compared row by row (default 0.01; 0 none,
   1 all). Equal counts and key sums can hide an update, so keep a sample.
-- `report_table`: where the report is appended; `seed`: the sample's random seed.
+- `report_table`: where the report is appended; `sample_seed`: the sample's random seed
+  (`seed` before 1.0, deprecated).
 
 ## Pitfalls
 

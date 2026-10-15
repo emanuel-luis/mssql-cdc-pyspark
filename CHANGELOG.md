@@ -80,6 +80,9 @@ micro-batch row's `warnings` may hold one more message (on Spark without admissi
 - Importing `CdcClient` from `mssql_cdc`: it warns at run time (`DeprecationWarning`), and
   2.0 removes it from there. `mssql_cdc.client` keeps it, internal: the data source builds
   its own client, so none of one's own plugs in, and a minor release may add methods to it.
+- `reconcile(seed=...)`: renamed `sample_seed`, which says what it seeds (the sample of
+  MATCH buckets compared row by row). `seed` keeps working until 2.0 and warns
+  (`DeprecationWarning`); passing both raises `TypeError`.
 
 ### Fixed
 

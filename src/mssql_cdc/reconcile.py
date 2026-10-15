@@ -63,6 +63,7 @@ import logging
 import math
 import random
 import uuid
+import warnings
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import closing
@@ -409,6 +410,7 @@ def reconcile(
     bucket_rows: int = 1_000_000,
     sample: float = 0.01,
     report_table: str | None = None,
+    sample_seed: int | None = None,
     seed: int | None = None,
 ) -> ReconcileResult:
     """Compare ``silver`` with the table the capture instance in ``options`` tracks (how: the
@@ -419,8 +421,10 @@ def reconcile(
     ``bronze``: the table silver is applied from; its newer changes, and the change table's
     the stream has not read yet, make a difference IN_FLIGHT. ``control_table``:
     ``apply_changes``'s, for silver's ``applied_lsn``. ``facts_table``: the stream's, to
-    check the chunks of bronze's newest chunked snapshot. ``bucket_rows``: rows per bucket. ``sample``: the fraction of the MATCH buckets
-    also compared row by row (0: none, 1: all). ``seed``: of that sample.
+    check the chunks of bronze's newest chunked snapshot. ``bucket_rows``: rows per bucket.
+    ``sample``: the fraction of the MATCH buckets also compared row by row (0: none, 1: all).
+    ``sample_seed``: the random seed of that sample. ``seed``: its name before 1.0, deprecated
+    (it warns, and leaves in 2.0); both at once raise ``TypeError``.
     """
     from pyspark.sql import functions as F
 
@@ -429,9 +433,18 @@ def reconcile(
     from .sink import _utc_now, _write
     from .source import METADATA_COLUMNS, _opt
 
+    if seed is not None:
+        if sample_seed is not None:
+            raise TypeError("reconcile() takes sample_seed or seed, its deprecated name, not both")
+        warnings.warn(
+            "reconcile(seed=...) is deprecated and leaves in 2.0: pass sample_seed=...",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        sample_seed = seed
     if bucket_rows < 1 or not 0 <= sample <= 1:
         raise ValueError("bucket_rows must be at least 1, and sample between 0 and 1")
-    run_id, run_at, rng = str(uuid.uuid4()), _utc_now(), random.Random(seed)
+    run_id, run_at, rng = str(uuid.uuid4()), _utc_now(), random.Random(sample_seed)
     schema = spark.read.format("mssql_cdc_snapshot").options(**options).load().schema
     meta = {n for n, _ in METADATA_COLUMNS} | {"_chunk"}
     columns = [f for f in schema if f.name not in meta]
