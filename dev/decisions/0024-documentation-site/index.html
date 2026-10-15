@@ -1976,6 +1976,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#amendment-3-a-deployment-per-run-not-per-commit" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 3: a deployment per run, not per commit
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -2410,6 +2421,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#amendment-3-a-deployment-per-run-not-per-commit" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 3: a deployment per run, not per commit
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -2438,7 +2460,8 @@
 <p><strong>Status:</strong> accepted<br />
 <strong>Date:</strong> 2026-10-01T14:43:57-03:00<br />
 <strong>Amended:</strong> 2026-10-14T09:21:02-03:00, one site per version with mike: <code>dev</code> from main, each release, <code>stable</code> (amendment 1)<br />
-<strong>Amended:</strong> 2026-10-15T09:43:36-03:00, a final release's run deletes its release candidates from the selector (amendment 2)</p>
+<strong>Amended:</strong> 2026-10-15T09:43:36-03:00, a final release's run deletes its release candidates from the selector (amendment 2)<br />
+<strong>Amended:</strong> 2026-10-15T12:20:00-03:00, each run's Pages deployment has its own name, so a tag on main's last commit publishes (amendment 3)</p>
 <h2 id="context">Context<a class="headerlink" href="#context" title="Permanent link">&para;</a></h2>
 <p>Usage was documented in a long README and the Markdown files under <code>docs/</code>; the API was
 documented only in docstrings. Users need guides, an options and tables reference, and an
@@ -2564,6 +2587,15 @@ pick. So the <code>docs</code> run of a tag <code>vX.Y.Z</code>, after it publis
 deletes <code>X.Y.ZrcN</code> with <code>mike delete</code>, in the same commits the push job pushes: the build job
 stays read-only. A run again from the same tag finds none left. Other versions stay until
 removed by hand (<code>RELEASING.md</code>).</p>
+<h2 id="amendment-3-a-deployment-per-run-not-per-commit">Amendment 3: a deployment per run, not per commit<a class="headerlink" href="#amendment-3-a-deployment-per-run-not-per-commit" title="Permanent link">&para;</a></h2>
+<p><code>actions/deploy-pages</code> names a Pages deployment after the commit (<code>GITHUB_SHA</code>), with no
+input to change it, and Pages answers a second deployment of the same commit with the first
+one, as a success. A release tag is pushed on the commit <code>main</code> has just published (the
+release commit, once CI passes), so 1.0.0rc1's run reported success and left the site as
+<code>main</code>'s run had it: the version was on <code>gh-pages</code>, not on the site, until the next push to
+<code>main</code>. The deploy job now calls the Pages API itself (create the deployment from the build
+job's artifact with the job's OIDC token, then wait for <code>succeed</code>), naming it
+<code>&lt;commit&gt;.&lt;run id&gt;.&lt;attempt&gt;</code>: every run, and a re-run, publishes its tree.</p>
 
 
 
