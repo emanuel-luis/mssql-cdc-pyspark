@@ -13,7 +13,8 @@
 **Amended:** 2026-10-09T11:39:56-03:00, a wave's measured values in its userMetadata may be null where the platform refuses caching (amendment 8, ADR 0032)  
 **Amended:** 2026-10-10T18:02:10-03:00, a chunked snapshot's facts rows leave its key values to a plans table next to bronze: keys removed from the rows 0.7.0 writes only, readers take them from either (amendment 9, ADR 0028 Amendment 4)  
 **Amended:** 2026-10-13T18:45:19-03:00, a chunked snapshot opened after a capture instance switch adds `switch_batch_id` to its 'snapshot_open' payload, and its rows take keys by its S (amendment 10, ADR 0023 Amendment 7)  
-**Amended:** 2026-10-14T09:06:30-03:00, the 1.x policy: Semantic Versioning from 1.0, the state contract frozen but for additions, a deprecation before every removal (amendment 11)
+**Amended:** 2026-10-14T09:06:30-03:00, the 1.x policy: Semantic Versioning from 1.0, the state contract frozen but for additions, a deprecation before every removal (amendment 11)  
+**Amended:** 2026-10-15T09:39:58-03:00, the files in `metricsPath` are internal, not state: the facts table is the record (amendment 11)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -329,6 +330,13 @@ stay, with the additions below.
   (`old -> new`, then the columns no longer captured) may be reworded in any release. A
   'schema_change' row's `detail` is the DDL statement as SQL Server recorded it (its first
   500 characters).
+* The files in `metricsPath` are not state, nor public: the partitions' metrics, the
+  reader's events and a chunk's read metrics carry what the facts table records, from the
+  executors and the planning to the sink and `backfill()`, which remove them once folded.
+  Their names and contents may change in any release; the facts table is the public record.
+  A release that changes them still folds, or knowingly drops, what the one before left
+  there, as an upgrade may restart a stream with them: until the sink writes it, an event
+  file is the only trace of a skip past purged changes.
 
 Considered:
 

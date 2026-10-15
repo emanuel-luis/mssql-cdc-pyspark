@@ -376,13 +376,16 @@ Anything else is a `ValueError`. See [Schema changes](../guides/schema-changes.m
 
 ### metricsPath
 
-A directory where each partition leaves a JSON file with its metrics (round trip, read time,
-MB, network wait; the batch's last partition also the retention watermark, capture lag and
-the commit time of the batch's end), and where the reader leaves an event file for each
-schema change, capture instance switch and skip past purged changes
-([failOnDataLoss](#failondataloss)).
-The sink folds them into the batch's facts row and removes them. Without it the metric
-columns of the facts table and `end_lsn` stay NULL, and events only reach the driver log.
+A directory where each partition leaves its metrics (round trip, read time, MB, network
+wait; the batch's last partition also the retention watermark, capture lag and the commit
+time of the batch's end), and where the reader leaves each schema change, capture instance
+switch and skip past purged changes ([failOnDataLoss](#failondataloss)).
+The sink folds them into the facts table and removes them. Without it the metric columns of
+the facts table and `end_lsn` stay NULL, and events only reach the driver log.
+
+The files are internal: their names and contents may change in any release, and only the
+library reads them. The [facts table](tables.md#facts) is the public record of what they
+carry.
 
 It must be a directory every node can write and the driver can read, one of:
 
@@ -428,8 +431,8 @@ its first key (inclusive) and the key it ends before (exclusive). A key is a val
 one-column key and a list for a composite one, `null` for an open end; a value JSON has no
 type for is the text `CAST` reads back (a datetime in ISO 8601, binary as `0x` hex), as
 `backfill()` plans them. With it, the rows gain a `_chunk INT` column with the
-chunk's number, and with [metricsPath](#metricspath) each chunk leaves
-`chunk-<chunk>.json` (rows, bytes, seconds, `max_lsn` after the read). Key bounds on a table
+chunk's number, and with [metricsPath](#metricspath) each chunk leaves its read metrics
+there, for `backfill()` (internal files, as that option's are). Key bounds on a table
 whose key cannot be read in ranges (no unique index, a type no bound can be bound as) are a
 `ValueError`. `backfill()` sets it; set it yourself only to read part of a table.
 

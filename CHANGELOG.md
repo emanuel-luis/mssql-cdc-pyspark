@@ -58,6 +58,11 @@ micro-batch row's `warnings` may hold one more message (on Spark without admissi
   only grows. It now names the keys of the generation state file and the Delta `txnAppId`s
   that make replays idempotent. The `warnings`, a task's `reason` and the `detail` of a
   'capture_instance_switched' row are text for people and may be reworded in any release.
+- The files in `metricsPath` are internal: the options reference no longer documents their
+  names or contents (a chunk's `chunk-<n>.json` was), which may change in any release. The
+  facts table is the public record of what they carry
+  ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)
+  amendment 11).
 - `FinalizationListener` is public for `join`, `last_error` and `failures`. Create it with
   `finalization.track()`; its constructor is not public, because a listener built by hand
   never started its worker.
