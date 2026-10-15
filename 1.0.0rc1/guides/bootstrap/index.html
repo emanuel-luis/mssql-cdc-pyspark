@@ -1,0 +1,3097 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="PySpark streaming source for SQL Server CDC, with a Delta sink and a completeness signal">
+      
+      
+      
+        <link rel="canonical" href="https://emanuel-luis.github.io/mssql-cdc-pyspark/1.0.0rc1/guides/bootstrap/">
+      
+      
+        <link rel="prev" href="../many-tables/">
+      
+      
+        <link rel="next" href="../data-loss/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.67">
+    
+    
+      
+        <title>Bootstrap - mssql-cdc-pyspark</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../../assets/stylesheets/modern/main.4ae390e2.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/modern/palette.96d1a7e4.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#bootstrap" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="mssql-cdc-pyspark" class="md-header__button md-logo" aria-label="mssql-cdc-pyspark" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            mssql-cdc-pyspark
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Bootstrap
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun-moon" viewBox="0 0 24 24"><path d="M12 2v2M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715M16 12a4 4 0 0 0-4-4M19 5l-1.256 1.256M20 12h2"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-moon" viewBox="0 0 24 24"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    emanuel-luis/mssql-cdc-pyspark
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="mssql-cdc-pyspark" class="md-nav__button md-logo" aria-label="mssql-cdc-pyspark" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    mssql-cdc-pyspark
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    emanuel-luis/mssql-cdc-pyspark
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Home
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_2">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Getting started
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quickstart
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+            <label class="md-nav__title" for="__nav_3">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Guides
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Streaming into Delta
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../many-tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Many tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Bootstrap
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Bootstrap
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#which-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Which snapshot
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-smallest-bootstrap" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The smallest bootstrap
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-it-behaves" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        How it behaves
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-snapshot-without-the-stream" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A snapshot without the stream
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#chunked-snapshots" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Chunked snapshots
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Chunked snapshots">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-chunks-are-sized" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        How chunks are sized
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tables-without-a-unique-index" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tables without a unique index
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#one-mode-per-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        One mode per run
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tables-too-big-to-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tables too big to snapshot
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pitfalls" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Pitfalls
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        See also
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../data-loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data loss and re-snapshots
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../silver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Silver tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../finalization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Finalization
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Monitoring
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../permissions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Permissions
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema-changes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Schema changes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DATABRICKS/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Running on Databricks
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_4">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Reference
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/options/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Options
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/output-schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Output schema
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Internals
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_5">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Internals
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DESIGN/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Design notes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../CONNECTORS/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  SQL Server drivers with native Arrow output
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DEVELOPMENT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../RELEASING/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Releasing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ROADMAP/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Roadmap
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../REFERENCES/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  References
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Decisions
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_6">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Decisions
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture Decision Records
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0001-python-datasource-v2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0001: Python DataSource V2 instead of a JVM connector
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0002-lsn-offsets-with-commit-time/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0002: Offsets are hex LSNs carrying the commit time
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0003-mssql-python-default-backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0003: mssql-python as default driver, arrow-odbc as fallback
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0004-verdict-in-control-table/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0004: finalized_until in a control table, never in table properties
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0005-ordering-over-atomicity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0005: Data first, verdict after, monotonic
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0006-file-backed-fake-for-engine-tests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0006: A file-backed CDC fake to test the real Spark engine
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0007-infer-columns-from-cdc-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0007: Infer captured columns from CDC metadata
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0008-detect-source-time-zone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0008: Detect the server time zone by name
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0009-read-change-tables-directly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0009: Read the change table directly
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0010-heartbeat-for-quiet-databases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0010: Idle lag of ~5 minutes; an optional Agent heartbeat for less
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0011-num-partitions-from-cores/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0011: numPartitions defaults to the compute's cores
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0012-delta-tables-through-the-deltatable-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0012: Delta tables through the DeltaTable API, created typed and commented
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0013-schema-migrations-per-table-kind/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0013: Schema migrations per table kind
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0014-network-and-read-metrics-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0014: Network and read metrics in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0015-split-batches-by-change-rows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0015: Split batches by the change table's rows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0016-bootstrap-snapshot-at-a-recorded-lsn/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0016: Bootstrap with a snapshot stamped with an LSN recorded before the read
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0017-retention-headroom-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0017: Retention headroom in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0018-automatic-resnapshot-after-data-loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0018: Automatic re-snapshot after CDC data loss
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0019-silver-helper-applies-the-change-log/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0019: A silver helper applies the bronze change log to a current-state table
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0020-capture-and-ingestion-lag-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0020: Capture and ingestion lag in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0021-compatibility-policy-for-0x/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0021: Compatibility policy for 0.x
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0022-defer-spark-changes-changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0022: Defer a Spark CHANGES changelog connector
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0023-schema-changes-and-capture-instance-switching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0023: Schema changes on the source, and switching to a newer capture instance
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0024-documentation-site/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0024: A documentation site built by Zensical, hosted on GitHub Pages
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0025-seed-from-an-existing-copy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0025: Seed a target from an existing copy of the table
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0026-continuous-finalization-listener/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0026: Continuous-mode finalization through a streaming query listener
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0027-fan-out-one-stream-per-table/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0027: Many tables: one stream per capture instance, started by a fan-out helper
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0028-chunked-snapshot-next-to-the-stream/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0028: Chunked snapshots read next to the running stream
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0029-driver-retries-and-lock-timeout/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0029: Driver-side retries, and an optional lock timeout
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0030-protocols-for-the-pluggable-seams/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0030: typing.Protocol for the pluggable seams
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0031-strict-typing-gates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0031: Strict typing: mypy strict on src, pyright --verifytypes on the public API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0032-facts-without-caching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0032: Facts without caching where the platform refuses it
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0033-spark-connect-tested-on-a-local-server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0033: Spark Connect, tested against a local Connect server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0034-credentials-outside-the-connection-string/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0034: Credentials outside the connection string
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Changelog
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Contributing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#which-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Which snapshot
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-smallest-bootstrap" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The smallest bootstrap
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-it-behaves" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        How it behaves
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-snapshot-without-the-stream" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        A snapshot without the stream
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#chunked-snapshots" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Chunked snapshots
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Chunked snapshots">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-chunks-are-sized" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        How chunks are sized
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tables-without-a-unique-index" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tables without a unique index
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#one-mode-per-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        One mode per run
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tables-too-big-to-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Tables too big to snapshot
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pitfalls" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Pitfalls
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        See also
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+  
+    <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark/edit/main/docs/guides/bootstrap.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-file-pen" viewBox="0 0 24 24"><path d="M12.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v9.34"/><path d="M14 2v5a1 1 0 0 0 1 1h5M10.378 12.622a1 1 0 0 1 3 3.003L8.36 20.637a2 2 0 0 1-.854.506l-2.867.837a.5.5 0 0 1-.62-.62l.836-2.869a2 2 0 0 1 .506-.853z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="bootstrap">Bootstrap<a class="headerlink" href="#bootstrap" title="Permanent link">&para;</a></h1>
+<p>A stream that starts from <code>earliest</code> reads what CDC retention still holds, three days by
+default. Rows written before CDC was enabled, or not changed within that window, never
+arrive. A bootstrap loads the whole table once, with a snapshot that meets the stream at an
+exact LSN: no gap, no overlap that a MERGE cannot absorb, and no lock on the source.</p>
+<h2 id="which-snapshot">Which snapshot<a class="headerlink" href="#which-snapshot" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Full (the default)</th>
+<th><a href="#chunked-snapshots">Chunked</a></th>
+<th><a href="#tables-too-big-to-snapshot">Seed</a></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What reads the table</td>
+<td><code>to_delta</code>, before the stream starts</td>
+<td><code>backfill()</code>, in waves, next to the running stream</td>
+<td>nothing: you have a copy</td>
+</tr>
+<tr>
+<td>Has to finish within</td>
+<td>the CDC retention</td>
+<td>the time the stream runs without a gap</td>
+<td>(the copy's own load)</td>
+</tr>
+<tr>
+<td>Progress</td>
+<td>one Delta commit at the end</td>
+<td>one commit and facts rows per wave</td>
+<td>one commit</td>
+</tr>
+<tr>
+<td>Needs</td>
+<td>nothing more</td>
+<td>a <code>facts_table</code>, a second task</td>
+<td>a copy and when it started</td>
+</tr>
+<tr>
+<td>For</td>
+<td>tables read in hours</td>
+<td>tables the link needs days or weeks to read</td>
+<td>very large tables with a copy</td>
+</tr>
+</tbody>
+</table>
+<p>Size a snapshot by its data, not its rows: what limits the read is the link to SQL Server.
+Runs against a production source moved 1.8 to 5.9 MB/s over four connections, which was
+18,000 to 105,000 rows per second depending on the row width. Divide the table's size by
+that and compare with the retention.</p>
+<h2 id="the-smallest-bootstrap">The smallest bootstrap<a class="headerlink" href="#the-smallest-bootstrap" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">mssql_cdc</span><span class="w"> </span><span class="kn">import</span> <span class="n">stream</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">query</span> <span class="o">=</span> <span class="n">stream</span><span class="p">(</span><span class="n">spark</span><span class="p">,</span> <span class="n">options</span><span class="p">)</span><span class="o">.</span><span class="n">to_delta</span><span class="p">(</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="s2">"bronze.orders"</span><span class="p">,</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">app_id</span><span class="o">=</span><span class="s2">"orders-v1"</span><span class="p">,</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">checkpoint</span><span class="o">=</span><span class="s2">"/checkpoints/orders"</span><span class="p">,</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">facts_table</span><span class="o">=</span><span class="s2">"ops.ingestion_facts"</span><span class="p">,</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">trigger</span><span class="o">=</span><span class="p">{</span><span class="s2">"availableNow"</span><span class="p">:</span> <span class="kc">True</span><span class="p">},</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">bootstrap</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="p">)</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="n">query</span><span class="o">.</span><span class="n">awaitTermination</span><span class="p">()</span>
+</code></pre></div>
+<p>Keep <code>bootstrap=True</code> on every run. The first run takes the snapshot; later runs find it in
+the target and read nothing again.</p>
+<h2 id="how-it-behaves">How it behaves<a class="headerlink" href="#how-it-behaves" title="Permanent link">&para;</a></h2>
+<ol>
+<li>Before reading anything, it records the LSN <code>L</code>: <code>sys.fn_cdc_get_max_lsn()</code>, or the
+   capture instance's first LSN minus one when capture has not reached a new instance yet.
+   Every commit up to <code>L</code> is already in the table when the read starts. With a facts table
+   it first writes a <code>snapshot_open</code> facts row in mode <code>full</code>, which keeps a chunked run
+   from opening another snapshot while this one is read (<a href="#one-mode-per-run">One mode per run</a>).</li>
+<li>It reads the table's current rows in the stream's schema, READ COMMITTED and never with
+   <code>NOLOCK</code>. Each row has <code>_operation = 0</code>, <code>_start_lsn = L</code> and <code>_commit_ts</code> the commit
+   time of <code>L</code>; <code>_seqval</code>, <code>_command_id</code> and <code>_batch_id</code> are NULL.</li>
+<li>It appends them to the target in one Delta commit and, with a facts table, writes a
+   facts row with <code>event = 'bootstrap'</code>, the snapshot's row count and how long it took.</li>
+<li>The stream starts a new checkpoint at <code>L</code> and reads every commit after it. Its first
+   batch holds everything committed while the table was read, up to <code>max_lsn</code>, cached whole
+   by the sink: on a snapshot that takes hours, set
+   <a href="../../reference/options/#maxcommitsperbatch">maxCommitsPerBatch</a> to keep it bounded.</li>
+</ol>
+<p>A commit that lands while the table is read can appear twice: in the snapshot, and as a
+change after <code>L</code>. Keeping the latest image per key, ordered by
+<code>(_start_lsn, _command_id, _seqval, _operation)</code>, absorbs that, because every snapshot row
+sorts before the changes read after it. <a href="../silver/"><code>apply_changes</code></a> does exactly this;
+other consumers of bronze must deduplicate the same way, as they already must for updates.</p>
+<p>On a rerun, the snapshot is found by the target's operation-0 rows under any capture
+instance of the table, the name matched ignoring case. Its LSN is returned and nothing is
+read, so a rerun can never skip the changes between the snapshot and a newer LSN. A
+checkpoint that already has offsets resumes from them. The <code>bootstrap</code> facts row is written
+once. The reasoning is in <a href="../../decisions/0016-bootstrap-snapshot-at-a-recorded-lsn/">ADR 0016</a>.</p>
+<p>The read is split across <code>numPartitions</code> connections:</p>
+<ul>
+<li>a single integer key column: uniform ranges between its minimum and maximum (sparse or
+  skewed keys give uneven ranges);</li>
+<li>a composite or non-integer key: ranges of about the same number of rows (the table's row
+  count from <code>sys.sp_spaceused</code>), each bound a seek of its range's keys from the one before;</li>
+<li>no unique index, or a key the stream cannot split on: one partition, unless
+  <a href="../../reference/options/#snapshotkeys">snapshotKeys</a> names columns to cut the ranges on.</li>
+</ul>
+<p>The snapshot needs no permission beyond the stream's (<a href="../permissions/">Permissions</a>).</p>
+<h2 id="a-snapshot-without-the-stream">A snapshot without the stream<a class="headerlink" href="#a-snapshot-without-the-stream" title="Permanent link">&para;</a></h2>
+<p><code>snapshot(target)</code> takes the snapshot alone, or finds the one already in the target, and
+returns its offset (an <a href="../../reference/api/#mssql_cdc.types.Offset"><code>Offset</code></a>). Start a new
+checkpoint from it:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">mssql_cdc</span><span class="w"> </span><span class="kn">import</span> <span class="n">stream</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">offset</span> <span class="o">=</span> <span class="n">stream</span><span class="p">(</span><span class="n">spark</span><span class="p">,</span> <span class="n">options</span><span class="p">)</span><span class="o">.</span><span class="n">snapshot</span><span class="p">(</span><span class="s2">"bronze.orders"</span><span class="p">)</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="c1"># {"lsn": "0x...", "commit_ts": "2026-10-01T12:00:00.123"}</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="n">query</span> <span class="o">=</span> <span class="n">stream</span><span class="p">(</span><span class="n">spark</span><span class="p">,</span> <span class="p">{</span><span class="o">**</span><span class="n">options</span><span class="p">,</span> <span class="s2">"startingLsn"</span><span class="p">:</span> <span class="n">offset</span><span class="p">[</span><span class="s2">"lsn"</span><span class="p">]})</span><span class="o">.</span><span class="n">to_delta</span><span class="p">(</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>    <span class="s2">"bronze.orders"</span><span class="p">,</span>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="n">app_id</span><span class="o">=</span><span class="s2">"orders-v1"</span><span class="p">,</span>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="n">checkpoint</span><span class="o">=</span><span class="s2">"/checkpoints/orders"</span><span class="p">,</span>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="n">facts_table</span><span class="o">=</span><span class="s2">"ops.ingestion_facts"</span><span class="p">,</span>
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="p">)</span>
+</code></pre></div>
+<p>Done this way there is no <code>bootstrap</code> facts row: only <code>to_delta</code> writes it.
+<code>snapshot(target, resnapshot=True)</code> takes a new snapshot even when the target has one, for
+a manual recovery (<a href="../data-loss/#recovering-by-hand">Data loss</a>).</p>
+<p>To write the snapshot somewhere else, read it as a batch source:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">mssql_cdc</span><span class="w"> </span><span class="kn">import</span> <span class="n">register</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">register</span><span class="p">(</span><span class="n">spark</span><span class="p">)</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">rows</span> <span class="o">=</span> <span class="n">spark</span><span class="o">.</span><span class="n">read</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="s2">"mssql_cdc_snapshot"</span><span class="p">)</span><span class="o">.</span><span class="n">options</span><span class="p">(</span><span class="o">**</span><span class="n">options</span><span class="p">)</span><span class="o">.</span><span class="n">load</span><span class="p">()</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">rows</span><span class="o">.</span><span class="n">write</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="s2">"parquet"</span><span class="p">)</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">"/data/snapshots/orders"</span><span class="p">)</span>
+</code></pre></div>
+<p>Every action on <code>rows</code> reads the table again, stamped with the LSN recorded for that read:
+write it once and take the LSN from the rows' <code>_start_lsn</code>. The <code>snapshotLsn</code> option stamps
+an LSN you recorded yourself instead, before the read started.</p>
+<h2 id="chunked-snapshots">Chunked snapshots<a class="headerlink" href="#chunked-snapshots" title="Permanent link">&para;</a></h2>
+<p>A full snapshot has to finish within the CDC retention, or the changes after its LSN are
+purged before the stream reads them. A chunked snapshot starts the stream first, at an LSN
+S, and reads the table in chunks next to it, so it only needs the stream to keep running.
+Run the stream as usual, with <code>snapshot="chunked"</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">mssql_cdc</span><span class="w"> </span><span class="kn">import</span> <span class="n">stream</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">orders</span> <span class="o">=</span> <span class="n">stream</span><span class="p">(</span><span class="n">spark</span><span class="p">,</span> <span class="n">options</span><span class="p">)</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="n">query</span> <span class="o">=</span> <span class="n">orders</span><span class="o">.</span><span class="n">to_delta</span><span class="p">(</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="s2">"bronze.orders"</span><span class="p">,</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    <span class="n">app_id</span><span class="o">=</span><span class="s2">"orders-v1"</span><span class="p">,</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>    <span class="n">checkpoint</span><span class="o">=</span><span class="s2">"/Volumes/main/ops/checkpoints/orders"</span><span class="p">,</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>    <span class="n">facts_table</span><span class="o">=</span><span class="s2">"ops.ingestion_facts"</span><span class="p">,</span>  <span class="c1"># required: its rows hold the snapshot's state</span>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>    <span class="n">trigger</span><span class="o">=</span><span class="p">{</span><span class="s2">"processingTime"</span><span class="p">:</span> <span class="s2">"1 minute"</span><span class="p">},</span>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>    <span class="n">bootstrap</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>    <span class="n">snapshot</span><span class="o">=</span><span class="s2">"chunked"</span><span class="p">,</span>
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="p">)</span>
+</code></pre></div>
+<p>and, in a task of its own, call <code>backfill()</code> until it is done:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="n">grace</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">monotonic</span><span class="p">()</span> <span class="o">+</span> <span class="mi">3600</span>  <span class="c1"># the stream's first run may not have opened it yet</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>    <span class="n">status</span> <span class="o">=</span> <span class="n">orders</span><span class="o">.</span><span class="n">backfill</span><span class="p">(</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>        <span class="s2">"bronze.orders"</span><span class="p">,</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>        <span class="n">app_id</span><span class="o">=</span><span class="s2">"orders-v1"</span><span class="p">,</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>        <span class="n">facts_table</span><span class="o">=</span><span class="s2">"ops.ingestion_facts"</span><span class="p">,</span>
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>        <span class="n">chunk_rows</span><span class="o">=</span><span class="mi">1_000_000</span><span class="p">,</span>
+<a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>        <span class="n">max_seconds</span><span class="o">=</span><span class="mi">3600</span><span class="p">,</span>  <span class="c1"># one call's budget; the next call goes on</span>
+<a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>        <span class="n">min_headroom_hours</span><span class="o">=</span><span class="mi">24</span><span class="p">,</span>
+<a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>    <span class="p">)</span>
+<a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>    <span class="n">state</span> <span class="o">=</span> <span class="n">status</span><span class="p">[</span><span class="s2">"state"</span><span class="p">]</span>
+<a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>    <span class="k">if</span> <span class="n">state</span> <span class="o">==</span> <span class="s2">"done"</span><span class="p">:</span>
+<a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a>        <span class="k">break</span>
+<a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a>    <span class="k">if</span> <span class="n">state</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">"waiting_headroom"</span><span class="p">,</span> <span class="s2">"waiting_metrics"</span><span class="p">):</span>
+<a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a>        <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">600</span><span class="p">)</span>  <span class="c1"># status["reason"] says why</span>
+<a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a>    <span class="k">elif</span> <span class="n">state</span> <span class="o">==</span> <span class="s2">"no_snapshot"</span><span class="p">:</span>
+<a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a>        <span class="k">if</span> <span class="n">time</span><span class="o">.</span><span class="n">monotonic</span><span class="p">()</span> <span class="o">&gt;</span> <span class="n">grace</span><span class="p">:</span>  <span class="c1"># a wrong target or app_id, or snapshot="full"</span>
+<a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a>            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="n">status</span><span class="p">[</span><span class="s2">"reason"</span><span class="p">])</span>
+<a id="__codelineno-4-21" name="__codelineno-4-21" href="#__codelineno-4-21"></a>        <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">60</span><span class="p">)</span>
+<a id="__codelineno-4-22" name="__codelineno-4-22" href="#__codelineno-4-22"></a>    <span class="c1"># "running": the call's budget ran out; go on</span>
+</code></pre></div>
+<p><code>state</code> is one of <code>done</code>, <code>running</code>, <code>waiting_headroom</code>, <code>waiting_metrics</code> and
+<code>no_snapshot</code> (<a href="../../reference/options/#backfill-parameters">backfill parameters</a>); the
+result is a <a href="../../reference/api/#mssql_cdc.types.BackfillStatus"><code>BackfillStatus</code></a>.</p>
+<p>How it behaves (<a href="../../decisions/0028-chunked-snapshot-next-to-the-stream/">ADR 0028</a>):</p>
+<ol>
+<li>The first <code>to_delta</code> records S, <code>sys.fn_cdc_get_max_lsn()</code> as for a full snapshot, then
+   the key's MIN and MAX, and writes them in the target's
+   <a href="../../reference/tables/#snapshot-plans">snapshot plans</a> table, then S in a
+   <code>snapshot_open</code> facts row (mode <code>chunked</code>). It reads nothing else from the table and
+   starts the stream at S at once. Later runs find that row and start from S again until
+   the checkpoint has offsets.</li>
+<li>The first <code>backfill()</code> call plans every chunk (<a href="#how-chunks-are-sized">below</a>) and records
+   the plan in the plans table, then its chunk count in a <code>snapshot_plan</code> facts row: the
+   facts hold no key values. Each call then reads the next chunks of the plan
+   in waves, <a href="../../reference/options/#numpartitions">numPartitions</a> chunks at a time, one
+   connection each. Before a wave is read, its stamp L is recorded, <code>max_lsn</code> again, at or
+   after S. The wave is appended to the target in one Delta commit: operation 0,
+   <code>_start_lsn</code> = L, <code>_snapshot</code> = S and the chunk in <code>_chunk</code>. Then each chunk's key range
+   in the plans table, and one <code>snapshot_chunk</code> facts row per chunk: its rows and L. The
+   next wave is read meanwhile,
+   while a background thread writes that commit and those rows.</li>
+<li>After the last chunk, which ends just above the MAX recorded at the open, it writes the
+   snapshot's <code>bootstrap</code> facts row, with min = max = S and the rows of every chunk, and
+   returns <code>done</code>. Downstream rebuilds from S: its rows and every change after S.</li>
+</ol>
+<p>A commit that lands between a chunk's stamp and its read can show in the chunk and again as
+a change after S; the latest image per key absorbs it, as with a full snapshot. A key that
+moves between chunks while they are read is a change after S, which the stream carries, and
+so is every row inserted above the MAX: no chunk reads those.</p>
+<ul>
+<li>A crash between a wave's append and its facts rows reruns that wave: Delta skips the
+  append and the facts rows are rebuilt from the commit that holds the wave or, once Delta's
+  log cleanup has dropped that commit, from the wave's rows in the target (without its read
+  time and size). Nothing is appended twice. A wave whose rows reached the plans table is
+  read again with the same chunks, whatever <code>numPartitions</code> the rerun has.</li>
+<li><code>min_headroom_hours</code> pauses before a wave while the stream's newest facts row shows less
+  <a href="../monitoring/">retention headroom</a>, or the stream has written none: the chunks share the
+  link with the stream, and a stream that falls behind the retention loses the snapshot too.</li>
+<li><code>isolation="snapshot"</code>, or the stream's <code>isolationLevel=snapshot</code> option when <code>isolation</code>
+  is left out, reads under SNAPSHOT isolation, where the DBA has set
+  <code>ALLOW_SNAPSHOT_ISOLATION</code>: neither a chunk nor the planning then waits for writers'
+  locks, at the cost of the version store. By default it reads READ COMMITTED, where a chunk
+  or the plan waits for a transaction holding locks in its range; never <code>NOLOCK</code>.</li>
+<li><code>max_waves</code> and <code>max_seconds</code> bound one call; the result also has <code>chunks_done</code>,
+  <code>chunks_total</code> (the plan's, from the first call on) and the snapshot's LSN.</li>
+<li>A wave takes whole rounds of <code>numPartitions</code> chunks, each connection reading its share one
+  chunk after the other: as many rounds as <code>target_wave_seconds</code> (5 minutes by default)
+  holds at the pace of the last wave, and no more than the rest of <code>max_seconds</code>. Each wave
+  pays a Spark job, a commit and its facts rows, and waits for its slowest connection, so
+  fewer, longer waves cost less; its rows stay cached until its commit, so a longer target
+  holds more of them (where the platform caches: on Databricks serverless a wave is read by
+  its commit). <code>target_wave_seconds=0</code> reads one round per wave.</li>
+</ul>
+<p><a href="../silver/#chunked-snapshots"><code>apply_changes</code></a> applies the waves as they arrive, when given
+the facts table. <a href="../validation/"><code>reconcile</code></a> checks the chunks against the facts and the
+result against the table.</p>
+<h3 id="how-chunks-are-sized">How chunks are sized<a class="headerlink" href="#how-chunks-are-sized" title="Permanent link">&para;</a></h3>
+<p>The first <code>backfill()</code> call plans every chunk of the snapshot, after S, and the plan never
+changes while the snapshot is open: a later call with another <code>chunk_rows</code> logs a warning
+and keeps the plan's. Each chunk is a fixed key range <code>[lo, hi)</code>; the first is open below,
+each starts where the previous ends, and the last ends just above the MAX.</p>
+<ul>
+<li>One integer key: the rows are counted per slice of the key, about 16 slices per
+  <code>chunk_rows</code>, in one <code>GROUP BY</code> on the server. A slice holding more than <code>chunk_rows</code> rows
+  is counted again in finer slices. Consecutive slices are then joined into chunks of at
+  most <code>chunk_rows</code> rows. So the sizes follow where the rows are, not the key's spread: a
+  dense cluster of ids is split, and a sparse region or a sentinel far above the ids joins
+  its neighbours instead of making a chunk of its own. When planned, every chunk but the
+  last holds at most <code>chunk_rows</code> rows and loses less than one slice to the next; rows
+  written while the snapshot is read change that a little.</li>
+<li>Any other key (composite, string, date): each chunk ends <code>chunk_rows</code> keys after the
+  previous one, found by seeking the key on the server. The last ends at the first key after
+  the MAX; when there is none yet at planning, <code>backfill()</code> looks for it again before each
+  wave, so rows inserted above the MAX while a long backfill runs (a creation time, a
+  sequential <code>uniqueidentifier</code>) stay the stream's instead of growing the last chunk.</li>
+</ul>
+<p>Planning reads the whole key once before the first wave, under READ COMMITTED: on a table of
+billions of rows that is a full scan of the narrowest index on the key, at the start of the
+first call. It needs only the stream's grants (<a href="../permissions/">Permissions</a>), and reads no
+row over the network but the counts and the bounds.</p>
+<h3 id="tables-without-a-unique-index">Tables without a unique index<a class="headerlink" href="#tables-without-a-unique-index" title="Permanent link">&para;</a></h3>
+<p>CDC tracks a table without a primary key or unique index, a heap of log rows say, but
+identifies none of its rows, so its chunks have no key to be cut on: by default its chunked
+snapshot is one chunk, the whole table. Name the columns to cut on instead in the stream's
+<a href="../../reference/options/#snapshotkeys">snapshotKeys</a> option, a creation date or an id that
+does not change:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">options</span> <span class="o">=</span> <span class="p">{</span><span class="o">**</span><span class="n">options</span><span class="p">,</span> <span class="s2">"snapshotKeys"</span><span class="p">:</span> <span class="s1">'["created_at"]'</span><span class="p">}</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="n">orders</span> <span class="o">=</span> <span class="n">stream</span><span class="p">(</span><span class="n">spark</span><span class="p">,</span> <span class="n">options</span><span class="p">)</span>  <span class="c1"># for to_delta and for backfill() alike</span>
+</code></pre></div>
+<p>The open records the columns with the snapshot, and its plan stays on them; <code>backfill()</code>
+raises if the stream's options would cut on others. The columns are planned as a key is:
+one integer column from row counts per slice, anything else from seeks.</p>
+<ul>
+<li>Each chunk is a range <code>[lo, hi)</code> of the columns' values, as SQL Server compares them
+  (a case-insensitive collation's <code>'a'</code> and <code>'A'</code> are one value), with the NULLs in the
+  first chunk. A row is in one chunk only, and a value is never split: one held by more
+  rows than <code>chunk_rows</code> makes a bigger chunk, of fewer than twice its rows. An integer
+  column's plan counts no NULLs, so they all join its first chunk, however many they are.</li>
+<li>A row that moves to another value while the snapshot is read can be read by two chunks,
+  or by none. Its change rows after S are in bronze, but a table without a key cannot tell
+  which row they change: cut on a column the writers never update.</li>
+<li>On a column no index leads, each bound the plan seeks and each chunk read scans the
+  table: give the column an index, or take a full snapshot.</li>
+<li>The snapshot fills bronze only. <a href="../silver/"><code>apply_changes</code></a> needs a key to MERGE by and
+  refuses a capture instance without a unique index unless given <code>keys</code>, columns that
+  identify a row; with no such columns, read bronze as the change log it is.</li>
+</ul>
+<h3 id="one-mode-per-run">One mode per run<a class="headerlink" href="#one-mode-per-run" title="Permanent link">&para;</a></h3>
+<p>A run, one <code>to_delta</code> call with its bootstrap and its re-snapshot, takes its snapshots in
+one <code>snapshot</code> mode. The next run may use the other mode, but not while a snapshot of the
+other mode is still open. Both modes write a <code>snapshot_open</code> facts row before they read the
+table (a chunked one once per generation, a full one at each run), and the snapshot's
+<code>bootstrap</code> or <code>resnapshot</code> row closes it. With a facts table, <code>to_delta</code> (with
+<code>bootstrap=True</code>, <code>on_data_loss="resnapshot"</code>, or <code>snapshot_on_switch=True</code> and
+<code>snapshot="chunked"</code>), <code>snapshot(app_id=..., facts_table=...)</code> and <code>backfill()</code> raise
+<code>ValueError</code> when the stream has an open snapshot of the other mode, and
+<code>seed(app_id=..., facts_table=...)</code> when it has one of either mode. A chunked snapshot that
+<code>snapshot_on_switch</code> opens after a switch to a newer capture instance holds the mode too
+(<a href="../schema-changes/#rows-unchanged-since-the-switch">Schema changes</a>).</p>
+<p>A full snapshot is open only while a run may still be reading it. Once CDC cleanup has
+passed its LSN it can never complete, so it no longer holds the mode, and a chunked run takes
+its generation over.</p>
+<p>To finish an open snapshot and free the mode:</p>
+<ul>
+<li>a chunked one: call <code>backfill()</code> until it returns <code>done</code> (or rerun <code>to_delta</code> with
+  <code>snapshot="chunked"</code> and keep calling it);</li>
+<li>a full one, left open by a run that stopped while reading: rerun <code>to_delta</code> with
+  <code>snapshot="full"</code>, which reads the table again and writes its <code>bootstrap</code> or <code>resnapshot</code>
+  row.</li>
+</ul>
+<p>The error names the snapshot's LSN and generation. The library cannot tell a full snapshot
+whose run died from one still being read: after a killed full run, either rerun it or wait
+until CDC cleanup passes its LSN (the retention at most) before switching to chunked. A full
+re-snapshot that failed because it outlived the retention is past that already: rerun with
+<code>snapshot="chunked"</code> (and <code>resnapshot_interval_days=0</code>, as after any failed attempt).</p>
+<h2 id="tables-too-big-to-snapshot">Tables too big to snapshot<a class="headerlink" href="#tables-too-big-to-snapshot" title="Permanent link">&para;</a></h2>
+<p>A snapshot has to finish within the CDC retention, or the changes after its LSN are purged
+before the stream reads them and the stream stops with <code>DataLossError</code>. When the table's
+size over the link's MB/s does not fit in the retention, take a
+<a href="#chunked-snapshots">chunked snapshot</a>, or, when a copy already exists, seed the target from
+it: hours instead of the weeks a chunked snapshot of billions of rows takes.</p>
+<p>Seed the target from a copy you already have, an existing lake table for instance, and let
+the stream start where the copy ends:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">datetime</span><span class="p">,</span> <span class="n">timezone</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">mssql_cdc</span><span class="w"> </span><span class="kn">import</span> <span class="n">stream</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="n">orders</span> <span class="o">=</span> <span class="n">stream</span><span class="p">(</span><span class="n">spark</span><span class="p">,</span> <span class="n">options</span><span class="p">)</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="n">orders</span><span class="o">.</span><span class="n">seed</span><span class="p">(</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    <span class="s2">"bronze.orders"</span><span class="p">,</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>    <span class="n">spark</span><span class="o">.</span><span class="n">table</span><span class="p">(</span><span class="s2">"lake.orders"</span><span class="p">),</span>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>    <span class="n">as_of</span><span class="o">=</span><span class="n">datetime</span><span class="p">(</span><span class="mi">2026</span><span class="p">,</span> <span class="mi">9</span><span class="p">,</span> <span class="mi">30</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">tzinfo</span><span class="o">=</span><span class="n">timezone</span><span class="o">.</span><span class="n">utc</span><span class="p">),</span>  <span class="c1"># when the copy started</span>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>    <span class="n">app_id</span><span class="o">=</span><span class="s2">"orders-v1"</span><span class="p">,</span>
+<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>    <span class="n">facts_table</span><span class="o">=</span><span class="s2">"ops.ingestion_facts"</span><span class="p">,</span>
+<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a><span class="p">)</span>
+<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a>
+<a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="n">query</span> <span class="o">=</span> <span class="n">orders</span><span class="o">.</span><span class="n">to_delta</span><span class="p">(</span>
+<a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a>    <span class="s2">"bronze.orders"</span><span class="p">,</span>
+<a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a>    <span class="n">app_id</span><span class="o">=</span><span class="s2">"orders-v1"</span><span class="p">,</span>
+<a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a>    <span class="n">checkpoint</span><span class="o">=</span><span class="s2">"/checkpoints/orders"</span><span class="p">,</span>
+<a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a>    <span class="n">facts_table</span><span class="o">=</span><span class="s2">"ops.ingestion_facts"</span><span class="p">,</span>
+<a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a>    <span class="n">bootstrap</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>  <span class="c1"># finds the seed: never reads the table</span>
+<a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a><span class="p">)</span>
+</code></pre></div>
+<p><code>as_of</code> says where the copy ends: every commit at or before it must be in the copy. Later
+commits may be in it too; the stream replays them, and keeping the latest image per key
+absorbs the overlap, as after a snapshot.</p>
+<ul>
+<li>A <code>datetime</code> is the time the copy started being read, in UTC (an aware one is
+  converted). It maps to the last commit at or before it in <code>cdc.lsn_time_mapping</code>, on
+  SQL Server's clock (<code>sourceTimeZone</code>), to the second; in the hour before a daylight-saving
+  fall-back, an hour earlier, since that hour's local times repeat. Taken on another
+  machine, subtract the clock difference: earlier is always safe, it only replays more;
+  later loses the commits in between.</li>
+<li>An LSN recorded on SQL Server before the copy started is exact:
+  <code>SELECT CONVERT(varchar(22), sys.fn_cdc_get_max_lsn(), 1)</code>.</li>
+</ul>
+<p>The copy is appended to the target in one Delta commit as snapshot rows: <code>_operation = 0</code>,
+<code>_start_lsn</code> the LSN of <code>as_of</code>, <code>_commit_ts</code> its commit time, <code>_capture_instance</code> the
+configured one. Its columns match the captured columns by name, ignoring case; other
+columns are dropped and each value is cast to the stream's type. A captured column the copy
+lacks is a <code>ValueError</code>; <code>allow_missing_columns=True</code> writes it as NULL instead. With a
+facts table and the stream's <code>app_id</code>, the seed writes the <code>bootstrap</code> facts row, with the
+copy's row count, and <code>to_delta(bootstrap=True)</code> writes no second one.</p>
+<p>Nothing is written when:</p>
+<ul>
+<li>CDC no longer holds the changes right after <code>as_of</code> (cleanup passed it, or no commit is
+  that old): <code>DataLossError</code>, the copy is older than the retention. Seed a newer copy.</li>
+<li>the target already holds a snapshot of the table at another LSN: <code>ValueError</code>. A rerun
+  with the same <code>as_of</code> returns the seed already there, so the call can stay in the job:
+  also under a snapshot appended later, and once cleanup has passed a time <code>as_of</code>, when
+  the newest snapshot of the table at or before it is taken as the seed.</li>
+</ul>
+<p>Never use <code>on_data_loss="resnapshot"</code> with a full snapshot on such a table: it reads it
+whole. With <code>snapshot="chunked"</code> the re-snapshot is chunked too
+(<a href="../data-loss/#chunked-re-snapshots">Data loss</a>). After a
+<code>DataLossError</code>, seed a newer copy with <code>reseed=True</code>, then start a new checkpoint and
+<code>app_id</code> from it (<a href="../data-loss/#recovering-by-hand">Data loss</a>). The reasoning is in
+<a href="../../decisions/0025-seed-from-an-existing-copy/">ADR 0025</a>.</p>
+<h2 id="pitfalls">Pitfalls<a class="headerlink" href="#pitfalls" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>bootstrap=True</code> sets <code>startingLsn</code> itself: passing both is a <code>ValueError</code>.</li>
+<li>Do not delete the snapshot rows (<code>_operation = 0</code>) from bronze. The next run with
+  <code>bootstrap=True</code> would find none and read the whole table again.</li>
+<li>The snapshot reads the source table, not CDC: it puts a full scan's load on SQL Server.
+  Cap <code>numPartitions</code> on a busy server. A chunked snapshot spreads the same load over its
+  waves.</li>
+<li>A chunked snapshot needs the stream running while it is read: a gap after S (data loss,
+  <code>failOnDataLoss=false</code>) abandons it. Leave <code>snapshotLsn</code> unset: a stamp below S breaks it.</li>
+<li>A chunked snapshot copies source key values out of bronze: its
+  <a href="../../reference/tables/#snapshot-plans">plans table</a> next to bronze,
+  <code>&lt;target&gt;_snapshot_plans</code>, and bronze's commit <code>userMetadata</code> hold the chunk bounds: the
+  key's MIN and MAX at the open and, for a key that is not a single integer, a real key
+  every <code>chunk_rows</code> rows. Column masks and row filters on bronze do not reach them, so give
+  the plans table and bronze's history (<code>DESCRIBE HISTORY</code>) bronze's access policy; in
+  bronze's schema, the plans table often has it already. The facts rows hold none, but for
+  a snapshot opened before 0.7.0, which keeps them in its facts rows until it completes.</li>
+<li><code>to_delta(bootstrap=True)</code> with either <code>snapshot</code> mode, and <code>snapshot()</code>, return the S of
+  a chunked snapshot of the target, open or complete, instead of reading the table again
+  (given the facts table, a full run raises while it is open:
+  <a href="#one-mode-per-run">One mode per run</a>); <code>seed()</code> refuses a target that holds one. To take another kind, start a new target, or a
+  new checkpoint and <code>app_id</code>. Before the first wave lands only the facts show it, so
+  <code>snapshot()</code> and <code>seed()</code>, which do not read them, would not see it then.</li>
+</ul>
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../data-loss/">Data loss and re-snapshots</a>: snapshots taken after CDC cleanup purged
+  unread changes.</li>
+<li><a href="../silver/">Silver tables</a>: the current state from the snapshot and the changes.</li>
+<li><a href="../validation/">Validation</a>: compare silver with the source table after a bootstrap.</li>
+<li><a href="../../reference/api/#mssql_cdc.pipeline.CdcStream.snapshot"><code>CdcStream.snapshot</code></a>,
+  <a href="../../reference/api/#mssql_cdc.pipeline.CdcStream.backfill"><code>CdcStream.backfill</code></a> and
+  <a href="../../reference/api/#mssql_cdc.pipeline.CdcStream.seed"><code>CdcStream.seed</code></a> in the API
+  reference.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../many-tables/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Many tables">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Many tables
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../data-loss/" class="md-footer__link md-footer__link--next" aria-label="Next: Data loss and re-snapshots">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Data loss and re-snapshots
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      &copy; 2026 Emanuel Luis, MIT license
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog" role="status" aria-atomic="true">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      
+      
+        
+        
+      <script id="__config" type="application/json">{"annotate":null,"base":"../..","features":["content.action.edit","content.code.copy","navigation.sections","navigation.footer","search.highlight","toc.follow"],"redirect":null,"search":"../../assets/javascripts/workers/search.7d14d953.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","clipboard.error":"Could not copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":{"alias":true,"provider":"mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.67a597eb.min.js"></script>
+      
+    
+  </body>
+</html>

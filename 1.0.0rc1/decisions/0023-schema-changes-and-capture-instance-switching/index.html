@@ -1,0 +1,3098 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="PySpark streaming source for SQL Server CDC, with a Delta sink and a completeness signal">
+      
+      
+      
+        <link rel="canonical" href="https://emanuel-luis.github.io/mssql-cdc-pyspark/1.0.0rc1/decisions/0023-schema-changes-and-capture-instance-switching/">
+      
+      
+        <link rel="prev" href="../0022-defer-spark-changes-changelog/">
+      
+      
+        <link rel="next" href="../0024-documentation-site/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.67">
+    
+    
+      
+        <title>0023: Schema changes on the source, and switching to a newer capture instance - mssql-cdc-pyspark</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../../assets/stylesheets/modern/main.4ae390e2.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/modern/palette.96d1a7e4.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#0023-schema-changes-on-the-source-and-switching-to-a-newer-capture-instance" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="mssql-cdc-pyspark" class="md-header__button md-logo" aria-label="mssql-cdc-pyspark" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            mssql-cdc-pyspark
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              0023: Schema changes on the source, and switching to a newer capture instance
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun-moon" viewBox="0 0 24 24"><path d="M12 2v2M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715M16 12a4 4 0 0 0-4-4M19 5l-1.256 1.256M20 12h2"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-moon" viewBox="0 0 24 24"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    emanuel-luis/mssql-cdc-pyspark
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="mssql-cdc-pyspark" class="md-nav__button md-logo" aria-label="mssql-cdc-pyspark" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    mssql-cdc-pyspark
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    emanuel-luis/mssql-cdc-pyspark
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Home
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_2">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Getting started
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quickstart
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_3">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Guides
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Streaming into Delta
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/many-tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Many tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/bootstrap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Bootstrap
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/data-loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data loss and re-snapshots
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/silver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Silver tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/finalization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Finalization
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Monitoring
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/permissions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Permissions
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/schema-changes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Schema changes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DATABRICKS/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Running on Databricks
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_4">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Reference
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/options/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Options
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/output-schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Output schema
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Internals
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_5">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Internals
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DESIGN/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Design notes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../CONNECTORS/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  SQL Server drivers with native Arrow output
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../DEVELOPMENT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../RELEASING/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Releasing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ROADMAP/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Roadmap
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../REFERENCES/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  References
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Decisions
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+            <label class="md-nav__title" for="__nav_6">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Decisions
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture Decision Records
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0001-python-datasource-v2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0001: Python DataSource V2 instead of a JVM connector
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0002-lsn-offsets-with-commit-time/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0002: Offsets are hex LSNs carrying the commit time
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0003-mssql-python-default-backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0003: mssql-python as default driver, arrow-odbc as fallback
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0004-verdict-in-control-table/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0004: finalized_until in a control table, never in table properties
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0005-ordering-over-atomicity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0005: Data first, verdict after, monotonic
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0006-file-backed-fake-for-engine-tests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0006: A file-backed CDC fake to test the real Spark engine
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0007-infer-columns-from-cdc-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0007: Infer captured columns from CDC metadata
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0008-detect-source-time-zone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0008: Detect the server time zone by name
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0009-read-change-tables-directly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0009: Read the change table directly
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0010-heartbeat-for-quiet-databases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0010: Idle lag of ~5 minutes; an optional Agent heartbeat for less
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0011-num-partitions-from-cores/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0011: numPartitions defaults to the compute's cores
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0012-delta-tables-through-the-deltatable-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0012: Delta tables through the DeltaTable API, created typed and commented
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0013-schema-migrations-per-table-kind/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0013: Schema migrations per table kind
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0014-network-and-read-metrics-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0014: Network and read metrics in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0015-split-batches-by-change-rows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0015: Split batches by the change table's rows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0016-bootstrap-snapshot-at-a-recorded-lsn/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0016: Bootstrap with a snapshot stamped with an LSN recorded before the read
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0017-retention-headroom-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0017: Retention headroom in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0018-automatic-resnapshot-after-data-loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0018: Automatic re-snapshot after CDC data loss
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0019-silver-helper-applies-the-change-log/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0019: A silver helper applies the bronze change log to a current-state table
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0020-capture-and-ingestion-lag-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0020: Capture and ingestion lag in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0021-compatibility-policy-for-0x/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0021: Compatibility policy for 0.x
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0022-defer-spark-changes-changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0022: Defer a Spark CHANGES changelog connector
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0023: Schema changes on the source, and switching to a newer capture instance
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0023: Schema changes on the source, and switching to a newer capture instance
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#context" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Context
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Decision
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Decision">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#d1-detect-ddl-on-the-driver-every-batch-and-react-by-kind" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        D1. Detect DDL on the driver, every batch, and react by kind
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d2-follow-a-newer-capture-instance-of-the-same-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        D2. Follow a newer capture instance of the same table
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d3-the-dba-creates-and-drops-instances-the-library-never-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        D3. The DBA creates and drops instances; the library never does
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d4-bronze-takes-new-columns-type-widening-is-the-owners-choice" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        D4. Bronze takes new columns; type widening is the owner's choice
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d5-rows-unchanged-since-a-switch-keep-null-for-a-newly-captured-column" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        D5. Rows unchanged since a switch keep NULL for a newly captured column
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#needed-whichever-option" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Needed whichever option
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consequences" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Consequences
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-6-the-readers-other-warnings-reach-the-facts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 6: the reader's other warnings reach the facts
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-7-the-snapshot-after-a-switch-chunked" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 7: the snapshot after a switch, chunked
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-8-the-switchs-detail-as-json" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 8: the switch's detail as JSON
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0024-documentation-site/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0024: A documentation site built by Zensical, hosted on GitHub Pages
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0025-seed-from-an-existing-copy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0025: Seed a target from an existing copy of the table
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0026-continuous-finalization-listener/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0026: Continuous-mode finalization through a streaming query listener
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0027-fan-out-one-stream-per-table/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0027: Many tables: one stream per capture instance, started by a fan-out helper
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0028-chunked-snapshot-next-to-the-stream/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0028: Chunked snapshots read next to the running stream
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0029-driver-retries-and-lock-timeout/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0029: Driver-side retries, and an optional lock timeout
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0030-protocols-for-the-pluggable-seams/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0030: typing.Protocol for the pluggable seams
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0031-strict-typing-gates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0031: Strict typing: mypy strict on src, pyright --verifytypes on the public API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0032-facts-without-caching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0032: Facts without caching where the platform refuses it
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0033-spark-connect-tested-on-a-local-server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0033: Spark Connect, tested against a local Connect server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../0034-credentials-outside-the-connection-string/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0034: Credentials outside the connection string
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Changelog
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Contributing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#context" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Context
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Decision
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Decision">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#d1-detect-ddl-on-the-driver-every-batch-and-react-by-kind" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        D1. Detect DDL on the driver, every batch, and react by kind
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d2-follow-a-newer-capture-instance-of-the-same-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        D2. Follow a newer capture instance of the same table
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d3-the-dba-creates-and-drops-instances-the-library-never-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        D3. The DBA creates and drops instances; the library never does
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d4-bronze-takes-new-columns-type-widening-is-the-owners-choice" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        D4. Bronze takes new columns; type widening is the owner's choice
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#d5-rows-unchanged-since-a-switch-keep-null-for-a-newly-captured-column" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        D5. Rows unchanged since a switch keep NULL for a newly captured column
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#needed-whichever-option" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Needed whichever option
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consequences" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Consequences
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-6-the-readers-other-warnings-reach-the-facts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 6: the reader's other warnings reach the facts
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-7-the-snapshot-after-a-switch-chunked" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 7: the snapshot after a switch, chunked
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#amendment-8-the-switchs-detail-as-json" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Amendment 8: the switch's detail as JSON
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+  
+    <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark/edit/main/docs/decisions/0023-schema-changes-and-capture-instance-switching.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-file-pen" viewBox="0 0 24 24"><path d="M12.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v9.34"/><path d="M14 2v5a1 1 0 0 0 1 1h5M10.378 12.622a1 1 0 0 1 3 3.003L8.36 20.637a2 2 0 0 1-.854.506l-2.867.837a.5.5 0 0 1-.62-.62l.836-2.869a2 2 0 0 1 .506-.853z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="0023-schema-changes-on-the-source-and-switching-to-a-newer-capture-instance">0023: Schema changes on the source, and switching to a newer capture instance<a class="headerlink" href="#0023-schema-changes-on-the-source-and-switching-to-a-newer-capture-instance" title="Permanent link">&para;</a></h1>
+<p><strong>Status:</strong> accepted<br />
+<strong>Date:</strong> 2026-09-30T18:40:00-03:00<br />
+<strong>Amended:</strong> 2026-09-30T20:09:44-03:00, run against SQL Server 2022 (<code>tests/integration</code>); a type bronze cannot take names <code>delta.enableTypeWidening</code><br />
+<strong>Amended:</strong> 2026-09-30T21:25:30-03:00, drop the older instance one batch after the switch event; schema checked at an instance's first read; uncaptured declared columns fail; <code>detail</code> is the DDL statement<br />
+<strong>Amended:</strong> 2026-10-01T15:55:00-03:00, type widening on silver is a manual <code>ALTER COLUMN ... TYPE</code>: <code>apply_changes</code> merges without schema evolution<br />
+<strong>Amended:</strong> 2026-10-01T17:25:27-03:00, lab check t9 runs the switch under a continuous writer on SQL Server 2022 and 2017; the production SQL Server 2016 SP3 change tables have <code>__$command_id</code><br />
+<strong>Amended:</strong> 2026-10-01T18:15:53-03:00, the switch tests run with the <code>arrow-odbc</code> backend too (ADR 0003 Amendment 2)<br />
+<strong>Amended:</strong> 2026-10-07T01:41:18-03:00, the reader's other warnings (columns not read, unknown options, a fixed UTC offset) reach the batch's facts row as <code>detail</code> <code>{"warnings": [...]}</code> (Amendment 6)<br />
+<strong>Amended:</strong> 2026-10-13T18:45:19-03:00, <code>snapshot_on_switch</code> in chunked mode: the switch batch opens a chunked snapshot at the newer instance's start LSN, which <code>backfill()</code> reads next to the stream (Amendment 7)<br />
+<strong>Amended:</strong> 2026-10-15T09:50:28-03:00, a <code>capture_instance_switched</code> row's <code>detail</code> is JSON: <code>old</code>, <code>new</code>, <code>start_lsn</code>, <code>not_captured</code> and the former line as <code>text</code> (Amendment 8)</p>
+<h2 id="context">Context<a class="headerlink" href="#context" title="Permanent link">&para;</a></h2>
+<p>A capture instance captures a fixed column list, chosen when it is enabled. To capture a
+column added to the table, SQL Server's way is a second capture instance of the same table
+(at most two), then disabling the first. Until now the library read one capture instance
+with the schema of <code>load()</code> and knew nothing about DDL. Measured on SQL Server 2022 CU27
+and 2017 CU31 in Docker, library at <code>03a0f3a</code>, with a least-privilege login (SELECT on the
+source table and on <code>cdc.&lt;ci&gt;_CT</code> only):</p>
+<ul>
+<li><strong>ADD COLUMN</strong>: the capture instance does not change (captured columns and change table
+  stay); <code>cdc.ddl_history</code> gets a row with <code>required_column_update = 0</code>; an UPDATE that
+  touches only the new column writes no change row. The stream kept going and the new
+  column's changes were lost until a new instance existed.</li>
+<li><strong>DROP COLUMN</strong> of a captured column: <code>sp_cdc_get_captured_columns</code> still lists it and the
+  change table keeps it; rows captured after the drop have NULL there (before-images too); a
+  commit made just before the DROP but captured after it kept its value; a <code>ddl_history</code> row
+  (0). The stream continued and bronze got NULLs, but <code>snapshot()</code>, <code>bootstrap=True</code> and
+  <code>on_data_loss="resnapshot"</code> failed with <code>Invalid column name</code>: the snapshot selected the
+  captured columns from the source table.</li>
+<li><strong>ALTER COLUMN</strong> type (<code>decimal(9,2)</code> to <code>(18,4)</code>, <code>varchar(10)</code> to <code>(50)</code>, <code>int</code> to
+  <code>bigint</code>): <code>sp_cdc_get_captured_columns</code> reports the new type, the change-table column is
+  altered and its rows converted, and the <code>ddl_history</code> row has <code>required_column_update = 1</code>.
+  A running query kept its load-time schema: it wrote the values that fit and failed on the
+  first that did not (pyarrow <code>ArrowInvalid: Rescaling Decimal value would cause data loss</code>).
+  On restart the schema was re-inferred and the Delta append failed with
+  <code>DELTA_FAILED_TO_MERGE_FIELDS</code>; with <code>delta.enableTypeWidening = true</code> on bronze plus
+  schema merging, Delta widened the column and wrote.</li>
+<li><strong>Other DDL</strong>: a NOT NULL change writes a <code>ddl_history</code> row (0). Renaming a captured column
+  is refused (<code>REPLICATED</code>). Renaming an uncaptured column or the table is allowed and not
+  recorded; after a table rename <code>sp_cdc_help_change_data_capture</code> shows the new name under
+  the old instance. TRUNCATE and altering the key column are refused. Adding back a dropped
+  column's name with another type makes a new <code>column_id</code>: captured and source columns must
+  be compared by <code>column_id</code>, not by name.</li>
+<li><strong>Visibility</strong>: capture writes <code>ddl_history</code> asynchronously, but over 2,746 samples and 8
+  DDLs there was no case where <code>max_lsn &gt;= ddl_lsn</code> and the row was not yet visible through
+  <code>sp_cdc_get_ddl_history</code> to the least-privilege login: a batch that ends at or below
+  <code>max_lsn</code> sees its DDLs. <code>ddl_time</code> comes in whole minutes.</li>
+<li><strong>Permissions</strong>: with SELECT on the source table the login can call
+  <code>sys.sp_cdc_get_ddl_history</code>, <code>sp_cdc_get_captured_columns</code>,
+  <code>sp_cdc_help_change_data_capture</code> (which lists both instances of the table),
+  <code>fn_cdc_get_min_lsn</code> and <code>fn_cdc_get_column_ordinal</code>; it cannot read <code>cdc.ddl_history</code>,
+  <code>cdc.change_tables</code>, <code>cdc.captured_columns</code> or <code>cdc.index_columns</code>. With only the
+  change-table grant the procedures say "Object does not exist or access is denied", the help
+  procedure returns nothing and <code>min_lsn</code> is <code>0x00</code>. A new instance's change table needs its
+  own <code>GRANT SELECT</code>.</li>
+<li><strong>A second capture instance</strong>: its <code>start_lsn</code> S is the commit LSN of the enable (in
+  <code>cdc.lsn_time_mapping</code>). Right after the enable <code>max_lsn</code> is below S and
+  <code>fn_cdc_get_min_lsn(v2)</code> is <code>0x00</code> until capture processes the enable (2.9 s under load; up
+  to ~5 minutes on a quiet database, ADR 0016). Under 50 inserts/s, of 685 commits, 259 were
+  only in v1 (all with LSN &lt; S), 426 in both (all &gt;= S, with identical <code>(start_lsn, seqval)</code>),
+  none only in v2 and none in neither. So reading v1 below S and v2 from S reads every commit
+  once. The enable waits while a transaction that already wrote the table is open (3.4 s;
+  that commit is only in v1, below S); a transaction that began earlier but writes only after
+  the enable does not block it and is complete in both. <code>__$command_id</code> differs between the
+  instances for the same change (v1 1, 3, 3, 5; v2 2, 4, 4, 6), each keeping the order:
+  <code>(start_lsn, seqval, operation)</code> identifies a change across instances, <code>command_id</code> does
+  not. A third instance is refused. <code>sp_cdc_disable_table</code> on v1 takes effect at once: its
+  change table is gone, <code>min_lsn</code> is <code>0x00</code>, its <code>ddl_history</code> rows are deleted and readers
+  get <code>Invalid object name</code>. DDL made before v2 existed is not in v2's history. Documented
+  only: cleanup moves <code>start_lsn</code> of every instance up to its new low watermark, so two
+  instances can share one; Debezium breaks that tie by <code>create_date</code>.</li>
+<li><strong>The library before this change</strong>: Spark accepted a changed source schema on restart with
+  the same checkpoint (<code>foreachBatch</code>). Switching <code>captureInstance</code> to v2 before the stream
+  had read v1 up to S raised <code>DataLossError</code> (right), but blamed CDC cleanup; after catching
+  up on v1 the switch worked, since offsets are database-wide LSNs. v2's new column failed
+  the bronze append with <code>DELTA_METADATA_MISMATCH</code> (no <code>mergeSchema</code>), and a column v2 lacked
+  was filled with NULL by Delta. A rerun with <code>bootstrap=True</code> after the switch wrote a second
+  full snapshot: the lookup filtered <code>_capture_instance = ci</code>, as did the ADR 0018 recovery.
+  Once v1 was dropped, a stream still configured for it failed at <code>load()</code> with "not found",
+  not naming v2.</li>
+<li><strong>Others</strong>: Debezium's SQL Server connector leaves the new instance to the DBA, cuts the
+  old one at the new one's <code>start_lsn</code> (the same rule), emits a notification, and drops
+  nothing; it reads <code>cdc.change_tables</code>, which invariant 11 rules out here. Estuary switches
+  to the newest instance with <code>start_lsn &lt;=</code> its position, and can manage instances itself
+  with <code>db_owner</code>. Lakeflow Connect uses a DDL trigger (<code>db_owner</code>). Fivetran reads one
+  instance. Fabric mirroring fails on DDL and reseeds. AWS DMS reads the log instead.</li>
+</ul>
+<h2 id="decision">Decision<a class="headerlink" href="#decision" title="Permanent link">&para;</a></h2>
+<p>The offset contract does not change (invariant 1): every LSN is database-wide, so which
+capture instance holds a range follows from the instances' <code>start_lsn</code>, computed again each
+time a batch is planned, replays included.</p>
+<h3 id="d1-detect-ddl-on-the-driver-every-batch-and-react-by-kind">D1. Detect DDL on the driver, every batch, and react by kind<a class="headerlink" href="#d1-detect-ddl-on-the-driver-every-batch-and-react-by-kind" title="Permanent link">&para;</a></h3>
+<ul>
+<li>When planning a batch, the reader asks <code>sys.sp_cdc_get_ddl_history(&lt;ci&gt;)</code> of each instance
+  the batch reads for entries with <code>ddl_lsn</code> in <code>(start, end]</code> (<code>CdcClient.ddl_history</code>), and
+  compares the captured types (<code>sp_cdc_get_captured_columns</code>) with the query's schema by name
+  (with <code>columns</code>, with the captured types at the run's first planning, since the declared
+  ones are the user's own conversions).</li>
+<li>A type change of a captured column that the query's type can no longer hold fails the
+  planning of the batch that contains it, before any row is read, with <code>SchemaChangedError</code>
+  (a <code>RuntimeError</code>, exported): "restart the query to re-infer the schema (and enable
+  <code>delta.enableTypeWidening</code> on bronze for a widening)". <code>required_column_update = 1</code> alone
+  does not fail it: the batch replayed after the restart holds the same DDL, and would fail
+  forever; a change that still fits (<code>varchar(10)</code> to <code>(50)</code>, both STRING) is a
+  <code>schema_change</code> event.</li>
+<li>ADD and DROP of columns and any other DDL: the stream continues, logs a warning, and
+  leaves a <code>schema_change</code> event for the facts (below).</li>
+<li>Option <code>schemaChangePolicy</code>: <code>classify</code> (the default, as above) or <code>fail</code> (any DDL in the
+  batch fails it; the replayed batch fails again, so the message says to restart once with
+  <code>classify</code> to go past it).</li>
+<li>Considered:</li>
+<li>Diffing <code>sp_cdc_get_captured_columns</code> each batch alone: it sees type changes only; an ADD
+    leaves the captured list as it was and a DROP stays listed.</li>
+<li>Reading <code>cdc.ddl_history</code> or a DDL trigger on the source: the first needs a grant beyond
+    invariant 11, the second <code>db_owner</code> and writes to the source (Lakeflow Connect).</li>
+<li>Failing on every DDL (Fabric mirroring): a NOT NULL change, or a column nobody captures,
+    would stop ingestion for nothing. Ignoring DDL, as before: the type change failed
+    mid-batch in an executor with an Arrow error, after some rows were written.</li>
+<li><code>sp_cdc_get_ddl_history</code> is documented, readable by the least-privilege login, and was
+    never behind <code>max_lsn</code> in the measurements.</li>
+</ul>
+<h3 id="d2-follow-a-newer-capture-instance-of-the-same-table">D2. Follow a newer capture instance of the same table<a class="headerlink" href="#d2-follow-a-newer-capture-instance-of-the-same-table" title="Permanent link">&para;</a></h3>
+<ul>
+<li>The reader lists the table's instances with one <code>sys.sp_cdc_help_change_data_capture</code>
+  call without arguments, the listing <code>source_table</code> already reads, which applies the same
+  permission check per table (<code>CdcClient.capture_instances</code>, oldest first); newer means a
+  later <code>create_date</code> (a tie on <code>start_lsn</code> after cleanup is broken by it).</li>
+<li><code>partitions()</code> cuts <code>[from, to]</code> at S, the newer instance's <code>start_lsn</code>: the older instance
+  for <code>[from, S - 1]</code> (clamped to the range), the newer for <code>[S, to]</code>, never an empty range
+  (invariant 3). Each <code>LsnRange</code> names its capture instance, so executors stay stateless
+  (invariant 5), and the retention guard runs per instance: a range of the older instance
+  checks the older's <code>min_lsn</code> (invariant 4).</li>
+<li>Schema at <code>load()</code>: the union by column name of the instances' captured columns, in capture
+  order, older first. Two types for one name resolve to the newer's when it holds the older's
+  values; otherwise <code>load()</code> fails with <code>SchemaChangedError</code>. A range selects typed NULL for a
+  column its instance lacks.</li>
+<li>Ordering across instances is <code>(_start_lsn, _seqval, _operation)</code>: <code>_command_id</code> numbers
+  each instance's rows its own way, so it breaks ties only within one <code>_start_lsn</code>, which the
+  cut at S keeps within one instance. The existing key
+  <code>(_start_lsn, _command_id, _seqval, _operation)</code> stays right for the same reason; the bronze
+  column comment says so.</li>
+<li>A newer instance that appears while a query runs: the query switches in place when its
+  schema holds every column the newer instance captures, with a type that fits, and otherwise
+  fails with <code>SchemaChangedError</code> at the boundary, before reading past S, so that the next
+  <code>load()</code> infers the new columns. With <code>columns</code> the declared list decides: the switch is in
+  place, with a warning naming captured columns it leaves out.</li>
+<li>A configured instance that was dropped: <code>load()</code> and planning follow the newest instance of
+  its table (found through its default name <code>&lt;schema&gt;_&lt;table&gt;</code>, or through the newest name
+  the run has seen); otherwise the not-found error names the table's instances.</li>
+<li><code>DataLossError</code> names the dropped older instance beside cleanup when a gap is in the
+  table's oldest remaining instance and the run has seen an instance the table no longer has
+  (amendment: where the gap lies does not tell the two apart); a <code>PermissionError</code> on the
+  newer change table names its own grant.</li>
+<li>The reader leaves a <code>capture_instance_switched</code> event (detail <code>old -&gt; new</code>, plus the
+  columns the query reads that the newer instance no longer captures, NULL from S on) when it
+  plans the first batch that reads the newer instance. The older one can be dropped after the
+  stream's next batch, not before (amendment): the sink commits the event row inside
+  <code>foreachBatch</code>, before Spark commits the batch (and before the <code>snapshot_on_switch</code>
+  snapshot), and a replay of that batch reads the older instance below S again. Moving the
+  event a batch later would need state across runs to emit it once, and <code>snapshot_on_switch</code>
+  needs the batch that crosses S. A stream that starts at or past S (a bootstrap after the
+  enable, <code>startingLsn=latest</code>) never reads the older instance and leaves no event.</li>
+<li>A query's schema is checked against an instance's columns the first time the run reads it
+  (amendment), not only at S: a stream that skips ahead into the newer instance
+  (<code>failOnDataLoss=false</code> after the older was dropped) fails the same way. A source column no
+  instance of the table captures (a typo in <code>columns</code>, a column outside
+  <code>@captured_column_list</code>) fails the run's first planning and the snapshot with a
+  <code>ValueError</code> instead of reading NULL in every change row.</li>
+<li>Considered:</li>
+<li>The user changes <code>captureInstance</code> by hand (the state before): it needs the stream to have
+    read exactly up to S first, or it fails, and every consumer does it at its own moment.</li>
+<li>A new checkpoint or stream per instance: a second checkpoint (invariant 8 needs a new
+    <code>app_id</code>) and a gap or an overlap to reconcile at S.</li>
+<li>Estuary's rule, the newest instance with <code>start_lsn &lt;=</code> the position, switches only at a
+    batch boundary; cutting inside the batch lets one batch span the switch.</li>
+</ul>
+<h3 id="d3-the-dba-creates-and-drops-instances-the-library-never-does">D3. The DBA creates and drops instances; the library never does<a class="headerlink" href="#d3-the-dba-creates-and-drops-instances-the-library-never-does" title="Permanent link">&para;</a></h3>
+<p><code>sql/switch_capture_instance.sql</code> documents the procedure: enable the new instance with the
+new column list, <code>GRANT SELECT ON cdc.&lt;new&gt;_CT TO &lt;reader&gt;</code>, wait for every stream's
+<code>capture_instance_switched</code> event and one batch more, then disable the old one. Considered:
+letting the library manage instances (Estuary): it needs <code>db_owner</code> and writes to the source, against invariant 11.</p>
+<h3 id="d4-bronze-takes-new-columns-type-widening-is-the-owners-choice">D4. Bronze takes new columns; type widening is the owner's choice<a class="headerlink" href="#d4-bronze-takes-new-columns-type-widening-is-the-owners-choice" title="Permanent link">&para;</a></h3>
+<p>Every bronze append, micro-batches and snapshots alike, uses <code>mergeSchema</code>: a column the
+newer instance captures is added (older rows read NULL), and a column the batch lacks is
+NULL. A type change fails the append unless the bronze table has
+<code>delta.enableTypeWidening = true</code> and the change is a widening Delta supports; the library
+documents the property and never sets it. The failed append raises <code>SchemaChangedError</code>
+naming the property and the <code>ALTER TABLE</code> that sets it (amendment): Delta's own error,
+<code>[DELTA_FAILED_TO_MERGE_FIELDS] Failed to merge fields 'amount' and 'amount'</code>, says neither.
+Considered: <code>overwriteSchema</code> (a rewrite of the
+table) and casting new types back to the old ones (silent truncation).</p>
+<h3 id="d5-rows-unchanged-since-a-switch-keep-null-for-a-newly-captured-column">D5. Rows unchanged since a switch keep NULL for a newly captured column<a class="headerlink" href="#d5-rows-unchanged-since-a-switch-keep-null-for-a-newly-captured-column" title="Permanent link">&para;</a></h3>
+<p>The latest image of a row that did not change after S has NULL for a column only the newer
+instance captures. <code>to_delta(..., snapshot_on_switch=False)</code>: with <code>True</code>, after the batch
+that first reads the newer instance (the <code>capture_instance_switched</code> event), the sink appends
+a snapshot (ADR 0016's machinery, stamped with <code>max_lsn</code> recorded before its read), so the
+latest image carries the new column's values. Considered: always snapshotting at a switch (a
+full read, too slow for large tables, see
+<a href="../../guides/bootstrap/#tables-too-big-to-snapshot">tables too big to snapshot</a>) and
+never (a column that stays NULL until each row changes).</p>
+<h3 id="needed-whichever-option">Needed whichever option<a class="headerlink" href="#needed-whichever-option" title="Permanent link">&para;</a></h3>
+<ul>
+<li>The snapshot reads typed NULL for a captured column the source table no longer has,
+  matched by <code>column_id</code> (<code>CdcClient.present_columns</code>), instead of failing.</li>
+<li>Existing snapshots are looked up by the set of capture instances of the same source table,
+  case-insensitive (<code>pipeline._instances</code>): <code>snapshot()</code>, <code>bootstrap=True</code> and the ADR 0018
+  recovery. The recovery's retention test uses the <code>min_lsn</code> of the instance the source reads
+  the next changes from: the newest one starting at or before them, else the oldest.</li>
+<li>Silver (ADR 0019) reads the rows of that set: with <code>options</code>, the table's instances come
+  from SQL Server. A row in the range to apply of any other instance fails the call, naming
+  it, instead of being skipped. A column bronze gained is added to silver.</li>
+<li>Facts events. The reader, which cannot write Delta, leaves one JSON file per event in the
+  metrics directory (<code>metricsPath</code>), <code>event-&lt;kind&gt;-&lt;lsn&gt;.json</code> (ADR 0018's
+  <code>'data_skipped'</code>: <code>event-data_skipped-&lt;ci&gt;-&lt;from&gt;.json</code>) with <code>event</code>,
+  <code>capture_instance</code>, <code>lsn</code>, <code>commit_ts</code> and <code>detail</code>. The sink writes each as a facts row of
+  the batch, in the same Delta commit as the batch's own row (<code>txnAppId</code> <code>&lt;app_id&gt;#facts</code>,
+  <code>txnVersion</code> the batch id), so a replay writes both or neither, and removes the files only
+  after that commit; a file with the same kind and LSN is one event. The row has <code>event</code> set
+  to the kind, the batch's <code>batch_id</code>, <code>rows = 0</code>, <code>min_lsn = max_lsn = end_lsn</code> the event's
+  LSN, <code>end_commit_ts</code> its commit time, <code>lost_*</code> NULL, and the new column <code>detail</code> (facts
+  migration 6), which also rewrites the comments of <code>batch_id</code>, <code>rows</code>, <code>event</code>, <code>end_lsn</code>
+  and <code>end_commit_ts</code>. Without <code>metricsPath</code>, events are warning logs only.</li>
+<li>Considered: a separate <code>txnAppId</code> per event kind (a second event of one kind in a later
+    batch needs a new version anyway) and writing from the driver (the reader has no Spark
+    session, and the rows would land before the batch's data).</li>
+<li>Bronze migration 1 gives existing tables the new comments of <code>_capture_instance</code> (the
+  instance each row actually came from) and <code>_command_id</code> (numbered per instance).</li>
+</ul>
+<h2 id="consequences">Consequences<a class="headerlink" href="#consequences" title="Permanent link">&para;</a></h2>
+<ul>
+<li>A facts consumer that took <code>event IS NOT NULL</code> for "a snapshot" (as ADR 0018 and the README
+  suggested for the rebuild point) must now filter <code>event IN ('bootstrap', 'resnapshot')</code>:
+  <code>schema_change</code> and <code>capture_instance_switched</code> rows carry <code>rows = 0</code> and a <code>batch_id</code>.
+  Statistics over micro-batches still filter <code>event IS NULL</code>. Silver and the tests' helpers
+  do.</li>
+<li>A type change needs a restart; a widening also needs <code>delta.enableTypeWidening</code> on bronze.
+  Silver needs more (amendment 3): <code>apply_changes</code> adds new columns but does not change types,
+  and its MERGE runs without schema evolution, so the property alone leaves silver's column at
+  the old type; its owner widens it with <code>ALTER TABLE ... ALTER COLUMN ... TYPE</code>. A narrowing
+  or an incompatible change needs a new bronze table or a rewrite.</li>
+<li>The newer instance's change table needs its own grant before the stream reaches S; the
+  first read without it raises a <code>PermissionError</code> naming it.</li>
+<li>The older instance can be dropped once every stream reading the table has a batch after its
+  <code>capture_instance_switched</code> event (a facts row of the same <code>app_id</code> with a larger
+  <code>batch_id</code>); a stream already at or past S needs none. The event reaches the facts only
+  through <code>metricsPath</code>, which <code>to_delta</code> defaults only for a local or Volume checkpoint.
+  Dropped earlier, the changes below S that only it held are lost: <code>DataLossError</code> names
+  cleanup and the dropped instance as the two possible causes (where the gap lies does not
+  tell them apart), and <code>on_data_loss="resnapshot"</code> recovers with a snapshot.</li>
+<li>With <code>columns</code>, the D1 type check compares with the captured types at the run's first
+  planning, so it catches a type change made while the query runs. One made while it is
+  stopped is not caught at planning: the read fails casting to the declared type, and
+  <code>columns</code> needs the new type.</li>
+<li>Planning asks one <code>sp_cdc_help_change_data_capture</code> and, per instance read, one
+  <code>sp_cdc_get_ddl_history</code> and one <code>sp_cdc_get_captured_columns</code> more per batch.</li>
+<li>After the old instance is dropped and <code>captureInstance</code> renamed to the new one, SQL Server
+  no longer lists the old name: rows stamped with it, a bootstrap snapshot included, match
+  nothing. A <code>bootstrap=True</code> rerun then takes one more snapshot (harmless, only slower), and a
+  silver table built from scratch fails loudly on the old rows (keep the old name configured,
+  as the stream follows it). ponytail: record the table's instance names in the facts events
+  and match on those if this shows up.</li>
+<li>SQL Server 2016 SP3: the <code>sp_cdc_*</code> procedures used here exist with no documented
+  per-version differences. <code>__$command_id</code> came with KB3030352 (2016 RTM CU5, SP1 CU2), and
+  the production change tables have it (amendment 4: read through the library on
+  2026-09-30). <code>CURRENT_TIMEZONE_ID</code> is absent (the ADR 0008 fallback applies). 2016 left
+  extended support on 2026-07-15.</li>
+<li>Lab check t9 (amendment 4) runs the switch end to end on SQL Server 2022 CU27 and 2017
+  CU31: a continuous writer, <code>sql/switch_capture_instance.sql</code> as written, a least-privilege
+  login, the running query stopped at S and restarted, the old instance dropped after the
+  event and one batch more. Bronze held every change once, its latest image equalled the
+  table, the stream kept running.</li>
+<li>Unverified: the switch on SQL Server 2016; Databricks;
+  a tie on <code>start_lsn</code> after cleanup (documented, not reproduced); <code>ddl_history</code> visibility
+  is measured (8 DDLs), not documented.</li>
+<li>Tests: <code>tests/test_delta_sink.py</code> (event files folded once across a replay, <code>mergeSchema</code>,
+  bronze migration 1, a switch adding a column with its events and no second bootstrap
+  snapshot, following the new instance after the old is dropped, <code>snapshot_on_switch</code>, a
+  snapshot after a DROP COLUMN, a re-snapshot after the old instance was dropped too early,
+  the type widening message) and <code>tests/test_silver.py</code> (silver across a switch, with and
+  without <code>options</code>). <code>tests/integration</code>, against SQL Server 2022 with a least-privilege
+  login (amendment): a new instance enabled under a continuous writer (every commit once,
+  below S from the old instance), the old one disabled too early (<code>DataLossError</code>, then
+  <code>on_data_loss="resnapshot"</code>), a type change stopping a running query before its batch is
+  written and widened on restart, bootstrap and re-snapshot after a DROP COLUMN, an ADD
+  COLUMN reaching bronze through a new instance with <code>snapshot_on_switch</code>, the missing grant
+  on the new change table, and a transaction open during the enable (only in the old
+  instance, below S). They also pinned that an update of only a column an instance does not
+  capture writes no change row there; the fake now does the same.</li>
+</ul>
+<h2 id="amendment-6-the-readers-other-warnings-reach-the-facts">Amendment 6: the reader's other warnings reach the facts<a class="headerlink" href="#amendment-6-the-readers-other-warnings-reach-the-facts" title="Permanent link">&para;</a></h2>
+<p>The reader logs on the driver, to the stderr of the Python worker Spark runs the source in,
+which jobs rarely keep. Changes on the source were already event rows; the warnings about
+what the query reads were in that log only: captured columns that <code>columns</code> leaves out at a
+newer instance (D2), computed columns left out of the inferred schema or listed in <code>columns</code>
+(<a href="../0007-infer-columns-from-cdc-metadata/">ADR 0007</a>), unknown options, and the UTC offset
+it converts commit times with on a server older than SQL Server 2022
+(<a href="../0008-detect-source-time-zone/">ADR 0008</a>).</p>
+<ul>
+<li>The reader keeps each until it plans a batch with a range to read. The batch's last range
+  carries them to its task, which writes them in its metrics file, and the sink puts them in
+  the <code>detail</code> of the batch's own row as JSON <code>{"warnings": [...]}</code>, only when there are any
+  (facts migration 12, a comment). They ride the batch's facts commit, so a replay writes
+  them once, and a retried task rewrites its file with them. Without <code>metricsPath</code> they stay
+  in the log.</li>
+<li>A restarted run's first batch can replay one whose facts commit was written before the
+  crash, which Delta then skips with the new run's warnings in it. The sink knows it from the
+  facts (the batch id is the largest the <code>app_id</code> wrote, as its resume check reads) and puts
+  them in the next batch's row instead.</li>
+<li>A warning is recorded as often as it is logged: once per run, and the offset again when it
+  changes. One logged elsewhere (the computed columns by <code>load()</code>, the offset by the client)
+  is recorded by the reader, not logged again.</li>
+<li>Retries on a new connection (ADR 0029) stay in the log: the batch went through.</li>
+<li>Considered: an event row per warning, a new <code>event</code> value for every consumer's filters to
+  know where the batch's row has <code>detail</code> free; and an event file written while planning,
+  which the sink folds into whatever batch comes next, a dead attempt's included, where a
+  dead attempt's partition files are removed before the read.</li>
+<li>Tests: <code>tests/test_reader_units.py</code> (each warning on the batch's last range, once, and in
+  its task's metrics file) and <code>tests/test_delta_sink.py</code> (a misspelt option and a column a
+  newer instance captures reach the batch's row once across a replay; a restart's warnings
+  reach the next batch's row when its first batch replays one already in the facts).</li>
+</ul>
+<h2 id="amendment-7-the-snapshot-after-a-switch-chunked">Amendment 7: the snapshot after a switch, chunked<a class="headerlink" href="#amendment-7-the-snapshot-after-a-switch-chunked" title="Permanent link">&para;</a></h2>
+<p>D5's snapshot reads the whole table inside the batch that read the switch, and the stream
+waits for it, so <code>to_delta</code> refused <code>snapshot_on_switch=True</code> with <code>snapshot="chunked"</code>: the
+tables too big to snapshot, the ones that take chunked snapshots, kept NULL in the new column
+until each row changed. Now, with <code>snapshot="chunked"</code>, that batch only opens a chunked
+snapshot (<a href="../0028-chunked-snapshot-next-to-the-stream/">ADR 0028</a>) and <code>backfill()</code> reads it
+next to the stream, as a chunked bootstrap; with <code>"full"</code> nothing changes.</p>
+<ul>
+<li>Its S is the newer instance's start LSN, the switch event's <code>min_lsn</code>, not <code>max_lsn</code> after
+  the batch as the full snapshot takes. The batch read past it, and its changes are in bronze
+  before the snapshot opens, so the stream has every change after S, as a generation has
+  after its chunked snapshot's S. Silver's rebuild (the rows of S and the changes after S)
+  and <code>reconcile</code>'s position (a chunked snapshot's S, which the stream has read up to: ADR
+  0028 Amendment 2) hold as they are. Every chunk is stamped with <code>max_lsn</code> before its wave,
+  after the batch's end and so after S; S is recorded before any row is read, but is not
+  <code>max_lsn</code> (invariant 12). S lies after the batch's start, which is at or after the S of
+  any chunked snapshot of the generation: it is the newest, and supersedes one still open,
+  as a newer open does (<code>backfill()</code>, silver and <code>reconcile</code> take the newest); that one's
+  chunks are read again, now with the new column.</li>
+<li>Its 'snapshot_open' row has <code>kind</code> <code>'bootstrap'</code> (no change was lost: a <code>'resnapshot'</code> row
+  is what monitoring alerts on), the running generation, and a new key <code>switch_batch_id</code>,
+  the <code>batch_id</code> of the switch's 'capture_instance_switched' row. The generation's own Delta
+  keys may be taken by its bootstrap or re-snapshot, so the open is keyed by S,
+  <code>&lt;app_id&gt;#snapopen.&lt;S&gt;</code>, 0, as its plans table row, and <code>backfill()</code> writes the completion,
+  a <code>'bootstrap'</code> row, as <code>&lt;app_id&gt;#snapdone.&lt;S&gt;</code>, 0 when the open has <code>switch_batch_id</code>. A
+  replay of the switch batch opens it at the same S: Delta skips both rows, and it is read
+  back.</li>
+<li>One mode per run: a chunked run with <code>snapshot_on_switch</code> checks the lock at its start
+  (ADR 0028), and the open snapshot holds the mode for the runs and <code>backfill()</code> calls after
+  it.</li>
+<li>State: facts migration 14 and plans migration 1, comments only (<code>event</code> and <code>detail</code>), and
+  the added key (<a href="../0021-compatibility-policy-for-0x/">ADR 0021</a> amendment 10).</li>
+<li>Considered: S at <code>max_lsn</code> after the batch, as the full snapshot: above the stream's
+  position, so <code>reconcile</code> would need the facts to tell a switch's S from a generation's, and
+  a commit in between would be in neither bronze nor its read of the change table. A new
+  <code>kind</code> or event (<code>'switch'</code>): every consumer that filters <code>event IN ('bootstrap',
+  'resnapshot')</code>, and an older release's silver, would miss its completion. Keeping the open
+  chunked snapshot and reading only the rest: its chunks read before the switch lack the new
+  column.</li>
+<li>Tests: <code>tests/test_silver.py</code> (a chunked snapshot opened after a switch, read by
+  <code>backfill()</code> in two calls with a delete and an update between them: silver equal to the
+  source with the new column; its completion next to the bootstrap's in one generation; the
+  open read back when the switch batch replays; a full run refused while it is open; a rerun
+  opens nothing), <code>tests/test_migrations.py</code>
+  (plans migration 1) and <code>tests/integration</code> (against SQL Server 2022, the
+  <code>sql/switch_capture_instance.sql</code> steps with a chunked bootstrap: the snapshot opened at the
+  new instance's start LSN, silver equal to the table with the new column after <code>backfill()</code>,
+  and again after the old instance is disabled).</li>
+</ul>
+<h2 id="amendment-8-the-switchs-detail-as-json">Amendment 8: the switch's detail as JSON<a class="headerlink" href="#amendment-8-the-switchs-detail-as-json" title="Permanent link">&para;</a></h2>
+<p>The switch's <code>detail</code> was a line for people (<code>old -&gt; new</code>, then the columns no longer
+captured), so a consumer that wanted the instance names, to wait for a switch in step 4 of
+<code>sql/switch_capture_instance.sql</code> or to alert on uncaptured columns, parsed text that may
+be reworded in any release (<a href="../0021-compatibility-policy-for-0x/">ADR 0021</a> amendment 11).
+From 1.0.0rc1 the reader writes it as JSON, through <code>events.switch_detail</code>:
+<code>{"old", "new", "start_lsn", "not_captured", "text"}</code>, <code>text</code> the former line, so every piece
+it held is still there, and <code>start_lsn</code> the row's <code>min_lsn</code>. The driver's warning still logs
+the line.</p>
+<ul>
+<li>State: rows written before keep the text (<a href="../0021-compatibility-policy-for-0x/">ADR 0021</a>
+  amendment 12); <code>events.switch_of</code> reads either as the same payload, and the queries in the
+  schema changes guide and the SQL script read <code>coalesce(get_json_object(detail, '$.text'),
+  detail)</code>. Facts migration 15 rewrites the <code>detail</code> comment only.</li>
+<li>Tests: <code>tests/test_source_fake.py</code> (the event file's JSON, with and without a column the
+  newer instance does not capture), <code>tests/test_delta_sink.py</code> (the facts row through
+  <code>to_delta</code>), <code>tests/test_payloads.py</code> (<code>switch_of</code> on both forms) and <code>tests/integration</code>
+  (against SQL Server 2022); lab check t9 reads it with <code>switch_of</code>.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../0022-defer-spark-changes-changelog/" class="md-footer__link md-footer__link--prev" aria-label="Previous: 0022: Defer a Spark CHANGES changelog connector">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                0022: Defer a Spark CHANGES changelog connector
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../0024-documentation-site/" class="md-footer__link md-footer__link--next" aria-label="Next: 0024: A documentation site built by Zensical, hosted on GitHub Pages">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                0024: A documentation site built by Zensical, hosted on GitHub Pages
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      &copy; 2026 Emanuel Luis, MIT license
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog" role="status" aria-atomic="true">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      
+      
+        
+        
+      <script id="__config" type="application/json">{"annotate":null,"base":"../..","features":["content.action.edit","content.code.copy","navigation.sections","navigation.footer","search.highlight","toc.follow"],"redirect":null,"search":"../../assets/javascripts/workers/search.7d14d953.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","clipboard.error":"Could not copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":{"alias":true,"provider":"mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.67a597eb.min.js"></script>
+      
+    
+  </body>
+</html>

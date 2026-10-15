@@ -1,0 +1,2860 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="PySpark streaming source for SQL Server CDC, with a Delta sink and a completeness signal">
+      
+      
+      
+        <link rel="canonical" href="https://emanuel-luis.github.io/mssql-cdc-pyspark/1.0.0rc1/ROADMAP/">
+      
+      
+        <link rel="prev" href="../RELEASING/">
+      
+      
+        <link rel="next" href="../REFERENCES/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.67">
+    
+    
+      
+        <title>Roadmap - mssql-cdc-pyspark</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.4ae390e2.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../assets/stylesheets/modern/palette.96d1a7e4.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#roadmap" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="mssql-cdc-pyspark" class="md-header__button md-logo" aria-label="mssql-cdc-pyspark" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            mssql-cdc-pyspark
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Roadmap
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun-moon" viewBox="0 0 24 24"><path d="M12 2v2M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715M16 12a4 4 0 0 0-4-4M19 5l-1.256 1.256M20 12h2"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-moon" viewBox="0 0 24 24"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    emanuel-luis/mssql-cdc-pyspark
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="mssql-cdc-pyspark" class="md-nav__button md-logo" aria-label="mssql-cdc-pyspark" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    mssql-cdc-pyspark
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    emanuel-luis/mssql-cdc-pyspark
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Home
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_2">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Getting started
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quickstart
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_3">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Guides
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Streaming into Delta
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/many-tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Many tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/bootstrap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Bootstrap
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/data-loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data loss and re-snapshots
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/silver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Silver tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/finalization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Finalization
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Monitoring
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/permissions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Permissions
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/schema-changes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Schema changes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DATABRICKS/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Running on Databricks
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_4">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Reference
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/options/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Options
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/output-schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Output schema
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Tables
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Internals
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+            <label class="md-nav__title" for="__nav_5">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Internals
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DESIGN/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Design notes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CONNECTORS/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  SQL Server drivers with native Arrow output
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DEVELOPMENT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RELEASING/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Releasing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Roadmap
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Roadmap
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#shipped" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Shipped
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#021-patch-shipped-2026-10-06-tests-and-supply-chain" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.2.1 (patch, shipped 2026-10-06): tests and supply chain
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#022-patch-shipped-2026-10-07-time-and-reconcile" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.2.2 (patch, shipped 2026-10-07): time and reconcile
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#030-minor-breaking-shipped-2026-10-07-api-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.3.0 (minor, Breaking, shipped 2026-10-07): API shape
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#040-minor-shipped-2026-10-07-typing-and-protocols" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.4.0 (minor, shipped 2026-10-07): typing and protocols
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#041-patch-shipped-2026-10-08-maintenance" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.4.1 (patch, shipped 2026-10-08): maintenance
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#050-minor-shipped-2026-10-09-faster-first-import" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.5.0 (minor, shipped 2026-10-09): faster first import
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#060-minor-shipped-2026-10-10-platforms" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.6.0 (minor, shipped 2026-10-10): platforms
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#070-minor-shipped-2026-10-13-credentials-and-privacy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.7.0 (minor, shipped 2026-10-13): credentials and privacy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#080-minor-shipped-2026-10-14-operations-at-scale" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.8.0 (minor, shipped 2026-10-14): operations at scale
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#100-stability" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        1.0.0: stability
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#after-10" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        After 1.0
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../REFERENCES/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  References
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Decisions
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_6">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Decisions
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture Decision Records
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0001-python-datasource-v2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0001: Python DataSource V2 instead of a JVM connector
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0002-lsn-offsets-with-commit-time/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0002: Offsets are hex LSNs carrying the commit time
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0003-mssql-python-default-backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0003: mssql-python as default driver, arrow-odbc as fallback
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0004-verdict-in-control-table/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0004: finalized_until in a control table, never in table properties
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0005-ordering-over-atomicity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0005: Data first, verdict after, monotonic
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0006-file-backed-fake-for-engine-tests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0006: A file-backed CDC fake to test the real Spark engine
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0007-infer-columns-from-cdc-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0007: Infer captured columns from CDC metadata
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0008-detect-source-time-zone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0008: Detect the server time zone by name
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0009-read-change-tables-directly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0009: Read the change table directly
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0010-heartbeat-for-quiet-databases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0010: Idle lag of ~5 minutes; an optional Agent heartbeat for less
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0011-num-partitions-from-cores/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0011: numPartitions defaults to the compute's cores
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0012-delta-tables-through-the-deltatable-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0012: Delta tables through the DeltaTable API, created typed and commented
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0013-schema-migrations-per-table-kind/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0013: Schema migrations per table kind
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0014-network-and-read-metrics-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0014: Network and read metrics in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0015-split-batches-by-change-rows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0015: Split batches by the change table's rows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0016-bootstrap-snapshot-at-a-recorded-lsn/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0016: Bootstrap with a snapshot stamped with an LSN recorded before the read
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0017-retention-headroom-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0017: Retention headroom in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0018-automatic-resnapshot-after-data-loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0018: Automatic re-snapshot after CDC data loss
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0019-silver-helper-applies-the-change-log/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0019: A silver helper applies the bronze change log to a current-state table
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0020-capture-and-ingestion-lag-in-facts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0020: Capture and ingestion lag in the ingestion facts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0021-compatibility-policy-for-0x/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0021: Compatibility policy for 0.x
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0022-defer-spark-changes-changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0022: Defer a Spark CHANGES changelog connector
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0023-schema-changes-and-capture-instance-switching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0023: Schema changes on the source, and switching to a newer capture instance
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0024-documentation-site/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0024: A documentation site built by Zensical, hosted on GitHub Pages
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0025-seed-from-an-existing-copy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0025: Seed a target from an existing copy of the table
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0026-continuous-finalization-listener/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0026: Continuous-mode finalization through a streaming query listener
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0027-fan-out-one-stream-per-table/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0027: Many tables: one stream per capture instance, started by a fan-out helper
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0028-chunked-snapshot-next-to-the-stream/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0028: Chunked snapshots read next to the running stream
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0029-driver-retries-and-lock-timeout/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0029: Driver-side retries, and an optional lock timeout
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0030-protocols-for-the-pluggable-seams/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0030: typing.Protocol for the pluggable seams
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0031-strict-typing-gates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0031: Strict typing: mypy strict on src, pyright --verifytypes on the public API
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0032-facts-without-caching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0032: Facts without caching where the platform refuses it
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0033-spark-connect-tested-on-a-local-server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0033: Spark Connect, tested against a local Connect server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0034-credentials-outside-the-connection-string/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0034: Credentials outside the connection string
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Changelog
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Contributing
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#shipped" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Shipped
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#021-patch-shipped-2026-10-06-tests-and-supply-chain" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.2.1 (patch, shipped 2026-10-06): tests and supply chain
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#022-patch-shipped-2026-10-07-time-and-reconcile" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.2.2 (patch, shipped 2026-10-07): time and reconcile
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#030-minor-breaking-shipped-2026-10-07-api-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.3.0 (minor, Breaking, shipped 2026-10-07): API shape
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#040-minor-shipped-2026-10-07-typing-and-protocols" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.4.0 (minor, shipped 2026-10-07): typing and protocols
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#041-patch-shipped-2026-10-08-maintenance" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.4.1 (patch, shipped 2026-10-08): maintenance
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#050-minor-shipped-2026-10-09-faster-first-import" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.5.0 (minor, shipped 2026-10-09): faster first import
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#060-minor-shipped-2026-10-10-platforms" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.6.0 (minor, shipped 2026-10-10): platforms
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#070-minor-shipped-2026-10-13-credentials-and-privacy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.7.0 (minor, shipped 2026-10-13): credentials and privacy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#080-minor-shipped-2026-10-14-operations-at-scale" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        0.8.0 (minor, shipped 2026-10-14): operations at scale
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#100-stability" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        1.0.0: stability
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#after-10" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        After 1.0
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+  
+    <a href="https://github.com/emanuel-luis/mssql-cdc-pyspark/edit/main/docs/ROADMAP.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-file-pen" viewBox="0 0 24 24"><path d="M12.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v9.34"/><path d="M14 2v5a1 1 0 0 0 1 1h5M10.378 12.622a1 1 0 0 1 3 3.003L8.36 20.637a2 2 0 0 1-.854.506l-2.867.837a.5.5 0 0 1-.62-.62l.836-2.869a2 2 0 0 1 .506-.853z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="roadmap">Roadmap<a class="headerlink" href="#roadmap" title="Permanent link">&para;</a></h1>
+<p>Small releases, one theme each, plus fixes. Under the 1.x policy (ADR 0021 amendment 11) a
+patch only fixes, or changes nothing users can see (tests, CI, docs); a minor adds public API
+or deprecates; only a major breaks the Python API (listed under "Breaking" in
+<code>CHANGELOG.md</code>). Before 1.0, a minor could break it.</p>
+<h2 id="shipped">Shipped<a class="headerlink" href="#shipped" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] <strong>v0.1, validate what exists</strong>: lab checks t1–t7 green against SQL Server 2022, code
+      and fake fixed where real CDC differed (ADRs 0008–0010); Delta tests; CI <code>unit</code>,
+      <code>integration</code> and <code>lab</code> jobs; Databricks classic (DBR 18.2, dedicated): t5, t6
+      <code>--schema</code>.</li>
+<li>[x] <strong>PyPI release</strong> of 0.1.0 (2026-10-01): package metadata, <code>py.typed</code>, <code>release.yml</code>
+      with Trusted Publishing behind a reviewed environment and a TestPyPI dry run,
+      <code>CHANGELOG.md</code> and the 0.x compatibility policy (ADR 0021); steps in <code>RELEASING.md</code>.</li>
+<li>[x] <strong>v0.2, production concerns</strong>, shipped as 0.2.0 on 2026-10-06: bootstrap snapshot
+      (ADR 0016), re-snapshot after data loss (ADR 0018), seeding from an existing copy
+      (ADR 0025), chunked first import next to the stream with <code>backfill()</code> and
+      <code>reconcile()</code> (ADR 0028, lab check t10), schema changes and capture instance switches
+      (ADR 0023, lab check t9, also on SQL Server 2017), the silver helper (ADR 0019),
+      continuous-mode finalization (ADR 0026), retention headroom and operational metrics in
+      the facts (ADRs 0017, 0020), <code>arrow-odbc</code> in CI (ADR 0003), one stream per table with
+      <code>start_many</code> (ADR 0027). Chunked snapshots ran from Databricks against a production
+      source on a 34-million and a 100-million-row table.</li>
+<li>[x] Even chunks for sparse single integer keys: a chunked snapshot's plan counts the rows
+      of each key slice on the server (ADR 0028), which supersedes NTILE tiles for them.</li>
+</ul>
+<h2 id="021-patch-shipped-2026-10-06-tests-and-supply-chain">0.2.1 (patch, shipped 2026-10-06): tests and supply chain<a class="headerlink" href="#021-patch-shipped-2026-10-06-tests-and-supply-chain" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Faster suites and CI: unit tests off the critical path, long jobs in parallel, a
+      lighter test session, pure tests where the engine is not needed (target: CI in about
+      30 minutes). Locally the unit suite went from 68 to 28 minutes with 277 to 420 tests.</li>
+<li>[x] <code>tests/compat/0.2.0</code>: the state the 0.2.0 wheel wrote.</li>
+<li>[x] Supply-chain checks in CI: <code>pip-audit</code>, <code>zizmor</code> (Actions), OpenSSF Scorecard, and a
+      job that installs the lowest direct dependency versions the package declares
+      (<code>uv sync --resolution lowest-direct</code>) and runs the fast tests.</li>
+<li>[ ] Report to Spark: stopping a PySpark <code>foreachBatch</code> query mid-batch (as <code>to_delta</code> does)
+      prints a <code>StackOverflowError</code> from the stream execution thread. <code>StreamExecution</code>'s
+      <code>isInterruptionException</code> runs the regex <code>PROXY_ERROR</code>, whose <code>(.|\r\n|\r|\n)*</code> recurses
+      once per character, over the Py4J error message (~16 KB with the embedded Java stack
+      trace). The query has already terminated, so nothing is lost; Spark's built-in <code>rate</code>
+      source hits it too, and <code>spark.driver.extraJavaOptions=-Xss16m</code> silences it. Found in
+      v4.2.0, unchanged on master; no JIRA yet.</li>
+<li>[x] Fixes found by the test review, and pyarrow 19 or later (18 crashes on Windows when
+      imported before <code>mssql_python</code>).</li>
+</ul>
+<h2 id="022-patch-shipped-2026-10-07-time-and-reconcile">0.2.2 (patch, shipped 2026-10-07): time and reconcile<a class="headerlink" href="#022-patch-shipped-2026-10-07-time-and-reconcile" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] DST fall-back: <code>commit_ts</code> can go backwards in a named zone; resolve the overlap by
+      LSN order.</li>
+<li>[x] Pre-2022 fixed-offset fallback (<code>sourceTimeZone=auto</code> before SQL Server 2022): driver
+      and executors disagree after a DST change; refresh the offset per batch.</li>
+<li>[x] <code>reconcile</code> reports stream lag as <code>MISMATCH</code> where it is <code>IN_FLIGHT</code>.</li>
+<li>[x] <code>reconcile</code>'s join misses a change of a NULL key; join null-safe.</li>
+</ul>
+<h2 id="030-minor-breaking-shipped-2026-10-07-api-shape">0.3.0 (minor, Breaking, shipped 2026-10-07): API shape<a class="headerlink" href="#030-minor-breaking-shipped-2026-10-07-api-shape" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Keyword-only parameters after <code>facts_table</code> in <code>to_delta</code>, and <code>resnapshot</code> in
+      <code>snapshot()</code>.</li>
+<li>[x] <code>Literal</code> types on every mode parameter (<code>snapshot</code>, <code>on_data_loss</code>, <code>isolation</code>,
+      policies).</li>
+<li>[x] Typed public results: <code>TypedDict</code>s (still dicts) for <code>backfill()</code>, <code>apply_changes()</code>,
+      <code>reconcile()</code>, <code>snapshot()</code>.</li>
+<li>[x] Planning warnings (columns not read) also in the facts <code>detail</code>, not only in the log.</li>
+</ul>
+<h2 id="040-minor-shipped-2026-10-07-typing-and-protocols">0.4.0 (minor, shipped 2026-10-07): typing and protocols<a class="headerlink" href="#040-minor-shipped-2026-10-07-typing-and-protocols" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] <code>typing.Protocol</code> for the pluggable seams: <code>Backend</code> (mssql-python, arrow-odbc, or a
+      user's own) and <code>CdcClient</code> (<code>SqlCdcClient</code>, the fake), <code>runtime_checkable</code>, exported;
+      they are the 0.3 classes themselves, so subclassing keeps working with nothing to
+      deprecate (ADR 0030).</li>
+<li>[x] <code>TypedDict</code>s for the state payloads ADR 0021 lists (<code>snapshot_open</code>,
+      <code>snapshot_plan</code>, <code>snapshot_chunk</code>, completion, a wave's <code>userMetadata</code>) and the known
+      source options.</li>
+<li>[x] <code>NewType</code> for LSN hex strings; frozen dataclasses in place of loose internal dicts.</li>
+<li>[x] mypy strict on <code>src</code> (no untyped defs, no implicit <code>Any</code> generics, <code>warn_return_any</code>);
+      <code>pyright --verifytypes</code> in CI to keep the public API fully typed (ADR 0031).</li>
+</ul>
+<h2 id="041-patch-shipped-2026-10-08-maintenance">0.4.1 (patch, shipped 2026-10-08): maintenance<a class="headerlink" href="#041-patch-shipped-2026-10-08-maintenance" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Split <code>client.py</code> (SQL builders, backends, planning) and <code>pipeline.py</code> (snapshot,
+      backfill, recovery) into packages without changing behaviour.</li>
+<li>[x] One place for the facts event protocol, shared by its writers and readers
+      (<code>mssql_cdc.events</code>).</li>
+<li>[x] Property-based tests (Hypothesis) for LSN math, plan tiling and change ordering; one
+      mutation-testing pass on the core modules, results recorded.</li>
+</ul>
+<h2 id="050-minor-shipped-2026-10-09-faster-first-import">0.5.0 (minor, shipped 2026-10-09): faster first import<a class="headerlink" href="#050-minor-shipped-2026-10-09-faster-first-import" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Overlapping waves (read the next while committing the previous one) and waves sized
+      toward a duration (<code>target_wave_seconds</code>: how many of the plan's chunks a wave takes,
+      the chunks unchanged); target: the full bootstrap's wall time, to be measured by the
+      Databricks benchmark below.</li>
+<li>[x] silver filters chunks by wave instead of reading every chunk on each call.</li>
+<li>[x] Batches capped by bytes for LOB tables; keyset bounds instead of NTILE for full
+      snapshots.</li>
+<li>[x] Measure <code>arrow-odbc</code>'s concurrent fetch (lab t8): +19% to +48% at 1 and 2 partitions,
+      nothing at 4; a later release stops turning it off (ADR 0003, Amendment 4).</li>
+<li>[x] Validation: a Databricks benchmark against the production source (34M rows: 943 s to
+      586 s; 100M rows: 5,096 s to 4,427 s; see the 0.5.0 CHANGELOG entry).</li>
+</ul>
+<h2 id="060-minor-shipped-2026-10-10-platforms">0.6.0 (minor, shipped 2026-10-10): platforms<a class="headerlink" href="#060-minor-shipped-2026-10-10-platforms" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Databricks serverless: facts without <code>persist()</code> where the platform refuses it,
+      counted by <code>observe()</code> on the append (ADR 0032).</li>
+<li>[x] Object-store <code>metricsPath</code> (<code>s3://</code>, <code>abfss://</code>) through <code>pyarrow.fs</code> (ADR 0014,
+      Amendment 6; tested with <code>file://</code> URIs, not a real object store).</li>
+<li>[x] Spark Connect checks: the library and <code>t5</code> from a Spark Connect client against a local
+      Connect server with Delta Connect, in CI's <code>connect</code> job (ADR 0033).</li>
+<li>[x] Serverless: the whole library with the fake backend on Databricks serverless
+      (environment 4): 24 checks, with <code>availableNow</code> (the platform refuses <code>processingTime</code>)
+      and the cache refused; the SQL Server path needs a network path from serverless, which
+      the validation workspace lacks.</li>
+</ul>
+<h2 id="070-minor-shipped-2026-10-13-credentials-and-privacy">0.7.0 (minor, shipped 2026-10-13): credentials and privacy<a class="headerlink" href="#070-minor-shipped-2026-10-13-credentials-and-privacy" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] <code>user</code>/<code>password</code> and Entra ID <code>accessToken</code> options, so the secret need not live in
+      the connection string; <code>tokenProvider</code> renews the token on long streams (ADR 0034).</li>
+<li>[x] The snapshot plan stops writing key values in clear into the facts table: they go to
+      a plans table next to bronze (ADR 0028, Amendment 4).</li>
+</ul>
+<h2 id="080-minor-shipped-2026-10-14-operations-at-scale">0.8.0 (minor, shipped 2026-10-14): operations at scale<a class="headerlink" href="#080-minor-shipped-2026-10-14-operations-at-scale" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Chunked snapshots of keyless tables, cut on a chosen column: the <code>snapshotKeys</code> option,
+      unique or not (ADR 0028, Amendment 6).</li>
+<li>[x] <code>snapshot_on_switch</code> in chunked mode: the switch batch opens a chunked snapshot at the
+      newer instance's start LSN, for <code>backfill()</code> (ADR 0023, Amendment 7).</li>
+<li>[x] <code>start_many()</code>: measure the per-stream driver cost and document a ceiling (lab check
+      t11, ADR 0027 Amendment); each start waits for the source of the one before it.</li>
+<li>[x] A verdict-freshness metric for alerts: <code>finalization.freshness()</code> and an alert query
+      that tells a held verdict from a stopped stream.</li>
+</ul>
+<h2 id="100-stability">1.0.0: stability<a class="headerlink" href="#100-stability" title="Permanent link">&para;</a></h2>
+<p>1.0 freezes the public API and the state contract: after it, a break needs 2.0 (ADR 0021,
+amendment 11). 1.0.0rc1 comes first and runs a real pipeline for a few weeks; 1.0.0 final
+ships when nothing found there requires an API change.</p>
+<ul>
+<li>[x] Frozen API and state contract: an audit of the public API, the four names
+      <code>mssql_cdc</code> exported that the reference never listed deprecated there, and the 1.x
+      policy (ADR 0021, amendment 11).</li>
+<li>[x] Decide the audit's breaking candidates before 1.0.0rc1: the results typed for Spark
+      Connect too (<code>*Like</code>, ADR 0031 amendment 2), <code>CdcClient</code> internal (ADR 0030 amendment
+      1), <code>reconcile(sample_seed=...)</code> with <code>seed</code> deprecated, the metrics files internal,
+      and a switch's facts <code>detail</code> as JSON (ADR 0021 amendments 11 and 12).</li>
+<li>[x] Versioned docs, <code>dev</code> and <code>stable</code>, with a version selector (ADR 0024, amendment 1).</li>
+<li>[x] Build provenance (attestations) in the release: GitHub's from 1.0.0rc1 on, PyPI's
+      (PEP 740) since 0.1.0.</li>
+<li>[ ] 1.0.0rc1 in a real pipeline for a few weeks, then 1.0.0.</li>
+</ul>
+<h2 id="after-10">After 1.0<a class="headerlink" href="#after-10" title="Permanent link">&para;</a></h2>
+<p>The t7 runs and the weeks-long chunked run check how the library behaves on a platform or
+over weeks, not the API or the state contract that 1.0 freezes, and each needs
+infrastructure the project lacks today. They do not hold 1.0.</p>
+<ul>
+<li>[ ] Databricks classic: t7 <code>--schema</code> (needs a lab SQL Server reachable from the
+      cluster).</li>
+<li>[ ] t7 against SQL Server on serverless (needs a network path from serverless) and on a
+      non-Databricks platform (no account).</li>
+<li>[ ] The weeks-long chunked run against the production source, on its largest table (it
+      holds a cluster for days or weeks; run it on request).</li>
+<li>[ ] Scala/Java DSv2 <code>Changelog</code> (<code>TableCatalog.loadChangelog</code>) so
+      <code>SELECT ... CHANGES FROM VERSION ...</code> works over SQL Server (Spark 4.2+). Deferred
+      until the API settles (ADR 0022).</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../RELEASING/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Releasing">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Releasing
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../REFERENCES/" class="md-footer__link md-footer__link--next" aria-label="Next: References">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                References
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      &copy; 2026 Emanuel Luis, MIT license
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog" role="status" aria-atomic="true">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      
+      
+        
+        
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":["content.action.edit","content.code.copy","navigation.sections","navigation.footer","search.highlight","toc.follow"],"redirect":null,"search":"../assets/javascripts/workers/search.7d14d953.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","clipboard.error":"Could not copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":{"alias":true,"provider":"mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.67a597eb.min.js"></script>
+      
+    
+  </body>
+</html>
