@@ -14,7 +14,8 @@
 **Amended:** 2026-10-10T18:02:10-03:00, a chunked snapshot's facts rows leave its key values to a plans table next to bronze: keys removed from the rows 0.7.0 writes only, readers take them from either (amendment 9, ADR 0028 Amendment 4)  
 **Amended:** 2026-10-13T18:45:19-03:00, a chunked snapshot opened after a capture instance switch adds `switch_batch_id` to its 'snapshot_open' payload, and its rows take keys by its S (amendment 10, ADR 0023 Amendment 7)  
 **Amended:** 2026-10-14T09:06:30-03:00, the 1.x policy: Semantic Versioning from 1.0, the state contract frozen but for additions, a deprecation before every removal (amendment 11)  
-**Amended:** 2026-10-15T09:39:58-03:00, the files in `metricsPath` are internal, not state: the facts table is the record (amendment 11)
+**Amended:** 2026-10-15T09:39:58-03:00, the files in `metricsPath` are internal, not state: the facts table is the record (amendment 11)  
+**Amended:** 2026-10-15T09:49:09-03:00, dropping a Python, Spark, Delta or SQL Server version past its end of life is a minor, announced a release before; 1.0 keeps Python 3.10 (amendment 11)
 
 ## Context
 0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
@@ -307,6 +308,12 @@ stay, with the additions below.
   logged where the option is read for a source option. The changelog lists it under
   "Deprecated", and the major that removes it under "Breaking", where every break is
   listed with what to change. A deprecated name stays for the rest of 1.x.
+* Supported versions follow their own end of life. Dropping support for a Python, Spark
+  (PySpark), Delta (delta-spark) or SQL Server version that has reached its end of life is
+  a minor release, not a major: the changelog announces it under "Deprecated" at least one
+  release before, and the minor that drops it says so under "Changed", with the new floor
+  (`requires-python`, the `[spark]` extra, or the SQL Server versions tested). A version
+  still supported upstream is dropped only in a major. 1.0 keeps Python 3.10.
 * The state contract only grows. Besides the Decision's list and amendments 4 to 10, it
   names what a later release reads back that the list left implicit:
   - the keys of the generation state file `<checkpoint>/_mssql_cdc_generation.json`:
@@ -346,6 +353,10 @@ Considered:
 * A deprecation window in time (six months). Releases are small and irregular; a window in
   releases can be checked from the changelog alone, and a deprecated name stays for the rest
   of 1.x anyway.
+* A major for every version dropped. Python, Spark and SQL Server end versions on their own
+  calendars; tying the library's major to them would make 2.0 a matter of dates, or keep a
+  dead runtime in the test matrix for the rest of 1.x. A platform past its end of life gets
+  no fixes of its own either, and the release before the drop keeps working on it.
 * Freezing the internal modules too (`client`, `events`, the sink but `delta_sink`, the
   fake). They change with every feature; only the reference is promised, and an internal
   name a user needs is listed there in a minor, which freezes it from then on.

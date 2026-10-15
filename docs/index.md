@@ -18,7 +18,10 @@ on a URI `pyarrow.fs` opens (`s3://`, `abfss://`...).
     The streaming engine is covered by unit tests and the SQL Server behaviour by
     integration tests against SQL Server 2022. From 1.0.0 on, only a major release breaks
     the Python API, and the state a stream leaves behind (checkpoints, table schemas) never
-    breaks without a migration path ([ADR 0021](decisions/0021-compatibility-policy-for-0x.md)).
+    breaks without a migration path. Dropping a Python, Spark, Delta or SQL Server version
+    that has reached its end of life is a minor release, announced in the changelog at least
+    one release before; 1.0 supports Python 3.10 and later
+    ([ADR 0021](decisions/0021-compatibility-policy-for-0x.md)).
 
 !!! note "Versions"
     Each release has its own pages: pick yours in the version selector. `stable` is the

@@ -56,7 +56,9 @@ micro-batch row's `warnings` may hold one more message (on Spark without admissi
   strictly: a patch fixes, a minor adds, a major breaks, and a type-only break counts.
   Anything public is deprecated in a 1.x minor before 2.0 removes it. The state contract
   only grows. It now names the keys of the generation state file and the Delta `txnAppId`s
-  that make replays idempotent. The `warnings`, a task's `reason` and the `detail` of a
+  that make replays idempotent. Dropping support for a Python, Spark, Delta or SQL Server
+  version that has reached its end of life is a minor release, announced here at least one
+  release before; 1.0 keeps Python 3.10. The `warnings`, a task's `reason` and the `detail` of a
   'capture_instance_switched' row are text for people and may be reworded in any release.
 - The files in `metricsPath` are internal: the options reference no longer documents their
   names or contents (a chunk's `chunk-<n>.json` was), which may change in any release. The

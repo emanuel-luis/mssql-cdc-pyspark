@@ -154,7 +154,9 @@ within 1.x it only grows: the offsets in its checkpoints, the checkpoint layout,
 schemas of the tables it writes, which change only through migrations that run on their own.
 Every release's "State compatibility" line says what it does to that state. The public API
 is what the documentation's reference documents (the Python API, the options and the output
-schema); everything else may change in any release
+schema); everything else may change in any release. Dropping support for a Python, Spark,
+Delta or SQL Server version that has reached its end of life is a minor release, announced
+in the changelog at least one release before; 1.0 supports Python 3.10 and later
 ([ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)).
 
 ## Development

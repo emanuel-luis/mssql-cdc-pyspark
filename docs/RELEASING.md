@@ -79,7 +79,9 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
 ## Release
 
 1. Set the version (ADR 0021 amendment 11): `uv version --bump patch` for fixes only,
-   `uv version --bump minor` for anything added or deprecated, `uv version --bump major`
+   `uv version --bump minor` for anything added or deprecated, or for dropping a Python,
+   Spark, Delta or SQL Server version that has reached its end of life (announced under
+   "Deprecated" in the changelog at least one release before), `uv version --bump major`
    for a break; it updates `uv.lock` too.
 2. In `CHANGELOG.md`, turn `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` with the date
    of the tag (for 0.1.0, replace `unreleased` in `## [0.1.0] - unreleased` with it), keep
