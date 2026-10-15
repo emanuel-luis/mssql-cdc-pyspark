@@ -4,7 +4,7 @@
 **Date:** 2026-10-01T14:43:57-03:00  
 **Amended:** 2026-10-14T09:21:02-03:00, one site per version with mike: `dev` from main, each release, `stable` (amendment 1)  
 **Amended:** 2026-10-15T09:43:36-03:00, a final release's run deletes its release candidates from the selector (amendment 2)  
-**Amended:** 2026-10-15T12:20:00-03:00, each run's Pages deployment has its own name, so a tag on main's last commit publishes (amendment 3)
+**Amended:** 2026-10-15T12:20:00-03:00, each run's Pages deployment is named after its gh-pages commit, so a tag on main's last commit publishes (amendment 3)
 
 ## Context
 Usage was documented in a long README and the Markdown files under `docs/`; the API was
@@ -140,5 +140,6 @@ one, as a success. A release tag is pushed on the commit `main` has just publish
 release commit, once CI passes), so 1.0.0rc1's run reported success and left the site as
 `main`'s run had it: the version was on `gh-pages`, not on the site, until the next push to
 `main`. The deploy job now calls the Pages API itself (create the deployment from the build
-job's artifact with the job's OIDC token, then wait for `succeed`), naming it
-`<commit>.<run id>.<attempt>`: every run, and a re-run, publishes its tree.
+job's artifact with the job's OIDC token, then wait for `succeed`), naming it after the
+`gh-pages` commit the run pushed: mike always commits (`--allow-empty`), so every run, and
+a re-run, publishes its tree. (Pages takes only a commit of the repository as that name.)
