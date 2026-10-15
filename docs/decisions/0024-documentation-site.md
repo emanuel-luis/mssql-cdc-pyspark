@@ -2,7 +2,8 @@
 
 **Status:** accepted  
 **Date:** 2026-10-01T14:43:57-03:00  
-**Amended:** 2026-10-14T09:21:02-03:00, one site per version with mike: `dev` from main, each release, `stable` (amendment 1)
+**Amended:** 2026-10-14T09:21:02-03:00, one site per version with mike: `dev` from main, each release, `stable` (amendment 1)  
+**Amended:** 2026-10-15T09:43:36-03:00, a final release's run deletes its release candidates from the selector (amendment 2)
 
 ## Context
 Usage was documented in a long README and the Markdown files under `docs/`; the API was
@@ -121,3 +122,12 @@ that passes the checks but never reaches PyPI (abandoned for the next number) st
 selector, and in `stable`, until removed by hand (`RELEASING.md`). When
 Zensical ships native versioning, the fork goes, and the `gh-pages` layout (a directory per
 version, `versions.json`) is what a replacement has to keep or redirect.
+
+## Amendment 2: a final release replaces its candidates
+A release candidate's pages are for the weeks it runs before its final release (ADR 0021
+amendment 11). Once `X.Y.Z` is out they describe the same version, and a selector that keeps
+`X.Y.Zrc1`, `X.Y.Zrc2`... next to it grows with every release and offers pages nobody should
+pick. So the `docs` run of a tag `vX.Y.Z`, after it publishes `X.Y.Z` (and moves `stable`),
+deletes `X.Y.ZrcN` with `mike delete`, in the same commits the push job pushes: the build job
+stays read-only. A run again from the same tag finds none left. Other versions stay until
+removed by hand (`RELEASING.md`).

@@ -106,9 +106,10 @@ whole thing, run it from a branch whose version is a pre-release (`uv version 0.
    [SECURITY.md](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/SECURITY.md#verifying-a-release)
    says (1.0.0rc1 is the first release with the GitHub one).
 
-   The tag also starts a `docs` run, which publishes the site as version `X.Y.Z` and moves
-   `stable` (the site's root) to it. Check that it went green and that the version
-   selector lists `X.Y.Z` with `stable`. Runs share one concurrency group and a newer one
+   The tag also starts a `docs` run, which publishes the site as version `X.Y.Z`, moves
+   `stable` (the site's root) to it, and then deletes that version's release candidates
+   (`X.Y.ZrcN`) from the selector with `mike delete`. Check that it went green and that the
+   version selector lists `X.Y.Z` with `stable`, and no `X.Y.ZrcN`. Runs share one concurrency group and a newer one
    cancels one still waiting, so if a push to `main` right after the tag left it cancelled,
    run `docs` again from the tag (Actions, `docs`, "Run workflow", the tag as the ref).
 6. Keep the state the release writes, so later versions are tested against it
@@ -148,14 +149,15 @@ uploaded again: fix forward with the next patch.
 
 A release candidate follows the same steps with a version like `1.0.0rc1`
 (`uv version 1.0.0rc1`, tag `v1.0.0rc1`); pip installs it only with `--pre` or an exact
-pin. Its `docs` run publishes version `1.0.0rc1` and leaves `stable` alone.
+pin. Its `docs` run publishes version `1.0.0rc1` and leaves `stable` alone; the `docs` run of
+its final release, `1.0.0`, removes it from the selector.
 
-A published version stays in the selector. To remove one (a release candidate once its
-final release is out, say), from an up-to-date clone with the docs group:
+Any other published version stays in the selector. To remove one (an abandoned version, say),
+from an up-to-date clone with the docs group:
 
 ```bash
 git fetch origin gh-pages:refs/remotes/origin/gh-pages
-uv run --group docs mike delete 1.0.0rc1   # commits to the local gh-pages branch
+uv run --group docs mike delete X.Y.Z   # commits to the local gh-pages branch
 git push origin gh-pages
 ```
 

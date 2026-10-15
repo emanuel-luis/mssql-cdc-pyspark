@@ -69,10 +69,10 @@ micro-batch row's `warnings` may hold one more message (on Spark without admissi
 - The documentation site is published per version, with a version selector: `dev` follows
   `main`, each release tag publishes its own version, and `stable`, the site's root, is the
   latest final release. A release candidate is published under its version without moving
-  `stable`. Links from before the versions open the same page in `stable` (`dev` until
-  1.0.0)
+  `stable`, and leaves the selector once its final release is published. Links from before
+  the versions open the same page in `stable` (`dev` until 1.0.0)
   ([ADR 0024](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0024-documentation-site/)
-  amendment 1).
+  amendments 1 and 2).
 
 ### Deprecated
 

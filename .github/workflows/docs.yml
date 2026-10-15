@@ -2,9 +2,9 @@ name: docs
 
 # Builds the documentation site (ADR 0024) and publishes it to GitHub Pages one version at a
 # time, with a version selector (amendment 1): a push to main publishes "dev"; a release tag
-# vX.Y.Z publishes X.Y.Z and moves "stable" to it (unless stable is newer); a tag vX.Y.ZrcN
-# publishes that version and leaves "stable" alone. A tag release.yml would refuse publishes
-# nothing. mike commits each version to the gh-pages branch, which keeps them all; the
+# vX.Y.Z publishes X.Y.Z, moves "stable" to it (unless stable is newer) and deletes its release
+# candidates X.Y.ZrcN (amendment 2); a tag vX.Y.ZrcN publishes that version and leaves "stable"
+# alone. A tag release.yml would refuse publishes nothing. mike commits each version to the gh-pages branch, which keeps them all; the
 # deploy job publishes that branch's tree. One-time setup (docs/RELEASING.md):
 # Settings > Pages > Source: "GitHub Actions", and a `v*` tag rule on the github-pages
 # environment.
@@ -65,6 +65,12 @@ jobs:
                 mike set-default stable
               else  # run again from an older tag: its pages only, stable stays newer
                 mike deploy --allow-empty "$v"
+              fi
+              # its release candidates (X.Y.ZrcN) leave the selector: the release replaces them
+              rcs="$(mike list --json | jq -r --arg rc "${v}rc" \
+                '.[].version | select(startswith($rc) and (ltrimstr($rc) | test("^[0-9]+$")))')"
+              if [ -n "$rcs" ]; then
+                mike delete $rcs  # unquoted: one version per word
               fi ;;
             *)
               echo "::error::the docs are published from main or a release tag, not $GITHUB_REF"
