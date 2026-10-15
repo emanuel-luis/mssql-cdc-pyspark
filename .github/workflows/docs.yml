@@ -27,6 +27,8 @@ jobs:
   build:
     name: build the site, commit the version to a local gh-pages
     runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.pages.outputs.artifact_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -91,7 +93,8 @@ jobs:
           mkdir _pages
           git archive gh-pages | tar -x -C _pages
           cp .github/pages/404.html _pages/
-      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      - id: pages
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with: { path: _pages/ }
 
   # The only job that can write to the repository runs nothing but git: on a hosted runner any
@@ -118,7 +121,7 @@ jobs:
 
   deploy:
     name: deploy to GitHub Pages
-    needs: push
+    needs: [build, push]
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -127,5 +130,27 @@ jobs:
       pages: write
       id-token: write
     steps:
+      # The Pages API, not actions/deploy-pages: that names the deployment after the commit, and
+      # Pages answers a second deployment of a commit with the first one, so a release tag on
+      # the commit main's run just published left the site as main's run had it. One name per
+      # run attempt (ADR 0024 amendment 3).
       - id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+        run: |
+          oidc="$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)"
+          echo "::add-mask::$oidc"
+          created="$(gh api "repos/$GITHUB_REPOSITORY/pages/deployments"             -F artifact_id="$ARTIFACT_ID"             -f pages_build_version="$GITHUB_SHA.$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT"             -f oidc_token="$oidc")"
+          echo "page_url=$(jq -r .page_url <<< "$created")" >> "$GITHUB_OUTPUT"
+          id="$(jq -r .id <<< "$created")"
+          for _ in $(seq 120); do  # 10 minutes, deploy-pages' default timeout
+            status="$(gh api "repos/$GITHUB_REPOSITORY/pages/deployments/$id" --jq .status)"
+            case "$status" in
+              succeed) exit 0 ;;
+              *failed|*error|*cancelled|*lost)
+                echo "::error::Pages deployment $id: $status"; exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "::error::Pages deployment $id: still $status after 10 minutes"; exit 1

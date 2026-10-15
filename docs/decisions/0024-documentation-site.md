@@ -3,7 +3,8 @@
 **Status:** accepted  
 **Date:** 2026-10-01T14:43:57-03:00  
 **Amended:** 2026-10-14T09:21:02-03:00, one site per version with mike: `dev` from main, each release, `stable` (amendment 1)  
-**Amended:** 2026-10-15T09:43:36-03:00, a final release's run deletes its release candidates from the selector (amendment 2)
+**Amended:** 2026-10-15T09:43:36-03:00, a final release's run deletes its release candidates from the selector (amendment 2)  
+**Amended:** 2026-10-15T12:20:00-03:00, each run's Pages deployment has its own name, so a tag on main's last commit publishes (amendment 3)
 
 ## Context
 Usage was documented in a long README and the Markdown files under `docs/`; the API was
@@ -131,3 +132,13 @@ pick. So the `docs` run of a tag `vX.Y.Z`, after it publishes `X.Y.Z` (and moves
 deletes `X.Y.ZrcN` with `mike delete`, in the same commits the push job pushes: the build job
 stays read-only. A run again from the same tag finds none left. Other versions stay until
 removed by hand (`RELEASING.md`).
+
+## Amendment 3: a deployment per run, not per commit
+`actions/deploy-pages` names a Pages deployment after the commit (`GITHUB_SHA`), with no
+input to change it, and Pages answers a second deployment of the same commit with the first
+one, as a success. A release tag is pushed on the commit `main` has just published (the
+release commit, once CI passes), so 1.0.0rc1's run reported success and left the site as
+`main`'s run had it: the version was on `gh-pages`, not on the site, until the next push to
+`main`. The deploy job now calls the Pages API itself (create the deployment from the build
+job's artifact with the job's OIDC token, then wait for `succeed`), naming it
+`<commit>.<run id>.<attempt>`: every run, and a re-run, publishes its tree.
