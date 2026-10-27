@@ -1,0 +1,57 @@
+# One micro-batch, call by call: what Spark asks the reader, the T-SQL the reader and read()
+# run, and what the sink writes. The batch DataFrame is lazy: the executors read it inside
+# foreachBatch, when the sink first acts on it. Grounded in src/mssql_cdc/source.py
+# (MssqlCdcStreamReader.latestOffset, _BaseReader.partitions, read), client/_sql_client.py
+# (max_lsn, nth_commit_after, lsn_to_time, capture_instances, increment_lsn, ddl_history,
+# min_lsn, split_points, iter_changes) and sink.py (delta_sink.write_batch). Replaces the
+# Mermaid "One micro-batch" sequence of docs/ARCHITECTURE.md; data-flow.d2 shows the same
+# batch as a flow, and user-flows-finalization.d2 what moves the verdict after it.
+...@_style
+
+batch: "One micro-batch, call by call" {
+  shape: sequence_diagram
+  style: {font-size: 24; bold: true}
+
+  engine: "Spark engine\n(driver)" {class: process}
+  reader: "Stream reader\n(driver)" {class: process}
+  sql: "SQL Server" {class: store}
+  exec: "read()\n(executor)" {class: process}
+  sink: "delta_sink\n(foreachBatch)" {class: process}
+
+  plan_end: "latestOffset: where the batch ends" {
+    engine -> reader: "latestOffset(start,\nReadMaxRows(n))"
+    reader -> sql: "sys.fn_cdc_get_max_lsn()\n(AvailableNow: the max_lsn\nit started with)"
+    reader -> sql: "n-th start_lsn after start\nin cdc.lsn_time_mapping"
+    reader -> sql: "commit time of end in\ncdc.lsn_time_mapping,\nconverted to UTC"
+    reader -> engine: "end =\n{lsn, commit_ts}" {class: meta}
+    engine."offset log\nwritten"
+  }
+
+  plan_ranges: "partitions: the LSN ranges to read" {
+    engine -> reader: "partitions(\nstart, end)"
+    reader -> sql: "sp_cdc_help_change_data_capture:\ninstances, their start_lsn"
+    reader -> sql: "fn_cdc_increment_lsn(start):\nthe first LSN to read"
+    reader -> sql: "sp_cdc_get_ddl_history(ci):\nDDL in (start, end]; a type\nchange: SchemaChangedError"
+    reader -> sql: "fn_cdc_get_min_lsn(ci):\nthe retention guard,\nper instance read"
+    reader -> sql: "NTILE split points on\ncdc.<ci>_CT\n(numPartitions > 1)"
+    reader -> engine: "LsnRange(ci,\nfrom, to) list,\nor DataLossError" {class: meta}
+    reader."schema_change,\ncapture_instance_switched,\ndata_skipped: event files\nin metricsPath"
+  }
+
+  write: "foreachBatch: the sink's first action on the lazy df reads it" {
+    engine -> sink: "foreachBatch(df, batch_id)"
+    sink -> engine: "append to bronze (or, where\ncaching works, cache df first):\nthe first action on df"
+    read_rows: "one task per LsnRange" {
+      engine -> exec: "read(LsnRange)"
+      exec -> sql: "cdc.<ci>_CT WHERE\n__\$start_lsn BETWEEN\nfrom AND to, JOIN\ncdc.lsn_time_mapping"
+      sql -> exec: "Arrow record\nbatches" {class: meta}
+      exec -> sql: "fn_cdc_get_min_lsn(ci):\ncleanup during the read?\nDataLossError, or a\npossible data_skipped"
+      exec -> engine: "batches cast to the Spark schema;\na metrics file in metricsPath"
+    }
+    engine -> sink: "the rows in bronze: txnAppId = app_id,\ntxnVersion = batch_id, mergeSchema" {class: meta}
+    sink -> sink: "facts: the batch's row,\nits metrics folded in,\nand its event rows,\none commit"
+    engine."commit log\nwritten"
+  }
+
+  engine."end offset in the\nquery's progress:\nfinalization advances\nfinalized_until"
+}

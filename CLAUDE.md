@@ -50,6 +50,11 @@ uv run ruff check                                   # lint (add --fix for the sa
 uv run ruff format                                  # format (CI runs --check)
 uv run mypy                                         # strict: src/ and tests/typing_*.py
 uv run pyright --verifytypes mssql_cdc --ignoreexternal  # public API 100% typed (ADR 0031)
+
+make d2-install                                     # pinned D2 v0.9.0, sha256-checked (Linux x86_64; WSL)
+make diagrams                                       # render docs/diagrams/*.d2 to SVG (ADR 0035)
+make diagrams-check                                 # CI diagrams job: fails on a stale, missing or orphan SVG
+make diagrams-watch NAME=architecture               # live preview of one diagram while editing
 ```
 
 `make` targets mirror these on Linux; `scripts/lab.ps1` is the PowerShell
@@ -134,6 +139,9 @@ docs/              the documentation site (mkdocs.yml; GitHub Pages via docs.yml
                    tables, API); and ARCHITECTURE, DESIGN, DEVELOPMENT, CONNECTORS,
                    DATABRICKS, ROADMAP, REFERENCES, RELEASING (PyPI via release.yml),
                    decisions/ (ADRs).
+  diagrams/        D2 sources and their committed SVGs (ADR 0035): architecture, components,
+                   data-flow, micro-batch, data-model, data-model-tables,
+                   user-flows-query-lifecycle, user-flows-finalization; _style.d2 is shared.
 CHANGELOG.md       Keep a Changelog; each release states its state compatibility (ADR 0021).
 notes/             Local only, gitignored: research notes in Portuguese (context, not spec).
 ```
@@ -296,3 +304,11 @@ about every 5 minutes (t1); `sql/heartbeat.sql` brings `max_lsn`'s lag to ~10 s
   (a release candidate gets none).
 * Record design changes as a new ADR in `docs/decisions/`, with `**Date:**` (ISO-8601 with
   the UTC offset) and an `**Amended:**` line per later change (see `docs/decisions/README.md`).
+* Diagrams are D2 only, no Mermaid (ADR 0035). Edit `docs/diagrams/<name>.d2`, run
+  `make diagrams` and commit the `.d2` with its `.svg`; never edit an SVG by hand. Each `.d2`
+  starts with `...@_style`, uses its classes and sets no fill color (fills do not switch in
+  dark mode). About 25 nodes and 1,300 px wide at most; edge labels add ELK layers, so put
+  long text in node labels. A change to what a diagram shows (a module, a table's key
+  columns, a step of a flow) updates the diagram in the same change. Docs pages link them
+  relatively (`diagrams/<name>.svg`); the README, which is the PyPI description, by absolute
+  URL on `main`.

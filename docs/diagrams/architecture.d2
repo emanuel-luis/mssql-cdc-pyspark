@@ -1,0 +1,83 @@
+# The system in context: SQL Server CDC, what the library runs on Spark (the streaming query and
+# the bootstrap snapshot), the Delta tables and checkpoint they write, the helpers that run after
+# a batch commits, and who calls it. Grounded in src/mssql_cdc/source.py (stream and snapshot
+# readers, read()), client/_sql_client.py (T-SQL), client/_backends.py, sink.py,
+# finalization.py, silver.py and pipeline/_stream.py (to_delta). Module detail: components.d2.
+...@_style
+
+title: "Architecture: SQL Server CDC into Delta, with a completeness verdict" {
+  shape: text
+  near: top-center
+  style: {font-size: 24; bold: true}
+}
+
+direction: down
+
+engineer: "Data engineer\nstream(spark, options)\n.to_delta(...)" {class: actor}
+consumers: "Downstream jobs\nread a period once\nis_final() says so" {class: actor}
+
+sqlserver: "SQL Server · CDC enabled on the table" {
+  class: group
+  table: "Source table\ndbo.orders" {class: source}
+  capture: "CDC capture job (Agent)\nreads the transaction log" {class: process}
+  ct: "Change table\ncdc.dbo_orders_CT\none row per change" {class: store}
+  map: "cdc.lsn_time_mapping\none row per commit,\nplus idle entries" {class: store}
+  table -> capture
+  capture -> ct
+  capture -> map
+}
+
+lib: "mssql_cdc on Spark 4.1+ or Spark Connect" {
+  class: group
+  snap: "Snapshot reader\nmssql_cdc_snapshot, for the\nbootstrap: the table at an\nLSN recorded before the read" {class: process}
+  reader: "Stream reader, on the driver\noffsets: commit LSN + commit time\nplans LsnRange partitions, guards" {class: process}
+  read: "read(), on the executors\nmssql-python or arrow-odbc\nto Arrow, cast to the schema" {class: process}
+  sink: "delta_sink (foreachBatch)\nidempotent append + facts row" {class: process}
+  reader -> read
+  read -> sink
+}
+
+out: "Written by the query" {
+  class: group
+  ckpt: "Checkpoint\noffsets, commits,\ngeneration state" {class: store}
+  bronze: "Bronze (Delta)\nchange log and\nsnapshot rows" {class: store}
+  facts: "Facts (Delta)\none row per batch\nand per event" {class: store}
+}
+
+after: "After a batch commits" {
+  class: group
+  fin: "finalization\nadvance() or track(): the end\noffset from the query's progress,\nmonotonic MERGE" {class: process}
+  apply: "apply_changes()\nMERGE latest image per key" {class: process}
+}
+
+served: "What consumers read" {
+  class: group
+  control: "table_finalization (Delta)\nfinalized_until per table" {class: store}
+  silver: "Silver (Delta)\none row per key" {class: store}
+}
+
+engineer -> lib
+sqlserver.table -> lib.snap
+sqlserver.map -> lib.reader {class: meta}
+sqlserver.ct -> lib.read
+lib.snap -> out.bronze
+lib.reader -> out.ckpt {class: meta}
+lib.sink -> out.bronze
+lib.sink -> out.facts {class: meta}
+lib.reader -> after.fin {class: meta}
+out.bronze -> after.apply
+after.fin -> served.control {class: meta}
+after.apply -> served.silver
+after.apply -> served.control {class: meta}
+served.control -> consumers {class: meta}
+served.silver -> consumers
+
+legend: Legend {
+  class: legend
+  grid-columns: 5
+  actor: actor {class: [actor; legend-actor]}
+  source: source table {class: [source; legend-item]}
+  process: process {class: [process; legend-item]}
+  store: stored data {class: [store; legend-store]}
+  edges: "solid arrow: data\ndashed: offsets, metadata,\nthe verdict" {shape: text; style.font-size: 13}
+}

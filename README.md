@@ -51,23 +51,9 @@ that LSN keeps advancing. This project
 carries that frontier through the pipeline. Details in the
 [design notes](https://emanuel-luis.github.io/mssql-cdc-pyspark/DESIGN/).
 
-```mermaid
-flowchart LR
-  subgraph SQL Server
-    T[(dbo.orders)] -- transaction log --> CAP[CDC capture job]
-    CAP --> CT[(cdc.dbo_orders_CT)]
-    CAP --> MAP[(cdc.lsn_time_mapping<br/>incl. idle heartbeats)]
-  end
-  subgraph Spark
-    SRC[mssql_cdc source<br/>offset = commit LSN + commit_ts]
-    SINK[Delta bronze<br/>idempotent append + facts]
-    FIN[table_finalization<br/>finalized_until, monotonic]
-  end
-  CT --> SRC
-  MAP --> SRC
-  SRC --> SINK --> FIN
-  FIN --> C[downstream jobs gate on finalized_until]
-```
+![Architecture: the CDC capture job copies each commit of the source table into its change table and cdc.lsn_time_mapping; the mssql_cdc stream reader on the Spark driver turns commit LSNs into offsets and LSN ranges, read() on the executors reads them as Arrow, delta_sink appends them to bronze with a facts row, and finalization and apply_changes then advance finalized_until and silver, which downstream jobs read.](https://raw.githubusercontent.com/emanuel-luis/mssql-cdc-pyspark/main/docs/diagrams/architecture.svg)
+
+Source: [architecture.d2](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/docs/diagrams/architecture.d2).
 
 ## Install
 

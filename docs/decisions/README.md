@@ -36,6 +36,7 @@
 | [0032](0032-facts-without-caching.md) | Facts without caching where the platform refuses it | accepted | 2026-10-09T11:39:56-03:00 | 2026-10-09T19:26:50-03:00 |
 | [0033](0033-spark-connect-tested-on-a-local-server.md) | Spark Connect, tested against a local Connect server | accepted | 2026-10-09T11:39:43-03:00 | 2026-10-09T19:26:50-03:00 |
 | [0034](0034-credentials-outside-the-connection-string.md) | Credentials outside the connection string: `user`, `password`, an Entra ID token or a token provider | accepted | 2026-10-10T17:59:29-03:00 | 2026-10-13T13:33:12-03:00 |
+| [0035](0035-diagrams-as-d2-sources.md) | Diagrams as D2 sources, rendered to committed SVGs | accepted | 2026-10-27T16:24:28-03:00 |  |
 
 New ADRs: copy the format, next number, one decision per file. Put the time the
 decision is recorded in `**Date:**` (ISO-8601 with the UTC offset, e.g.

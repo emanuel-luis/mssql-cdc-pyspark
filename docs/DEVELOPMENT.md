@@ -271,6 +271,22 @@ Optional git hooks run `ruff check --fix` and `ruff format` on staged files, plu
 file hygiene checks, from `.pre-commit-config.yaml`: `uvx prek install`, or
 `pre-commit install` with pre-commit 4.4 or later. CI does not depend on them.
 
+## Diagrams
+
+The diagrams on these pages are D2 sources in `docs/diagrams/`, rendered to the SVGs next to
+them with one pinned D2 ([ADR 0035](decisions/0035-diagrams-as-d2-sources.md)):
+
+```bash
+make d2-install                    # D2 v0.9.0 into ~/.local/share/d2/v0.9.0, sha256-checked (Linux x86_64)
+make diagrams                      # render every docs/diagrams/*.d2 to SVG
+make diagrams-check                # what CI's diagrams job runs: fails on a stale or orphan SVG
+make diagrams-watch NAME=components   # live preview in the browser while editing one
+```
+
+On Windows run them in WSL. Commit the `.d2` with its `.svg`, and never edit an SVG by hand.
+Every diagram imports `docs/diagrams/_style.d2`, which holds the layout engine (ELK), the
+light and dark themes and one class per kind of element.
+
 ## Lab
 
 See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
@@ -300,6 +316,9 @@ See `LAB.md`. Each check writes `lab/results/<check>-<utc>.json` (gitignored).
   `t10` and `t10-resnapshot`. On the weekly schedule or a manual dispatch ("Run workflow")
   a fourth part, `idle`, runs t1 and then the destructive t7, both `continue-on-error`, on
   its own server. Each part uploads its results as the `lab-results-<part>` artifact.
+* `diagrams`: installs the pinned D2 (checksum-checked) and runs `make diagrams-check`, which
+  fails when a committed SVG differs from its `.d2` source; the rendered SVGs are uploaded as
+  the `diagrams` artifact either way. It waits for no other job.
 
 `.github/workflows/security.yml` checks the supply chain on every pull request, every push
 to `main` and weekly:
