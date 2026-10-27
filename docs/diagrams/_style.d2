@@ -1,0 +1,104 @@
+# Shared style, imported first by every diagram: `...@_style`. Not rendered on its own.
+#
+# Explicit colors (style.fill: "#...") never change in dark mode, so no class sets a fill. Each
+# kind picks a shape instead, D2 fills each shape with a theme color code, and the two override
+# maps below recolor those codes for light and dark (the SVG switches on prefers-color-scheme).
+# The one explicit color, the check stroke, is a mid tone that reads on both backgrounds.
+#   process  rectangle  B6 (B5 inside a container)  blue
+#   source   page       AB4 / AB5                   amber
+#   store    cylinder   AA4 / AA5                   green
+#   serving  hexagon    N5                          teal
+#   actor    person     B3                          purple
+#   external cloud      N7 (the background)         dashed outline
+#   check    rectangle  transparent, dashed accent  contracts and tests
+# Containers use B4. Strokes and edges use B1/B2, text N1/N2.
+vars: {
+  d2-config: {
+    layout-engine: elk
+    theme-id: 0
+    dark-theme-id: 200
+    pad: 24
+    theme-overrides: {
+      N1: "#1F2328"
+      N2: "#59636E"
+      N3: "#818B98"
+      N4: "#D1D9E0"
+      N5: "#D3F5EF"
+      N6: "#EFF2F5"
+      N7: "#FFFFFF"
+      B1: "#57606A"
+      B2: "#57606A"
+      B3: "#EADCFF"
+      B4: "#F6F8FA"
+      B5: "#DDF4FF"
+      B6: "#DDF4FF"
+      AA2: "#0969DA"
+      AA4: "#DAFBE1"
+      AA5: "#DAFBE1"
+      AB4: "#FFF1C7"
+      AB5: "#FFF1C7"
+    }
+    dark-theme-overrides: {
+      N1: "#E6EDF3"
+      N2: "#9198A1"
+      N3: "#656C76"
+      N4: "#3D444D"
+      N5: "#0E3533"
+      N6: "#212830"
+      N7: "#0D1117"
+      B1: "#9198A1"
+      B2: "#9198A1"
+      B3: "#33245C"
+      B4: "#151B23"
+      B5: "#0F2D4A"
+      B6: "#0F2D4A"
+      AA2: "#4493F8"
+      AA4: "#11321F"
+      AA5: "#11321F"
+      AB4: "#3A2C0B"
+      AB5: "#3A2C0B"
+    }
+  }
+}
+
+classes: {
+  process: {shape: rectangle}
+  source: {shape: page}
+  store: {shape: cylinder}
+  serving: {shape: hexagon}
+  actor: {shape: person}
+  external: {
+    shape: cloud
+    style.stroke-dash: 4
+  }
+  check: {
+    shape: rectangle
+    style: {
+      fill: transparent
+      stroke: "#BC4C00"
+      stroke-dash: 3
+      stroke-width: 2
+    }
+  }
+  # Edges: solid for data, dashed for metadata, control and reads that move no data.
+  meta: {style.stroke-dash: 4}
+
+  # Container: label top-left, read as a heading. ELK can still route an edge through it.
+  group: {label.near: top-left}
+
+  # Invisible edge: puts a check in the same ELK layer as the node it tests (both get an edge
+  # from the same predecessor), so checks sit beside their node instead of adding a row.
+  layer: {style.opacity: 0}
+
+  # Hand-made legend: D2's own legend (vars.d2-legend) is a white box in dark mode too.
+  # legend: {class: legend; grid-columns: 4; one item per kind used, plus a text cell for edges}
+  legend: {
+    near: bottom-center
+    grid-gap: 10
+    label.near: top-left
+    style.font-size: 15
+  }
+  legend-item: {width: 150; height: 40; style.font-size: 13}
+  legend-store: {width: 150; height: 84; style.font-size: 13}
+  legend-actor: {width: 44; height: 44; style.font-size: 13}
+}
