@@ -58,25 +58,10 @@ source to the consumer. The reasoning is in [Design notes](DESIGN.md).
 
 ## The pipeline at a glance
 
-```mermaid
-flowchart LR
-  subgraph SQL Server
-    T[(dbo.orders)] -- transaction log --> CAP[CDC capture job]
-    CAP --> CT[(cdc.dbo_orders_CT)]
-    CAP --> MAP[(cdc.lsn_time_mapping)]
-  end
-  subgraph Spark
-    SRC[mssql_cdc source<br/>offset = commit LSN + commit time]
-    BR[Delta bronze<br/>change log + facts]
-    FIN[control table<br/>finalized_until]
-    SIL[silver<br/>one row per key]
-  end
-  CT --> SRC
-  MAP --> SRC
-  SRC --> BR --> FIN
-  BR -. apply_changes .-> SIL
-  FIN --> C[downstream jobs<br/>gate on finalized_until]
-```
+[![Architecture: the CDC capture job copies each commit of the source table into its change table and cdc.lsn_time_mapping; the mssql_cdc stream reader on the Spark driver turns commit LSNs into offsets and LSN ranges, read() on the executors reads them as Arrow, delta_sink appends them to bronze with a facts row, and finalization and apply_changes then advance finalized_until and silver, which downstream jobs read.](diagrams/architecture.svg)](diagrams/architecture.svg)
+
+Source: [architecture.d2](diagrams/architecture.d2). How the pieces work:
+[Architecture](ARCHITECTURE.md).
 
 In code, one stream and one verdict:
 

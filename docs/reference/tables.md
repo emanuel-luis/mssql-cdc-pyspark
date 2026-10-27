@@ -20,6 +20,11 @@ below are the ones the tables carry, copied from the code (`mssql_cdc.sink`,
 and `mssql_cdc.migrations`), and
 `tests/test_docs_tables.py` fails when they drift. How the pieces fit: [Architecture](../ARCHITECTURE.md#tables-written-by-the-sink-finalization-silver-and-reconcile).
 
+[![Data model of the Delta tables: bronze rows point at their facts row by _batch_id and at their snapshot by _snapshot; the snapshot plans point at the facts by the snapshot's LSN; the control table's applied_lsn and snapshot_lsn point into bronze for a silver table, whose rows carry the bronze _start_lsn of their image; the reconcile report names the silver table's control row.](../diagrams/data-model-tables.svg)](../diagrams/data-model-tables.svg)
+
+Source: [data-model-tables.d2](../diagrams/data-model-tables.d2). Keys and linking columns
+only; the columns and their comments follow.
+
 ## Bronze
 
 The change log, append-only.

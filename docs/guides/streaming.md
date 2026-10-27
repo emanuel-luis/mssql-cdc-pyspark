@@ -135,6 +135,10 @@ committed batch. `to_delta` keeps two more things under the same path: the defau
 directory, `_mssql_cdc_metrics`, and after a re-snapshot the generation state and the new
 generations' checkpoints ([Generations](../ARCHITECTURE.md#generations-to_delta)).
 
+[![Lifecycle of a query: on the first run to_delta finds no generation state, takes the bootstrap snapshot at an LSN S recorded before the read, and starts the stream at S; each batch n writes offsets/n, is read and appended to bronze with txnVersion n and its facts row, then commits/n. After a crash between offsets/n and commits/n, the same call reuses the snapshot already written, Spark replays batch n with the same range, and Delta skips the append and the facts row it already holds.](../diagrams/user-flows-query-lifecycle.svg)](../diagrams/user-flows-query-lifecycle.svg)
+
+Source: [user-flows-query-lifecycle.d2](../diagrams/user-flows-query-lifecycle.d2).
+
 The kind of path matters:
 
 | Checkpoint | Stream | Default metrics | `on_data_loss="resnapshot"` |

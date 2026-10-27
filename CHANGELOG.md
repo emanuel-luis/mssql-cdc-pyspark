@@ -13,6 +13,13 @@ Every release says what it does to that state in its "State compatibility" line.
 
 ## [Unreleased]
 
+### Changed
+
+- Documentation: the architecture, the components, a micro-batch, the data model and the
+  main flows are D2 diagrams rendered to SVG, replacing the Mermaid charts; the README's
+  diagram now shows on PyPI too
+  ([ADR 0035](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0035-diagrams-as-d2-sources/)).
+
 ## [1.0.0rc1] - 2026-10-15
 
 State compatibility: offsets and checkpoints are unchanged. The facts table gets migration

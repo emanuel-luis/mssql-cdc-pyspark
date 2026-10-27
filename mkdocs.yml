@@ -74,11 +74,7 @@ markdown_extensions:
   - pymdownx.snippets:
       base_path: [.]
       check_paths: true
-  - pymdownx.superfences:
-      custom_fences:
-        - name: mermaid
-          class: mermaid
-          format: pymdownx.superfences.fence_code_format  # Zensical resolves the name; keeps the YAML safe
+  - pymdownx.superfences  # diagrams are D2 sources rendered to SVG (docs/diagrams/, ADR 0035)
   - pymdownx.tabbed:
       alternate_style: true
 
@@ -148,5 +144,6 @@ nav:
       - decisions/0032-facts-without-caching.md
       - decisions/0033-spark-connect-tested-on-a-local-server.md
       - decisions/0034-credentials-outside-the-connection-string.md
+      - decisions/0035-diagrams-as-d2-sources.md
   - Changelog: changelog.md
   - Contributing: contributing.md

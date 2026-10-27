@@ -86,6 +86,10 @@ commit up to that LSN's commit time is too ([Design notes](../DESIGN.md)).
 - `apply_changes` advances the silver table's own row, capped at the bronze verdict it read
   before applying ([Silver tables](silver.md)). Gate silver consumers on the silver name.
 
+[![Finalization flows: after an AvailableNow run, the job takes the end offset from the query's last progress and calls advance, which truncates its commit time to the hour and MERGEs it into the control table only when it is later; with track(), a listener does the same after every batch and join() waits for the last verdict; apply_changes reads bronze's verdict before bronze and gives silver's row that verdict with its applied_lsn; a downstream job calls is_final and reads the period only when period_end is at or before finalized_until.](../diagrams/user-flows-finalization.svg)](../diagrams/user-flows-finalization.svg)
+
+Source: [user-flows-finalization.d2](../diagrams/user-flows-finalization.d2).
+
 ## Continuous mode
 
 `end_offset_from_progress(query.lastProgress)` after `awaitTermination()` fits jobs that run
