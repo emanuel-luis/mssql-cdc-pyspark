@@ -2310,6 +2310,33 @@
 
                 
               
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0035-diagrams-as-d2-sources/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0035: Diagrams as D2 sources, rendered to committed SVGs
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
             </ul>
           </nav>
         
@@ -2677,6 +2704,8 @@ commit time in UTC, <code>{"lsn": "0x...", "commit_ts": "..."}</code>. A rerun r
 committed batch. <code>to_delta</code> keeps two more things under the same path: the default metrics
 directory, <code>_mssql_cdc_metrics</code>, and after a re-snapshot the generation state and the new
 generations' checkpoints (<a href="../../ARCHITECTURE/#generations-to_delta">Generations</a>).</p>
+<p><a href="../../diagrams/user-flows-query-lifecycle.svg"><img alt="Lifecycle of a query: on the first run to_delta finds no generation state, takes the bootstrap snapshot at an LSN S recorded before the read, and starts the stream at S; each batch n writes offsets/n, is read and appended to bronze with txnVersion n and its facts row, then commits/n. After a crash between offsets/n and commits/n, the same call reuses the snapshot already written, Spark replays batch n with the same range, and Delta skips the append and the facts row it already holds." src="../../diagrams/user-flows-query-lifecycle.svg" /></a></p>
+<p>Source: <a href="../../diagrams/user-flows-query-lifecycle.d2">user-flows-query-lifecycle.d2</a>.</p>
 <p>The kind of path matters:</p>
 <table>
 <thead>

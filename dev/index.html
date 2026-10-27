@@ -2240,6 +2240,33 @@
 
                 
               
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./decisions/0035-diagrams-as-d2-sources/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0035: Diagrams as D2 sources, rendered to committed SVGs
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
             </ul>
           </nav>
         
@@ -2464,23 +2491,9 @@ source to the consumer. The reasoning is in <a href="DESIGN/">Design notes</a>.<
 <li>Optionally keeps a current-state (silver) table, one row per key, from the change log.</li>
 </ul>
 <h2 id="the-pipeline-at-a-glance">The pipeline at a glance<a class="headerlink" href="#the-pipeline-at-a-glance" title="Permanent link">&para;</a></h2>
-<pre class="mermaid"><code>flowchart LR
-  subgraph SQL Server
-    T[(dbo.orders)] -- transaction log --&gt; CAP[CDC capture job]
-    CAP --&gt; CT[(cdc.dbo_orders_CT)]
-    CAP --&gt; MAP[(cdc.lsn_time_mapping)]
-  end
-  subgraph Spark
-    SRC[mssql_cdc source&lt;br/&gt;offset = commit LSN + commit time]
-    BR[Delta bronze&lt;br/&gt;change log + facts]
-    FIN[control table&lt;br/&gt;finalized_until]
-    SIL[silver&lt;br/&gt;one row per key]
-  end
-  CT --&gt; SRC
-  MAP --&gt; SRC
-  SRC --&gt; BR --&gt; FIN
-  BR -. apply_changes .-&gt; SIL
-  FIN --&gt; C[downstream jobs&lt;br/&gt;gate on finalized_until]</code></pre>
+<p><a href="diagrams/architecture.svg"><img alt="Architecture: the CDC capture job copies each commit of the source table into its change table and cdc.lsn_time_mapping; the mssql_cdc stream reader on the Spark driver turns commit LSNs into offsets and LSN ranges, read() on the executors reads them as Arrow, delta_sink appends them to bronze with a facts row, and finalization and apply_changes then advance finalized_until and silver, which downstream jobs read." src="diagrams/architecture.svg" /></a></p>
+<p>Source: <a href="diagrams/architecture.d2">architecture.d2</a>. How the pieces work:
+<a href="ARCHITECTURE/">Architecture</a>.</p>
 <p>In code, one stream and one verdict:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">mssql_cdc</span><span class="w"> </span><span class="kn">import</span> <span class="n">finalization</span><span class="p">,</span> <span class="n">stream</span>
 <a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>

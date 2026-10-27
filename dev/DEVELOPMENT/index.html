@@ -1223,6 +1223,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#diagrams" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Diagrams
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#lab" class="md-nav__link">
     <span class="md-ellipsis">
       <span class="md-typeset">
@@ -2349,6 +2360,33 @@
 
                 
               
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0035-diagrams-as-d2-sources/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0035: Diagrams as D2 sources, rendered to committed SVGs
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
             </ul>
           </nav>
         
@@ -2559,6 +2597,17 @@
     <span class="md-ellipsis">
       <span class="md-typeset">
         Lint, format, types
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#diagrams" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Diagrams
       </span>
     </span>
   </a>
@@ -2917,6 +2966,17 @@ reason: <code># noqa: BLE001 - &lt;why&gt;</code>.</p>
 <p>Optional git hooks run <code>ruff check --fix</code> and <code>ruff format</code> on staged files, plus a few
 file hygiene checks, from <code>.pre-commit-config.yaml</code>: <code>uvx prek install</code>, or
 <code>pre-commit install</code> with pre-commit 4.4 or later. CI does not depend on them.</p>
+<h2 id="diagrams">Diagrams<a class="headerlink" href="#diagrams" title="Permanent link">&para;</a></h2>
+<p>The diagrams on these pages are D2 sources in <code>docs/diagrams/</code>, rendered to the SVGs next to
+them with one pinned D2 (<a href="../decisions/0035-diagrams-as-d2-sources/">ADR 0035</a>):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>make<span class="w"> </span>d2-install<span class="w">                    </span><span class="c1"># D2 v0.9.0 into ~/.local/share/d2/v0.9.0, sha256-checked (Linux x86_64)</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>make<span class="w"> </span>diagrams<span class="w">                      </span><span class="c1"># render every docs/diagrams/*.d2 to SVG</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>make<span class="w"> </span>diagrams-check<span class="w">                </span><span class="c1"># what CI's diagrams job runs: fails on a stale or orphan SVG</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>make<span class="w"> </span>diagrams-watch<span class="w"> </span><span class="nv">NAME</span><span class="o">=</span>components<span class="w">   </span><span class="c1"># live preview in the browser while editing one</span>
+</code></pre></div>
+<p>On Windows run them in WSL. Commit the <code>.d2</code> with its <code>.svg</code>, and never edit an SVG by hand.
+Every diagram imports <code>docs/diagrams/_style.d2</code>, which holds the layout engine (ELK), the
+light and dark themes and one class per kind of element.</p>
 <h2 id="lab">Lab<a class="headerlink" href="#lab" title="Permanent link">&para;</a></h2>
 <p>See <code>LAB.md</code>. Each check writes <code>lab/results/&lt;check&gt;-&lt;utc&gt;.json</code> (gitignored).</p>
 <h2 id="ci">CI<a class="headerlink" href="#ci" title="Permanent link">&para;</a></h2>
@@ -2943,6 +3003,9 @@ file hygiene checks, from <code>.pre-commit-config.yaml</code>: <code>uvx prek i
   <code>t10</code> and <code>t10-resnapshot</code>. On the weekly schedule or a manual dispatch ("Run workflow")
   a fourth part, <code>idle</code>, runs t1 and then the destructive t7, both <code>continue-on-error</code>, on
   its own server. Each part uploads its results as the <code>lab-results-&lt;part&gt;</code> artifact.</li>
+<li><code>diagrams</code>: installs the pinned D2 (checksum-checked) and runs <code>make diagrams-check</code>, which
+  fails when a committed SVG differs from its <code>.d2</code> source; the rendered SVGs are uploaded as
+  the <code>diagrams</code> artifact either way. It waits for no other job.</li>
 </ul>
 <p><code>.github/workflows/security.yml</code> checks the supply chain on every pull request, every push
 to <code>main</code> and weekly:</p>
@@ -2965,9 +3028,9 @@ a second job, which runs only git, pushes the new commits, and the deploy job pu
 that branch's tree with <code>.github/pages/404.html</code> at the root, which sends links from before
 the versions on to <code>stable</code> (or <code>dev</code>). CI's <code>docs</code> job runs only the strict build.</p>
 <p>To see the version selector locally, build into a local <code>gh-pages</code> branch and serve it:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>uv<span class="w"> </span>run<span class="w"> </span>--group<span class="w"> </span>docs<span class="w"> </span>mike<span class="w"> </span>deploy<span class="w"> </span>dev<span class="w">       </span><span class="c1"># a commit on the local gh-pages branch, not pushed</span>
-<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>uv<span class="w"> </span>run<span class="w"> </span>--group<span class="w"> </span>docs<span class="w"> </span>mike<span class="w"> </span>serve<span class="w">            </span><span class="c1"># http://localhost:8000/dev/</span>
-<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>git<span class="w"> </span>branch<span class="w"> </span>-D<span class="w"> </span>gh-pages<span class="w">                    </span><span class="c1"># when done; never push it from here</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>uv<span class="w"> </span>run<span class="w"> </span>--group<span class="w"> </span>docs<span class="w"> </span>mike<span class="w"> </span>deploy<span class="w"> </span>dev<span class="w">       </span><span class="c1"># a commit on the local gh-pages branch, not pushed</span>
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>uv<span class="w"> </span>run<span class="w"> </span>--group<span class="w"> </span>docs<span class="w"> </span>mike<span class="w"> </span>serve<span class="w">            </span><span class="c1"># http://localhost:8000/dev/</span>
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>git<span class="w"> </span>branch<span class="w"> </span>-D<span class="w"> </span>gh-pages<span class="w">                    </span><span class="c1"># when done; never push it from here</span>
 </code></pre></div>
 <h2 id="releasing">Releasing<a class="headerlink" href="#releasing" title="Permanent link">&para;</a></h2>
 <p>See <a href="../RELEASING/">Releasing</a>.</p>

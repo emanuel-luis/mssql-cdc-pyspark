@@ -2288,6 +2288,33 @@
 
                 
               
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0035-diagrams-as-d2-sources/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0035: Diagrams as D2 sources, rendered to committed SVGs
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
             </ul>
           </nav>
         
@@ -2558,6 +2585,9 @@ below are the ones the tables carry, copied from the code (<code>mssql_cdc.sink<
 <code>mssql_cdc.events</code>, <code>mssql_cdc.finalization</code>, <code>mssql_cdc.silver</code>, <code>mssql_cdc.reconcile</code>
 and <code>mssql_cdc.migrations</code>), and
 <code>tests/test_docs_tables.py</code> fails when they drift. How the pieces fit: <a href="../../ARCHITECTURE/#tables-written-by-the-sink-finalization-silver-and-reconcile">Architecture</a>.</p>
+<p><a href="../../diagrams/data-model-tables.svg"><img alt="Data model of the Delta tables: bronze rows point at their facts row by _batch_id and at their snapshot by _snapshot; the snapshot plans point at the facts by the snapshot's LSN; the control table's applied_lsn and snapshot_lsn point into bronze for a silver table, whose rows carry the bronze _start_lsn of their image; the reconcile report names the silver table's control row." src="../../diagrams/data-model-tables.svg" /></a></p>
+<p>Source: <a href="../../diagrams/data-model-tables.d2">data-model-tables.d2</a>. Keys and linking columns
+only; the columns and their comments follow.</p>
 <h2 id="bronze">Bronze<a class="headerlink" href="#bronze" title="Permanent link">&para;</a></h2>
 <p>The change log, append-only.</p>
 <blockquote>

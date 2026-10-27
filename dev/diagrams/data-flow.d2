@@ -1,0 +1,80 @@
+# One micro-batch, from an LSN range to rows in bronze and a verdict: where the offsets come
+# from, how the range is planned and read, the checks on the way (schema, retention, the cast
+# to the declared schema) and the run metadata (offset and commit logs, metricsPath, facts).
+# Grounded in src/mssql_cdc/source.py (latestOffset, partitions, _check_ddl, _guard_retention,
+# read), client/_sql_client.py (iter_changes, split_points, nth_commit_after), sink.py
+# (delta_sink) and finalization.py (advance). The call order is in micro-batch.d2.
+...@_style
+
+title: "Data flow: one micro-batch, from an LSN range to rows" {
+  shape: text
+  near: top-center
+  style: {font-size: 24; bold: true}
+}
+
+direction: down
+
+sqlserver: "SQL Server" {
+  class: group
+  cdcmeta: "CDC metadata\nfn_cdc_get_max_lsn, get_min_lsn,\nsp_cdc_help_change_data_capture,\nsp_cdc_get_ddl_history" {class: source}
+  map: "cdc.lsn_time_mapping\ncommit LSN, commit time;\nidle entries keep max_lsn moving" {class: store}
+  ct: "cdc.dbo_orders_CT\nthe capture instance's\nchange rows" {class: store}
+}
+
+plan: "Driver · plan the batch" {
+  class: group
+  latest: "latestOffset(start)\nend = max_lsn, or the n-th\ncommit after start\n(maxCommitsPerBatch);\nAvailableNow: the max_lsn\nit began at" {class: process}
+  parts: "partitions(start, end)\n[increment(start), end] cut at a newer\ninstance's start, split by NTILE\ninto LsnRange partitions" {class: process}
+  checks: "checks while planning\nschema: DDL in (start, end] with a\nchanged type fails the batch\nretention: from below min_lsn is\nDataLossError, or skipped and recorded" {class: check}
+  offsets: "Offset log\noffsets/<n>: {lsn, commit_ts},\nwritten before the batch runs" {class: store}
+  latest -> offsets {class: meta}
+  offsets -> parts {class: meta}
+  offsets -> checks {class: layer}
+}
+
+exec: "Executors · read the ranges" {
+  class: group
+  read: "read(LsnRange)\nchange rows BETWEEN from AND to,\njoined to their commit time (UTC)" {class: process}
+  cast: "contract: every Arrow batch\ncast to the declared schema" {class: check}
+  guard2: "retention guard (after the read)\nmin_lsn moved past from:\nDataLossError, or a possible skip" {class: check}
+}
+
+metrics: "metricsPath\nper-range metrics files,\nplanning events" {class: store}
+
+sinkg: "Driver · foreachBatch" {
+  class: group
+  sink: "delta_sink(df, batch_id)\nappend with txnAppId = app_id,\ntxnVersion = batch_id: a replay\nis skipped" {class: process}
+}
+
+bronze: "Bronze\none row per change,\n_batch_id added" {class: store}
+facts: "Facts\nthe batch's row and its events,\none commit" {class: store}
+commits: "Commit log\ncommits/<n>, written once\nforeachBatch returns" {class: store}
+
+fin: "finalization.advance(end)\nfinalized_until = GREATEST(old,\ntrunc(end.commit_ts))" {class: process}
+control: "table_finalization\nfinalized_until per table" {class: store}
+
+sqlserver.map -> plan.latest {class: meta}
+sqlserver.cdcmeta -> plan.parts {class: meta}
+plan.parts -> exec.read
+sqlserver.ct -> exec.read
+plan.parts -> exec.cast {class: layer}
+plan.parts -> exec.guard2 {class: layer}
+plan.parts -> metrics {class: meta}
+exec.read -> metrics {class: meta}
+exec.read -> sinkg.sink
+metrics -> sinkg.sink {class: meta}
+sinkg.sink -> bronze
+sinkg.sink -> facts {class: meta}
+sinkg.sink -> commits {class: meta}
+commits -> fin {class: meta}
+fin -> control {class: meta}
+
+legend: Legend {
+  class: legend
+  grid-columns: 5
+  source: CDC metadata {class: [source; legend-item]}
+  process: process {class: [process; legend-item]}
+  store: stored data {class: [store; legend-store]}
+  check: check or contract {class: [check; legend-item]}
+  edges: "solid arrow: rows\ndashed: offsets, metrics,\nevents, the verdict" {shape: text; style.font-size: 13}
+}

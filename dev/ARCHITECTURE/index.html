@@ -2305,6 +2305,33 @@
 
                 
               
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0035-diagrams-as-d2-sources/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0035: Diagrams as D2 sources, rendered to committed SVGs
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
             </ul>
           </nav>
         
@@ -2536,39 +2563,9 @@
 
 <h1 id="architecture">Architecture<a class="headerlink" href="#architecture" title="Permanent link">&para;</a></h1>
 <h2 id="components">Components<a class="headerlink" href="#components" title="Permanent link">&para;</a></h2>
-<pre class="mermaid"><code>flowchart TB
-  subgraph src/mssql_cdc
-    DS[source.MssqlCdcDataSource&lt;br/&gt;schema, streamReader]
-    RD[source.MssqlCdcStreamReader&lt;br/&gt;offsets, partitions, read]
-    SN[source.MssqlCdcSnapshotReader&lt;br/&gt;key ranges, read]
-    CL[client.CdcClient]
-    SQL[client.SqlCdcClient&lt;br/&gt;T-SQL]
-    BE1[MssqlPythonBackend&lt;br/&gt;cursor.arrow_batch]
-    BE2[ArrowOdbcBackend&lt;br/&gt;read_arrow_batches]
-    FK[fake.FakeCdcClient&lt;br/&gt;files]
-    SK[sink.delta_sink&lt;br/&gt;foreachBatch]
-    FN[finalization&lt;br/&gt;advance / is_final]
-    PL[pipeline.CdcStream&lt;br/&gt;to_delta, snapshot, generations]
-    BF[pipeline.CdcStream.backfill&lt;br/&gt;chunked snapshot waves]
-    SV[silver.apply_changes&lt;br/&gt;MERGE, waves, rebuild]
-    RC[reconcile&lt;br/&gt;bucket counts, row hashes]
-  end
-  PL --&gt; DS
-  PL --&gt; SK
-  BF --&gt; SN
-  RC --&gt; SN
-  RC --&gt; CL
-  DS --&gt; RD --&gt; CL
-  DS --&gt; SN --&gt; CL
-  CL --&gt; SQL --&gt; BE1 &amp; BE2
-  CL --&gt; FK
-  RD -. micro-batches .-&gt; SK
-  SN -. snapshot rows .-&gt; PL
-  SK -. after commit .-&gt; FN
-  SK -. bronze .-&gt; SV
-  BF -. chunk waves .-&gt; SV
-  SV -. after MERGE .-&gt; FN
-  SV -. silver .-&gt; RC</code></pre>
+<p><a href="../diagrams/components.svg"><img alt="Components: the entry points (start_many, CdcStream with to_delta and backfill) start the two Spark DataSources, mssql_cdc with its stream reader and mssql_cdc_snapshot with its snapshot reader; both read through the CdcClient protocol, implemented by SqlCdcClient over the mssql-python or arrow-odbc backend, or by the file-backed fake in tests; delta_sink writes each micro-batch, then apply_changes, finalization and reconcile run after the read." src="../diagrams/components.svg" /></a></p>
+<p>Source: <a href="../diagrams/components.d2">components.d2</a>. The system around these modules, from SQL
+Server to the downstream jobs, is on the <a href="../#the-pipeline-at-a-glance">home page</a>.</p>
 <ul>
 <li><strong>Source</strong>: Spark Python DataSource V2 (<code>pyspark.sql.datasource</code>). One stream per
   source table: its capture instance, and the newer one it switches to (ADR 0023).
@@ -2633,38 +2630,13 @@
 </tbody>
 </table>
 <h2 id="one-micro-batch">One micro-batch<a class="headerlink" href="#one-micro-batch" title="Permanent link">&para;</a></h2>
-<pre class="mermaid"><code>sequenceDiagram
-  participant E as Spark engine
-  participant R as Reader (driver)
-  participant X as read() (executor)
-  participant S as SQL Server
-  participant D as Delta sink
-  participant F as Finalization
-
-  E-&gt;&gt;R: latestOffset(start, ReadMaxRows(n))
-  R-&gt;&gt;S: fn_cdc_get_max_lsn()  (or AvailableNow target)
-  R-&gt;&gt;S: n-th start_lsn after start in lsn_time_mapping
-  R-&gt;&gt;S: fn_cdc_map_lsn_to_time(end)  -&gt; commit_ts (UTC)
-  R--&gt;&gt;E: end = {lsn, commit_ts}
-  Note over E: offset log written (checkpoint)
-  E-&gt;&gt;R: partitions(start, end)
-  R-&gt;&gt;S: sp_cdc_help_change_data_capture: the table's instances, their start_lsn
-  R-&gt;&gt;S: sp_cdc_get_ddl_history(ci): DDL in (start, end]  (a type change: SchemaChangedError)
-  R-&gt;&gt;S: fn_cdc_increment_lsn(start), fn_cdc_get_min_lsn(ci) per instance read
-  R-&gt;&gt;S: NTILE split points on cdc.ci_CT (numPartitions &gt; 1)
-  R--&gt;&gt;E: [LsnRange(ci, from, to), ...], cut at a newer instance's start  or DataLossError
-  Note over R: events (schema_change, capture_instance_switched, data_skipped) as files in metricsPath
-  E-&gt;&gt;X: read(LsnRange)
-  X-&gt;&gt;S: cdc.ci_CT WHERE start_lsn BETWEEN from AND to, JOIN lsn_time_mapping
-  S--&gt;&gt;X: Arrow record batches
-  X-&gt;&gt;S: fn_cdc_get_min_lsn(ci)  (cleanup during the read? DataLossError, or with failOnDataLoss=false a possible data_skipped in its metrics file)
-  X--&gt;&gt;E: batches cast to the Spark schema
-  E-&gt;&gt;D: foreachBatch(df, batch_id)
-  D-&gt;&gt;D: append (txnAppId, txnVersion=batch_id, userMetadata=facts, mergeSchema)
-  D-&gt;&gt;D: facts: the batch's row and its event rows, one commit
-  Note over E: commit log written
-  E-&gt;&gt;F: after the query (AvailableNow) or on progress
-  F-&gt;&gt;F: MERGE finalized_until = GREATEST(old, trunc(end.commit_ts))</code></pre>
+<p>What a batch reads and writes, with the checks on the way and where its run metadata lands:</p>
+<p><a href="../diagrams/data-flow.svg"><img alt="Data flow of one micro-batch: on the driver, latestOffset picks the end from max_lsn or the n-th commit in cdc.lsn_time_mapping, Spark writes it to the offset log, and partitions plans LsnRange partitions, with the schema and retention checks; executors read each range from the change table joined to its commit time, cast every Arrow batch to the declared schema and check retention again; delta_sink appends the rows to bronze and the batch's facts row, folding in the metricsPath files; the commit log follows, then finalization.advance moves finalized_until." src="../diagrams/data-flow.svg" /></a></p>
+<p>Source: <a href="../diagrams/data-flow.d2">data-flow.d2</a>. The same batch call by call, with the T-SQL
+each step runs:</p>
+<p><a href="../diagrams/micro-batch.svg"><img alt="Sequence of one micro-batch: the Spark engine calls latestOffset (max_lsn, the n-th commit, the end's commit time) and writes the offset log; partitions lists the capture instances, checks the DDL history and retention, and asks for NTILE split points, returning LsnRange partitions or DataLossError; inside foreachBatch, the sink's first action on the lazy DataFrame (the append to bronze with txnAppId and txnVersion, or a cache) runs one read() task per range, which reads the change table joined to cdc.lsn_time_mapping as Arrow batches and re-checks min_lsn; the sink writes the facts in one commit, then the commit log is written." src="../diagrams/micro-batch.svg" /></a></p>
+<p>Source: <a href="../diagrams/micro-batch.d2">micro-batch.d2</a>. After the batch, finalization moves the
+verdict: <a href="../guides/finalization/#how-it-behaves">Finalization</a>.</p>
 <h2 id="offsets-and-the-checkpoint">Offsets and the checkpoint<a class="headerlink" href="#offsets-and-the-checkpoint" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="p">{</span><span class="nt">"lsn"</span><span class="p">:</span><span class="w"> </span><span class="s2">"0x0000002A000001F00003"</span><span class="p">,</span><span class="w"> </span><span class="nt">"commit_ts"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-09-28T14:03:12.117"</span><span class="p">}</span>
 </code></pre></div>
@@ -2678,6 +2650,9 @@
   deterministic for a range as long as CDC cleanup has not purged it; if it has, the
   guard fails the query.</li>
 </ul>
+<p>What the source reads on SQL Server and the state it keeps, with the LSNs that tie them:</p>
+<p><a href="../diagrams/data-model.svg"><img alt="Data model of the source: the change table cdc.&lt;ci&gt;_CT and the offset, the generation state and every stream row point at a commit LSN in cdc.lsn_time_mapping, whose tran_end_time is the commit time; LsnRange partitions and stream rows name their capture instance, as sys.sp_cdc_help_change_data_capture lists it with its start_lsn." src="../diagrams/data-model.svg" /></a></p>
+<p>Source: <a href="../diagrams/data-model.d2">data-model.d2</a>.</p>
 <h3 id="a-second-capture-instance">A second capture instance<a class="headerlink" href="#a-second-capture-instance" title="Permanent link">&para;</a></h3>
 <p>A table can have two capture instances, the newer one usually capturing a column the older
 does not (<a href="../decisions/0023-schema-changes-and-capture-instance-switching/">ADR 0023</a>). The
@@ -2723,6 +2698,9 @@ older instance first. It needs only the permissions of the CDC query functions. 
 infers them too when its capture instances record their columns
 (<code>FakeCdcDatabase(columns=...)</code>), and needs <code>columns</code> otherwise.</p>
 <h2 id="tables-written-by-the-sink-finalization-silver-and-reconcile">Tables written by the sink, finalization, silver and reconcile<a class="headerlink" href="#tables-written-by-the-sink-finalization-silver-and-reconcile" title="Permanent link">&para;</a></h2>
+<p><a href="../diagrams/data-model-tables.svg"><img alt="Data model of the Delta tables: bronze rows point at their facts row by _batch_id and at their snapshot by _snapshot; the snapshot plans point at the facts by the snapshot's LSN; the control table's applied_lsn and snapshot_lsn point into bronze for a silver table, whose rows carry the bronze _start_lsn of their image; the reconcile report names the silver table's control row." src="../diagrams/data-model-tables.svg" /></a></p>
+<p>Source: <a href="../diagrams/data-model-tables.d2">data-model-tables.d2</a>. Keys and linking columns
+only; every column is in <a href="../reference/tables/">Tables</a>.</p>
 <table>
 <thead>
 <tr>

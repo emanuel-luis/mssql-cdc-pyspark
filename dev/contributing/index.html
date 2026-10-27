@@ -2149,6 +2149,33 @@
 
                 
               
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/0035-diagrams-as-d2-sources/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0035: Diagrams as D2 sources, rendered to committed SVGs
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
             </ul>
           </nav>
         
@@ -2279,7 +2306,12 @@
    with <code>--check</code>) in its <code>lint</code> job before anything else.</li>
 <li>Behaviour changes in the source need a test in <code>tests/test_source_fake.py</code>; T-SQL
    changes need <code>tests/test_client_sql.py</code> updates and a lab check run.</li>
-<li>Design changes need an ADR in <code>docs/decisions/</code>.</li>
+<li>Design changes need an ADR in <code>docs/decisions/</code>. A change to what a diagram in
+   <code>docs/diagrams/</code> shows updates its <code>.d2</code> source: run <code>make diagrams</code> (the pinned D2;
+   <code>make d2-install</code> once, on Linux or WSL) and commit the <code>.d2</code> with its <code>.svg</code>. CI's
+   <code>diagrams</code> job runs <code>make diagrams-check</code>, which fails on a stale SVG;
+   <code>make diagrams-watch NAME=&lt;name&gt;</code> previews one while you edit
+   (<a href="https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0035-diagrams-as-d2-sources/">ADR 0035</a>).</li>
 <li>Keep <code>docs/reference/options.md</code> and <code>docs/reference/output-schema.md</code> in sync with the
    options read in <code>src/mssql_cdc/source.py</code> and <code>client.make_client</code>; usage is documented
    once, on the site (<code>docs/</code>), and the README links to it.</li>

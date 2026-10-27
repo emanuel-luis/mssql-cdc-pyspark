@@ -139,6 +139,9 @@
         <loc>https://emanuel-luis.github.io/mssql-cdc-pyspark/dev/decisions/0034-credentials-outside-the-connection-string/</loc>
       </url>
       <url>
+        <loc>https://emanuel-luis.github.io/mssql-cdc-pyspark/dev/decisions/0035-diagrams-as-d2-sources/</loc>
+      </url>
+      <url>
         <loc>https://emanuel-luis.github.io/mssql-cdc-pyspark/dev/getting-started/installation/</loc>
       </url>
       <url>

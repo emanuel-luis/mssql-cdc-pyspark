@@ -2255,6 +2255,33 @@
 
                 
               
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../decisions/0035-diagrams-as-d2-sources/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  0035: Diagrams as D2 sources, rendered to committed SVGs
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
             </ul>
           </nav>
         
@@ -2507,6 +2534,8 @@ commit up to that LSN's commit time is too (<a href="../../DESIGN/">Design notes
 <li><code>apply_changes</code> advances the silver table's own row, capped at the bronze verdict it read
   before applying (<a href="../silver/">Silver tables</a>). Gate silver consumers on the silver name.</li>
 </ul>
+<p><a href="../../diagrams/user-flows-finalization.svg"><img alt="Finalization flows: after an AvailableNow run, the job takes the end offset from the query's last progress and calls advance, which truncates its commit time to the hour and MERGEs it into the control table only when it is later; with track(), a listener does the same after every batch and join() waits for the last verdict; apply_changes reads bronze's verdict before bronze and gives silver's row that verdict with its applied_lsn; a downstream job calls is_final and reads the period only when period_end is at or before finalized_until." src="../../diagrams/user-flows-finalization.svg" /></a></p>
+<p>Source: <a href="../../diagrams/user-flows-finalization.d2">user-flows-finalization.d2</a>.</p>
 <h2 id="continuous-mode">Continuous mode<a class="headerlink" href="#continuous-mode" title="Permanent link">&para;</a></h2>
 <p><code>end_offset_from_progress(query.lastProgress)</code> after <code>awaitTermination()</code> fits jobs that run
 with <code>availableNow</code> on a schedule. A stream that keeps running (a <code>processingTime</code> trigger,
