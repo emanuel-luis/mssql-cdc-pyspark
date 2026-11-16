@@ -1,0 +1,93 @@
+# What the source reads on SQL Server and the state it keeps. SQL Server side: the capture
+# instance (sys.sp_cdc_help_change_data_capture), its change table cdc.<ci>_CT and
+# cdc.lsn_time_mapping, only the columns the library reads. Spark side: the offset in Spark's
+# checkpoint (invariant 1), the LsnRange partition the driver plans and pickles to an executor,
+# the to_delta generation state file, and the row the stream emits (docs/reference/
+# output-schema.md). Grounded in client/_sql_client.py (iter_changes, capture_instances,
+# _commit_time), source.py (LsnRange, _BaseReader._offset) and pipeline/_recovery.py.
+# Arrows: an LSN or a name that points at the row it identifies.
+...@_style
+
+title: "Data model: the CDC tables the source reads, and the state it keeps" {
+  shape: text
+  near: top-center
+  style: {font-size: 24; bold: true}
+}
+
+note: "Every LSN crosses as 0x + 20 uppercase hex, bound as CONVERT(binary(10), ?, 1).\nmax_lsn = sys.fn_cdc_get_max_lsn(); min_lsn = sys.fn_cdc_get_min_lsn(ci), the retention watermark.\nTimes are UTC on the Spark side (tran_end_time follows the server's clock)." {
+  shape: text
+  near: bottom-center
+  style.font-size: 14
+}
+
+direction: right
+
+instance: "capture instance (sp_cdc_help_change_data_capture)" {
+  shape: sql_table
+  capture_instance: sysname {constraint: primary_key}
+  source_schema: sysname
+  source_table: sysname
+  start_lsn: "binary(10): its first LSN, S"
+  captured_column_list: nvarchar
+}
+
+ct: "cdc.<ci>_CT (change table)" {
+  shape: sql_table
+  "__\$start_lsn": "binary(10): commit LSN" {constraint: foreign_key}
+  "__\$seqval": "binary(10)"
+  "__\$operation": "int: 1 del, 2 ins, 3/4 upd"
+  "__\$command_id": int
+  "captured columns": "as captured"
+}
+
+map: "cdc.lsn_time_mapping" {
+  shape: sql_table
+  start_lsn: "binary(10): a commit LSN" {constraint: primary_key}
+  tran_end_time: "datetime: commit time"
+  tran_begin_time: datetime
+  tran_id: "varbinary(10)"
+}
+
+offset: "offset (checkpoint offsets/<n>, JSON)" {
+  shape: sql_table
+  lsn: "last processed commit LSN" {constraint: foreign_key}
+  commit_ts: "its commit time, UTC, ms"
+}
+
+range: "LsnRange (planned per batch, pickled)" {
+  shape: sql_table
+  capture_instance: string {constraint: foreign_key}
+  from_lsn: "increment(start), inclusive"
+  to_lsn: "<= end, inclusive"
+  columns: "the instance's, or all"
+  zone: "the driver's clock"
+  last: "bool: the batch's last range"
+}
+
+generation: "_mssql_cdc_generation.json (to_delta)" {
+  shape: sql_table
+  generation: "int n: _generations/<n>" {constraint: primary_key}
+  snapshot_lsn: "S, where it starts" {constraint: foreign_key}
+  commit_ts: "S's commit time, UTC"
+  at: "when it was written"
+  recovering: "offset while a recovery runs"
+  failed_at: "a failed re-snapshot"
+}
+
+row: "a stream row (mssql_cdc)" {
+  shape: sql_table
+  _capture_instance: string {constraint: foreign_key}
+  _start_lsn: "string: __\$start_lsn" {constraint: foreign_key}
+  _seqval: string
+  _operation: "int: 0 on snapshot rows"
+  _command_id: int
+  _commit_ts: "timestamp_ntz, UTC"
+  "captured columns": "Spark types"
+}
+
+ct."__\$start_lsn" -> map.start_lsn
+offset.lsn -> map.start_lsn
+generation.snapshot_lsn -> map.start_lsn
+range.capture_instance -> instance.capture_instance
+row._capture_instance -> instance.capture_instance
+row._start_lsn -> map.start_lsn

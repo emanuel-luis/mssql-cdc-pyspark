@@ -1,0 +1,77 @@
+# The modules of src/mssql_cdc and how they call each other: the entry points, the two Spark
+# DataSources and their readers, the client and its backends, and what runs after the read.
+# Grounded in source.py, client/ (_protocols, _sql_client, _backends), fake.py, sink.py,
+# finalization.py, silver.py, reconcile.py, fanout.py and pipeline/ (_stream, _snapshots,
+# _chunked). Replaces the Mermaid "Components" chart of docs/ARCHITECTURE.md.
+...@_style
+
+title: "Components: the modules of mssql_cdc" {
+  shape: text
+  near: top-center
+  style: {font-size: 24; bold: true}
+}
+
+direction: down
+
+entry: "Entry points · pipeline/, fanout.py" {
+  class: group
+  many: "fanout.start_many()\none to_delta per\ncapture instance" {class: process}
+  to_delta: "pipeline.CdcStream\nto_delta, snapshot, seed,\ngenerations" {class: process}
+  backfill: "CdcStream.backfill()\nchunked snapshot waves" {class: process}
+  many -> to_delta
+}
+
+sources: "Spark DataSources · source.py" {
+  class: group
+  ds: "MssqlCdcDataSource\n\"mssql_cdc\": schema,\nstreamReader" {class: process}
+  rd: "MssqlCdcStreamReader (4.2+;\nMssqlCdcLegacyStreamReader\nbefore): offsets, partitions,\nread" {class: process}
+  sds: "MssqlCdcSnapshotDataSource\n\"mssql_cdc_snapshot\"" {class: process}
+  sn: "MssqlCdcSnapshotReader\nkey ranges, read" {class: process}
+  ds -> rd
+  sds -> sn
+}
+
+client: "Client · client/, fake.py" {
+  class: group
+  cl: "CdcClient protocol\nmake_client(options)" {class: process}
+  sql: "SqlCdcClient\nthe only T-SQL" {class: process}
+  fk: "FakeCdcClient\nfile-backed, for tests" {class: process}
+  be1: "MssqlPythonBackend\ncursor.arrow_batch" {class: process}
+  be2: "ArrowOdbcBackend\nread_arrow_batches" {class: process}
+  cl -> sql
+  cl -> fk
+  sql -> be1
+  sql -> be2
+}
+
+after: "After the read" {
+  class: group
+  sk: "sink.delta_sink\nforeachBatch: each micro-batch\ninto bronze, plus its facts row" {class: process}
+  fn: "finalization\nadvance, track, is_final" {class: process}
+  sv: "silver.apply_changes\nbronze into silver:\nMERGE, waves, rebuild" {class: process}
+  rc: "reconcile\nsilver vs SQL Server:\ncounts by make_client,\nrows by mssql_cdc_snapshot" {class: process}
+  sk -> sv
+  sk -> fn {class: meta}
+  sv -> fn {class: meta}
+  sv -> rc
+}
+
+sqlserver: "SQL Server" {class: external}
+
+entry.to_delta -> sources.ds
+entry.to_delta -> sources.sds
+entry.to_delta -> after.sk
+entry.backfill -> sources.sds
+sources.rd -> client.cl
+sources.sn -> client.cl
+sources.rd -> after.sk
+client.be1 -> sqlserver
+client.be2 -> sqlserver
+
+legend: Legend {
+  class: legend
+  grid-columns: 3
+  process: module or class {class: [process; legend-item]}
+  external: external system {class: [external; legend-item]}
+  edges: "solid arrow: a call or data\ndashed: after the commit\nor MERGE, the verdict" {shape: text; style.font-size: 13}
+}

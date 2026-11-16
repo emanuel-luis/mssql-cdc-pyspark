@@ -1,0 +1,49 @@
+# A streaming query's lifecycle as the operator sees it: the first run of to_delta with a
+# bootstrap snapshot, the batches up to where AvailableNow started, and a restart after a crash
+# between the offset log and the commit log, which replays the batch without duplicating it.
+# Grounded in src/mssql_cdc/pipeline/_stream.py (to_delta), _snapshots.py (_bootstrap,
+# _last_snapshot), _recovery.py (generations), source.py (initialOffset,
+# prepareForTriggerAvailableNow) and sink.py (delta_sink: _last_batch, txnAppId/txnVersion).
+...@_style
+
+life: "A query's lifecycle: first run, then a restart from the checkpoint" {
+  shape: sequence_diagram
+  style: {font-size: 24; bold: true}
+
+  op: "Data engineer" {class: actor}
+  td: "to_delta\n(CdcStream)" {class: process}
+  sql: "SQL Server" {class: store}
+  engine: "Spark engine" {class: process}
+  ckpt: "Checkpoint" {class: store}
+  sink: "delta_sink" {class: process}
+  delta: "Bronze and\nfacts (Delta)" {class: store}
+
+  first: "First run" {
+    op -> td: "to_delta(target,\napp_id, checkpoint,\nfacts_table,\nbootstrap=True,\navailableNow)"
+    td -> ckpt: "generation state?\nnone: generation 0"
+    td -> sql: "max_lsn first:\nthe snapshot's\nLSN S; then\nthe table's rows"
+    td -> delta: "snapshot rows:\n_operation 0,\n_snapshot = S;\nfacts 'bootstrap'"
+    td -> engine: "readStream\nmssql_cdc,\nstartingLsn = S"
+    engine -> ckpt: "no offsets:\ninitialOffset()\n= S"
+    engine -> sql: "AvailableNow:\nmax_lsn once,\nthe target"
+    batches: "Each batch n, up to that target (micro-batch.d2)" {
+      engine -> ckpt: "offsets/<n>\n= end"
+      engine -> sql: "plan the\nLSN ranges"
+      engine -> sink: "foreachBatch\n(df, n)"
+      sink -> delta: "bronze append,\ntxnVersion = n (the\nexecutors read the\nrange as it runs);\nthe facts row"
+      engine -> ckpt: "commits/<n>"
+    }
+    engine -> op: "the query stops\nat the target" {class: meta}
+  }
+
+  restart: "Restart after a crash between offsets/<n> and commits/<n>" {
+    op -> td: "the same call"
+    td -> delta: "bootstrap: the\nsnapshot written,\nits S; no re-read"
+    td -> engine: "start(): offsets\nexist, startingLsn\nis ignored"
+    engine -> ckpt: "offsets/<n>, no\ncommits/<n>: replay\nn, same (start, end)"
+    engine -> sink: "foreachBatch\n(df, n) again"
+    sink -> delta: "facts: app_id's\nlast batch is n,\nso a replay"
+    sink -> delta: "txnVersion = n:\nDelta skips the\nappend and facts"
+    engine -> ckpt: "commits/<n>,\nthen batch n + 1"
+  }
+}

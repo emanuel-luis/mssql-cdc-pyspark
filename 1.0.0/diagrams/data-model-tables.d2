@@ -1,0 +1,90 @@
+# The Delta tables the library writes, keys and linking columns only: bronze, facts, the
+# snapshot plans, the control table, silver and the reconcile report. Every column with its
+# comment is in docs/reference/tables.md, which tests/test_docs_tables.py keeps equal to the
+# code (sink.py, events.py, finalization.py, silver.py, reconcile.py). The links are logical:
+# Delta enforces no keys. Each arrow follows a column comment there.
+...@_style
+
+# ELK staircases these tables (their edges leave from column ports on the sides): dagre here.
+vars: {d2-config: {layout-engine: dagre}}
+
+title: "Data model: the Delta tables the library writes" {
+  shape: text
+  near: top-center
+  style: {font-size: 24; bold: true}
+}
+
+note: "Keys and linking columns only; every column and its comment: Tables in the reference.\nLinks are logical (Delta enforces no keys). All LSNs are 0x + 20 uppercase hex strings; all times UTC." {
+  shape: text
+  near: bottom-center
+  style.font-size: 14
+}
+
+direction: down
+
+report: "reconcile report (report_table)" {
+  shape: sql_table
+  run_id: "string: one run"
+  silver: "control's table_name" {constraint: foreign_key}
+  silver_lsn: "string: its applied_lsn"
+  source_lsn: "string: max_lsn read first"
+  "bucket_lo, bucket_hi": "string (JSON)"
+  "status, failure_type": string
+}
+
+silver: "silver (apply_changes target)" {
+  shape: sql_table
+  "key columns": "as captured" {constraint: primary_key}
+  "captured columns": "as in bronze"
+  _start_lsn: "bronze _start_lsn of its image" {constraint: foreign_key}
+  _commit_ts: timestamp_ntz
+}
+
+control: "table_finalization (control_table)" {
+  shape: sql_table
+  table_name: string {constraint: primary_key}
+  finalized_until: "timestamp_ntz: the verdict"
+  "end_lsn, end_commit_ts": "the end that moved it"
+  applied_lsn: "silver: bronze _start_lsn applied" {constraint: foreign_key}
+  snapshot_lsn: "silver: bronze _snapshot rebuilt from" {constraint: foreign_key}
+  open_snapshot_lsn: "string: still open"
+  snapshot_wave: "int: last wave applied"
+}
+
+bronze: "bronze (to_delta target)" {
+  shape: sql_table
+  _start_lsn: "string: commit LSN"
+  "_seqval, _operation, _command_id": "change order"
+  _commit_ts: timestamp_ntz
+  "captured columns": "Spark types"
+  _batch_id: "facts batch_id (with app_id)" {constraint: foreign_key}
+  _snapshot: "snapshot rows: S, facts min_lsn" {constraint: foreign_key}
+  _chunk: "int: a chunked one's chunk"
+}
+
+plans: "<bronze>_snapshot_plans" {
+  shape: sql_table
+  snapshot: "S: facts min_lsn" {constraint: foreign_key}
+  event: "string: the facts row it completes"
+  detail: "string (JSON): key values"
+}
+
+facts: "facts (facts_table)" {
+  shape: sql_table
+  app_id: "string: the sink"
+  batch_id: "bigint: NULL on snapshots"
+  event: "string: NULL for a batch"
+  rows: bigint
+  "min_lsn, max_lsn": "string: S on snapshot rows"
+  "end_lsn, end_commit_ts": "the batch's end offset"
+  target: "string: the table written"
+  "metrics, lag, retention": "per batch"
+}
+
+report.silver -> control.table_name
+silver._start_lsn -> bronze._start_lsn
+control.applied_lsn -> bronze._start_lsn
+control.snapshot_lsn -> bronze._snapshot
+bronze._batch_id -> facts.batch_id
+bronze._snapshot -> facts."min_lsn, max_lsn"
+plans.snapshot -> facts."min_lsn, max_lsn"

@@ -1,0 +1,46 @@
+# How finalized_until moves and who reads it: after an AvailableNow run (advance), after every
+# batch of a running query (track), for a silver table (apply_changes), and the consumer's gate
+# (is_final). Grounded in src/mssql_cdc/finalization.py (end_offset_from_progress, candidate,
+# advance, track, FinalizationListener, is_final) and silver.py (apply_changes: the verdict).
+...@_style
+
+fin: "Finalization: moving finalized_until, and gating on it" {
+  shape: sequence_diagram
+  style: {font-size: 24; bold: true}
+
+  job: "Pipeline job" {class: actor}
+  query: "Streaming\nquery" {class: process}
+  fin: "finalization" {class: process}
+  apply: "apply_changes" {class: process}
+  control: "table_finalization\n(Delta)" {class: store}
+  consumer: "Downstream\njob" {class: actor}
+
+  batch: "AvailableNow: once the run ends" {
+    job -> query: "awaitTermination()"
+    query -> job: "lastProgress" {class: meta}
+    job -> fin: "end_offset_from_progress:\nend = {lsn, commit_ts}"
+    job -> fin: "advance(spark, control,\n\"bronze.orders\", end)"
+    fin -> fin: "candidate =\ntrunc(end.commit_ts)\nto the hour"
+    fin -> control: "MERGE on table_name:\nonly if the candidate is\nlater (never backwards);\nretried on a conflict"
+  }
+
+  running: "A running query: track()" {
+    job -> fin: "track(spark, query,\ncontrol, table)"
+    query -> fin: "onQueryProgress:\neach batch's end offset" {class: meta}
+    fin -> control: "advance() on the\nlistener's worker thread"
+    job -> fin: "join() once the query\nstops: the last verdict"
+  }
+
+  silver: "Silver: apply_changes(bronze, silver, control_table, facts_table)" {
+    job -> apply: "apply_changes(...)"
+    apply -> control: "bronze's verdict, read\nbefore bronze itself"
+    apply -> apply: "MERGE the changes\nafter applied_lsn"
+    apply -> control: "silver's row: applied_lsn,\nfinalized_until = the\nbronze verdict read first"
+  }
+
+  gate: "A consumer gates on the verdict" {
+    consumer -> control: "is_final(control, table,\nperiod_end)"
+    control -> consumer: "period_end <=\nfinalized_until?" {class: meta}
+    consumer -> consumer: "true: read the period;\nfalse: wait, ask again"
+  }
+}
