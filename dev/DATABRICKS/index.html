@@ -2333,7 +2333,7 @@ Platform-specific concerns:</p>
    DBR 18.2, dedicated, single node: installed with <code>mssql-python</code>, bootstrap and stream
    ran). A release candidate installs only by its exact pin:</li>
 </ol>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">"libraries"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"pypi"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"package"</span><span class="p">:</span><span class="w"> </span><span class="s2">"mssql-cdc-pyspark==0.8.0"</span><span class="p">}}]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">"libraries"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"pypi"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"package"</span><span class="p">:</span><span class="w"> </span><span class="s2">"mssql-cdc-pyspark==1.0.0"</span><span class="p">}}]</span>
 </code></pre></div>
 <p>For an unreleased commit, a <code>requirements</code> task library pointing to a
    <code>requirements.txt</code> in the workspace or a Volume that holds a git reference (the <code>pypi</code>
@@ -2342,7 +2342,7 @@ Platform-specific concerns:</p>
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">"libraries"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"requirements"</span><span class="p">:</span><span class="w"> </span><span class="s2">"/Workspace/Users/&lt;you&gt;/requirements.txt"</span><span class="p">}]</span>
 </code></pre></div>
-<p>In a notebook, <code>%pip install mssql-cdc-pyspark==0.8.0</code> (or the git line) works too. Leave out the <code>[spark]</code>
+<p>In a notebook, <code>%pip install mssql-cdc-pyspark==1.0.0</code> (or the git line) works too. Leave out the <code>[spark]</code>
    extra: PyPI <code>pyspark</code> conflicts with the runtime's own Spark. <code>mssql-python</code>, installed
    with the package, loads <code>libltdl7</code> (and the Kerberos libraries) on every node that
    opens a connection; add a

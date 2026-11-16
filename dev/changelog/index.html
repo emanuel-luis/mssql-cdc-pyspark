@@ -2260,7 +2260,18 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Unreleased">
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#100-2026-11-16" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        1.0.0 - 2026-11-16
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1.0.0 - 2026-11-16">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -3068,7 +3079,18 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Unreleased">
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#100-2026-11-16" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        1.0.0 - 2026-11-16
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1.0.0 - 2026-11-16">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -3827,13 +3849,25 @@ breaks the Python API, each break listed under "Breaking" with what to change. B
 a minor release could break it. The state a stream leaves behind (offsets, checkpoint
 layout, table schemas) never breaks without a migration path, and within 1.x it only grows.
 Every release says what it does to that state in its "State compatibility" line.</p>
-<h2 id="unreleased"><a href="https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v1.0.0rc1...HEAD">Unreleased</a><a class="headerlink" href="#unreleased" title="Permanent link">&para;</a></h2>
+<h2 id="unreleased"><a href="https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v1.0.0...HEAD">Unreleased</a><a class="headerlink" href="#unreleased" title="Permanent link">&para;</a></h2>
+<h2 id="100-2026-11-16"><a href="https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.8.0...v1.0.0">1.0.0</a> - 2026-11-16<a class="headerlink" href="#100-2026-11-16" title="Permanent link">&para;</a></h2>
+<p>The same library code as 1.0.0rc1; its changes are listed under it below. 1.0.0 is the first
+stable release: from here on the 1.x policy of
+<a href="https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/">ADR 0021</a>
+amendment 11 applies (a patch only fixes, a minor adds and deprecates, a break needs 2.0). It
+ships on the maintainer's decision, without the weeks of 1.0.0rc1 in a real pipeline that the
+roadmap planned; no report since 1.0.0rc1 asked for an API or state change.</p>
+<p>State compatibility: as 1.0.0rc1, which this release does not change. From 0.8.0, 1.0.0rc1's
+line below applies: offsets and checkpoints are unchanged, facts migration 15 rewrites the
+<code>detail</code> comment only, and a 'capture_instance_switched' row's <code>detail</code> is JSON.</p>
 <h3 id="changed">Changed<a class="headerlink" href="#changed" title="Permanent link">&para;</a></h3>
 <ul>
 <li>Documentation: the architecture, the components, a micro-batch, the data model and the
   main flows are D2 diagrams rendered to SVG, replacing the Mermaid charts; the README's
   diagram now shows on PyPI too
   (<a href="https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0035-diagrams-as-d2-sources/">ADR 0035</a>).</li>
+<li>Package metadata: the "Development Status" classifier is "5 - Production/Stable" (was
+  "4 - Beta").</li>
 </ul>
 <h2 id="100rc1-2026-10-15"><a href="https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.8.0...v1.0.0rc1">1.0.0rc1</a> - 2026-10-15<a class="headerlink" href="#100rc1-2026-10-15" title="Permanent link">&para;</a></h2>
 <p>State compatibility: offsets and checkpoints are unchanged. The facts table gets migration

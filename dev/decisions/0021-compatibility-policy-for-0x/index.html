@@ -2632,7 +2632,8 @@
 <strong>Amended:</strong> 2026-10-14T09:06:30-03:00, the 1.x policy: Semantic Versioning from 1.0, the state contract frozen but for additions, a deprecation before every removal (amendment 11)<br />
 <strong>Amended:</strong> 2026-10-15T09:39:58-03:00, the files in <code>metricsPath</code> are internal, not state: the facts table is the record (amendment 11)<br />
 <strong>Amended:</strong> 2026-10-15T09:49:09-03:00, dropping a Python, Spark, Delta or SQL Server version past its end of life is a minor, announced a release before; 1.0 keeps Python 3.10 (amendment 11)<br />
-<strong>Amended:</strong> 2026-10-15T09:50:28-03:00, a 'capture_instance_switched' row's <code>detail</code> is JSON from 1.0.0rc1, its keys state, its <code>text</code> for people (amendment 12, ADR 0023 Amendment 8)</p>
+<strong>Amended:</strong> 2026-10-15T09:50:28-03:00, a 'capture_instance_switched' row's <code>detail</code> is JSON from 1.0.0rc1, its keys state, its <code>text</code> for people (amendment 12, ADR 0023 Amendment 8)<br />
+<strong>Amended:</strong> 2026-11-16T13:30:44-03:00, 1.0.0 ships on the maintainer's decision before the planned weeks of 1.0.0rc1 in a real pipeline; no report since 1.0.0rc1 asked for an API or state change (amendment 11)</p>
 <h2 id="context">Context<a class="headerlink" href="#context" title="Permanent link">&para;</a></h2>
 <p>0.1.0 is the first release on PyPI. Semantic Versioning promises nothing before 1.0, but
 a stream leaves state behind that outlives any version: offsets in Spark checkpoints,
@@ -2887,8 +2888,10 @@ after the batch that first reads a newer capture instance
 <h2 id="amendment-11-the-1x-policy">Amendment 11: the 1.x policy<a class="headerlink" href="#amendment-11-the-1x-policy" title="Permanent link">&para;</a></h2>
 <p>1.0 freezes the public Python API and the state contract. 1.0.0rc1 comes first and runs a
 real pipeline for a few weeks; 1.0.0 ships when nothing that run finds needs an API change,
-and a change it does need goes into another release candidate, not after 1.0.0. From
-1.0.0 on, this amendment replaces the Decision's first two bullets (what a minor and a
+and a change it does need goes into another release candidate, not after 1.0.0. 1.0.0
+shipped on 2026-11-16 on the maintainer's decision, before those weeks had passed: its
+library code is 1.0.0rc1's, and no report since 1.0.0rc1 asked for an API or state change.
+From 1.0.0 on, this amendment replaces the Decision's first two bullets (what a minor and a
 patch may change); the state contract, the "State compatibility" line and <code>tests/compat</code>
 stay, with the additions below.</p>
 <ul>

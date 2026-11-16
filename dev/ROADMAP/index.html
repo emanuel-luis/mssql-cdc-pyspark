@@ -2748,8 +2748,9 @@ or deprecates; only a major breaks the Python API (listed under "Breaking" in
 </ul>
 <h2 id="100-stability">1.0.0: stability<a class="headerlink" href="#100-stability" title="Permanent link">&para;</a></h2>
 <p>1.0 freezes the public API and the state contract: after it, a break needs 2.0 (ADR 0021,
-amendment 11). 1.0.0rc1 comes first and runs a real pipeline for a few weeks; 1.0.0 final
-ships when nothing found there requires an API change.</p>
+amendment 11). The plan was 1.0.0rc1 first, then a few weeks in a real pipeline before
+1.0.0. 1.0.0 shipped 2026-11-16 on the maintainer's decision, before those weeks: no report
+since 1.0.0rc1 asked for an API or state change.</p>
 <ul>
 <li>[x] Frozen API and state contract: an audit of the public API, the four names
       <code>mssql_cdc</code> exported that the reference never listed deprecated there, and the 1.x
@@ -2762,7 +2763,9 @@ ships when nothing found there requires an API change.</p>
 <li>[x] Build provenance (attestations) in the release: GitHub's from 1.0.0rc1 on, PyPI's
       (PEP 740) since 0.1.0.</li>
 <li>[x] 1.0.0rc1, shipped 2026-10-15.</li>
-<li>[ ] 1.0.0rc1 in a real pipeline for a few weeks, then 1.0.0.</li>
+<li>[x] 1.0.0, shipped 2026-11-16 on the maintainer's decision, without the planned weeks of
+      1.0.0rc1 in a real pipeline; no report since 1.0.0rc1 asked for an API or state
+      change.</li>
 </ul>
 <h2 id="after-10">After 1.0<a class="headerlink" href="#after-10" title="Permanent link">&para;</a></h2>
 <p>The t7 runs and the weeks-long chunked run check how the library behaves on a platform or
