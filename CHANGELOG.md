@@ -13,12 +13,27 @@ Every release says what it does to that state in its "State compatibility" line.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-16
+
+The same library code as 1.0.0rc1; its changes are listed under it below. 1.0.0 is the first
+stable release: from here on the 1.x policy of
+[ADR 0021](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0021-compatibility-policy-for-0x/)
+amendment 11 applies (a patch only fixes, a minor adds and deprecates, a break needs 2.0). It
+ships on the maintainer's decision, without the weeks of 1.0.0rc1 in a real pipeline that the
+roadmap planned; no report since 1.0.0rc1 asked for an API or state change.
+
+State compatibility: as 1.0.0rc1, which this release does not change. From 0.8.0, 1.0.0rc1's
+line below applies: offsets and checkpoints are unchanged, facts migration 15 rewrites the
+`detail` comment only, and a 'capture_instance_switched' row's `detail` is JSON.
+
 ### Changed
 
 - Documentation: the architecture, the components, a micro-batch, the data model and the
   main flows are D2 diagrams rendered to SVG, replacing the Mermaid charts; the README's
   diagram now shows on PyPI too
   ([ADR 0035](https://emanuel-luis.github.io/mssql-cdc-pyspark/decisions/0035-diagrams-as-d2-sources/)).
+- Package metadata: the "Development Status" classifier is "5 - Production/Stable" (was
+  "4 - Beta").
 
 ## [1.0.0rc1] - 2026-10-15
 
@@ -1219,7 +1234,8 @@ migrations yet ([ADR 0013](https://emanuel-luis.github.io/mssql-cdc-pyspark/deci
 - `import mssql_cdc` without PySpark raises an `ImportError` that says to run on a Spark
   platform, which ships its own, or to install the `[spark]` extra.
 
-[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v1.0.0rc1...HEAD
+[Unreleased]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.8.0...v1.0.0
 [1.0.0rc1]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.8.0...v1.0.0rc1
 [0.8.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/emanuel-luis/mssql-cdc-pyspark/compare/v0.6.0...v0.7.0

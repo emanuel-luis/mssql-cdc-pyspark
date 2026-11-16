@@ -12,7 +12,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install mssql-cdc-pyspark==0.8.0
+# MAGIC %pip install mssql-cdc-pyspark==1.0.0
 
 # COMMAND ----------
 

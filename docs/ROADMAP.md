@@ -134,8 +134,9 @@ or deprecates; only a major breaks the Python API (listed under "Breaking" in
 ## 1.0.0: stability
 
 1.0 freezes the public API and the state contract: after it, a break needs 2.0 (ADR 0021,
-amendment 11). 1.0.0rc1 comes first and runs a real pipeline for a few weeks; 1.0.0 final
-ships when nothing found there requires an API change.
+amendment 11). The plan was 1.0.0rc1 first, then a few weeks in a real pipeline before
+1.0.0. 1.0.0 shipped 2026-11-16 on the maintainer's decision, before those weeks: no report
+since 1.0.0rc1 asked for an API or state change.
 
 - [x] Frozen API and state contract: an audit of the public API, the four names
       `mssql_cdc` exported that the reference never listed deprecated there, and the 1.x
@@ -148,7 +149,9 @@ ships when nothing found there requires an API change.
 - [x] Build provenance (attestations) in the release: GitHub's from 1.0.0rc1 on, PyPI's
       (PEP 740) since 0.1.0.
 - [x] 1.0.0rc1, shipped 2026-10-15.
-- [ ] 1.0.0rc1 in a real pipeline for a few weeks, then 1.0.0.
+- [x] 1.0.0, shipped 2026-11-16 on the maintainer's decision, without the planned weeks of
+      1.0.0rc1 in a real pipeline; no report since 1.0.0rc1 asked for an API or state
+      change.
 
 ## After 1.0
 

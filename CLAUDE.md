@@ -4,8 +4,8 @@
 for SQL Server CDC**, plus a Delta sink and a **completeness signal**
 (`finalized_until`). Product: `README.md`; usage: the docs site (`docs/`, Zensical from
 `mkdocs.yml`, ADR 0024); how it works: `docs/ARCHITECTURE.md`; why: `docs/DESIGN.md`;
-what is next: `docs/ROADMAP.md`. Status: 1.0 release candidate; the public API and the
-state contract are frozen (ADR 0021 amendment 11). Version in `pyproject.toml`.
+what is next: `docs/ROADMAP.md`. Status: 1.x, stable; the public API and the state
+contract are frozen (ADR 0021 amendment 11). Version in `pyproject.toml`.
 What each area has been validated against (Spark 4.1/4.2, Databricks, Connect, SQL Server
 2017/2022) is in the tests, `lab/results/` and `CHANGELOG.md`.
 
