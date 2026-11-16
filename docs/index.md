@@ -27,7 +27,7 @@ on a URI `pyarrow.fs` opens (`s3://`, `abfss://`...).
     Each release has its own pages: pick yours in the version selector. `stable` is the
     latest final release; `dev` follows `main`, which may be ahead of PyPI. A release
     candidate installs only with `pip install --pre mssql-cdc-pyspark` or its exact pin,
-    such as `mssql-cdc-pyspark==0.8.0`. The
+    such as `mssql-cdc-pyspark==1.0.0`. The
     [changelog](https://github.com/emanuel-luis/mssql-cdc-pyspark/blob/main/CHANGELOG.md)
     says what each release has.
 
