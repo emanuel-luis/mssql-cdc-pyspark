@@ -22,8 +22,9 @@ amendment 11 applies (a patch only fixes, a minor adds and deprecates, a break n
 ships on the maintainer's decision, without the weeks of 1.0.0rc1 in a real pipeline that the
 roadmap planned; no report since 1.0.0rc1 asked for an API or state change.
 
-State compatibility: unchanged from 1.0.0rc1 (no migration; offsets, checkpoints and tables
-as 1.0.0rc1 writes them).
+State compatibility: as 1.0.0rc1, which this release does not change. From 0.8.0, 1.0.0rc1's
+line below applies: offsets and checkpoints are unchanged, facts migration 15 rewrites the
+`detail` comment only, and a 'capture_instance_switched' row's `detail` is JSON.
 
 ### Changed
 
